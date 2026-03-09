@@ -32,14 +32,10 @@ struct PlanSystemCard: View {
     var body: some View {
         PlanModeCardContainer(title: "Plan", showsProgress: message.isStreaming) {
             if !bodyText.isEmpty {
-                Text(bodyText)
-                    .font(AppFont.body())
-                    .foregroundStyle(.primary)
+                MarkdownTextView(text: bodyText, profile: .assistantProse)
                     .fixedSize(horizontal: false, vertical: true)
             } else if let explanationText {
-                Text(explanationText)
-                    .font(AppFont.body())
-                    .foregroundStyle(.primary)
+                MarkdownTextView(text: explanationText, profile: .assistantProse)
             }
 
             if let explanationText, !bodyText.isEmpty {

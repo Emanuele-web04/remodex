@@ -271,7 +271,7 @@ private struct FileChangeDiffSheet: View {
     }
 }
 
-private struct MarkdownTextView: View {
+struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
 
@@ -381,7 +381,7 @@ private struct CodeCommentFindingCard: View {
     }
 }
 
-private enum MarkdownTextFormatter {
+enum MarkdownTextFormatter {
     // Applies lightweight markdown cleanup and turns file paths into link-styled labels.
     static func renderableText(from raw: String, profile: MarkdownRenderProfile) -> String {
         MarkdownRenderableTextCache.rendered(raw: raw, profile: profile) {

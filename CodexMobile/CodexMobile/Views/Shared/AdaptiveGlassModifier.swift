@@ -41,8 +41,6 @@ private struct AdaptiveNavigationBarModifier: ViewModifier {
             content
         } else {
             content
-                .toolbarBackgroundVisibility(.visible, for: .navigationBar)
-                .toolbarBackground(.thinMaterial, for: .navigationBar)
         }
     }
 }
@@ -58,8 +56,6 @@ private struct AdaptiveToolbarItemModifier<S: Shape>: ViewModifier {
             content
         } else {
             content
-                .padding(6)
-                .background(.thinMaterial, in: shape)
         }
     }
 }

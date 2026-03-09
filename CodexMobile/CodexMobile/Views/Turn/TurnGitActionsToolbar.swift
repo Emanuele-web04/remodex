@@ -131,6 +131,7 @@ struct TurnGitActionsToolbarButton: View {
         }
         .controlSize(.small)
         .buttonStyle(.plain)
+        .foregroundStyle(.primary)
         .adaptiveToolbarItem(in: Circle())
         .accessibilityLabel("Git actions")
         .accessibilityValue(syncStatusAccessibilityValue ?? "Repository status unavailable")
