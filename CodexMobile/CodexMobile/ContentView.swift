@@ -19,6 +19,7 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var isShowingManualScanner = false
     @State private var isSearchActive = false
+    @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
 
     private let sidebarWidth: CGFloat = 330
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
@@ -86,7 +87,11 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rootContent: some View {
-        if codex.isConnected || viewModel.isAttemptingAutoReconnect || shouldShowReconnectShell {
+        if !hasSeenOnboarding {
+            OnboardingView {
+                withAnimation { hasSeenOnboarding = true }
+            }
+        } else if codex.isConnected || viewModel.isAttemptingAutoReconnect || shouldShowReconnectShell {
             mainAppBody
         } else {
             qrScannerBody

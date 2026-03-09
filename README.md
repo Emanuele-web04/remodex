@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/remodex-og.png" alt="Remodex" />
+</p>
+
 # Remodex
 
 [![npm version](https://img.shields.io/npm/v/remodex)](https://www.npmjs.com/package/remodex)
