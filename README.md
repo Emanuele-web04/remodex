@@ -11,6 +11,8 @@ Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a 
 
 Right now, testing the full phone-to-Mac flow still depends on `relay.example.invalid`.
 
+The current TestFlight phase is free while I validate the app over the next few days. After that, the iOS app is planned to move to the App Store as a one-time paid app. That decision is mainly to help cover the cost of the VPS behind the pairing flow and the ongoing development/support needed to keep Remodex working well; final pricing will be shared separately.
+
 > **I am very early in this project. Expect bugs.**
 >
 > I am not actively accepting contributions yet. If you still want to help, read [CONTRIBUTING.md](CONTRIBUTING.md) first.
