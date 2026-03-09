@@ -1,0 +1,21 @@
+{
+  "images" : [
+    {
+      "filename" : "remodex2-iOS-Default-1024x1024@1x.png",
+      "idiom" : "universal",
+      "scale" : "1x"
+    },
+    {
+      "idiom" : "universal",
+      "scale" : "2x"
+    },
+    {
+      "idiom" : "universal",
+      "scale" : "3x"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

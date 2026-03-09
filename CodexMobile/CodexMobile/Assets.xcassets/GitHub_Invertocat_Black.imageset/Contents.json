@@ -1,0 +1,15 @@
+{
+  "images" : [
+    {
+      "filename" : "GitHub_Invertocat_Black.svg",
+      "idiom" : "universal"
+    }
+  ],
+  "properties" : {
+    "template-rendering-intent" : "template"
+  },
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

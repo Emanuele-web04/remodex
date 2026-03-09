@@ -1,0 +1,56 @@
+// FILE: SidebarSearchField.swift
+// Purpose: Compact search pill for filtering sidebar threads.
+// Layer: View Component
+// Exports: SidebarSearchField
+
+import SwiftUI
+
+struct SidebarSearchField: View {
+    @Binding var text: String
+    @Binding var isActive: Bool
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(AppFont.subheadline())
+                    .foregroundStyle(.secondary)
+
+                TextField("Search conversations", text: $text)
+                    .font(AppFont.subheadline())
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($isFocused)
+
+                if !text.isEmpty {
+                    Button {
+                        text = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(AppFont.subheadline())
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+
+            if isFocused {
+                Button("Cancel") {
+                    text = ""
+                    isFocused = false
+                }
+                .font(AppFont.subheadline())
+                .foregroundStyle(.primary)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: isFocused)
+        .onChange(of: isFocused) { _, newValue in
+            isActive = newValue
+        }
+    }
+}

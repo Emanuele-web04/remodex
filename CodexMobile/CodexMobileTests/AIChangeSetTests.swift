@@ -1,0 +1,149 @@
+// FILE: AIChangeSetTests.swift
+// Purpose: Verifies patch parsing and turn-scoped AI change-set finalization for revertable responses.
+// Layer: Unit Test
+// Exports: AIChangeSetTests
+// Depends on: XCTest, CodexMobile
+
+import XCTest
+@testable import CodexMobile
+
+@MainActor
+final class AIChangeSetTests: XCTestCase {
+    func testUnifiedPatchParserExtractsSingleFileUpdate() {
+        let patch = """
+        diff --git a/Sources/App.swift b/Sources/App.swift
+        index 1111111..2222222 100644
+        --- a/Sources/App.swift
+        +++ b/Sources/App.swift
+        @@ -1,2 +1,3 @@
+         struct App {}
+        +let enabled = true
+        -let disabled = false
+        """
+
+        let analysis = AIUnifiedPatchParser.analyze(patch)
+
+        XCTAssertEqual(analysis.fileChanges.count, 1)
+        XCTAssertEqual(analysis.fileChanges.first?.path, "Sources/App.swift")
+        XCTAssertEqual(analysis.fileChanges.first?.kind, .update)
+        XCTAssertEqual(analysis.fileChanges.first?.additions, 1)
+        XCTAssertEqual(analysis.fileChanges.first?.deletions, 1)
+        XCTAssertTrue(analysis.unsupportedReasons.isEmpty)
+    }
+
+    func testUnifiedPatchParserMarksRenameAsUnsupported() {
+        let patch = """
+        diff --git a/Old.swift b/New.swift
+        similarity index 100%
+        rename from Old.swift
+        rename to New.swift
+        """
+
+        let analysis = AIUnifiedPatchParser.analyze(patch)
+
+        XCTAssertTrue(analysis.fileChanges.isEmpty)
+        XCTAssertTrue(
+            analysis.unsupportedReasons.contains("Rename, mode-only, or symlink changes are not auto-revertable in v1.")
+        )
+    }
+
+    func testTurnDiffFinalizesReadyChangeSetForAssistantMessage() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.threads = [
+            CodexThread(id: threadID, title: "Revert", cwd: "/tmp/repo")
+        ]
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Implemented the change."
+        )
+        service.recordTurnDiffChangeSet(
+            threadId: threadID,
+            turnId: turnID,
+            diff: """
+            diff --git a/Sources/App.swift b/Sources/App.swift
+            index 1111111..2222222 100644
+            --- a/Sources/App.swift
+            +++ b/Sources/App.swift
+            @@ -1 +1,2 @@
+             struct App {}
+            +let enabled = true
+            """
+        )
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+
+        let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        let changeSet = try XCTUnwrap(service.readyChangeSet(forAssistantMessage: assistantMessage))
+
+        XCTAssertEqual(changeSet.threadId, threadID)
+        XCTAssertEqual(changeSet.turnId, turnID)
+        XCTAssertEqual(changeSet.assistantMessageId, assistantMessage.id)
+        XCTAssertEqual(changeSet.status, .ready)
+        XCTAssertEqual(changeSet.repoRoot, "/tmp/repo")
+    }
+
+    func testMultipleFallbackPatchesStayNotRevertable() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Made several edits."
+        )
+        service.recordFallbackFileChangePatch(
+            threadId: threadID,
+            turnId: turnID,
+            patch: """
+            diff --git a/Sources/A.swift b/Sources/A.swift
+            index 1111111..2222222 100644
+            --- a/Sources/A.swift
+            +++ b/Sources/A.swift
+            @@ -1 +1,2 @@
+             let a = 1
+            +let b = 2
+            """
+        )
+        service.recordFallbackFileChangePatch(
+            threadId: threadID,
+            turnId: turnID,
+            patch: """
+            diff --git a/Sources/B.swift b/Sources/B.swift
+            index 3333333..4444444 100644
+            --- a/Sources/B.swift
+            +++ b/Sources/B.swift
+            @@ -1 +1,2 @@
+             let c = 3
+            +let d = 4
+            """
+        )
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+
+        let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        let changeSet = try XCTUnwrap(service.aiChangeSet(forAssistantMessage: assistantMessage))
+
+        XCTAssertEqual(changeSet.status, .notRevertable)
+        XCTAssertTrue(
+            changeSet.unsupportedReasons.contains(
+                "This response emitted multiple file-change patches, so v1 cannot safely auto-revert it."
+            )
+        )
+    }
+
+    private func makeService() -> CodexService {
+        let service = CodexService()
+        Self.retainedServices.append(service)
+        return service
+    }
+
+    private static var retainedServices: [CodexService] = []
+}

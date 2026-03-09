@@ -1,0 +1,286 @@
+// FILE: ComposerBottomBar.swift
+// Purpose: Bottom bar with attachment/model/reasoning/access menus, queue controls, and send button.
+// Layer: View Component
+// Exports: ComposerBottomBar
+// Depends on: SwiftUI, TurnComposerMetaMapper
+
+import SwiftUI
+
+struct ComposerBottomBar: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    // Data
+    let orderedModelOptions: [CodexModelOption]
+    let selectedModelID: String?
+    let selectedModelTitle: String
+    let isLoadingModels: Bool
+    let reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
+    let selectedReasoningEffort: String?
+    let selectedReasoningTitle: String
+    let reasoningMenuDisabled: Bool
+    let remainingAttachmentSlots: Int
+    let isComposerInteractionLocked: Bool
+    let isSendDisabled: Bool
+    let isPlanModeArmed: Bool
+    let queuedCount: Int
+    let isQueuePaused: Bool
+    let activeTurnID: String?
+    let isThreadRunning: Bool
+
+    // Callbacks
+    let onSelectModel: (String) -> Void
+    let onSelectReasoning: (String) -> Void
+    let onTapAddImage: () -> Void
+    let onTapTakePhoto: () -> Void
+    let onSetPlanModeArmed: (Bool) -> Void
+    let onResumeQueue: () -> Void
+    let onStopTurn: (String?) -> Void
+    let onSend: () -> Void
+
+    // MARK: - Constants
+
+    private let metaLabelColor = Color(.secondaryLabel)
+    private var metaTextFont: Font { AppFont.subheadline() }
+    private var metaSymbolFont: Font { AppFont.system(size: 11, weight: .regular) }
+    private let metaSymbolSize: CGFloat = 12
+    private let brainSymbolSize: CGFloat = 8
+    private let reasoningSymbolName = "brain"
+    private let reasoningSymbolIsAsset = true
+    private var metaChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
+    private let metaVerticalPadding: CGFloat = 6
+    private let plusTapTargetSide: CGFloat = 22
+
+    private var sendButtonIconColor: Color {
+        if isSendDisabled { return Color(.systemGray2) }
+        return Color(.systemBackground)
+    }
+
+    private var sendButtonBackgroundColor: Color {
+        if isSendDisabled { return Color(.systemGray5) }
+        return Color(.label)
+    }
+
+    // MARK: - Body
+
+    var body: some View {
+        HStack(spacing: 12) {
+            attachmentMenu
+            modelMenu
+            reasoningMenu
+            if isPlanModeArmed {
+                Divider()
+                    .frame(height: 16)
+                planModeIndicator
+            }
+            Spacer(minLength: 0)
+
+            if isQueuePaused && queuedCount > 0 {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onResumeQueue()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color(.systemBackground))
+                        .frame(width: 28, height: 28)
+                        .background(Color.orange, in: Circle())
+                }
+                .accessibilityLabel("Resume queued messages")
+            }
+
+            if isThreadRunning {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    onStopTurn(activeTurnID)
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(Color(.systemBackground))
+                        .frame(width: 32, height: 32)
+                        .background(Color(.label), in: Circle())
+                }
+            }
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback()
+                onSend()
+            } label: {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(sendButtonIconColor)
+                    .frame(width: 32, height: 32)
+                    .background(sendButtonBackgroundColor, in: Circle())
+            }
+            .overlay(alignment: .topTrailing) {
+                if queuedCount > 0 {
+                    queueBadge
+                        .offset(x: 8, y: -8)
+                }
+            }
+            .disabled(isSendDisabled)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
+        .padding(.top, 10)
+    }
+
+    // MARK: - Menus
+
+    private var attachmentMenu: some View {
+        Menu {
+            Toggle(isOn: Binding(
+                get: { isPlanModeArmed },
+                set: { newValue in
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onSetPlanModeArmed(newValue)
+                }
+            )) {
+                Label("Plan mode", systemImage: "checklist")
+            }
+
+            Section {
+                Button("Photo library") {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    onTapAddImage()
+                }
+                .disabled(remainingAttachmentSlots == 0)
+
+                Button("Take a photo") {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    onTapTakePhoto()
+                }
+                .disabled(remainingAttachmentSlots == 0)
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(metaTextFont)
+                .fontWeight(.regular)
+                .frame(width: plusTapTargetSide, height: plusTapTargetSide)
+                .contentShape(Capsule())
+        }
+        .tint(metaLabelColor)
+        .disabled(isComposerInteractionLocked)
+        .accessibilityLabel("Attachment and plan options")
+    }
+
+    private var modelMenu: some View {
+        Menu {
+            Text("Select model")
+            if isLoadingModels {
+                Text("Loading models...")
+            } else if orderedModelOptions.isEmpty {
+                Text("No models available")
+            } else {
+                ForEach(orderedModelOptions, id: \.id) { model in
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onSelectModel(model.id)
+                    } label: {
+                        if selectedModelID == model.id {
+                            Label(TurnComposerMetaMapper.modelTitle(for: model), systemImage: "checkmark")
+                        } else {
+                            Text(TurnComposerMetaMapper.modelTitle(for: model))
+                        }
+                    }
+                }
+            }
+        } label: {
+            composerMenuLabel(title: selectedModelTitle)
+        }
+        .tint(metaLabelColor)
+    }
+
+    private var reasoningMenu: some View {
+        Menu {
+            Text("Select reasoning")
+            if reasoningDisplayOptions.isEmpty {
+                Text("No reasoning options")
+            } else {
+                ForEach(reasoningDisplayOptions, id: \.id) { option in
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onSelectReasoning(option.effort)
+                    } label: {
+                        if selectedReasoningEffort == option.effort {
+                            Label(option.title, systemImage: "checkmark")
+                        } else {
+                            Text(option.title)
+                        }
+                    }
+                }
+            }
+        } label: {
+            composerMenuLabel(title: selectedReasoningTitle, leadingImageName: reasoningSymbolName, leadingImageIsSystem: false)
+        }
+        .disabled(reasoningMenuDisabled)
+        .tint(metaLabelColor)
+    }
+
+    private var planModeIndicator: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "checklist")
+                .font(metaSymbolFont)
+            Text("Plan")
+                .font(metaTextFont)
+                .fontWeight(.regular)
+                .lineLimit(1)
+        }
+        .padding(.vertical, metaVerticalPadding)
+        .padding(.horizontal, 4)
+        .foregroundStyle(Color(.plan))
+    }
+
+    private var queueBadge: some View {
+        HStack(spacing: 3) {
+            if isQueuePaused {
+                Image(systemName: "pause.fill")
+                    .font(AppFont.system(size: 8, weight: .bold))
+            }
+            Text("\(queuedCount)")
+                .font(AppFont.caption2(weight: .bold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(
+            Capsule().fill(isQueuePaused ? Color.orange : Color.cyan)
+        )
+    }
+
+    // MARK: - Shared Label
+
+    private func composerMenuLabel(
+        title: String,
+        leadingImageName: String? = nil,
+        leadingImageIsSystem: Bool = true
+    ) -> some View {
+        HStack(spacing: 6) {
+            if let leadingImageName {
+                Group {
+                    if leadingImageIsSystem {
+                        Image(systemName: leadingImageName)
+                            .font(metaSymbolFont)
+                    } else {
+                        Image(leadingImageName)
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: metaSymbolSize, height: metaSymbolSize)
+                    }
+                }
+            }
+
+            Text(title)
+                .font(metaTextFont)
+                .fontWeight(.regular)
+                .lineLimit(1)
+
+            Image(systemName: "chevron.down")
+                .font(metaChevronFont)
+        }
+        .padding(.vertical, metaVerticalPadding)
+        .padding(.horizontal, 4)
+        .foregroundStyle(metaLabelColor)
+        .contentShape(Rectangle())
+    }
+}
