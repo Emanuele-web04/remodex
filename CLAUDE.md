@@ -11,6 +11,7 @@ This repo is local-first now. Do not reintroduce hosted-service assumptions, rem
 - Do not reintroduce filtering by selected repo in sidebar/content.
 - Keep cross-repo open/create flow with automatic local context switch.
 - Preserve single responsibility: shared logic belongs in services/coordinators, not duplicated in views.
+- Treat this repo as open source: avoid junk code, placeholder hacks, noisy one-off workarounds, and low-signal docs.
 - If you touch docs, keep them local-only and remove stale hosted-service notes instead of adding compatibility layers.
 
 ## iOS runtime + timeline guardrails
