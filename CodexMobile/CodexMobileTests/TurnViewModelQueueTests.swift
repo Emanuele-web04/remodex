@@ -357,6 +357,43 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
     }
 
+    func testRefreshInFlightTurnStateDoesNotUseOlderInterruptibleTurn() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.runningThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-old"
+        service.activeTurnId = "turn-old"
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/read")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "turns": .array([
+                            .object([
+                                "id": .string("turn-old"),
+                                "status": .string("in_progress"),
+                            ]),
+                            .object([
+                                "id": .string("turn-latest"),
+                                "status": .string("completed"),
+                            ]),
+                        ])
+                    ])
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let didRefresh = await service.refreshInFlightTurnState(threadId: "thread-queue")
+
+        XCTAssertTrue(didRefresh)
+        XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
+        XCTAssertNil(service.activeTurnIdByThread["thread-queue"])
+    }
+
     func testSteerQueuedDraftIsNoOpWhenThreadIsNotRunning() async {
         let service = makeService()
         service.isConnected = true
