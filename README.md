@@ -61,8 +61,15 @@ This is a monorepo with a local bridge, an iOS app target, and its tests:
 - **Node.js** v18+
 - **[Codex CLI](https://github.com/openai/codex)** installed and in your PATH
 - **[Codex desktop app](https://openai.com/index/codex/)** (optional — for viewing threads on your Mac)
+- **[Remodex iOS app via TestFlight](https://testflight.apple.com/join/PKZhBUVM)** installed on your iPhone or iPad before scanning the pairing QR
 - **macOS** (for desktop refresh features — the core bridge works on any OS)
 - **Xcode 16+** (only if building the iOS app from source)
+
+## Install the iOS App
+
+Install the Remodex app from [TestFlight](https://testflight.apple.com/join/PKZhBUVM) before you run `remodex up`.
+
+The pairing QR is meant to be scanned from inside the Remodex app. If you scan it with a generic camera/QR reader before installing the app, your device may treat the QR payload as plain text and open a web search instead of pairing.
 
 ## Install the Bridge
 
@@ -78,7 +85,7 @@ If you only want to try Remodex, you can install it from npm and run it without 
 remodex up
 ```
 
-That's it. Scan the QR code with your iPhone and start coding.
+Then open the Remodex app from [TestFlight](https://testflight.apple.com/join/PKZhBUVM), scan the QR code from inside the app, and start coding.
 
 ## Local Development
 
