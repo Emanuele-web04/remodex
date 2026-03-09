@@ -15,6 +15,14 @@ Right now, testing the full phone-to-Mac flow still depends on `relay.example.in
 >
 > I am not actively accepting contributions yet. If you still want to help, read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
+## Get the App
+
+Install the Remodex app from [TestFlight](https://testflight.apple.com/join/PKZhBUVM) before you run `remodex up`.
+
+Once the app is installed, onboarding inside Remodex walks you through pairing and scanning the QR from inside the app.
+
+If you scan the pairing QR with a generic camera or QR reader before installing the app, your device may treat the QR payload as plain text and open a web search instead of pairing.
+
 ## Architecture
 
 ```
@@ -65,12 +73,6 @@ This is a monorepo with a local bridge, an iOS app target, and its tests:
 - **macOS** (for desktop refresh features — the core bridge works on any OS)
 - **Xcode 16+** (only if building the iOS app from source)
 
-## Install the iOS App
-
-Install the Remodex app from [TestFlight](https://testflight.apple.com/join/PKZhBUVM) before you run `remodex up`.
-
-The pairing QR is meant to be scanned from inside the Remodex app. If you scan it with a generic camera/QR reader before installing the app, your device may treat the QR payload as plain text and open a web search instead of pairing.
-
 ## Install the Bridge
 
 ```sh
@@ -85,7 +87,7 @@ If you only want to try Remodex, you can install it from npm and run it without 
 remodex up
 ```
 
-Then open the Remodex app from [TestFlight](https://testflight.apple.com/join/PKZhBUVM), scan the QR code from inside the app, and start coding.
+Open the Remodex app, follow the onboarding flow, then scan the QR code from inside the app and start coding.
 
 ## Local Development
 
