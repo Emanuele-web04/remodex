@@ -163,6 +163,7 @@ REMODEX_RELAY=ws://localhost:9000/relay remodex up
 - Remodex is local-first: Codex, git operations, and workspace actions run on your Mac, while the iPhone acts as a paired remote control.
 - The pairing QR contains the relay base URL and a random session ID. After a successful scan, the iPhone stores that pairing in Keychain and tries to reconnect automatically on relaunch or when the app returns to the foreground.
 - The default relay is `wss://relay.example.invalid/relay`, so traffic is encrypted in transit with TLS. You can also point Remodex at your own relay if you prefer to keep routing fully under your control.
+- If you want to inspect or self-host the relay, the server code is available in [`relay/`](relay/).
 - On the iPhone, the default agent permission mode is `On-Request`. Switching the app to `Full access` auto-approves runtime approval prompts from the agent.
 
 ## Git Integration
@@ -244,7 +245,7 @@ Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `co
 The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. Navigate away and back, or enable `REMODEX_REFRESH_ENABLED=true` to have the bridge auto-refresh the desktop app after each turn.
 
 **Can I self-host the relay server?**
-Yes — set `REMODEX_RELAY` to your own relay base URL. Remodex works well as a local-first setup with a relay you control, and the default hosted relay is there if you want the quickest path to getting started.
+Yes. The default hosted relay runs on my VPS, and the relay server code is available in [`relay/`](relay/) if you want to inspect it or run your own compatible relay. Then point Remodex at your relay with `REMODEX_RELAY`.
 
 **Is the default hosted relay safe for sensitive work?**
 For everyday use, it is a practical default: traffic is protected in transit with TLS and all Codex execution still happens on your Mac. If you want the tightest control over routing, set `REMODEX_RELAY` to a relay you run yourself.
