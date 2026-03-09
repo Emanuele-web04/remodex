@@ -58,6 +58,18 @@ enum QueuePauseState: Equatable {
 @MainActor
 @Observable
 final class TurnViewModel {
+    // Preserves the exact composer payload + raw chips so stale-busy recovery can retry cleanly.
+    private struct PendingTurnSend {
+        let payload: String
+        let attachments: [CodexImageAttachment]
+        let skillMentions: [CodexTurnSkillMention]
+        let collaborationMode: CodexCollaborationModeKind?
+        let rawInput: String
+        let rawFileMentions: [TurnComposerMentionedFile]
+        let rawSkillMentions: [TurnComposerMentionedSkill]
+        let rawAttachments: [TurnComposerImageAttachment]
+    }
+
     // Splits contiguous filename segments into search-friendly word chunks.
     private static let fileMentionSegmentRegex = try? NSRegularExpression(
         pattern: #"[A-Z]+(?=$|[A-Z][a-z]|\d)|[A-Z]?[a-z]+|\d+"#
@@ -628,58 +640,36 @@ final class TurnViewModel {
             skillMentions: skillMentions,
             createdAt: Date()
         )
+        let pendingSend = PendingTurnSend(
+            payload: payload,
+            attachments: attachments,
+            skillMentions: skillMentions,
+            collaborationMode: isPlanModeArmed ? .plan : nil,
+            rawInput: input,
+            rawFileMentions: composerMentionedFiles,
+            rawSkillMentions: composerMentionedSkills,
+            rawAttachments: composerAttachments
+        )
         let threadBusy = isThreadBusy(codex: codex, threadID: threadID)
         let queuePaused = isQueuePaused(codex: codex, threadID: threadID)
 
-        if threadBusy || queuePaused {
-            appendQueuedDraft(queuedDraft, codex: codex, threadID: threadID)
-            shouldAnchorToAssistantResponse = true
-            clearComposer()
-
-            if queuePaused && !threadBusy {
-                resumeQueueAndFlushIfPossible(codex: codex, threadID: threadID)
-            }
-            return
-        }
-
-        // Snapshot raw composer state before clearing so we can restore it exactly on failure.
-        let rawInput = input
-        let rawFileMentions = composerMentionedFiles
-        let rawSkillMentions = composerMentionedSkills
-        let rawAttachments = composerAttachments
-        let collaborationMode: CodexCollaborationModeKind? = isPlanModeArmed ? .plan : nil
-
         isSending = true
-        isPlanModeArmed = false
-        shouldAnchorToAssistantResponse = true
-        clearComposer()
-
         Task { @MainActor in
             defer { isSending = false }
 
-            do {
-                try await codex.startTurn(
-                    userInput: payload,
-                    threadId: threadID,
-                    attachments: attachments,
-                    skillMentions: skillMentions,
-                    collaborationMode: collaborationMode
-                )
-            } catch {
-                shouldAnchorToAssistantResponse = false
-                // Restore exact raw draft so user doesn't lose their message or mention chips.
-                input = rawInput
-                composerMentionedFiles = rawFileMentions
-                composerMentionedSkills = rawSkillMentions
-                composerAttachments = rawAttachments
-                if collaborationMode == .plan,
-                   shouldRearmPlanModeAfterSendFailure(error) {
-                    isPlanModeArmed = true
+            let stillBusy = await refreshBusyStateIfNeeded(codex: codex, threadID: threadID, wasBusy: threadBusy)
+            if stillBusy || queuePaused {
+                appendQueuedDraft(queuedDraft, codex: codex, threadID: threadID)
+                shouldAnchorToAssistantResponse = true
+                clearComposer()
+
+                if queuePaused && !stillBusy {
+                    resumeQueueAndFlushIfPossible(codex: codex, threadID: threadID)
                 }
-                if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                    codex.lastErrorMessage = error.localizedDescription
-                }
+                return
             }
+
+            await performTurnSend(pendingSend, codex: codex, threadID: threadID)
         }
     }
 
@@ -747,6 +737,18 @@ final class TurnViewModel {
             defer { steeringDraftID = nil }
 
             do {
+                let stillBusy = await refreshBusyStateIfNeeded(codex: codex, threadID: threadID, wasBusy: true)
+                if !stillBusy {
+                    try await codex.startTurn(
+                        userInput: draft.text,
+                        threadId: threadID,
+                        attachments: draft.attachments,
+                        skillMentions: draft.skillMentions
+                    )
+                    removeQueuedDraft(id: id, codex: codex, threadID: threadID)
+                    return
+                }
+
                 let expectedTurnID = try await resolveSteerExpectedTurnID(
                     codex: codex,
                     threadID: threadID
@@ -1221,8 +1223,58 @@ final class TurnViewModel {
         "ios-at-file-\(threadID)"
     }
 
+    // Reuses the stop-button refresh path so queued sends do not trust stale running flags.
+    private func refreshBusyStateIfNeeded(
+        codex: CodexService,
+        threadID: String,
+        wasBusy: Bool
+    ) async -> Bool {
+        guard wasBusy,
+              codex.activeTurnID(for: threadID) == nil,
+              codex.runningThreadIDs.contains(threadID) else {
+            return wasBusy
+        }
+
+        _ = await codex.refreshInFlightTurnState(threadId: threadID)
+        return isThreadBusy(codex: codex, threadID: threadID)
+    }
+
     private func isThreadBusy(codex: CodexService, threadID: String) -> Bool {
         codex.activeTurnID(for: threadID) != nil || codex.runningThreadIDs.contains(threadID)
+    }
+
+    // Sends the prepared payload and restores the exact raw composer state if startTurn fails.
+    private func performTurnSend(
+        _ pendingSend: PendingTurnSend,
+        codex: CodexService,
+        threadID: String
+    ) async {
+        isPlanModeArmed = false
+        shouldAnchorToAssistantResponse = true
+        clearComposer()
+
+        do {
+            try await codex.startTurn(
+                userInput: pendingSend.payload,
+                threadId: threadID,
+                attachments: pendingSend.attachments,
+                skillMentions: pendingSend.skillMentions,
+                collaborationMode: pendingSend.collaborationMode
+            )
+        } catch {
+            shouldAnchorToAssistantResponse = false
+            input = pendingSend.rawInput
+            composerMentionedFiles = pendingSend.rawFileMentions
+            composerMentionedSkills = pendingSend.rawSkillMentions
+            composerAttachments = pendingSend.rawAttachments
+            if pendingSend.collaborationMode == .plan,
+               shouldRearmPlanModeAfterSendFailure(error) {
+                isPlanModeArmed = true
+            }
+            if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                codex.lastErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     // Resolves the active turn id for manual steer without relying on async autoclosure operators.
