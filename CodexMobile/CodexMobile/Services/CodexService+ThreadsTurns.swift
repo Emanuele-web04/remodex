@@ -1257,31 +1257,27 @@ extension CodexService {
         }
 
         let turnObjects = threadObject["turns"]?.arrayValue?.compactMap { $0.objectValue } ?? []
-        var latestTurnID: String?
-        var hasInterruptibleTurnWithoutID = false
-
-        for turnObject in turnObjects.reversed() {
-            let turnID = normalizedInterruptIdentifier(
-                turnObject["id"]?.stringValue
-                    ?? turnObject["turnId"]?.stringValue
-                    ?? turnObject["turn_id"]?.stringValue
-            )
-            if latestTurnID == nil, let turnID {
-                latestTurnID = turnID
-            }
-
-            guard isInterruptibleTurnStatus(normalizedInterruptTurnStatus(from: turnObject)) else {
-                continue
-            }
-
-            if let turnID {
-                return (turnID, false, latestTurnID)
-            }
-
-            hasInterruptibleTurnWithoutID = true
+        guard let latestTurnObject = turnObjects.last else {
+            return (nil, false, nil)
         }
 
-        return (nil, hasInterruptibleTurnWithoutID, latestTurnID)
+        let latestTurnID = normalizedInterruptIdentifier(
+            latestTurnObject["id"]?.stringValue
+                ?? latestTurnObject["turnId"]?.stringValue
+                ?? latestTurnObject["turn_id"]?.stringValue
+        )
+        let latestStatus = normalizedInterruptTurnStatus(from: latestTurnObject)
+
+        // Missing status should stay permissive so incomplete payloads do not clear live UI state.
+        guard isInterruptibleTurnStatus(latestStatus) else {
+            return (nil, false, latestTurnID)
+        }
+
+        if let latestTurnID {
+            return (latestTurnID, false, latestTurnID)
+        }
+
+        return (nil, true, latestTurnID)
     }
 
     // Retries after refreshing turn id when local activeTurn cache is stale.
