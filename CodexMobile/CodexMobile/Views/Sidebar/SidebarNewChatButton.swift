@@ -50,7 +50,7 @@ struct SidebarNewChatButton: View {
     }
 }
 // MARK: - Previews
-#Preview("Abilitato") {
+#Preview("Enabled") {
     SidebarNewChatButton(isCreatingThread: false, isEnabled: true, statusMessage: nil) {
         // Preview action
     }
@@ -58,7 +58,7 @@ struct SidebarNewChatButton: View {
     .frame(width: 260)
 }
 
-#Preview("Caricamento") {
+#Preview("Loading") {
     SidebarNewChatButton(isCreatingThread: true, isEnabled: true, statusMessage: "Preparing owner/repo...") {
         // Preview action
     }
@@ -66,7 +66,7 @@ struct SidebarNewChatButton: View {
     .frame(width: 260)
 }
 
-#Preview("Disabilitato") {
+#Preview("Disabled") {
     SidebarNewChatButton(isCreatingThread: false, isEnabled: false, statusMessage: nil) {
         // Preview action
     }

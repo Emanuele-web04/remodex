@@ -527,7 +527,8 @@ function readBridgeConfig({ env = process.env, platform = process.platform } = {
     env
   );
   const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
-  const defaultRefreshEnabled = Boolean(refreshCommand) || (platform === "darwin" && !codexEndpoint);
+  // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
+  const defaultRefreshEnabled = false;
   return {
     relayUrl: readFirstDefinedEnv(
       ["REMODEX_RELAY", "PHODEX_RELAY"],

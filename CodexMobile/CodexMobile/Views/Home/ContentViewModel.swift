@@ -35,15 +35,10 @@ final class ContentViewModel {
     }
 
     // Connects to the relay WebSocket using a scanned QR code payload.
-    func connectToRelay(sessionId: String, relayUrl: String, codex: CodexService) async {
+    func connectToRelay(pairingPayload: CodexPairingQRPayload, codex: CodexService) async {
         await stopAutoReconnectForManualScan(codex: codex)
-        let fullURL = "\(relayUrl)/\(sessionId)"
-
-        // Persist for reconnection
-        SecureStore.writeString(sessionId, for: CodexSecureKeys.relaySessionId)
-        SecureStore.writeString(relayUrl, for: CodexSecureKeys.relayUrl)
-        codex.relaySessionId = sessionId
-        codex.relayUrl = relayUrl
+        let fullURL = "\(pairingPayload.relay)/\(pairingPayload.sessionId)"
+        codex.rememberRelayPairing(pairingPayload)
 
         do {
             try await connectWithAutoRecovery(

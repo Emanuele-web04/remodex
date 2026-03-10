@@ -101,12 +101,11 @@ struct ContentView: View {
     }
 
     private var qrScannerBody: some View {
-        QRScannerView { sessionId, relayUrl in
+        QRScannerView { pairingPayload in
             Task {
                 isShowingManualScanner = false
                 await viewModel.connectToRelay(
-                    sessionId: sessionId,
-                    relayUrl: relayUrl,
+                    pairingPayload: pairingPayload,
                     codex: codex
                 )
             }
@@ -174,6 +173,7 @@ struct ContentView: View {
         } else {
             HomeEmptyStateView(
                 connectionPhase: homeConnectionPhase,
+                securityLabel: codex.secureConnectionState.statusLabel,
                 onToggleConnection: {
                     Task {
                         await viewModel.toggleConnection(codex: codex)

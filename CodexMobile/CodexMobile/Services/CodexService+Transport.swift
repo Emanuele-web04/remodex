@@ -73,11 +73,22 @@ extension CodexService {
     }
 
     func sendMessage(_ message: RPCMessage) async throws {
+        let payload = try encoder.encode(message)
+        guard let plaintext = String(data: payload, encoding: .utf8) else {
+            throw CodexServiceError.invalidResponse("Unable to encode outgoing JSON-RPC payload")
+        }
+
+        let secureText = try secureWireText(for: plaintext)
+        try await sendRawText(secureText)
+    }
+
+    // Sends raw secure control messages before the JSON-RPC channel is initialized.
+    func sendRawText(_ text: String) async throws {
         guard let connection = webSocketConnection else {
             throw CodexServiceError.disconnected
         }
 
-        let payload = try encoder.encode(message)
+        let payload = Data(text.utf8)
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "codex-jsonrpc", metadata: [metadata])
 
@@ -127,7 +138,7 @@ extension CodexService {
                 if let data,
                    let text = String(data: data, encoding: .utf8) {
                     self.lastRawMessage = text
-                    self.processIncomingText(text)
+                    self.processIncomingWireText(text)
                 }
 
                 self.receiveNextMessage(on: connection)

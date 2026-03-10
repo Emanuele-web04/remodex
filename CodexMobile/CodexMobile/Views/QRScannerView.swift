@@ -8,7 +8,7 @@ import AVFoundation
 import SwiftUI
 
 struct QRScannerView: View {
-    let onScan: (_ sessionId: String, _ relayUrl: String) -> Void
+    let onScan: (CodexPairingQRPayload) -> Void
 
     @State private var scannerError: String?
     @State private var hasCameraPermission = false
@@ -106,26 +106,39 @@ struct QRScannerView: View {
             return
         }
 
-        guard let jsonObject = try? JSONSerialization.jsonObject(with: data),
-              let json = jsonObject as? [String: Any] else {
-            scannerError = "Not a valid pairing code. Make sure you're scanning a QR from the Remodex CLI."
+        let decoder = JSONDecoder()
+        guard let payload = try? decoder.decode(CodexPairingQRPayload.self, from: data) else {
+            scannerError = "Not a valid secure pairing code. Make sure you're scanning a QR from the latest Remodex bridge."
             resetScanLock()
             return
         }
 
-        guard let relay = json["relay"] as? String, !relay.isEmpty else {
-            scannerError = "QR code is missing the relay URL. Re-generate the code from the CLI."
+        guard payload.v == codexPairingQRVersion else {
+            scannerError = "This QR code uses an unsupported pairing format. Update the iPhone app or the Mac bridge and try again."
             resetScanLock()
             return
         }
 
-        guard let sessionId = json["sessionId"] as? String, !sessionId.isEmpty else {
-            scannerError = "QR code is missing the session ID. Re-generate the code from the CLI."
+        guard !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            scannerError = "QR code is missing the relay URL. Re-generate the code from the bridge."
             resetScanLock()
             return
         }
 
-        onScan(sessionId, relay)
+        guard !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            scannerError = "QR code is missing the session ID. Re-generate the code from the bridge."
+            resetScanLock()
+            return
+        }
+
+        let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
+        if expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) < Date() {
+            scannerError = "This pairing QR code has expired. Generate a new one from the Mac bridge."
+            resetScanLock()
+            return
+        }
+
+        onScan(payload)
     }
 }
 

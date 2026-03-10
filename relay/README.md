@@ -8,8 +8,8 @@ In production, the default hosted relay runs on my VPS. If you want, you can ins
 
 - accepts WebSocket connections at `/relay/{sessionId}`
 - pairs one Mac host with one live iPhone client for a session
-- forwards JSON-RPC traffic between Mac and iPhone
-- replays a small in-memory history buffer to a reconnecting iPhone client
+- forwards secure control messages and encrypted payloads between Mac and iPhone
+- logs only connection metadata and payload sizes, not plaintext prompts or responses
 - exposes lightweight stats for a health endpoint
 
 ## What It Does Not Do
@@ -20,6 +20,16 @@ In production, the default hosted relay runs on my VPS. If you want, you can ins
 - it does not persist the local workspace on the server
 
 Codex, git, and local file operations still run on the user's Mac.
+The relay is intentionally blind to Remodex application contents once the secure handshake completes.
+
+## Security Model
+
+Remodex uses the relay as a transport hop, not as a trusted application server.
+
+- The pairing QR gives the iPhone the bridge identity public key plus short-lived session details.
+- The iPhone and bridge perform a signed handshake, derive shared AES-256-GCM keys with X25519 + HKDF-SHA256, and then encrypt application payloads end to end.
+- The relay can still observe connection metadata and the plaintext secure control messages needed to establish the encrypted session.
+- The relay does not receive plaintext Remodex application payloads after the secure session is active.
 
 ## Protocol Notes
 

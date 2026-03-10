@@ -5,7 +5,6 @@
 
 const { WebSocket } = require("ws");
 
-const MAX_HISTORY = 500;
 const CLEANUP_DELAY_MS = 60_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CLOSE_CODE_SESSION_UNAVAILABLE = 4002;
@@ -55,7 +54,6 @@ function setupRelay(wss) {
       sessions.set(sessionId, {
         mac: null,
         clients: new Set(),
-        history: [],
         cleanupTimer: null,
       });
     }
@@ -100,23 +98,15 @@ function setupRelay(wss) {
       console.log(
         `[relay] iPhone connected -> session ${sessionId} (${session.clients.size} client(s))`
       );
-
-      // Replay recent host output so a reconnecting client can catch up.
-      for (const msg of session.history) {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(msg);
-        }
-      }
     }
 
     ws.on("message", (data) => {
       const msg = typeof data === "string" ? data : data.toString("utf-8");
+      console.log(
+        `[relay] forwarded ${role} -> session ${sessionId} (${Buffer.byteLength(msg, "utf8")} bytes)`
+      );
 
       if (role === "mac") {
-        session.history.push(msg);
-        if (session.history.length > MAX_HISTORY) {
-          session.history.shift();
-        }
         for (const client of session.clients) {
           if (client.readyState === WebSocket.OPEN) {
             client.send(msg);

@@ -31,6 +31,11 @@ struct CodexRunningThreadWatch: Equatable, Sendable {
     let expiresAt: Date
 }
 
+struct CodexSecureControlWaiter {
+    let id: UUID
+    let continuation: CheckedContinuation<String, Error>
+}
+
 
 enum CodexThreadRunBadgeState: Equatable, Sendable {
     case running
@@ -124,6 +129,12 @@ final class CodexService {
     // Relay session persistence
     var relaySessionId: String?
     var relayUrl: String?
+    var relayMacDeviceId: String?
+    var relayMacIdentityPublicKey: String?
+    var relayProtocolVersion: Int = codexSecureProtocolVersion
+    var lastAppliedBridgeOutboundSeq = 0
+    var secureConnectionState: CodexSecureConnectionState = .notPaired
+    var secureMacFingerprint: String?
 
     // --- Internal wiring ------------------------------------------------------
 
@@ -160,6 +171,12 @@ final class CodexService {
     var runCompletionNotificationDedupedAt: [String: Date] = [:]
     var notificationCenterDelegateProxy: CodexNotificationCenterDelegateProxy?
     var shouldAutoReconnectOnForeground = false
+    var secureSession: CodexSecureSession?
+    var pendingHandshake: CodexPendingHandshake?
+    var phoneIdentityState: CodexPhoneIdentityState
+    var trustedMacRegistry: CodexTrustedMacRegistry
+    var pendingSecureControlContinuations: [String: [CodexSecureControlWaiter]] = [:]
+    var bufferedSecureControlMessages: [String: [String]] = [:]
     // Assistant-scoped patch ledger used by the revert-changes flow.
     var aiChangeSetsByID: [String: AIChangeSet] = [:]
     var aiChangeSetIDByTurnID: [String: String] = [:]
@@ -191,6 +208,8 @@ final class CodexService {
         self.decoder = decoder
         self.defaults = defaults
         self.userNotificationCenter = userNotificationCenter
+        self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
+        self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
         let loadedMessages = messagePersistence.load().mapValues { messages in
             messages.map { message in
                 var value = message
@@ -233,6 +252,23 @@ final class CodexService {
         // Restore relay session from Keychain
         self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
         self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+        self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
+        self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
+        if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
+           let parsedProtocolVersion = Int(rawProtocolVersion) {
+            self.relayProtocolVersion = parsedProtocolVersion
+        } else {
+            self.relayProtocolVersion = codexSecureProtocolVersion
+        }
+        if let rawLastAppliedSeq = SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
+           let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
+            self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
+        }
+        if let relayMacDeviceId,
+           let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
+            self.secureConnectionState = .trustedMac
+            self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+        }
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.
@@ -250,6 +286,18 @@ final class CodexService {
     // Normalizes the persisted relay base URL before reuse in reconnect flows.
     var normalizedRelayURL: String? {
         relayUrl?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+    }
+
+    var normalizedRelayMacDeviceId: String? {
+        relayMacDeviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+    }
+
+    var normalizedRelayMacIdentityPublicKey: String? {
+        relayMacIdentityPublicKey?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
     }

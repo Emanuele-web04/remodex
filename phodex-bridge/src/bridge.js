@@ -15,12 +15,15 @@ const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
+const { loadOrCreateBridgeDeviceState } = require("./secure-device-state");
+const { createBridgeSecureTransport } = require("./secure-transport");
 
 function startBridge() {
   const config = readBridgeConfig();
   const sessionId = uuidv4();
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
+  const deviceState = loadOrCreateBridgeDeviceState();
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
     debounceMs: config.refreshDebounceMs,
@@ -37,7 +40,11 @@ function startBridge() {
   let lastConnectionStatus = null;
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
-  const pendingCodexMessages = [];
+  const secureTransport = createBridgeSecureTransport({
+    sessionId,
+    relayUrl: relayBaseUrl,
+    deviceState,
+  });
 
   const codex = createCodexTransport({
     endpoint: config.codexEndpoint,
@@ -119,26 +126,27 @@ function startBridge() {
       clearReconnectTimer();
       reconnectAttempt = 0;
       logConnectionStatus("connected");
-      while (pendingCodexMessages.length > 0) {
-        const buffered = pendingCodexMessages.shift();
-        nextSocket.send(buffered);
-      }
+      secureTransport.bindLiveSendWireMessage((wireMessage) => {
+        if (nextSocket.readyState === WebSocket.OPEN) {
+          nextSocket.send(wireMessage);
+        }
+      });
     });
 
     nextSocket.on("message", (data) => {
       const message = typeof data === "string" ? data : data.toString("utf8");
-      if (handleBridgeManagedHandshakeMessage(message, nextSocket)) {
+      if (secureTransport.handleIncomingWireMessage(message, {
+        sendControlMessage(controlMessage) {
+          if (nextSocket.readyState === WebSocket.OPEN) {
+            nextSocket.send(JSON.stringify(controlMessage));
+          }
+        },
+        onApplicationMessage(plaintextMessage) {
+          handleApplicationMessage(plaintextMessage);
+        },
+      })) {
         return;
       }
-      if (handleWorkspaceRequest(message, (r) => nextSocket.send(r))) {
-        return;
-      }
-      if (handleGitRequest(message, (r) => nextSocket.send(r))) {
-        return;
-      }
-      desktopRefresher.handleInbound(message);
-      rememberThreadFromMessage("phone", message);
-      codex.send(message);
     });
 
     nextSocket.on("close", (code) => {
@@ -155,18 +163,18 @@ function startBridge() {
     });
   }
 
-  printQR(sessionId, relayBaseUrl);
+  printQR(secureTransport.createPairingPayload());
   connectRelay();
 
   codex.onMessage((message) => {
     trackCodexHandshakeState(message);
     desktopRefresher.handleOutbound(message);
     rememberThreadFromMessage("codex", message);
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(message);
-    } else {
-      pendingCodexMessages.push(message);
-    }
+    secureTransport.queueOutboundApplicationMessage(message, (wireMessage) => {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(wireMessage);
+      }
+    });
   });
 
   codex.onClose(() => {
@@ -188,6 +196,31 @@ function startBridge() {
     clearReconnectTimer();
   }));
 
+  // Routes decrypted app payloads through the same bridge handlers as before.
+  function handleApplicationMessage(rawMessage) {
+    if (handleBridgeManagedHandshakeMessage(rawMessage)) {
+      return;
+    }
+    if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
+    if (handleGitRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
+    desktopRefresher.handleInbound(rawMessage);
+    rememberThreadFromMessage("phone", rawMessage);
+    codex.send(rawMessage);
+  }
+
+  // Encrypts bridge-generated responses instead of letting the relay see plaintext.
+  function sendApplicationResponse(rawMessage) {
+    secureTransport.queueOutboundApplicationMessage(rawMessage, (wireMessage) => {
+      if (socket?.readyState === WebSocket.OPEN) {
+        socket.send(wireMessage);
+      }
+    });
+  }
+
   function rememberThreadFromMessage(source, rawMessage) {
     const threadId = extractThreadId(rawMessage);
     if (!threadId) {
@@ -200,7 +233,7 @@ function startBridge() {
   // The spawned/shared Codex app-server stays warm across phone reconnects.
   // When iPhone reconnects it sends initialize again, but forwarding that to the
   // already-initialized Codex transport only produces "Already initialized".
-  function handleBridgeManagedHandshakeMessage(rawMessage, relaySocket) {
+  function handleBridgeManagedHandshakeMessage(rawMessage) {
     let parsed = null;
     try {
       parsed = JSON.parse(rawMessage);
@@ -219,7 +252,7 @@ function startBridge() {
         return false;
       }
 
-      relaySocket.send(JSON.stringify({
+      sendApplicationResponse(JSON.stringify({
         id: parsed.id,
         result: {
           bridgeManaged: true,

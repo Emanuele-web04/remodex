@@ -86,6 +86,16 @@ struct SettingsView: View {
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
+            Text("Security: \(codex.secureConnectionState.statusLabel)")
+                .font(AppFont.caption())
+                .foregroundStyle(codex.secureConnectionState == .encrypted ? .green : .secondary)
+
+            if let fingerprint = codex.secureMacFingerprint, !fingerprint.isEmpty {
+                Text("Trusted Mac: \(fingerprint)")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
             if connectionPhaseShowsProgress {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -389,7 +399,7 @@ private struct SettingsArchivedChatsCard: View {
 private struct SettingsAboutCard: View {
     var body: some View {
         SettingsCard(title: "About") {
-            Text("Remodex connects to Codex running locally on your Mac via a relay WebSocket. All sessions stay on your machine.")
+            Text("Remodex connects to Codex running locally on your Mac via a relay WebSocket. The relay sees only ciphertext and connection metadata once the secure handshake completes.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
         }

@@ -143,15 +143,15 @@ All optional. Sensible defaults are provided.
 |----------|---------|-------------|
 | `REMODEX_RELAY` | `wss://relay.example.invalid/relay` | Relay base URL used for QR pairing and phone/Mac session routing |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
-| `REMODEX_REFRESH_ENABLED` | `true` on local macOS runs | Auto-refresh Codex.app when phone activity is detected (`false` disables it, external endpoints default to off) |
+| `REMODEX_REFRESH_ENABLED` | `false` | Auto-refresh Codex.app when phone activity is detected (`true` enables it explicitly) |
 | `REMODEX_REFRESH_DEBOUNCE_MS` | `1200` | Debounce window (ms) for coalescing refresh events |
 | `REMODEX_REFRESH_COMMAND` | — | Custom shell command to run instead of the built-in AppleScript refresh |
 | `REMODEX_CODEX_BUNDLE_ID` | `com.openai.codex` | macOS bundle ID of the Codex app |
 | `CODEX_HOME` | `~/.codex` | Codex data directory (used here for `sessions/` rollout files) |
 
 ```sh
-# Disable desktop refresh
-REMODEX_REFRESH_ENABLED=false remodex up
+# Enable desktop refresh explicitly
+REMODEX_REFRESH_ENABLED=true remodex up
 
 # Connect to an existing Codex instance
 REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
@@ -163,10 +163,30 @@ REMODEX_RELAY=ws://localhost:9000/relay remodex up
 ## Pairing and Safety
 
 - Remodex is local-first: Codex, git operations, and workspace actions run on your Mac, while the iPhone acts as a paired remote control.
-- The pairing QR contains the relay base URL and a random session ID. After a successful scan, the iPhone stores that pairing in Keychain and tries to reconnect automatically on relaunch or when the app returns to the foreground.
-- The default relay is `wss://relay.example.invalid/relay`, so traffic is encrypted in transit with TLS. You can also point Remodex at your own relay if you prefer to keep routing fully under your control.
+- The pairing QR now carries the relay base URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and tries to reconnect automatically on relaunch or when the app returns to the foreground.
+- The default relay is `wss://relay.example.invalid/relay`, so the socket itself is protected with TLS in transit, and Remodex wraps application payloads in end-to-end encryption after the secure handshake completes.
 - If you want to inspect or self-host the relay, the server code is available in [`relay/`](relay/).
 - On the iPhone, the default agent permission mode is `On-Request`. Switching the app to `Full access` auto-approves runtime approval prompts from the agent.
+
+## Security and Privacy
+
+Remodex now uses an authenticated end-to-end encrypted channel between the paired iPhone and the bridge running on your Mac. The relay still carries the WebSocket traffic, but it does not get the plaintext contents of prompts, tool calls, Codex responses, git output, or workspace RPC payloads once the secure session is established.
+
+The secure channel is built in these steps:
+
+1. The bridge generates and persists a long-term device identity keypair on the Mac.
+2. The pairing QR shares the relay URL, session ID, bridge device ID, bridge identity public key, and a short expiry window.
+3. During pairing, the iPhone and bridge exchange fresh X25519 ephemeral keys and nonces.
+4. The bridge signs the handshake transcript with its Ed25519 identity key, and the iPhone verifies that signature against the public key from the QR code or the previously trusted Mac record.
+5. The iPhone signs a client-auth transcript with its own Ed25519 identity key, and the bridge verifies that before accepting the session.
+6. Both sides derive directional AES-256-GCM keys with HKDF-SHA256 and then wrap application messages in encrypted envelopes with monotonic counters for replay protection.
+
+Privacy notes:
+
+- The relay can still see connection metadata and the plaintext secure control messages used to set up the encrypted session, including session IDs, device IDs, public keys, nonces, and handshake result codes.
+- The relay does not see decrypted application payloads after the secure handshake succeeds.
+- The iPhone currently trusts a single paired phone identity per Mac bridge state. Pairing a different iPhone requires resetting pairing on the Mac first.
+- On-device message history is also encrypted at rest on iPhone using a Keychain-backed AES key.
 
 ## Git Integration
 
@@ -200,11 +220,11 @@ The bridge also handles local workspace-scoped revert operations for the assista
 
 Remodex works with both the Codex CLI and the Codex desktop app (`Codex.app`). Under the hood, the bridge spawns a `codex app-server` process — the same JSON-RPC interface that powers the desktop app and IDE extensions. Conversations are persisted as JSONL rollout files under `~/.codex/sessions`, so threads started from your phone show up in the desktop app too.
 
-**Known limitation**: The Codex desktop app does not live-reload when an external `app-server` process writes new data to disk. Threads created or updated from your phone won't appear in the desktop app until it remounts that route. Remodex now enables desktop refresh by default only on the normal local macOS flow, automatically bounces the Codex app route after new-phone-thread events, rollout-file growth, and always performs a final completion refresh so the last state lands on Mac too.
+**Known limitation**: The Codex desktop app does not live-reload when an external `app-server` process writes new data to disk. Threads created or updated from your phone won't appear in the desktop app until it remounts that route. Remodex keeps desktop refresh off by default for now because the current deep-link bounce is still disruptive. You can still enable it manually if you want the old remount workaround.
 
 ```sh
-# Disable auto-refresh if you prefer manual desktop updates
-REMODEX_REFRESH_ENABLED=false remodex up
+# Enable the old deep-link refresh workaround manually
+REMODEX_REFRESH_ENABLED=true remodex up
 ```
 
 This triggers a debounced deep-link bounce (`codex://settings` → `codex://threads/<id>`) that forces the desktop app to remount the current thread without interrupting any running tasks. While a turn is running, Remodex also watches the persisted rollout for that thread and issues occasional throttled refreshes so long responses become visible on Mac without a full app relaunch. If the local desktop path is unavailable, the bridge self-disables desktop refresh for the rest of that run instead of retrying noisily forever.
@@ -212,7 +232,7 @@ This triggers a debounced deep-link bounce (`codex://settings` → `codex://thre
 ## Connection Resilience
 
 - **Auto-reconnect**: If the relay connection drops, the bridge reconnects with exponential backoff (1 s → 5 s max)
-- **Message buffering**: Messages are queued while the relay is disconnected and flushed on reconnect
+- **Secure catch-up**: The bridge keeps a bounded local outbound buffer and re-sends missed encrypted messages after a secure reconnect
 - **Codex persistence**: The Codex process stays alive across relay reconnects
 - **Graceful shutdown**: SIGINT/SIGTERM cleanly close all connections
 
@@ -244,13 +264,13 @@ The bridge stops. Run `remodex up` again — your phone will reconnect when it d
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.
 
 **Why don't my phone threads show up in the Codex desktop app immediately?**
-The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. On macOS, Remodex now auto-refreshes Codex.app by default for the normal local bridge flow after new thread events, rollout growth, and turn completion. If you're using `REMODEX_CODEX_ENDPOINT`, desktop refresh defaults to off unless you explicitly enable it with `REMODEX_REFRESH_ENABLED=true`.
+The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. Remodex keeps desktop refresh off by default for now because the current workaround bounces the Codex app route and can feel disruptive. If you still want that workaround, enable it explicitly with `REMODEX_REFRESH_ENABLED=true`.
 
 **Can I self-host the relay server?**
 Yes. The default hosted relay runs on my VPS, and the relay server code is available in [`relay/`](relay/) if you want to inspect it or run your own compatible relay. Then point Remodex at your relay with `REMODEX_RELAY`.
 
 **Is the default hosted relay safe for sensitive work?**
-For everyday use, it is a practical default: traffic is protected in transit with TLS and all Codex execution still happens on your Mac. If you want the tightest control over routing, set `REMODEX_RELAY` to a relay you run yourself.
+For everyday use, it is now much stronger than a plain relay: traffic is protected in transit with TLS, application payloads are end-to-end encrypted after the secure handshake, and all Codex execution still happens on your Mac. The relay can still observe connection metadata and handshake control messages, so if you want the tightest control over routing and metadata exposure, set `REMODEX_RELAY` to a relay you run yourself.
 
 ## License
 

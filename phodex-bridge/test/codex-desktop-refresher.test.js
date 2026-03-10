@@ -43,10 +43,10 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
     platform: "darwin",
   });
 
-  assert.equal(macConfig.refreshEnabled, true);
+  assert.equal(macConfig.refreshEnabled, false);
   assert.equal(macEndpointConfig.refreshEnabled, false);
   assert.equal(linuxConfig.refreshEnabled, false);
-  assert.equal(linuxCommandConfig.refreshEnabled, true);
+  assert.equal(linuxCommandConfig.refreshEnabled, false);
   assert.equal(explicitOnConfig.refreshEnabled, true);
   assert.equal(explicitOffConfig.refreshEnabled, false);
 });

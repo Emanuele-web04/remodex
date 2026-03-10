@@ -55,15 +55,16 @@ extension CodexService {
             throw CodexServiceError.invalidInput(friendlyMessage)
         }
         webSocketConnection = connection
-
-        isConnected = true
-        shouldAutoReconnectOnForeground = false
-        connectionRecoveryState = .idle
-        lastErrorMessage = nil
         startReceiveLoop(with: connection)
         clearHydrationCaches()
 
         do {
+            try await performSecureHandshake()
+
+            isConnected = true
+            shouldAutoReconnectOnForeground = false
+            connectionRecoveryState = .idle
+            lastErrorMessage = nil
             try await initializeSession()
 
             startSyncLoop()
@@ -116,6 +117,7 @@ extension CodexService {
         postConnectSyncToken = nil
         clearHydrationCaches()
         resumedThreadIDs.removeAll()
+        resetSecureTransportState()
 
         failAllPendingRequests(with: CodexServiceError.disconnected)
     }
@@ -124,8 +126,18 @@ extension CodexService {
     func clearSavedRelaySession() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = nil
         relayUrl = nil
+        relayMacDeviceId = nil
+        relayMacIdentityPublicKey = nil
+        relayProtocolVersion = codexSecureProtocolVersion
+        lastAppliedBridgeOutboundSeq = 0
+        secureConnectionState = .notPaired
+        secureMacFingerprint = nil
     }
 
     func initializeSession() async throws {
@@ -292,6 +304,7 @@ extension CodexService {
         supportsTurnCollaborationMode = false
         resumedThreadIDs.removeAll()
         clearHydrationCaches()
+        resetSecureTransportState()
     }
 
     // Detects runtimes that still reject `initialize.capabilities`.
