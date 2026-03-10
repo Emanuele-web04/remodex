@@ -28,8 +28,8 @@ struct ContentView: View {
         rootContent
             // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
             .task {
-                await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
                 syncSelectedThread(with: codex.threads)
+                await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
             .onChange(of: showSettings) { _, show in
                 if show {

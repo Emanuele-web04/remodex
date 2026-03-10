@@ -422,6 +422,9 @@ extension CodexService {
 
     func isRecoverableTransientConnectionError(_ error: Error) -> Bool {
         if let serviceError = error as? CodexServiceError {
+            if case .requestTimeout = serviceError {
+                return true
+            }
             if case .invalidInput(let message) = serviceError {
                 return message.localizedCaseInsensitiveContains("timed out")
             }
