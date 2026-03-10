@@ -392,8 +392,10 @@ private extension CodexService {
     }
 
     func handleEncryptedEnvelopeText(_ text: String) {
-        guard var secureSession,
-              let envelope = try? decodeSecureControl(SecureEnvelope.self, from: text),
+        // No active session yet (handshake in progress) — silently drop stale envelopes.
+        guard var secureSession else { return }
+
+        guard let envelope = try? decodeSecureControl(SecureEnvelope.self, from: text),
               envelope.sessionId == secureSession.sessionId,
               envelope.keyEpoch == secureSession.keyEpoch,
               envelope.sender == "mac",
