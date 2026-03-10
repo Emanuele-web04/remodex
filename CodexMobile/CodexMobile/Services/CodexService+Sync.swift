@@ -18,11 +18,12 @@ extension CodexService {
         debugSyncLog("sync loop start")
 
         // Conservative adaptive intervals:
-        // - Keep UI responsive in foreground
-        // - Reduce background/network load significantly
-        let listIntervalForegroundNs: UInt64 = 20_000_000_000
+        // - Poll a bit faster in foreground so chats created on Mac become
+        //   continuable on iPhone sooner without adding a new live-sync path
+        // - Keep background/network load significantly lower
+        let listIntervalForegroundNs: UInt64 = 8_000_000_000
         let listIntervalBackgroundNs: UInt64 = 75_000_000_000
-        let historyIntervalForegroundNs: UInt64 = 15_000_000_000
+        let historyIntervalForegroundNs: UInt64 = 8_000_000_000
         let historyIntervalBackgroundIdleNs: UInt64 = 90_000_000_000
         let historyIntervalBackgroundRunningNs: UInt64 = 12_000_000_000
         let watchIntervalForegroundNs: UInt64 = 4_000_000_000
