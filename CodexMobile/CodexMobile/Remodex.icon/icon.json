@@ -2,16 +2,35 @@
   "fill" : "system-light",
   "groups" : [
     {
-      "blend-mode" : "normal",
-      "blur-material" : 0.5,
       "layers" : [
         {
-          "image-name" : "remodex.png",
-          "name" : "remodex"
+          "image-name-specializations" : [
+            {
+              "value" : "more-simplelogo.png"
+            },
+            {
+              "idiom" : "square",
+              "value" : "Group 9.png"
+            }
+          ],
+          "name" : "Group 9",
+          "position-specializations" : [
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 1.02,
+                "translation-in-points" : [
+                  0,
+                  0
+                ]
+              }
+            }
+          ]
         }
       ],
+      "lighting" : "combined",
       "shadow" : {
-        "kind" : "layer-color",
+        "kind" : "neutral",
         "opacity" : 0.5
       },
       "specular" : true,

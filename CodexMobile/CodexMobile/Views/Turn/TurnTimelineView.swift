@@ -34,15 +34,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @ViewBuilder let composer: () -> Composer
 
     private let scrollBottomAnchorID = "turn-scroll-bottom-anchor"
-    private let scrollCoordinateSpaceID = "turn-scroll-coordinate-space"
-
     /// Number of messages to show per page.  Only the tail slice is rendered;
     /// scrolling to the top reveals a "Load earlier messages" button.
     private static var pageSize: Int { 40 }
 
     @State private var visibleTailCount: Int = pageSize
     @State private var viewportHeight: CGFloat = 0
-    @State private var lastReportedBottomAnchorMaxY: CGFloat?
     // Cached per-render artifacts to avoid O(n) recomputation inside the body.
     @State private var cachedBlockInfoByMessageID: [String: String] = [:]
     @State private var cachedLastFileChangeMessageID: String? = nil
@@ -51,7 +48,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
     @State private var initialRecoverySnapPendingThreadID: String?
     @State private var initialRecoverySnapTask: Task<Void, Never>?
-    @State private var scrollAwayDebounceTask: Task<Void, Never>?
+    @State private var followBottomScrollTask: Task<Void, Never>?
 
     /// The tail slice of messages currently rendered in the timeline.
     private var visibleMessages: ArraySlice<CodexMessage> {
@@ -126,22 +123,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         Color.clear
                             .frame(height: 1)
                             .id(scrollBottomAnchorID)
-                            .background(
-                                GeometryReader { geometry in
-                                    Color.clear.preference(
-                                        key: TurnScrollBottomAnchorMaxYPreferenceKey.self,
-                                        value: quantizedGeometryValue(
-                                            geometry.frame(in: .named(scrollCoordinateSpaceID)).maxY
-                                        )
-                                    )
-                                }
-                            )
                             .allowsHitTesting(false)
                             .padding(.bottom, 12)
                     }
                 }
                 .accessibilityIdentifier("turn.timeline.scrollview")
-                .coordinateSpace(name: scrollCoordinateSpaceID)
                 .background(Color(.systemBackground))
                 .defaultScrollAnchor(.bottom)
                 .scrollDismissesKeyboard(.interactively)
@@ -150,20 +136,26 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         onTapOutsideComposer()
                     }
                 )
-                .onGeometryChange(for: CGFloat.self) { proxy in
-                    quantizedGeometryValue(proxy.size.height)
-                } action: { newHeight in
-                    guard newHeight != viewportHeight else { return }
-                    viewportHeight = newHeight
-                    performInitialRecoverySnapIfNeeded(using: proxy)
-                }
-                .onPreferenceChange(TurnScrollBottomAnchorMaxYPreferenceKey.self) { bottomAnchorMaxY in
-                    guard bottomAnchorMaxY != lastReportedBottomAnchorMaxY else { return }
-                    lastReportedBottomAnchorMaxY = bottomAnchorMaxY
-                    updateScrolledToBottom(
-                        bottomAnchorMaxY: bottomAnchorMaxY,
-                        viewportHeight: viewportHeight
-                    )
+                .onScrollGeometryChange(for: ScrollBottomGeometry.self) { geometry in
+                    let vh = geometry.visibleRect.height
+                    let isAtBottom: Bool
+                    if geometry.contentSize.height <= 0 || vh <= 0 {
+                        isAtBottom = true
+                    } else if geometry.contentSize.height <= vh {
+                        isAtBottom = true
+                    } else {
+                        isAtBottom = geometry.visibleRect.maxY
+                            >= geometry.contentSize.height - TurnScrollStateTracker.bottomThreshold
+                    }
+                    return ScrollBottomGeometry(isAtBottom: isAtBottom, viewportHeight: vh)
+                } action: { old, new in
+                    if new.viewportHeight != old.viewportHeight, new.viewportHeight > 0 {
+                        viewportHeight = new.viewportHeight
+                        performInitialRecoverySnapIfNeeded(using: proxy)
+                    }
+                    if new.isAtBottom != old.isAtBottom {
+                        handleScrolledToBottomChanged(new.isAtBottom)
+                    }
                 }
                 // React to every timeline mutation so streamed text growth stays pinned
                 // when the user is already at the bottom.
@@ -339,7 +331,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         cancelScrollTasks()
         scrollSessionThreadID = threadID
         visibleTailCount = Self.pageSize
-        lastReportedBottomAnchorMaxY = nil
         isScrolledToBottom = true
         autoScrollMode = shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
         initialRecoverySnapPendingThreadID = threadID
@@ -347,63 +338,33 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     // Cancels any delayed scroll work so old thread sessions cannot move the new one.
     private func cancelScrollTasks() {
-        scrollAwayDebounceTask?.cancel()
-        scrollAwayDebounceTask = nil
         initialRecoverySnapTask?.cancel()
         initialRecoverySnapTask = nil
+        followBottomScrollTask?.cancel()
+        followBottomScrollTask = nil
     }
 
-    private func updateScrolledToBottom(bottomAnchorMaxY: CGFloat, viewportHeight: CGFloat) {
-        guard viewportHeight > 0 else { return }
-
-        let nextValue = TurnScrollStateTracker.isScrolledToBottom(
-            bottomAnchorMaxY: bottomAnchorMaxY,
-            viewportHeight: viewportHeight,
-            hasMessages: !messages.isEmpty
-        )
-
-        guard nextValue != isScrolledToBottom else {
-            scrollAwayDebounceTask?.cancel()
-            scrollAwayDebounceTask = nil
-            return
-        }
+    // Stops follow-bottom as soon as the user drags away so queued snaps cannot fight the gesture.
+    private func handleScrolledToBottomChanged(_ nextValue: Bool) {
+        guard nextValue != isScrolledToBottom else { return }
 
         if nextValue {
-            // false → true (scroll back to bottom): immediate
-            scrollAwayDebounceTask?.cancel()
-            scrollAwayDebounceTask = nil
             isScrolledToBottom = true
             if autoScrollMode != .anchorAssistantResponse {
                 autoScrollMode = .followBottom
             }
         } else {
-            // true → false (scroll away): debounce 80ms
-            guard scrollAwayDebounceTask == nil else { return }
-            scrollAwayDebounceTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 80_000_000)
-                guard !Task.isCancelled else { return }
-                // Keep the first-load recovery armed until we have attempted the
-                // corrective bottom snap for this thread.
-                if initialRecoverySnapPendingThreadID == threadID {
-                    scrollAwayDebounceTask = nil
-                    return
-                }
-                isScrolledToBottom = false
-                if autoScrollMode != .anchorAssistantResponse {
-                    autoScrollMode = .manual
-                }
-                scrollAwayDebounceTask = nil
+            followBottomScrollTask?.cancel()
+            followBottomScrollTask = nil
+            isScrolledToBottom = false
+            if autoScrollMode != .anchorAssistantResponse {
+                autoScrollMode = .manual
             }
         }
     }
 
-    // Rounds geometry readings so sub-point layout noise does not feed back into scroll state.
-    private func quantizedGeometryValue(_ value: CGFloat) -> CGFloat {
-        (value * 2).rounded() / 2
-    }
-
-    // Repairs the initial white/blank viewport race by doing one deferred snap only
-    // after the scroll view has a real height and messages are laid out.
+    // Repairs the initial white/blank viewport race by doing a deferred snap, then
+    // one follow-up verification snap after the footer/lazy rows finish settling.
     private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
         guard initialRecoverySnapPendingThreadID == threadID,
               initialRecoverySnapTask == nil,
@@ -417,6 +378,22 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         let expectedThreadID = threadID
         initialRecoverySnapTask = Task { @MainActor in
             await Task.yield()
+            guard !Task.isCancelled,
+                  initialRecoverySnapPendingThreadID == expectedThreadID,
+                  scrollSessionThreadID == expectedThreadID,
+                  !messages.isEmpty,
+                  viewportHeight > 0,
+                  autoScrollMode == .followBottom,
+                  !shouldAnchorToAssistantResponse else {
+                initialRecoverySnapTask = nil
+                return
+            }
+
+            scrollToBottom(using: proxy, animated: false)
+
+            // A second snap one frame later fixes the common case where the composer
+            // inset or lazy cell heights settle just after the first recovery jump.
+            try? await Task.sleep(nanoseconds: 16_000_000)
             guard !Task.isCancelled,
                   initialRecoverySnapPendingThreadID == expectedThreadID,
                   scrollSessionThreadID == expectedThreadID,
@@ -462,10 +439,28 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             _ = anchorToAssistantResponseIfNeeded(using: proxy)
         case .followBottom:
             if isScrolledToBottom {
-                scrollToBottom(using: proxy, animated: false)
+                scheduleFollowBottomScroll(using: proxy)
             }
         case .manual:
             return
+        }
+    }
+
+    /// Coalesces rapid follow-bottom scrolls into at most one per display frame,
+    /// preventing discrete jumps on every streaming delta.
+    private func scheduleFollowBottomScroll(using proxy: ScrollViewProxy) {
+        guard followBottomScrollTask == nil else { return }
+        let expectedThreadID = threadID
+        followBottomScrollTask = Task { @MainActor in
+            defer { followBottomScrollTask = nil }
+            try? await Task.sleep(nanoseconds: 16_000_000) // ~1 display frame
+            guard !Task.isCancelled,
+                  scrollSessionThreadID == expectedThreadID,
+                  autoScrollMode == .followBottom,
+                  isScrolledToBottom else {
+                return
+            }
+            proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
         }
     }
 
@@ -543,9 +538,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         return !isLatestBlock
     }
 
-    // Scrolls to the bottom sentinel; used by manual jump button and pin-to-bottom behavior.
-    // Runs synchronously to avoid a 1-frame lag between content growth and scroll update
-    // that causes isScrolledToBottom to briefly flip and the layout to jitter.
+    // Scrolls to the bottom sentinel; used by manual jump button and initial recovery snap.
+    // Streaming follow-bottom uses the throttled scheduleFollowBottomScroll instead.
     private func scrollToBottom(using proxy: ScrollViewProxy, animated: Bool) {
         guard !messages.isEmpty else { return }
 
@@ -559,12 +553,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 }
 
-private struct TurnScrollBottomAnchorMaxYPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = .zero
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
+private struct ScrollBottomGeometry: Equatable {
+    let isAtBottom: Bool
+    let viewportHeight: CGFloat
 }
 
 private struct TurnFloatingButtonPressStyle: ButtonStyle {
