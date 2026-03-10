@@ -83,6 +83,12 @@ This is a monorepo with a local bridge, an iOS app target, and its tests:
 npm install -g remodex
 ```
 
+To update an existing global install later:
+
+```sh
+npm install -g remodex@latest
+```
+
 If you only want to try Remodex, you can install it from npm and run it without cloning this repository.
 
 ## Quick Start
