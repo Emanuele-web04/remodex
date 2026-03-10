@@ -381,6 +381,15 @@ private struct SidebarNewChatProjectPickerSheet: View {
                         .padding(.vertical, 2)
                     }
                 }
+
+                Section {
+                    // Explains the existing scoping rule at the exact moment the user chooses it.
+                    Text("Chats started in a project stay scoped to that working directory. If you pick No Project, the chat is global.")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .listRowBackground(Color.clear)
+                }
             }
             .navigationTitle("Start new chat")
             .navigationBarTitleDisplayMode(.inline)
