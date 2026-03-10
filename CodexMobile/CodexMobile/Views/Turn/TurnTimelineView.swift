@@ -42,6 +42,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     @State private var visibleTailCount: Int = pageSize
     @State private var viewportHeight: CGFloat = 0
+    @State private var lastReportedBottomAnchorMaxY: CGFloat?
     // Cached per-render artifacts to avoid O(n) recomputation inside the body.
     @State private var cachedBlockInfoByMessageID: [String: String] = [:]
     @State private var cachedLastFileChangeMessageID: String? = nil
@@ -129,7 +130,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                                 GeometryReader { geometry in
                                     Color.clear.preference(
                                         key: TurnScrollBottomAnchorMaxYPreferenceKey.self,
-                                        value: geometry.frame(in: .named(scrollCoordinateSpaceID)).maxY
+                                        value: quantizedGeometryValue(
+                                            geometry.frame(in: .named(scrollCoordinateSpaceID)).maxY
+                                        )
                                     )
                                 }
                             )
@@ -148,13 +151,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     }
                 )
                 .onGeometryChange(for: CGFloat.self) { proxy in
-                    proxy.size.height
+                    quantizedGeometryValue(proxy.size.height)
                 } action: { newHeight in
                     guard newHeight != viewportHeight else { return }
                     viewportHeight = newHeight
                     performInitialRecoverySnapIfNeeded(using: proxy)
                 }
                 .onPreferenceChange(TurnScrollBottomAnchorMaxYPreferenceKey.self) { bottomAnchorMaxY in
+                    guard bottomAnchorMaxY != lastReportedBottomAnchorMaxY else { return }
+                    lastReportedBottomAnchorMaxY = bottomAnchorMaxY
                     updateScrolledToBottom(
                         bottomAnchorMaxY: bottomAnchorMaxY,
                         viewportHeight: viewportHeight
@@ -334,6 +339,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         cancelScrollTasks()
         scrollSessionThreadID = threadID
         visibleTailCount = Self.pageSize
+        lastReportedBottomAnchorMaxY = nil
         isScrolledToBottom = true
         autoScrollMode = shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
         initialRecoverySnapPendingThreadID = threadID
@@ -389,6 +395,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 scrollAwayDebounceTask = nil
             }
         }
+    }
+
+    // Rounds geometry readings so sub-point layout noise does not feed back into scroll state.
+    private func quantizedGeometryValue(_ value: CGFloat) -> CGFloat {
+        (value * 2).rounded() / 2
     }
 
     // Repairs the initial white/blank viewport race by doing one deferred snap only
