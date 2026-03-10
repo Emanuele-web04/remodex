@@ -78,6 +78,7 @@ struct SecureServerHello: Codable, Sendable {
     let keyEpoch: Int
     let expiresAtForTranscript: Int64
     let macSignature: String
+    let clientNonce: String?
 }
 
 struct SecureClientAuth: Codable, Sendable {

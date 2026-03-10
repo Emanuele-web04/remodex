@@ -54,8 +54,16 @@ extension CodexService {
         )
         try await sendWireControlMessage(clientHello)
 
-        let serverHelloRaw = try await waitForSecureControlMessage(kind: "serverHello")
-        let serverHello = try decodeSecureControl(SecureServerHello.self, from: serverHelloRaw)
+        let serverHello = try await waitForMatchingServerHello(
+            expectedSessionId: sessionId,
+            expectedMacDeviceId: macDeviceId,
+            expectedMacIdentityPublicKey: expectedMacIdentityPublicKey,
+            expectedClientNonce: clientHello.clientNonce,
+            clientNonce: clientNonce,
+            phoneDeviceId: phoneIdentityState.phoneDeviceId,
+            phoneIdentityPublicKey: phoneIdentityState.phoneIdentityPublicKey,
+            phoneEphemeralPublicKey: clientHello.phoneEphemeralPublicKey
+        )
         guard serverHello.protocolVersion == codexSecureProtocolVersion else {
             throw CodexSecureTransportError.incompatibleVersion(
                 "This bridge is using a different secure transport version. Update Remodex on the iPhone or Mac and try again."
@@ -87,11 +95,25 @@ extension CodexService {
             serverNonce: serverNonce,
             expiresAtForTranscript: serverHello.expiresAtForTranscript
         )
+        debugSecureLog(
+            "verify mode=\(serverHello.handshakeMode.rawValue) session=\(shortSecureId(sessionId)) "
+            + "keyEpoch=\(serverHello.keyEpoch) mac=\(shortSecureId(serverHello.macDeviceId)) "
+            + "phone=\(shortSecureId(phoneIdentityState.phoneDeviceId)) "
+            + "expectedMacKey=\(shortSecureFingerprint(expectedMacIdentityPublicKey)) "
+            + "actualMacKey=\(shortSecureFingerprint(serverHello.macIdentityPublicKey)) "
+            + "phoneKey=\(shortSecureFingerprint(phoneIdentityState.phoneIdentityPublicKey)) "
+            + "transcript=\(shortTranscriptDigest(transcriptBytes))"
+        )
         let macPublicKey = try Curve25519.Signing.PublicKey(
             rawRepresentation: Data(base64EncodedOrEmpty: serverHello.macIdentityPublicKey)
         )
         let macSignature = Data(base64EncodedOrEmpty: serverHello.macSignature)
-        guard macPublicKey.isValidSignature(macSignature, for: transcriptBytes) else {
+        let isSignatureValid = macPublicKey.isValidSignature(macSignature, for: transcriptBytes)
+        debugSecureLog(
+            "verify-result mode=\(serverHello.handshakeMode.rawValue) valid=\(isSignatureValid) "
+            + "signature=\(shortTranscriptDigest(macSignature))"
+        )
+        guard isSignatureValid else {
             throw CodexSecureTransportError.invalidHandshake("The secure Mac signature could not be verified.")
         }
 
@@ -114,13 +136,11 @@ extension CodexService {
         )
         try await sendWireControlMessage(clientAuth)
 
-        let secureReadyRaw = try await waitForSecureControlMessage(kind: "secureReady")
-        let secureReady = try decodeSecureControl(SecureReadyMessage.self, from: secureReadyRaw)
-        guard secureReady.sessionId == sessionId,
-              secureReady.keyEpoch == serverHello.keyEpoch,
-              secureReady.macDeviceId == macDeviceId else {
-            throw CodexSecureTransportError.invalidHandshake("The bridge did not confirm the expected secure session.")
-        }
+        _ = try await waitForMatchingSecureReady(
+            expectedSessionId: sessionId,
+            expectedKeyEpoch: serverHello.keyEpoch,
+            expectedMacDeviceId: macDeviceId
+        )
 
         let macEphemeralPublicKey = try Curve25519.KeyAgreement.PublicKey(
             rawRepresentation: Data(base64EncodedOrEmpty: serverHello.macEphemeralPublicKey)
@@ -426,6 +446,107 @@ private extension CodexService {
         secureMacFingerprint = codexSecureFingerprint(for: publicKey)
     }
 
+    /// Waits for a serverHello whose echoed clientNonce matches the one we sent.
+    /// Stale serverHellos from a previous handshake attempt (e.g. buffered by the relay
+    /// across a phone disconnect/reconnect) are silently discarded until the correct one
+    /// arrives or the per-message 12-second timeout fires.
+    func waitForMatchingServerHello(
+        expectedSessionId: String,
+        expectedMacDeviceId: String,
+        expectedMacIdentityPublicKey: String,
+        expectedClientNonce: String,
+        clientNonce: Data,
+        phoneDeviceId: String,
+        phoneIdentityPublicKey: String,
+        phoneEphemeralPublicKey: String
+    ) async throws -> SecureServerHello {
+        while true {
+            let raw = try await waitForSecureControlMessage(kind: "serverHello")
+            let hello = try decodeSecureControl(SecureServerHello.self, from: raw)
+            if let echoedNonce = hello.clientNonce, echoedNonce != expectedClientNonce {
+                debugSecureLog("discarding stale serverHello (clientNonce mismatch)")
+                continue
+            }
+            if hello.clientNonce == nil,
+               !isMatchingLegacyServerHello(
+                    hello,
+                    expectedSessionId: expectedSessionId,
+                    expectedMacDeviceId: expectedMacDeviceId,
+                    expectedMacIdentityPublicKey: expectedMacIdentityPublicKey,
+                    clientNonce: clientNonce,
+                    phoneDeviceId: phoneDeviceId,
+                    phoneIdentityPublicKey: phoneIdentityPublicKey,
+                    phoneEphemeralPublicKey: phoneEphemeralPublicKey
+               ) {
+                debugSecureLog("discarding stale serverHello (legacy signature mismatch)")
+                continue
+            }
+            return hello
+        }
+    }
+
+    // Falls back to transcript-signature matching for pre-echo serverHello payloads.
+    func isMatchingLegacyServerHello(
+        _ hello: SecureServerHello,
+        expectedSessionId: String,
+        expectedMacDeviceId: String,
+        expectedMacIdentityPublicKey: String,
+        clientNonce: Data,
+        phoneDeviceId: String,
+        phoneIdentityPublicKey: String,
+        phoneEphemeralPublicKey: String
+    ) -> Bool {
+        guard hello.protocolVersion == codexSecureProtocolVersion,
+              hello.sessionId == expectedSessionId,
+              hello.macDeviceId == expectedMacDeviceId,
+              hello.macIdentityPublicKey == expectedMacIdentityPublicKey,
+              let macPublicKey = try? Curve25519.Signing.PublicKey(
+                  rawRepresentation: Data(base64EncodedOrEmpty: hello.macIdentityPublicKey)
+              ) else {
+            return false
+        }
+
+        let transcriptBytes = codexSecureTranscriptBytes(
+            sessionId: expectedSessionId,
+            protocolVersion: hello.protocolVersion,
+            handshakeMode: hello.handshakeMode,
+            keyEpoch: hello.keyEpoch,
+            macDeviceId: hello.macDeviceId,
+            phoneDeviceId: phoneDeviceId,
+            macIdentityPublicKey: hello.macIdentityPublicKey,
+            phoneIdentityPublicKey: phoneIdentityPublicKey,
+            macEphemeralPublicKey: hello.macEphemeralPublicKey,
+            phoneEphemeralPublicKey: phoneEphemeralPublicKey,
+            clientNonce: clientNonce,
+            serverNonce: Data(base64EncodedOrEmpty: hello.serverNonce),
+            expiresAtForTranscript: hello.expiresAtForTranscript
+        )
+        return macPublicKey.isValidSignature(
+            Data(base64EncodedOrEmpty: hello.macSignature),
+            for: transcriptBytes
+        )
+    }
+
+    /// Waits for a secureReady whose keyEpoch matches the current handshake.
+    /// Stale secureReady messages from previous sessions are discarded until the
+    /// correct one arrives or the per-message 12-second timeout fires.
+    func waitForMatchingSecureReady(
+        expectedSessionId: String,
+        expectedKeyEpoch: Int,
+        expectedMacDeviceId: String
+    ) async throws -> SecureReadyMessage {
+        while true {
+            let raw = try await waitForSecureControlMessage(kind: "secureReady")
+            let ready = try decodeSecureControl(SecureReadyMessage.self, from: raw)
+            if ready.sessionId == expectedSessionId,
+               ready.keyEpoch == expectedKeyEpoch,
+               ready.macDeviceId == expectedMacDeviceId {
+                return ready
+            }
+            debugSecureLog("discarding stale secureReady (keyEpoch=\(ready.keyEpoch) expected=\(expectedKeyEpoch))")
+        }
+    }
+
     func wireMessageKind(from rawText: String) -> String? {
         guard let data = rawText.data(using: .utf8),
               let json = try? JSONDecoder().decode(JSONValue.self, from: data),
@@ -448,5 +569,26 @@ private extension CodexService {
             SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
         }
         return data
+    }
+
+    func debugSecureLog(_ message: String) {
+        print("[CodexSecure] \(message)")
+    }
+
+    func shortSecureId(_ value: String) -> String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? "none" : String(normalized.prefix(8))
+    }
+
+    func shortSecureFingerprint(_ publicKeyBase64: String) -> String {
+        let bytes = Data(base64EncodedOrEmpty: publicKeyBase64)
+        guard !bytes.isEmpty else {
+            return "invalid"
+        }
+        return shortTranscriptDigest(bytes)
+    }
+
+    func shortTranscriptDigest(_ data: Data) -> String {
+        SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined().prefix(16).description
     }
 }

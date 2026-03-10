@@ -228,6 +228,13 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
       currentDeviceState.macIdentityPublicKey,
       transcriptBytes
     );
+    debugSecureLog(
+      `serverHello mode=${handshakeMode} session=${shortId(sessionId)} keyEpoch=${keyEpoch} `
+      + `mac=${shortId(currentDeviceState.macDeviceId)} phone=${shortId(phoneDeviceId)} `
+      + `macKey=${shortFingerprint(currentDeviceState.macIdentityPublicKey)} `
+      + `phoneKey=${shortFingerprint(phoneIdentityPublicKey)} `
+      + `transcript=${transcriptDigest(transcriptBytes)}`
+    );
 
     pendingHandshake = {
       sessionId,
@@ -255,6 +262,7 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
       keyEpoch,
       expiresAtForTranscript,
       macSignature,
+      clientNonce: clientNonceBase64,
     });
   }
 
@@ -500,6 +508,27 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
     isSecureChannelReady,
     queueOutboundApplicationMessage,
   };
+}
+
+function debugSecureLog(message) {
+  console.log(`[remodex][secure] ${message}`);
+}
+
+function shortId(value) {
+  const normalized = normalizeNonEmptyString(value);
+  return normalized ? normalized.slice(0, 8) : "none";
+}
+
+function shortFingerprint(publicKeyBase64) {
+  const bytes = base64ToBuffer(publicKeyBase64);
+  if (!bytes || bytes.length === 0) {
+    return "invalid";
+  }
+  return createHash("sha256").update(bytes).digest("hex").slice(0, 12);
+}
+
+function transcriptDigest(transcriptBytes) {
+  return createHash("sha256").update(transcriptBytes).digest("hex").slice(0, 16);
 }
 
 function encryptEnvelopePayload(payloadObject, key, sender, counter, sessionId, keyEpoch) {
