@@ -16,18 +16,38 @@ function createCodexTransport({ endpoint = "", env = process.env } = {}) {
 }
 
 function createSpawnTransport({ env }) {
-  const codex = spawn("codex", ["app-server"], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...env },
-  });
+  const launch = createCodexLaunchPlan({ env });
+  const codex = spawn(launch.command, launch.args, launch.options);
 
   let stdoutBuffer = "";
+  let stderrBuffer = "";
+  let didRequestShutdown = false;
+  let didReportError = false;
   const listeners = createListenerBag();
 
-  codex.on("error", (error) => listeners.emitError(error));
-  codex.on("close", (code, signal) => listeners.emitClose(code, signal));
-  // The bridge keeps stdout focused on connection state, so raw app-server logs stay muted here.
-  codex.stderr.on("data", () => {});
+  codex.on("error", (error) => {
+    didReportError = true;
+    listeners.emitError(error);
+  });
+  codex.on("close", (code, signal) => {
+    if (!didRequestShutdown && !didReportError && code !== 0) {
+      didReportError = true;
+      listeners.emitError(createCodexCloseError({
+        code,
+        signal,
+        stderrBuffer,
+        launchDescription: launch.description,
+      }));
+      return;
+    }
+
+    listeners.emitClose(code, signal);
+  });
+  // Keep stderr muted during normal operation, but preserve enough output to
+  // explain launch failures when the child exits before the bridge can use it.
+  codex.stderr.on("data", (chunk) => {
+    stderrBuffer = appendOutputBuffer(stderrBuffer, chunk.toString("utf8"));
+  });
 
   codex.stdout.on("data", (chunk) => {
     stdoutBuffer += chunk.toString("utf8");
@@ -45,7 +65,7 @@ function createSpawnTransport({ env }) {
   return {
     mode: "spawn",
     describe() {
-      return "`codex app-server`";
+      return launch.description;
     },
     send(message) {
       if (!codex.stdin.writable) {
@@ -64,11 +84,70 @@ function createSpawnTransport({ env }) {
       listeners.onError = handler;
     },
     shutdown() {
-      if (!codex.killed) {
-        codex.kill("SIGTERM");
-      }
+      didRequestShutdown = true;
+      shutdownCodexProcess(codex);
     },
   };
+}
+
+// Builds a single, platform-aware launch path so the bridge never "guesses"
+// between multiple commands and accidentally starts duplicate runtimes.
+function createCodexLaunchPlan({ env }) {
+  const sharedOptions = {
+    stdio: ["pipe", "pipe", "pipe"],
+    env: { ...env },
+  };
+
+  if (process.platform === "win32") {
+    return {
+      command: env.ComSpec || "cmd.exe",
+      args: ["/d", "/c", "codex app-server"],
+      options: {
+        ...sharedOptions,
+        windowsHide: true,
+      },
+      description: "`cmd.exe /d /c codex app-server`",
+    };
+  }
+
+  return {
+    command: "codex",
+    args: ["app-server"],
+    options: sharedOptions,
+    description: "`codex app-server`",
+  };
+}
+
+// Stops the exact process tree we launched on Windows so the shell wrapper
+// does not leave a child Codex process running in the background.
+function shutdownCodexProcess(codex) {
+  if (codex.killed || codex.exitCode !== null) {
+    return;
+  }
+
+  if (process.platform === "win32" && codex.pid) {
+    const killer = spawn("taskkill", ["/pid", String(codex.pid), "/t", "/f"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    killer.on("error", () => {
+      codex.kill();
+    });
+    return;
+  }
+
+  codex.kill("SIGTERM");
+}
+
+function createCodexCloseError({ code, signal, stderrBuffer, launchDescription }) {
+  const details = stderrBuffer.trim();
+  const reason = details || `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ""}.`;
+  return new Error(`Codex launcher ${launchDescription} failed: ${reason}`);
+}
+
+function appendOutputBuffer(buffer, chunk) {
+  const next = `${buffer}${chunk}`;
+  return next.slice(-4_096);
 }
 
 function createWebSocketTransport({ endpoint }) {

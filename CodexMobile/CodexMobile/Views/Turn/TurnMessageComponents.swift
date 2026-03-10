@@ -1228,7 +1228,6 @@ private struct ThinkingDisclosureView: View {
             .fontWeight(.regular)
             .italic()
             .foregroundStyle(.secondary.opacity(0.85))
-            .modifier(ShimmerModifier(isActive: isStreaming))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1241,7 +1240,11 @@ private struct CommandExecutionStatusCard: View {
     @State private var isShowingDetailSheet = false
 
     var body: some View {
-        CommandExecutionCardBody(command: status.command)
+        CommandExecutionCardBody(
+            command: status.command,
+            statusLabel: status.statusLabel,
+            accent: status.accent
+        )
             .contentShape(Rectangle())
             .onTapGesture {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)

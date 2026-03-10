@@ -50,7 +50,8 @@ function startBridge() {
       console.error(`[remodex] Failed to connect to Codex endpoint: ${config.codexEndpoint}`);
     } else {
       console.error("[remodex] Failed to start `codex app-server`.");
-      console.error("[remodex] Make sure the `codex` CLI is installed and available in PATH.");
+      console.error(`[remodex] Launch command: ${codex.describe()}`);
+      console.error("[remodex] Make sure the Codex CLI is installed and that the launcher works on this OS.");
     }
     console.error(error.message);
     process.exit(1);
@@ -145,6 +146,7 @@ function startBridge() {
       if (socket === nextSocket) {
         socket = null;
       }
+      desktopRefresher.handleTransportReset();
       scheduleRelayReconnect(code);
     });
 
@@ -171,6 +173,7 @@ function startBridge() {
     logConnectionStatus("disconnected");
     isShuttingDown = true;
     clearReconnectTimer();
+    desktopRefresher.handleTransportReset();
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
       socket.close();
     }

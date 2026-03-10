@@ -19,6 +19,8 @@ struct SidebarView: View {
     @State private var searchText = ""
     @State private var isCreatingThread = false
     @State private var groupedThreads: [SidebarThreadGroup] = []
+    @State private var isShowingNewChatProjectPicker = false
+    @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
     @State private var threadPendingDeletion: CodexThread? = nil
     @State private var createThreadErrorMessage: String? = nil
 
@@ -37,7 +39,7 @@ struct SidebarView: View {
                 isCreatingThread: isCreatingThread,
                 isEnabled: canCreateThread,
                 statusMessage: nil,
-                action: { handleNewChatTap(preferredProjectPath: nil) }
+                action: handleNewChatButtonTap
             )
             .padding(.horizontal, 16)
             .padding(.bottom, 10)
@@ -57,7 +59,9 @@ struct SidebarView: View {
                 onCreateThreadInProjectGroup: { group in
                     handleNewChatTap(preferredProjectPath: group.projectPath)
                 },
-                onDeleteProjectGroup: { _ in },
+                onArchiveProjectGroup: { group in
+                    projectGroupPendingArchive = group
+                },
                 onRenameThread: { thread, newName in
                     codex.renameThread(thread.id, name: newName)
                 },
@@ -105,6 +109,34 @@ struct SidebarView: View {
                     .padding()
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
+        }
+        .sheet(isPresented: $isShowingNewChatProjectPicker) {
+            SidebarNewChatProjectPickerSheet(
+                choices: newChatProjectChoices,
+                onSelectProject: { projectPath in
+                    handleNewChatTap(preferredProjectPath: projectPath)
+                },
+                onSelectWithoutProject: {
+                    handleNewChatTap(preferredProjectPath: nil)
+                }
+            )
+        }
+        .confirmationDialog(
+            "Archive \"\(projectGroupPendingArchive?.label ?? "project")\"?",
+            isPresented: Binding(
+                get: { projectGroupPendingArchive != nil },
+                set: { if !$0 { projectGroupPendingArchive = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Archive Project") {
+                archivePendingProjectGroup()
+            }
+            Button("Cancel", role: .cancel) {
+                projectGroupPendingArchive = nil
+            }
+        } message: {
+            Text("All active chats in this project will be archived.")
         }
         .confirmationDialog(
             "Delete \"\(threadPendingDeletion?.displayTitle ?? "conversation")\"?",
@@ -155,6 +187,16 @@ struct SidebarView: View {
         }
     }
 
+    // Shows a native sheet so folder names and full paths stay readable on small screens.
+    private func handleNewChatButtonTap() {
+        if newChatProjectChoices.isEmpty {
+            handleNewChatTap(preferredProjectPath: nil)
+            return
+        }
+
+        isShowingNewChatProjectPicker = true
+    }
+
     private func handleNewChatTap(preferredProjectPath: String?) {
         Task { @MainActor in
             guard codex.isConnected else {
@@ -194,6 +236,26 @@ struct SidebarView: View {
         searchText = ""
         showSettings = true
         onClose()
+    }
+
+    // Archives every live chat in the selected project group and clears the current selection if needed.
+    private func archivePendingProjectGroup() {
+        guard let group = projectGroupPendingArchive else { return }
+
+        let threadIDs = SidebarThreadGrouping.liveThreadIDsForProjectGroup(group, in: codex.threads)
+        let selectedThreadWasArchived = selectedThread.map { selected in
+            threadIDs.contains(selected.id)
+        } ?? false
+
+        _ = codex.archiveThreadGroup(threadIDs: threadIDs)
+
+        if selectedThreadWasArchived {
+            selectedThread = codex.threads.first(where: { thread in
+                thread.syncState == .live && !threadIDs.contains(thread.id)
+            })
+        }
+
+        projectGroupPendingArchive = nil
     }
 
     // Rebuilds sidebar sections only when the source thread array changes.
@@ -237,7 +299,99 @@ struct SidebarView: View {
         return byThreadID
     }
 
+    // Keeps the chooser in sync with the same project buckets shown in the sidebar.
+    private var newChatProjectChoices: [SidebarProjectChoice] {
+        SidebarThreadGrouping.makeProjectChoices(from: codex.threads)
+    }
+
     private var canCreateThread: Bool {
         codex.isConnected && codex.isInitialized
+    }
+}
+
+private struct SidebarNewChatProjectPickerSheet: View {
+    let choices: [SidebarProjectChoice]
+    let onSelectProject: (String) -> Void
+    let onSelectWithoutProject: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Text("Choose a project for this chat.")
+                        .font(AppFont.body())
+                        .foregroundStyle(.secondary)
+                        .listRowBackground(Color.clear)
+                }
+
+                Section("Projects") {
+                    ForEach(choices) { choice in
+                        Button {
+                            dismiss()
+                            onSelectProject(choice.projectPath)
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "folder")
+                                    .font(AppFont.body(weight: .medium))
+                                    .foregroundStyle(.secondary)
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(choice.label)
+                                        .font(AppFont.body(weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                                    Text(choice.projectPath)
+                                        .font(AppFont.mono(.caption))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                        .truncationMode(.middle)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                    }
+                }
+
+                Section {
+                    Button {
+                        dismiss()
+                        onSelectWithoutProject()
+                    } label: {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "plus.bubble")
+                                .font(AppFont.body(weight: .medium))
+                                .foregroundStyle(.secondary)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("No Project")
+                                    .font(AppFont.body(weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Text("Start a chat without a working directory.")
+                                    .font(AppFont.body())
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+            .navigationTitle("Start new chat")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents(choices.count > 4 ? [.medium, .large] : [.medium])
     }
 }

@@ -318,6 +318,17 @@ extension CodexService {
         sendThreadArchiveRPC(threadId: threadId, unarchive: false)
     }
 
+    // Archives every active thread in a sidebar project group so the folder disappears from the live list.
+    func archiveThreadGroup(threadIDs: [String]) -> [String] {
+        let uniqueThreadIDs = Array(Set(threadIDs)).sorted()
+        for threadID in uniqueThreadIDs {
+            archiveThread(threadID)
+        }
+
+        debugSyncLog("thread group archived by user: count=\(uniqueThreadIDs.count)")
+        return uniqueThreadIDs
+    }
+
     func unarchiveThread(_ threadId: String) {
         if let index = threads.firstIndex(where: { $0.id == threadId }) {
             threads[index].syncState = .live

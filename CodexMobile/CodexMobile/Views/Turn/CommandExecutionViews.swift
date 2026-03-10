@@ -35,49 +35,41 @@ struct CommandExecutionStatusModel {
 
 struct CommandExecutionCardBody: View {
     let command: String
-    private let commandAccent = Color(.command)
-    private let cornerRadius: CGFloat = 13
+    let statusLabel: String
+    let accent: CommandExecutionStatusAccent
 
     var body: some View {
-        HStack(spacing: 0) {
-            commandAccent.opacity(0.95)
-                .frame(width: 4)
+        HStack(spacing: 10) {
+            accent.color.opacity(0.95)
+                .frame(width: 3)
+                .clipShape(Capsule())
 
             HStack(spacing: 8) {
                 Image(systemName: "terminal.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(commandAccent)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(accent.color)
 
                 Text(command)
-                    .font(AppFont.mono(.callout))
+                    .font(AppFont.mono(.caption))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
 
                 Spacer(minLength: 4)
 
+                Text(statusLabel)
+                    .font(AppFont.mono(.caption2))
+                    .foregroundStyle(accent.color)
+
                 Image(systemName: "chevron.right")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 10)
+            .padding(.vertical, 2)
         }
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(cardShape.fill(.ultraThinMaterial))
-        .overlay(cardShape.stroke(.secondary.opacity(0.2), lineWidth: 1))
-        .clipShape(cardShape)
-    }
-
-    private var cardShape: UnevenRoundedRectangle {
-        UnevenRoundedRectangle(
-            topLeadingRadius: cornerRadius,
-            bottomLeadingRadius: cornerRadius,
-            bottomTrailingRadius: cornerRadius,
-            topTrailingRadius: cornerRadius,
-            style: .continuous
-        )
+        .padding(.vertical, 2)
     }
 }
 
@@ -221,13 +213,25 @@ struct CommandExecutionDetailSheet: View {
 
         var body: some View {
             VStack(spacing: 16) {
-                CommandExecutionCardBody(command: "/usr/bin/bash -lc \"cd /home/user/project && npm install\"")
+                CommandExecutionCardBody(
+                    command: "/usr/bin/bash -lc \"cd /home/user/project && npm install\"",
+                    statusLabel: "running",
+                    accent: .running
+                )
                     .contentShape(Rectangle())
                     .onTapGesture { isShowingSheet = true }
 
-                CommandExecutionCardBody(command: "git status")
+                CommandExecutionCardBody(
+                    command: "git status",
+                    statusLabel: "completed",
+                    accent: .completed
+                )
 
-                CommandExecutionCardBody(command: "python3 train.py --epochs 100 --lr 0.001 --batch-size 32 --output /tmp/model")
+                CommandExecutionCardBody(
+                    command: "python3 train.py --epochs 100 --lr 0.001 --batch-size 32 --output /tmp/model",
+                    statusLabel: "failed",
+                    accent: .failed
+                )
             }
             .padding(.horizontal, 16)
             .sheet(isPresented: $isShowingSheet) {

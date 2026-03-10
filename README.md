@@ -143,15 +143,15 @@ All optional. Sensible defaults are provided.
 |----------|---------|-------------|
 | `REMODEX_RELAY` | `wss://relay.example.invalid/relay` | Relay base URL used for QR pairing and phone/Mac session routing |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
-| `REMODEX_REFRESH_ENABLED` | `false` | Auto-refresh Codex.app when phone activity is detected |
+| `REMODEX_REFRESH_ENABLED` | `true` on local macOS runs | Auto-refresh Codex.app when phone activity is detected (`false` disables it, external endpoints default to off) |
 | `REMODEX_REFRESH_DEBOUNCE_MS` | `1200` | Debounce window (ms) for coalescing refresh events |
 | `REMODEX_REFRESH_COMMAND` | — | Custom shell command to run instead of the built-in AppleScript refresh |
 | `REMODEX_CODEX_BUNDLE_ID` | `com.openai.codex` | macOS bundle ID of the Codex app |
 | `CODEX_HOME` | `~/.codex` | Codex data directory (used here for `sessions/` rollout files) |
 
 ```sh
-# Enable desktop refresh
-REMODEX_REFRESH_ENABLED=true remodex up
+# Disable desktop refresh
+REMODEX_REFRESH_ENABLED=false remodex up
 
 # Connect to an existing Codex instance
 REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
@@ -200,14 +200,14 @@ The bridge also handles local workspace-scoped revert operations for the assista
 
 Remodex works with both the Codex CLI and the Codex desktop app (`Codex.app`). Under the hood, the bridge spawns a `codex app-server` process — the same JSON-RPC interface that powers the desktop app and IDE extensions. Conversations are persisted as JSONL rollout files under `~/.codex/sessions`, so threads started from your phone show up in the desktop app too.
 
-**Known limitation**: The Codex desktop app does not live-reload when an external `app-server` process writes new data to disk. Threads created or updated from your phone won't appear in the desktop app until you navigate away and back, or close and reopen the app. Remodex includes a built-in workaround: enable desktop refresh to have the bridge automatically bounce the Codex app's route via AppleScript after each turn completes.
+**Known limitation**: The Codex desktop app does not live-reload when an external `app-server` process writes new data to disk. Threads created or updated from your phone won't appear in the desktop app until it remounts that route. Remodex now enables desktop refresh by default only on the normal local macOS flow, automatically bounces the Codex app route after new-phone-thread events, rollout-file growth, and always performs a final completion refresh so the last state lands on Mac too.
 
 ```sh
-# Auto-refresh Codex.app when phone activity is detected
-REMODEX_REFRESH_ENABLED=true remodex up
+# Disable auto-refresh if you prefer manual desktop updates
+REMODEX_REFRESH_ENABLED=false remodex up
 ```
 
-This triggers a debounced deep-link bounce (`codex://settings` → `codex://threads/<id>`) that forces the desktop app to remount the current thread without interrupting any running tasks.
+This triggers a debounced deep-link bounce (`codex://settings` → `codex://threads/<id>`) that forces the desktop app to remount the current thread without interrupting any running tasks. While a turn is running, Remodex also watches the persisted rollout for that thread and issues occasional throttled refreshes so long responses become visible on Mac without a full app relaunch. If the local desktop path is unavailable, the bridge self-disables desktop refresh for the rest of that run instead of retrying noisily forever.
 
 ## Connection Resilience
 
@@ -243,8 +243,8 @@ The bridge stops. Run `remodex up` again — your phone will reconnect when it d
 **Can I connect to a remote Codex instance?**
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.
 
-**Why don't my phone threads show up in the Codex desktop app?**
-The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. Navigate away and back, or enable `REMODEX_REFRESH_ENABLED=true` to have the bridge auto-refresh the desktop app after each turn.
+**Why don't my phone threads show up in the Codex desktop app immediately?**
+The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. On macOS, Remodex now auto-refreshes Codex.app by default for the normal local bridge flow after new thread events, rollout growth, and turn completion. If you're using `REMODEX_CODEX_ENDPOINT`, desktop refresh defaults to off unless you explicitly enable it with `REMODEX_REFRESH_ENABLED=true`.
 
 **Can I self-host the relay server?**
 Yes. The default hosted relay runs on my VPS, and the relay server code is available in [`relay/`](relay/) if you want to inspect it or run your own compatible relay. Then point Remodex at your relay with `REMODEX_RELAY`.

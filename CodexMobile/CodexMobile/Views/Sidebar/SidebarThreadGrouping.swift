@@ -10,6 +10,13 @@ enum SidebarThreadGroupKind: Equatable {
     case archived
 }
 
+struct SidebarProjectChoice: Identifiable, Equatable {
+    let id: String
+    let label: String
+    let projectPath: String
+    let sortDate: Date
+}
+
 struct SidebarThreadGroup: Identifiable {
     let id: String
     let label: String
@@ -29,33 +36,15 @@ enum SidebarThreadGrouping {
         now _: Date = Date(),
         calendar _: Calendar = .current
     ) -> [SidebarThreadGroup] {
-        var liveThreadsByProject: [String: [CodexThread]] = [:]
         var archivedThreads: [CodexThread] = []
 
         for thread in threads {
             if thread.syncState == .archivedLocal {
                 archivedThreads.append(thread)
-                continue
             }
-
-            liveThreadsByProject[thread.projectKey, default: []].append(thread)
         }
 
-        // Use the thread-bound cwd as the single source of truth so chats stay grouped by repo/folder.
-        var groups = liveThreadsByProject.map { projectKey, projectThreads in
-            makeProjectGroup(projectKey: projectKey, threads: projectThreads)
-        }
-        .sorted { lhs, rhs in
-            if lhs.sortDate != rhs.sortDate {
-                return lhs.sortDate > rhs.sortDate
-            }
-
-            if lhs.label != rhs.label {
-                return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
-            }
-
-            return lhs.id < rhs.id
-        }
+        var groups = makeProjectGroups(from: threads)
 
         let sortedArchived = sortThreadsByRecentActivity(archivedThreads)
         if let firstArchived = sortedArchived.first {
@@ -74,6 +63,35 @@ enum SidebarThreadGrouping {
         return groups
     }
 
+    // Reuses the sidebar project grouping rules for places like the New Chat chooser.
+    static func makeProjectChoices(from threads: [CodexThread]) -> [SidebarProjectChoice] {
+        makeProjectGroups(from: threads).compactMap { group in
+            guard let projectPath = group.projectPath else {
+                return nil
+            }
+
+            return SidebarProjectChoice(
+                id: group.id,
+                label: group.label,
+                projectPath: projectPath,
+                sortDate: group.sortDate
+            )
+        }
+    }
+
+    // Resolves all live thread ids that belong to the tapped project, even if the visible group is filtered.
+    static func liveThreadIDsForProjectGroup(_ group: SidebarThreadGroup, in threads: [CodexThread]) -> [String] {
+        guard group.kind == .project else {
+            return []
+        }
+
+        return sortThreadsByRecentActivity(
+            threads.filter { thread in
+                thread.syncState != .archivedLocal && projectGroupID(for: thread) == group.id
+            }
+        ).map(\.id)
+    }
+
     private static func makeProjectGroup(projectKey: String, threads: [CodexThread]) -> SidebarThreadGroup {
         let sortedThreads = sortThreadsByRecentActivity(threads)
         let representativeThread = sortedThreads.first
@@ -88,6 +106,30 @@ enum SidebarThreadGrouping {
         )
     }
 
+    // Keeps project-derived UI consistent by centralizing the live-thread → project bucket mapping.
+    private static func makeProjectGroups(from threads: [CodexThread]) -> [SidebarThreadGroup] {
+        var liveThreadsByProject: [String: [CodexThread]] = [:]
+
+        for thread in threads where thread.syncState != .archivedLocal {
+            liveThreadsByProject[thread.projectKey, default: []].append(thread)
+        }
+
+        return liveThreadsByProject.map { projectKey, projectThreads in
+            makeProjectGroup(projectKey: projectKey, threads: projectThreads)
+        }
+        .sorted { lhs, rhs in
+            if lhs.sortDate != rhs.sortDate {
+                return lhs.sortDate > rhs.sortDate
+            }
+
+            if lhs.label != rhs.label {
+                return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+            }
+
+            return lhs.id < rhs.id
+        }
+    }
+
     private static func sortThreadsByRecentActivity(_ threads: [CodexThread]) -> [CodexThread] {
         threads.sorted { lhs, rhs in
             let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
@@ -97,5 +139,9 @@ enum SidebarThreadGrouping {
             }
             return lhs.id < rhs.id
         }
+    }
+
+    private static func projectGroupID(for thread: CodexThread) -> String {
+        "project:\(thread.projectKey)"
     }
 }

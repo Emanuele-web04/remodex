@@ -1,13 +1,128 @@
 // FILE: rollout-watch.js
-// Purpose: Watches the rollout file for the active Remodex thread so handoff can be verified from the real persisted Codex data.
+// Purpose: Shared rollout-file lookup/watch helpers for CLI inspection and desktop refresh.
 // Layer: CLI helper
-// Exports: watchThreadRollout
+// Exports: watchThreadRollout, createThreadRolloutActivityWatcher
 // Depends on: fs, os, path, ./session-state
 
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { readLastActiveThread } = require("./session-state");
+
+const DEFAULT_WATCH_INTERVAL_MS = 1_000;
+const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 10_000;
+const DEFAULT_TRANSIENT_ERROR_RETRY_LIMIT = 2;
+
+// Polls one rollout file until it materializes and then reports size growth.
+function createThreadRolloutActivityWatcher({
+  threadId,
+  intervalMs = DEFAULT_WATCH_INTERVAL_MS,
+  lookupTimeoutMs = DEFAULT_LOOKUP_TIMEOUT_MS,
+  idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
+  now = () => Date.now(),
+  fsModule = fs,
+  transientErrorRetryLimit = DEFAULT_TRANSIENT_ERROR_RETRY_LIMIT,
+  onEvent = () => {},
+  onIdle = () => {},
+  onTimeout = () => {},
+  onError = () => {},
+} = {}) {
+  const resolvedThreadId = resolveThreadId(threadId);
+  const sessionsRoot = resolveSessionsRoot();
+  const startedAt = now();
+
+  let isStopped = false;
+  let rolloutPath = null;
+  let lastSize = null;
+  let lastGrowthAt = startedAt;
+  let transientErrorCount = 0;
+
+  const tick = () => {
+    if (isStopped) {
+      return;
+    }
+
+    try {
+      const currentTime = now();
+
+      if (!rolloutPath) {
+        if (currentTime - startedAt >= lookupTimeoutMs) {
+          onTimeout({ threadId: resolvedThreadId });
+          stop();
+          return;
+        }
+
+        rolloutPath = findRolloutFileForThread(sessionsRoot, resolvedThreadId, { fsModule });
+        if (!rolloutPath) {
+          transientErrorCount = 0;
+          return;
+        }
+
+        lastSize = readFileSize(rolloutPath, fsModule);
+        lastGrowthAt = currentTime;
+        transientErrorCount = 0;
+        onEvent({
+          reason: "materialized",
+          threadId: resolvedThreadId,
+          rolloutPath,
+          size: lastSize,
+        });
+        return;
+      }
+
+      const nextSize = readFileSize(rolloutPath, fsModule);
+      transientErrorCount = 0;
+      if (nextSize > lastSize) {
+        lastSize = nextSize;
+        lastGrowthAt = currentTime;
+        onEvent({
+          reason: "growth",
+          threadId: resolvedThreadId,
+          rolloutPath,
+          size: nextSize,
+        });
+        return;
+      }
+
+      if (currentTime - lastGrowthAt >= idleTimeoutMs) {
+        onIdle({
+          threadId: resolvedThreadId,
+          rolloutPath,
+          size: lastSize,
+        });
+        stop();
+      }
+    } catch (error) {
+      if (isRetryableFilesystemError(error) && transientErrorCount < transientErrorRetryLimit) {
+        transientErrorCount += 1;
+        return;
+      }
+
+      onError(error);
+      stop();
+    }
+  };
+
+  const intervalId = setInterval(tick, intervalMs);
+  tick();
+
+  function stop() {
+    if (isStopped) {
+      return;
+    }
+
+    isStopped = true;
+    clearInterval(intervalId);
+  }
+
+  return {
+    stop,
+    get threadId() {
+      return resolvedThreadId;
+    },
+  };
+}
 
 function watchThreadRollout(threadId = "") {
   const resolvedThreadId = resolveThreadId(threadId);
@@ -85,12 +200,16 @@ function resolveSessionsRoot() {
   return path.join(codexHome, "sessions");
 }
 
-function findRolloutFileForThread(root, threadId) {
+function findRolloutFileForThread(root, threadId, { fsModule = fs } = {}) {
+  if (!fsModule.existsSync(root)) {
+    return null;
+  }
+
   const stack = [root];
 
   while (stack.length > 0) {
     const current = stack.pop();
-    const entries = fs.readdirSync(current, { withFileTypes: true });
+    const entries = fsModule.readdirSync(current, { withFileTypes: true });
 
     for (const entry of entries) {
       const fullPath = path.join(current, entry.name);
@@ -173,4 +292,17 @@ function previewText(value) {
   return `${normalized.slice(0, 117)}...`;
 }
 
-module.exports = { watchThreadRollout };
+function readFileSize(filePath, fsModule = fs) {
+  return fsModule.statSync(filePath).size;
+}
+
+function isRetryableFilesystemError(error) {
+  return ["ENOENT", "EACCES", "EPERM", "EBUSY"].includes(error?.code);
+}
+
+module.exports = {
+  watchThreadRollout,
+  createThreadRolloutActivityWatcher,
+  resolveSessionsRoot,
+  findRolloutFileForThread,
+};

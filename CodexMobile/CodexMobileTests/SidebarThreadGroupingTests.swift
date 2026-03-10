@@ -61,6 +61,176 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups[1].threads.map(\.id), ["archived-thread"])
     }
 
+    func testMakeProjectChoicesReusesLiveProjectBucketsAndSkipsNoProject() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            makeThread(id: "app-thread", updatedAt: now, cwd: "/Users/me/work/app"),
+            makeThread(id: "site-thread", updatedAt: now.addingTimeInterval(-60), cwd: "/Users/me/work/site"),
+            makeThread(id: "no-project-thread", updatedAt: now.addingTimeInterval(-120), cwd: nil),
+            makeThread(
+                id: "archived-thread",
+                updatedAt: now.addingTimeInterval(60),
+                cwd: "/Users/me/work/archived",
+                syncState: .archivedLocal
+            ),
+        ]
+
+        let choices = SidebarThreadGrouping.makeProjectChoices(from: threads)
+
+        XCTAssertEqual(choices.map(\.label), ["app", "site"])
+        XCTAssertEqual(choices.map(\.projectPath), ["/Users/me/work/app", "/Users/me/work/site"])
+    }
+
+    func testLiveThreadIDsForProjectGroupUsesAllThreadsNotJustFilteredMatches() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let allThreads = [
+            makeThread(id: "app-thread-1", updatedAt: now, cwd: "/Users/me/work/app"),
+            makeThread(id: "app-thread-2", updatedAt: now.addingTimeInterval(-60), cwd: "/Users/me/work/app"),
+            makeThread(id: "site-thread", updatedAt: now.addingTimeInterval(-120), cwd: "/Users/me/work/site"),
+        ]
+        let filteredGroup = SidebarThreadGroup(
+            id: "project:/Users/me/work/app",
+            label: "app",
+            kind: .project,
+            sortDate: now,
+            projectPath: "/Users/me/work/app",
+            threads: [allThreads[0]]
+        )
+
+        let threadIDs = SidebarThreadGrouping.liveThreadIDsForProjectGroup(filteredGroup, in: allThreads)
+
+        XCTAssertEqual(threadIDs, ["app-thread-1", "app-thread-2"])
+    }
+
+    func testLiveThreadIDsForProjectGroupKeepsNoProjectChatsTogether() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let allThreads = [
+            makeThread(id: "no-project-1", updatedAt: now, cwd: nil),
+            makeThread(id: "no-project-2", updatedAt: now.addingTimeInterval(-30), cwd: " "),
+            makeThread(id: "project-thread", updatedAt: now.addingTimeInterval(-60), cwd: "/Users/me/work/app"),
+        ]
+        let noProjectGroup = SidebarThreadGroup(
+            id: "project:__no_project__",
+            label: "No Project",
+            kind: .project,
+            sortDate: now,
+            projectPath: nil,
+            threads: [allThreads[0]]
+        )
+
+        let threadIDs = SidebarThreadGrouping.liveThreadIDsForProjectGroup(noProjectGroup, in: allThreads)
+
+        XCTAssertEqual(threadIDs, ["no-project-1", "no-project-2"])
+    }
+
+    func testProjectExpansionStateInitiallyExpandsAllVisibleGroups() {
+        let groups = [
+            makeProjectGroup(id: "project:/Users/me/work/app"),
+            makeProjectGroup(id: "project:/Users/me/work/site"),
+        ]
+
+        let snapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: [],
+            knownGroupIDs: [],
+            visibleGroups: groups,
+            hasInitialized: false
+        )
+
+        XCTAssertEqual(snapshot.expandedGroupIDs, Set(groups.map(\.id)))
+        XCTAssertEqual(snapshot.knownGroupIDs, Set(groups.map(\.id)))
+    }
+
+    func testProjectExpansionStateInitiallyKeepsPersistedCollapsedGroupsClosed() {
+        let groups = [
+            makeProjectGroup(id: "project:/Users/me/work/app"),
+            makeProjectGroup(id: "project:/Users/me/work/site"),
+        ]
+
+        let snapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: [],
+            knownGroupIDs: [],
+            visibleGroups: groups,
+            hasInitialized: false,
+            persistedCollapsedGroupIDs: Set(["project:/Users/me/work/site"])
+        )
+
+        XCTAssertEqual(snapshot.expandedGroupIDs, Set(["project:/Users/me/work/app"]))
+        XCTAssertEqual(snapshot.knownGroupIDs, Set(groups.map(\.id)))
+    }
+
+    func testProjectExpansionStatePreservesCollapsedGroupsAcrossRefreshes() {
+        let groups = [
+            makeProjectGroup(id: "project:/Users/me/work/app"),
+            makeProjectGroup(id: "project:/Users/me/work/site"),
+        ]
+
+        let snapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: ["project:/Users/me/work/app"],
+            knownGroupIDs: Set(groups.map(\.id)),
+            visibleGroups: groups,
+            hasInitialized: true
+        )
+
+        XCTAssertEqual(snapshot.expandedGroupIDs, ["project:/Users/me/work/app"])
+    }
+
+    func testProjectExpansionStateAutoExpandsNewProjectGroupsOnly() {
+        let existingGroups = [
+            makeProjectGroup(id: "project:/Users/me/work/app"),
+            makeProjectGroup(id: "project:/Users/me/work/site"),
+        ]
+        let updatedGroups = existingGroups + [makeProjectGroup(id: "project:/Users/me/work/docs")]
+
+        let snapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: ["project:/Users/me/work/app"],
+            knownGroupIDs: Set(existingGroups.map(\.id)),
+            visibleGroups: updatedGroups,
+            hasInitialized: true
+        )
+
+        XCTAssertEqual(
+            snapshot.expandedGroupIDs,
+            ["project:/Users/me/work/app", "project:/Users/me/work/docs"]
+        )
+    }
+
+    func testGroupIDContainingSelectedThreadReturnsOwningProjectGroup() {
+        let selectedThread = makeThread(
+            id: "thread-a",
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            cwd: "/Users/me/work/app"
+        )
+        let groups = [
+            SidebarThreadGroup(
+                id: "project:/Users/me/work/app",
+                label: "app",
+                kind: .project,
+                sortDate: selectedThread.updatedAt ?? .distantPast,
+                projectPath: "/Users/me/work/app",
+                threads: [selectedThread]
+            ),
+            makeProjectGroup(id: "project:/Users/me/work/site"),
+        ]
+
+        let groupID = SidebarProjectExpansionState.groupIDContainingSelectedThread(selectedThread, in: groups)
+
+        XCTAssertEqual(groupID, "project:/Users/me/work/app")
+    }
+
+    func testPersistedGroupIDsRoundTrip() {
+        let encoded = SidebarProjectExpansionState.encodePersistedGroupIDs([
+            "project:/Users/me/work/site",
+            "project:/Users/me/work/app",
+        ])
+
+        let decoded = SidebarProjectExpansionState.decodePersistedGroupIDs(encoded)
+
+        XCTAssertEqual(decoded, Set([
+            "project:/Users/me/work/app",
+            "project:/Users/me/work/site",
+        ]))
+    }
+
     private func makeThread(
         id: String,
         updatedAt: Date,
@@ -73,6 +243,17 @@ final class SidebarThreadGroupingTests: XCTestCase {
             updatedAt: updatedAt,
             cwd: cwd,
             syncState: syncState
+        )
+    }
+
+    private func makeProjectGroup(id: String) -> SidebarThreadGroup {
+        SidebarThreadGroup(
+            id: id,
+            label: id,
+            kind: .project,
+            sortDate: .distantPast,
+            projectPath: id.replacingOccurrences(of: "project:", with: ""),
+            threads: []
         )
     }
 }

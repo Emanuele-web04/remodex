@@ -45,7 +45,7 @@ struct TurnToolbarContent: ToolbarContent {
                             .font(AppFont.mono(.caption))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                            .truncationMode(.tail)
+                            .truncationMode(.middle)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .buttonStyle(.plain)

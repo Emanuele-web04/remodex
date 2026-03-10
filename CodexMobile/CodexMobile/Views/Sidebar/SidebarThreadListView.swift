@@ -18,11 +18,14 @@ struct SidebarThreadListView: View {
     let runBadgeStateByThreadID: [String: CodexThreadRunBadgeState]
     let onSelectThread: (CodexThread) -> Void
     let onCreateThreadInProjectGroup: (SidebarThreadGroup) -> Void
-    var onDeleteProjectGroup: ((SidebarThreadGroup) -> Void)? = nil
+    var onArchiveProjectGroup: ((SidebarThreadGroup) -> Void)? = nil
     var onRenameThread: ((CodexThread, String) -> Void)? = nil
     var onArchiveToggleThread: ((CodexThread) -> Void)? = nil
     var onDeleteThread: ((CodexThread) -> Void)? = nil
+    @AppStorage("sidebar.collapsedProjectGroupIDs") private var collapsedProjectGroupIDsStorage = ""
     @State private var expandedProjectGroupIDs: Set<String> = []
+    @State private var knownProjectGroupIDs: Set<String> = []
+    @State private var hasInitializedProjectGroupExpansion = false
     @State private var isArchivedExpanded = false
 
     var body: some View {
@@ -58,7 +61,7 @@ struct SidebarThreadListView: View {
             syncExpandedProjectGroupState()
         }
         .onChange(of: selectedThread?.id) { _, _ in
-            syncExpandedProjectGroupState()
+            revealSelectedThreadProjectGroup()
         }
     }
 
@@ -109,12 +112,12 @@ struct SidebarThreadListView: View {
             }
             .buttonStyle(.plain)
             .contextMenu {
-                if let onDeleteProjectGroup {
-                    Button(role: .destructive) {
+                if let onArchiveProjectGroup {
+                    Button {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onDeleteProjectGroup(group)
+                        onArchiveProjectGroup(group)
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("Archive Project", systemImage: "archivebox")
                     }
                 }
             }
@@ -195,16 +198,103 @@ struct SidebarThreadListView: View {
     }
 
     private func toggleProjectGroupExpansion(_ groupID: String) {
+        var persistedCollapsedGroupIDs = SidebarProjectExpansionState.decodePersistedGroupIDs(
+            collapsedProjectGroupIDsStorage
+        )
         if expandedProjectGroupIDs.contains(groupID) {
             expandedProjectGroupIDs.remove(groupID)
+            persistedCollapsedGroupIDs.insert(groupID)
         } else {
             expandedProjectGroupIDs.insert(groupID)
+            persistedCollapsedGroupIDs.remove(groupID)
         }
+        collapsedProjectGroupIDsStorage = SidebarProjectExpansionState.encodePersistedGroupIDs(
+            persistedCollapsedGroupIDs
+        )
     }
 
     // Keep project sections expanded after regrouping so live updates do not collapse the sidebar.
     private func syncExpandedProjectGroupState() {
-        let allGroupIDs = Set(groups.map(\.id))
-        expandedProjectGroupIDs = expandedProjectGroupIDs.union(allGroupIDs)
+        let nextState = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: expandedProjectGroupIDs,
+            knownGroupIDs: knownProjectGroupIDs,
+            visibleGroups: groups,
+            hasInitialized: hasInitializedProjectGroupExpansion,
+            persistedCollapsedGroupIDs: SidebarProjectExpansionState.decodePersistedGroupIDs(
+                collapsedProjectGroupIDsStorage
+            )
+        )
+        expandedProjectGroupIDs = nextState.expandedGroupIDs
+        knownProjectGroupIDs = nextState.knownGroupIDs
+        hasInitializedProjectGroupExpansion = true
+    }
+
+    // Keeps an externally selected thread visible without re-opening unrelated project groups.
+    private func revealSelectedThreadProjectGroup() {
+        if let selectedGroupID = SidebarProjectExpansionState.groupIDContainingSelectedThread(
+            selectedThread,
+            in: groups
+        ) {
+            expandedProjectGroupIDs.insert(selectedGroupID)
+        }
+    }
+}
+
+struct SidebarProjectExpansionSnapshot: Equatable {
+    let expandedGroupIDs: Set<String>
+    let knownGroupIDs: Set<String>
+}
+
+enum SidebarProjectExpansionState {
+    // Preserves user collapse choices while still auto-opening project groups that appear for the first time.
+    static func synchronizedState(
+        currentExpandedGroupIDs: Set<String>,
+        knownGroupIDs: Set<String>,
+        visibleGroups: [SidebarThreadGroup],
+        hasInitialized: Bool,
+        persistedCollapsedGroupIDs: Set<String> = []
+    ) -> SidebarProjectExpansionSnapshot {
+        let visibleGroupIDs = Set(
+            visibleGroups
+                .filter { $0.kind == .project }
+                .map(\.id)
+        )
+        guard hasInitialized else {
+            return SidebarProjectExpansionSnapshot(
+                expandedGroupIDs: visibleGroupIDs.subtracting(persistedCollapsedGroupIDs),
+                knownGroupIDs: visibleGroupIDs
+            )
+        }
+
+        let newGroupIDs = visibleGroupIDs.subtracting(knownGroupIDs)
+        return SidebarProjectExpansionSnapshot(
+            expandedGroupIDs: currentExpandedGroupIDs.intersection(visibleGroupIDs).union(newGroupIDs),
+            knownGroupIDs: visibleGroupIDs
+        )
+    }
+
+    // Finds the project group that owns the current selection so the active thread is not hidden.
+    static func groupIDContainingSelectedThread(_ selectedThread: CodexThread?, in groups: [SidebarThreadGroup]) -> String? {
+        guard let selectedThread else {
+            return nil
+        }
+
+        return groups.first(where: { $0.kind == .project && $0.contains(selectedThread) })?.id
+    }
+
+    static func decodePersistedGroupIDs(_ rawValue: String) -> Set<String> {
+        guard let data = rawValue.data(using: .utf8),
+              let decoded = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return Set(decoded)
+    }
+
+    static func encodePersistedGroupIDs(_ groupIDs: Set<String>) -> String {
+        guard let data = try? JSONEncoder().encode(groupIDs.sorted()),
+              let encoded = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return encoded
     }
 }

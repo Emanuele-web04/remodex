@@ -522,7 +522,7 @@ struct TurnView: View {
         let folderName = (fullPath as NSString).lastPathComponent
         return TurnThreadNavigationContext(
             folderName: folderName.isEmpty ? fullPath : folderName,
-            subtitle: folderName.isEmpty ? fullPath : folderName,
+            subtitle: fullPath,
             fullPath: fullPath
         )
     }

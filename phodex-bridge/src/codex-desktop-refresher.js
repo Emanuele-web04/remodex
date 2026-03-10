@@ -2,14 +2,20 @@
 // Purpose: Debounced Mac desktop refresh controller for Codex.app after phone-authored conversation changes.
 // Layer: CLI helper
 // Exports: CodexDesktopRefresher, readBridgeConfig
-// Depends on: child_process, path
+// Depends on: child_process, path, ./rollout-watch
 
 const { execFile } = require("child_process");
 const path = require("path");
+const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 
 const DEFAULT_BUNDLE_ID = "com.openai.codex";
 const DEFAULT_APP_PATH = "/Applications/Codex.app";
 const DEFAULT_DEBOUNCE_MS = 1200;
+const DEFAULT_FALLBACK_NEW_THREAD_MS = 2_000;
+const DEFAULT_MID_RUN_REFRESH_THROTTLE_MS = 3_000;
+const DEFAULT_ROLLOUT_LOOKUP_TIMEOUT_MS = 5_000;
+const DEFAULT_ROLLOUT_IDLE_TIMEOUT_MS = 10_000;
+const DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD = 3;
 const REFRESH_SCRIPT_PATH = path.join(__dirname, "scripts", "codex-refresh.applescript");
 const NEW_THREAD_DEEP_LINK = "codex://threads/new";
 
@@ -21,6 +27,15 @@ class CodexDesktopRefresher {
     bundleId = DEFAULT_BUNDLE_ID,
     appPath = DEFAULT_APP_PATH,
     logPrefix = "[remodex]",
+    fallbackNewThreadMs = DEFAULT_FALLBACK_NEW_THREAD_MS,
+    midRunRefreshThrottleMs = DEFAULT_MID_RUN_REFRESH_THROTTLE_MS,
+    rolloutLookupTimeoutMs = DEFAULT_ROLLOUT_LOOKUP_TIMEOUT_MS,
+    rolloutIdleTimeoutMs = DEFAULT_ROLLOUT_IDLE_TIMEOUT_MS,
+    now = () => Date.now(),
+    refreshExecutor = null,
+    watchThreadRolloutFactory = createThreadRolloutActivityWatcher,
+    refreshBackend = null,
+    customRefreshFailureThreshold = DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD,
   } = {}) {
     this.enabled = enabled;
     this.debounceMs = debounceMs;
@@ -28,16 +43,41 @@ class CodexDesktopRefresher {
     this.bundleId = bundleId;
     this.appPath = appPath;
     this.logPrefix = logPrefix;
+    this.fallbackNewThreadMs = fallbackNewThreadMs;
+    this.midRunRefreshThrottleMs = midRunRefreshThrottleMs;
+    this.rolloutLookupTimeoutMs = rolloutLookupTimeoutMs;
+    this.rolloutIdleTimeoutMs = rolloutIdleTimeoutMs;
+    this.now = now;
+    this.refreshExecutor = refreshExecutor;
+    this.watchThreadRolloutFactory = watchThreadRolloutFactory;
+    this.refreshBackend = refreshBackend
+      || (this.refreshCommand ? "command" : (this.refreshExecutor ? "command" : "applescript"));
+    this.customRefreshFailureThreshold = customRefreshFailureThreshold;
 
-    this.pendingUserRefresh = false;
+    this.mode = "idle";
+    this.pendingNewThread = false;
+    this.pendingRefreshKinds = new Set();
     this.pendingCompletionRefresh = false;
     this.pendingCompletionTurnId = null;
+    this.pendingCompletionTargetUrl = "";
+    this.pendingCompletionTargetThreadId = "";
     this.pendingTargetUrl = "";
-    this.pendingTargetThreadId = null;
+    this.pendingTargetThreadId = "";
     this.lastRefreshAt = 0;
+    this.lastRefreshSignature = "";
     this.lastTurnIdRefreshed = null;
+    this.lastMidRunRefreshAt = 0;
     this.refreshTimer = null;
     this.refreshRunning = false;
+    this.fallbackTimer = null;
+    this.activeWatcher = null;
+    this.activeWatchedThreadId = null;
+    this.watchStartAt = 0;
+    this.lastRolloutSize = null;
+    this.stopWatcherAfterRefreshThreadId = null;
+    this.runtimeRefreshAvailable = enabled;
+    this.consecutiveRefreshFailures = 0;
+    this.unavailableLogged = false;
   }
 
   handleInbound(rawMessage) {
@@ -47,13 +87,32 @@ class CodexDesktopRefresher {
     }
 
     const method = parsed.method;
-    if (method !== "thread/start" && method !== "turn/start") {
+    if (method === "thread/start") {
+      const target = resolveInboundTarget(method, parsed);
+      if (target?.threadId) {
+        this.queueRefresh("phone", target, `phone ${method}`);
+        this.ensureWatcher(target.threadId);
+        return;
+      }
+
+      this.pendingNewThread = true;
+      this.mode = "pending_new_thread";
+      this.clearPendingTarget();
+      this.scheduleNewThreadFallback();
       return;
     }
 
-    this.noteRefreshTarget(resolveInboundTarget(method, parsed));
-    this.pendingUserRefresh = true;
-    this.scheduleRefresh(`phone ${method}`);
+    if (method === "turn/start") {
+      const target = resolveInboundTarget(method, parsed);
+      if (!target) {
+        return;
+      }
+
+      this.queueRefresh("phone", target, `phone ${method}`);
+      if (target.threadId) {
+        this.ensureWatcher(target.threadId);
+      }
+    }
   }
 
   handleOutbound(rawMessage) {
@@ -64,24 +123,53 @@ class CodexDesktopRefresher {
 
     const method = parsed.method;
     if (method === "turn/completed") {
+      this.clearFallbackTimer();
       const turnId = extractTurnId(parsed);
       if (turnId && turnId === this.lastTurnIdRefreshed) {
         this.log(`refresh skipped (debounced): completion already refreshed for ${turnId}`);
         return;
       }
 
-      this.noteRefreshTarget(resolveOutboundTarget(method, parsed));
-      this.pendingCompletionRefresh = true;
-      this.pendingCompletionTurnId = turnId;
-      this.scheduleRefresh(`codex ${method}`);
+      const target = resolveOutboundTarget(method, parsed);
+      this.queueCompletionRefresh(target, turnId, `codex ${method}`);
       return;
     }
 
     if (method === "thread/started") {
-      this.noteRefreshTarget(resolveOutboundTarget(method, parsed));
-      this.pendingUserRefresh = true;
-      this.scheduleRefresh(`codex ${method}`);
+      const target = resolveOutboundTarget(method, parsed);
+      this.pendingNewThread = false;
+      this.clearFallbackTimer();
+      this.queueRefresh("phone", target, `codex ${method}`);
+      if (target?.threadId) {
+        this.mode = "watching_thread";
+        this.ensureWatcher(target.threadId);
+      }
     }
+  }
+
+  // Stops volatile watcher/fallback state when transport drops or bridge exits.
+  handleTransportReset() {
+    this.clearRefreshTimer();
+    this.clearPendingState();
+    this.lastRefreshAt = 0;
+    this.lastRefreshSignature = "";
+    this.mode = "idle";
+    this.clearFallbackTimer();
+    this.stopWatcher();
+  }
+
+  queueRefresh(kind, target, reason) {
+    this.noteRefreshTarget(target);
+    this.pendingRefreshKinds.add(kind);
+    this.scheduleRefresh(reason);
+  }
+
+  queueCompletionRefresh(target, turnId, reason) {
+    this.noteCompletionTarget(target);
+    this.pendingCompletionRefresh = true;
+    this.pendingCompletionTurnId = turnId;
+    this.stopWatcherAfterRefreshThreadId = target?.threadId || null;
+    this.scheduleRefresh(reason);
   }
 
   noteRefreshTarget(target) {
@@ -90,13 +178,30 @@ class CodexDesktopRefresher {
     }
 
     this.pendingTargetUrl = target.url;
-    if (target.threadId) {
-      this.pendingTargetThreadId = target.threadId;
+    this.pendingTargetThreadId = target.threadId || "";
+  }
+
+  clearPendingTarget() {
+    this.pendingTargetUrl = "";
+    this.pendingTargetThreadId = "";
+  }
+
+  noteCompletionTarget(target) {
+    if (!target?.url) {
+      return;
     }
+
+    this.pendingCompletionTargetUrl = target.url;
+    this.pendingCompletionTargetThreadId = target.threadId || "";
+  }
+
+  clearPendingCompletionTarget() {
+    this.pendingCompletionTargetUrl = "";
+    this.pendingCompletionTargetThreadId = "";
   }
 
   scheduleRefresh(reason) {
-    if (!this.enabled) {
+    if (!this.canRefresh()) {
       return;
     }
 
@@ -105,7 +210,7 @@ class CodexDesktopRefresher {
       return;
     }
 
-    const elapsedSinceLastRefresh = Date.now() - this.lastRefreshAt;
+    const elapsedSinceLastRefresh = this.now() - this.lastRefreshAt;
     const waitMs = Math.max(0, this.debounceMs - elapsedSinceLastRefresh);
     this.log(`refresh scheduled: ${reason}`);
     this.refreshTimer = setTimeout(() => {
@@ -115,12 +220,12 @@ class CodexDesktopRefresher {
   }
 
   async runPendingRefresh() {
-    if (!this.enabled) {
+    if (!this.canRefresh()) {
       this.clearPendingState();
       return;
     }
 
-    if (!this.pendingUserRefresh && !this.pendingCompletionRefresh) {
+    if (!this.hasPendingRefreshWork()) {
       return;
     }
 
@@ -129,44 +234,78 @@ class CodexDesktopRefresher {
       return;
     }
 
+    const isCompletionRun = this.pendingCompletionRefresh;
+    const pendingRefreshKinds = isCompletionRun
+      ? new Set(["completion"])
+      : new Set(this.pendingRefreshKinds);
     const completionTurnId = this.pendingCompletionTurnId;
-    const targetUrl = this.pendingTargetUrl;
-    const targetThreadId = this.pendingTargetThreadId;
-    const labelParts = [];
-    if (this.pendingUserRefresh) {
-      labelParts.push("user");
-    }
-    if (this.pendingCompletionRefresh) {
-      labelParts.push("completion");
-    }
+    const targetUrl = isCompletionRun ? this.pendingCompletionTargetUrl : this.pendingTargetUrl;
+    const targetThreadId = isCompletionRun
+      ? this.pendingCompletionTargetThreadId
+      : this.pendingTargetThreadId;
+    const stopWatcherAfterRefreshThreadId = isCompletionRun
+      ? this.stopWatcherAfterRefreshThreadId
+      : null;
+    const shouldForceCompletionRefresh = isCompletionRun;
 
-    this.pendingUserRefresh = false;
-    this.pendingCompletionRefresh = false;
-    this.pendingCompletionTurnId = null;
-    this.pendingTargetUrl = "";
-    this.pendingTargetThreadId = null;
+    if (isCompletionRun) {
+      this.pendingCompletionRefresh = false;
+      this.pendingCompletionTurnId = null;
+      this.clearPendingCompletionTarget();
+      this.stopWatcherAfterRefreshThreadId = null;
+    } else {
+      this.pendingRefreshKinds.clear();
+      this.clearPendingTarget();
+    }
     this.refreshRunning = true;
     this.log(
-      `refresh running: ${labelParts.join("+")}${targetThreadId ? ` thread=${targetThreadId}` : ""}`
+      `refresh running: ${Array.from(pendingRefreshKinds).join("+")}${targetThreadId ? ` thread=${targetThreadId}` : ""}`
     );
 
+    let didRefresh = false;
     try {
-      await this.executeRefresh(targetUrl);
-      this.lastRefreshAt = Date.now();
-      if (completionTurnId) {
+      const refreshSignature = `${targetUrl || "app"}|${targetThreadId || "no-thread"}`;
+      if (
+        !shouldForceCompletionRefresh
+        && refreshSignature === this.lastRefreshSignature
+        && this.now() - this.lastRefreshAt < this.debounceMs
+      ) {
+        this.log(`refresh skipped (duplicate target): ${refreshSignature}`);
+      } else {
+        await this.executeRefresh(targetUrl);
+        this.lastRefreshAt = this.now();
+        this.lastRefreshSignature = refreshSignature;
+        this.consecutiveRefreshFailures = 0;
+        didRefresh = true;
+      }
+      if (completionTurnId && didRefresh) {
         this.lastTurnIdRefreshed = completionTurnId;
       }
     } catch (error) {
-      this.logRefreshFailure(error);
+      this.handleRefreshFailure(error);
     } finally {
       this.refreshRunning = false;
-      if (this.pendingUserRefresh || this.pendingCompletionRefresh) {
+      if (
+        didRefresh
+        && stopWatcherAfterRefreshThreadId
+        && stopWatcherAfterRefreshThreadId === this.activeWatchedThreadId
+      ) {
+        this.stopWatcher();
+        this.mode = this.pendingNewThread ? "pending_new_thread" : "idle";
+      }
+      // A completion refresh can queue while another refresh is still running,
+      // so retry whenever either queue still has work.
+      if (this.hasPendingRefreshWork()) {
         this.scheduleRefresh("pending follow-up refresh");
       }
     }
   }
 
   executeRefresh(targetUrl) {
+    if (this.refreshExecutor) {
+      return this.refreshExecutor(targetUrl || "");
+    }
+
     if (this.refreshCommand) {
       return execFilePromise("/bin/sh", ["-lc", this.refreshCommand]);
     }
@@ -180,41 +319,231 @@ class CodexDesktopRefresher {
   }
 
   clearPendingState() {
-    this.pendingUserRefresh = false;
+    this.pendingNewThread = false;
+    this.pendingRefreshKinds.clear();
     this.pendingCompletionRefresh = false;
     this.pendingCompletionTurnId = null;
-    this.pendingTargetUrl = "";
-    this.pendingTargetThreadId = null;
+    this.clearPendingCompletionTarget();
+    this.clearPendingTarget();
+    this.stopWatcherAfterRefreshThreadId = null;
+  }
+
+  clearRefreshTimer() {
+    if (!this.refreshTimer) {
+      return;
+    }
+
+    clearTimeout(this.refreshTimer);
+    this.refreshTimer = null;
+  }
+
+  // Schedules a single low-cost fallback when a brand new thread id is still unknown.
+  scheduleNewThreadFallback() {
+    if (!this.canRefresh()) {
+      return;
+    }
+
+    if (this.fallbackTimer) {
+      return;
+    }
+
+    this.fallbackTimer = setTimeout(() => {
+      this.fallbackTimer = null;
+      if (!this.pendingNewThread || this.pendingTargetThreadId) {
+        return;
+      }
+
+      this.noteRefreshTarget({ threadId: null, url: NEW_THREAD_DEEP_LINK });
+      this.pendingRefreshKinds.add("phone");
+      this.scheduleRefresh("fallback thread/start");
+    }, this.fallbackNewThreadMs);
+  }
+
+  clearFallbackTimer() {
+    if (!this.fallbackTimer) {
+      return;
+    }
+
+    clearTimeout(this.fallbackTimer);
+    this.fallbackTimer = null;
+  }
+
+  // Keeps one lightweight rollout watcher alive for the current Remodex-controlled thread.
+  ensureWatcher(threadId) {
+    if (!this.canRefresh() || !threadId) {
+      return;
+    }
+
+    if (this.activeWatchedThreadId === threadId && this.activeWatcher) {
+      return;
+    }
+
+    this.stopWatcher();
+    this.activeWatchedThreadId = threadId;
+    this.watchStartAt = this.now();
+    this.lastRolloutSize = null;
+    this.mode = "watching_thread";
+    this.activeWatcher = this.watchThreadRolloutFactory({
+      threadId,
+      lookupTimeoutMs: this.rolloutLookupTimeoutMs,
+      idleTimeoutMs: this.rolloutIdleTimeoutMs,
+      onEvent: (event) => this.handleWatcherEvent(event),
+      onIdle: () => {
+        this.log(`rollout watcher idle thread=${threadId}`);
+        this.stopWatcher();
+        this.mode = this.pendingNewThread ? "pending_new_thread" : "idle";
+      },
+      onTimeout: () => {
+        this.log(`rollout watcher timeout thread=${threadId}`);
+        this.stopWatcher();
+        this.mode = this.pendingNewThread ? "pending_new_thread" : "idle";
+      },
+      onError: (error) => {
+        this.log(`rollout watcher failed thread=${threadId}: ${error.message}`);
+        this.stopWatcher();
+        this.mode = this.pendingNewThread ? "pending_new_thread" : "idle";
+      },
+    });
+  }
+
+  stopWatcher() {
+    if (!this.activeWatcher) {
+      this.activeWatchedThreadId = null;
+      this.watchStartAt = 0;
+      this.lastRolloutSize = null;
+      return;
+    }
+
+    this.activeWatcher.stop();
+    this.activeWatcher = null;
+    this.activeWatchedThreadId = null;
+    this.watchStartAt = 0;
+    this.lastRolloutSize = null;
+  }
+
+  // Converts rollout growth into occasional refreshes without spamming the desktop.
+  handleWatcherEvent(event) {
+    if (!event?.threadId || event.threadId !== this.activeWatchedThreadId) {
+      return;
+    }
+
+    const previousSize = this.lastRolloutSize;
+    this.lastRolloutSize = event.size;
+    this.noteRefreshTarget({
+      threadId: event.threadId,
+      url: buildThreadDeepLink(event.threadId),
+    });
+
+    if (event.reason === "materialized") {
+      this.queueRefresh("rollout_materialized", {
+        threadId: event.threadId,
+        url: buildThreadDeepLink(event.threadId),
+      }, `rollout ${event.reason}`);
+      return;
+    }
+
+    if (event.reason !== "growth") {
+      return;
+    }
+
+    if (previousSize == null) {
+      this.queueRefresh("rollout_growth", {
+        threadId: event.threadId,
+        url: buildThreadDeepLink(event.threadId),
+      }, "rollout first-growth");
+      this.lastMidRunRefreshAt = this.now();
+      return;
+    }
+
+    if (this.now() - this.lastMidRunRefreshAt < this.midRunRefreshThrottleMs) {
+      return;
+    }
+
+    this.lastMidRunRefreshAt = this.now();
+    this.queueRefresh("rollout_growth", {
+      threadId: event.threadId,
+      url: buildThreadDeepLink(event.threadId),
+    }, "rollout mid-run");
   }
 
   log(message) {
     console.log(`${this.logPrefix} ${message}`);
   }
 
-  logRefreshFailure(error) {
-    const message = error?.stderr?.toString("utf8")
-      || error?.stdout?.toString("utf8")
-      || error?.message
-      || "unknown refresh error";
+  handleRefreshFailure(error) {
+    const message = extractErrorMessage(error);
+    console.error(`${this.logPrefix} refresh failed: ${message}`);
 
-    console.error(`${this.logPrefix} refresh failed: ${message.trim()}`);
+    if (this.refreshBackend === "applescript" && isDesktopUnavailableError(message)) {
+      this.disableRuntimeRefresh("desktop refresh unavailable on this Mac");
+      return;
+    }
+
+    if (this.refreshBackend === "command") {
+      this.consecutiveRefreshFailures += 1;
+      if (this.consecutiveRefreshFailures >= this.customRefreshFailureThreshold) {
+        this.disableRuntimeRefresh("custom refresh command kept failing");
+      }
+    }
+  }
+
+  disableRuntimeRefresh(reason) {
+    if (!this.runtimeRefreshAvailable) {
+      return;
+    }
+
+    this.runtimeRefreshAvailable = false;
+    this.clearRefreshTimer();
+    this.clearFallbackTimer();
+    this.stopWatcher();
+    this.clearPendingState();
+    this.mode = "idle";
+
+    if (!this.unavailableLogged) {
+      console.error(`${this.logPrefix} desktop refresh disabled until restart: ${reason}`);
+      this.unavailableLogged = true;
+    }
+  }
+
+  canRefresh() {
+    return this.enabled && this.runtimeRefreshAvailable;
+  }
+
+  // Tells the debounce loop whether any phone/completion refresh is still waiting to run.
+  hasPendingRefreshWork() {
+    return this.pendingCompletionRefresh || this.pendingRefreshKinds.size > 0;
   }
 }
 
-function readBridgeConfig() {
+function readBridgeConfig({ env = process.env, platform = process.platform } = {}) {
+  const codexEndpoint = readFirstDefinedEnv(
+    ["REMODEX_CODEX_ENDPOINT", "PHODEX_CODEX_ENDPOINT"],
+    "",
+    env
+  );
+  const refreshCommand = readFirstDefinedEnv(
+    ["REMODEX_REFRESH_COMMAND", "PHODEX_ON_PHONE_MESSAGE"],
+    "",
+    env
+  );
+  const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
+  const defaultRefreshEnabled = Boolean(refreshCommand) || (platform === "darwin" && !codexEndpoint);
   return {
-    relayUrl: readFirstDefinedEnv(["REMODEX_RELAY", "PHODEX_RELAY"], "wss://relay.example.invalid/relay"),
-    refreshEnabled: parseBooleanEnv(readFirstDefinedEnv(["REMODEX_REFRESH_ENABLED"], "false")),
+    relayUrl: readFirstDefinedEnv(
+      ["REMODEX_RELAY", "PHODEX_RELAY"],
+      "wss://relay.example.invalid/relay",
+      env
+    ),
+    refreshEnabled: explicitRefreshEnabled == null
+      ? defaultRefreshEnabled
+      : explicitRefreshEnabled,
     refreshDebounceMs: parseIntegerEnv(
-      readFirstDefinedEnv(["REMODEX_REFRESH_DEBOUNCE_MS"], String(DEFAULT_DEBOUNCE_MS)),
+      readFirstDefinedEnv(["REMODEX_REFRESH_DEBOUNCE_MS"], String(DEFAULT_DEBOUNCE_MS), env),
       DEFAULT_DEBOUNCE_MS
     ),
-    codexEndpoint: readFirstDefinedEnv(["REMODEX_CODEX_ENDPOINT", "PHODEX_CODEX_ENDPOINT"], ""),
-    refreshCommand: readFirstDefinedEnv(
-      ["REMODEX_REFRESH_COMMAND", "PHODEX_ON_PHONE_MESSAGE"],
-      ""
-    ),
-    codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID),
+    codexEndpoint,
+    refreshCommand,
+    codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),
     codexAppPath: DEFAULT_APP_PATH,
   };
 }
@@ -312,9 +641,19 @@ function buildThreadDeepLink(threadId) {
   return `codex://threads/${threadId}`;
 }
 
-function readFirstDefinedEnv(keys, fallback) {
+function readOptionalBooleanEnv(keys, env = process.env) {
   for (const key of keys) {
-    const value = process.env[key];
+    const value = env[key];
+    if (typeof value === "string" && value.trim() !== "") {
+      return parseBooleanEnv(value.trim());
+    }
+  }
+  return null;
+}
+
+function readFirstDefinedEnv(keys, fallback, env = process.env) {
+  for (const key of keys) {
+    const value = env[key];
     if (typeof value === "string" && value.trim() !== "") {
       return value.trim();
     }
@@ -330,6 +669,30 @@ function parseBooleanEnv(value) {
 function parseIntegerEnv(value, fallback) {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function extractErrorMessage(error) {
+  return (
+    error?.stderr?.toString("utf8")
+    || error?.stdout?.toString("utf8")
+    || error?.message
+    || "unknown refresh error"
+  ).trim();
+}
+
+function isDesktopUnavailableError(message) {
+  const normalized = String(message).toLowerCase();
+  return [
+    "unable to find application named",
+    "application isn’t running",
+    "application isn't running",
+    "can’t get application id",
+    "can't get application id",
+    "does not exist",
+    "no application knows how to open",
+    "cannot find app",
+    "could not find application",
+  ].some((snippet) => normalized.includes(snippet));
 }
 
 module.exports = {

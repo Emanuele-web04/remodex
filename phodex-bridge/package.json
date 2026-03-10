@@ -11,7 +11,8 @@
     "src/"
   ],
   "scripts": {
-    "start": "node ./bin/remodex.js up"
+    "start": "node ./bin/remodex.js up",
+    "test": "node --test ./test/*.test.js"
   },
   "keywords": [
     "remodex",
