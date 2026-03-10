@@ -6,6 +6,12 @@
 
 import SwiftUI
 
+private enum TurnAutoScrollMode {
+    case followBottom
+    case anchorAssistantResponse
+    case manual
+}
+
 struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let threadID: String
     let messages: [CodexMessage]
@@ -40,6 +46,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var cachedBlockInfoByMessageID: [String: String] = [:]
     @State private var cachedLastFileChangeMessageID: String? = nil
     @State private var blockInfoInputKey: Int = 0
+    @State private var scrollSessionThreadID: String?
+    @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
+    @State private var initialRecoverySnapPendingThreadID: String?
+    @State private var initialRecoverySnapTask: Task<Void, Never>?
     @State private var scrollAwayDebounceTask: Task<Void, Never>?
 
     /// The tail slice of messages currently rendered in the timeline.
@@ -65,11 +75,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     footer()
                 }
+                .onAppear {
+                    beginScrollSessionIfNeeded()
+                }
                 .onChange(of: threadID) { _, _ in
-                    scrollAwayDebounceTask?.cancel()
-                    visibleTailCount = Self.pageSize
-                    isScrolledToBottom = true
-                    shouldAnchorToAssistantResponse = false
+                    beginScrollSessionIfNeeded(force: true)
                 }
         } else {
             ScrollViewReader { proxy in
@@ -142,6 +152,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 } action: { newHeight in
                     guard newHeight != viewportHeight else { return }
                     viewportHeight = newHeight
+                    performInitialRecoverySnapIfNeeded(using: proxy)
                 }
                 .onPreferenceChange(TurnScrollBottomAnchorMaxYPreferenceKey.self) { bottomAnchorMaxY in
                     updateScrolledToBottom(
@@ -159,15 +170,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     recomputeBlockInfoIfNeeded()
                 }
                 .onChange(of: threadID) { _, _ in
-                    scrollAwayDebounceTask?.cancel()
-                    visibleTailCount = Self.pageSize
-                    isScrolledToBottom = true
-                    shouldAnchorToAssistantResponse = false
+                    beginScrollSessionIfNeeded(force: true)
                     recomputeBlockInfoIfNeeded()
+                    handleTimelineMutation(using: proxy)
                 }
                 .onChange(of: activeTurnID) { _, _ in
                     recomputeBlockInfoIfNeeded()
-                    anchorToAssistantResponseIfNeeded(using: proxy)
+                    handleTimelineMutation(using: proxy)
                 }
                 .onChange(of: latestTurnTerminalState) { _, _ in
                     recomputeBlockInfoIfNeeded()
@@ -175,17 +184,29 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .onChange(of: stoppedTurnIDs) { _, _ in
                     recomputeBlockInfoIfNeeded()
                 }
+                .onChange(of: shouldAnchorToAssistantResponse) { _, newValue in
+                    if newValue {
+                        autoScrollMode = .anchorAssistantResponse
+                        handleTimelineMutation(using: proxy)
+                    } else if autoScrollMode == .anchorAssistantResponse {
+                        autoScrollMode = isScrolledToBottom ? .followBottom : .manual
+                    }
+                }
                 // Keeps footer pinned to bottom without adding a solid spacer block above it.
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     footer(scrollToBottomAction: {
+                        autoScrollMode = .followBottom
+                        initialRecoverySnapPendingThreadID = nil
                         scrollToBottom(using: proxy, animated: true)
                     })
                 }
                 .onAppear {
+                    beginScrollSessionIfNeeded()
                     recomputeBlockInfoIfNeeded()
+                    handleTimelineMutation(using: proxy)
                 }
                 .onDisappear {
-                    scrollAwayDebounceTask?.cancel()
+                    cancelScrollTasks()
                 }
             }
         }
@@ -305,6 +326,27 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         )
     }
 
+    // Resets per-thread scroll intent so each opened conversation gets one fresh
+    // post-layout recovery snap and starts in bottom-follow mode.
+    private func beginScrollSessionIfNeeded(force: Bool = false) {
+        guard force || scrollSessionThreadID != threadID else { return }
+
+        cancelScrollTasks()
+        scrollSessionThreadID = threadID
+        visibleTailCount = Self.pageSize
+        isScrolledToBottom = true
+        autoScrollMode = shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
+        initialRecoverySnapPendingThreadID = threadID
+    }
+
+    // Cancels any delayed scroll work so old thread sessions cannot move the new one.
+    private func cancelScrollTasks() {
+        scrollAwayDebounceTask?.cancel()
+        scrollAwayDebounceTask = nil
+        initialRecoverySnapTask?.cancel()
+        initialRecoverySnapTask = nil
+    }
+
     private func updateScrolledToBottom(bottomAnchorMaxY: CGFloat, viewportHeight: CGFloat) {
         guard viewportHeight > 0 else { return }
 
@@ -325,43 +367,94 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             scrollAwayDebounceTask?.cancel()
             scrollAwayDebounceTask = nil
             isScrolledToBottom = true
+            if autoScrollMode != .anchorAssistantResponse {
+                autoScrollMode = .followBottom
+            }
         } else {
             // true → false (scroll away): debounce 80ms
             guard scrollAwayDebounceTask == nil else { return }
             scrollAwayDebounceTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 80_000_000)
                 guard !Task.isCancelled else { return }
+                // Keep the first-load recovery armed until we have attempted the
+                // corrective bottom snap for this thread.
+                if initialRecoverySnapPendingThreadID == threadID {
+                    scrollAwayDebounceTask = nil
+                    return
+                }
                 isScrolledToBottom = false
+                if autoScrollMode != .anchorAssistantResponse {
+                    autoScrollMode = .manual
+                }
                 scrollAwayDebounceTask = nil
             }
         }
     }
 
-    private func anchorToAssistantResponseIfNeeded(using proxy: ScrollViewProxy) {
+    // Repairs the initial white/blank viewport race by doing one deferred snap only
+    // after the scroll view has a real height and messages are laid out.
+    private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
+        guard initialRecoverySnapPendingThreadID == threadID,
+              initialRecoverySnapTask == nil,
+              !messages.isEmpty,
+              viewportHeight > 0,
+              autoScrollMode == .followBottom,
+              !shouldAnchorToAssistantResponse else {
+            return
+        }
+
+        let expectedThreadID = threadID
+        initialRecoverySnapTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled,
+                  initialRecoverySnapPendingThreadID == expectedThreadID,
+                  scrollSessionThreadID == expectedThreadID,
+                  !messages.isEmpty,
+                  viewportHeight > 0,
+                  autoScrollMode == .followBottom,
+                  !shouldAnchorToAssistantResponse else {
+                initialRecoverySnapTask = nil
+                return
+            }
+
+            scrollToBottom(using: proxy, animated: false)
+            initialRecoverySnapPendingThreadID = nil
+            initialRecoverySnapTask = nil
+        }
+    }
+
+    private func anchorToAssistantResponseIfNeeded(using proxy: ScrollViewProxy) -> Bool {
         guard shouldAnchorToAssistantResponse,
               let assistantMessageID = TurnTimelineReducer.assistantResponseAnchorMessageID(
                 in: Array(visibleMessages),
                 activeTurnID: activeTurnID
               ) else {
-            return
+            return false
         }
 
         withAnimation(.easeInOut(duration: 0.2)) {
             proxy.scrollTo(assistantMessageID, anchor: .top)
         }
         shouldAnchorToAssistantResponse = false
+        autoScrollMode = .manual
+        initialRecoverySnapPendingThreadID = nil
+        return true
     }
 
-    // Keeps bottom-pinned chats following streamed height changes instead of only
-    // reacting when a new message row is inserted.
+    // Centralizes all automatic scrolling so first-load recovery, response anchoring,
+    // and bottom-following do not compete with one another.
     private func handleTimelineMutation(using proxy: ScrollViewProxy) {
-        if shouldAnchorToAssistantResponse {
-            anchorToAssistantResponseIfNeeded(using: proxy)
-            return
-        }
+        performInitialRecoverySnapIfNeeded(using: proxy)
 
-        if isScrolledToBottom {
-            scrollToBottom(using: proxy, animated: false)
+        switch autoScrollMode {
+        case .anchorAssistantResponse:
+            _ = anchorToAssistantResponseIfNeeded(using: proxy)
+        case .followBottom:
+            if isScrolledToBottom {
+                scrollToBottom(using: proxy, animated: false)
+            }
+        case .manual:
+            return
         }
     }
 

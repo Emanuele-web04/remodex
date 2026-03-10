@@ -89,6 +89,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private let minVisibleLines: CGFloat
         private let maxVisibleLines: CGFloat
         private var lastFocusBindingValue: Bool
+        private var pendingHeightValue: CGFloat?
+        private var isHeightCommitScheduled = false
 
         init(
             text: Binding<String>,
@@ -150,8 +152,26 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             let clamped = min(max(measured, minHeight), maxHeight)
 
             if abs(dynamicHeight.wrappedValue - clamped) > 0.5 {
-                DispatchQueue.main.async {
-                    self.dynamicHeight.wrappedValue = clamped
+                scheduleHeightCommit(clamped)
+            }
+        }
+
+        // Coalesces repeated text-layout height writes so SwiftUI sees at most one
+        // composer-height update per run-loop turn instead of several per frame.
+        private func scheduleHeightCommit(_ height: CGFloat) {
+            pendingHeightValue = height
+            guard !isHeightCommitScheduled else { return }
+
+            isHeightCommitScheduled = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isHeightCommitScheduled = false
+
+                guard let pendingHeight = self.pendingHeightValue else { return }
+                self.pendingHeightValue = nil
+
+                if abs(self.dynamicHeight.wrappedValue - pendingHeight) > 0.5 {
+                    self.dynamicHeight.wrappedValue = pendingHeight
                 }
             }
         }

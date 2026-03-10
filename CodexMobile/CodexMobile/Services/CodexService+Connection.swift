@@ -232,10 +232,11 @@ extension CodexService {
         postConnectSyncTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                guard self.postConnectSyncToken == syncToken else { return }
-                self.isBootstrappingConnectionSync = false
-                self.postConnectSyncTask = nil
-                self.postConnectSyncToken = nil
+                if self.postConnectSyncToken == syncToken {
+                    self.isBootstrappingConnectionSync = false
+                    self.postConnectSyncTask = nil
+                    self.postConnectSyncToken = nil
+                }
             }
             await self.performPostConnectSyncPass(preferredThreadId: preferredThreadId)
         }

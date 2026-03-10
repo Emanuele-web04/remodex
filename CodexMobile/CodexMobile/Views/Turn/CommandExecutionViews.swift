@@ -13,12 +13,15 @@ enum CommandExecutionStatusAccent: String {
     case completed
     case failed
 
+    // Keep tool-call status colors aligned with the inline command language used elsewhere in the app.
+    private static let commandColor = Color(.command)
+
     var color: Color {
         switch self {
         case .running:
-            return .yellow
+            return Self.commandColor
         case .completed:
-            return .green
+            return .mint
         case .failed:
             return .red
         }
@@ -50,7 +53,7 @@ struct CommandExecutionCardBody: View {
                     .foregroundStyle(accent.color)
 
                 Text(command)
-                    .font(AppFont.mono(.caption))
+                    .font(AppFont.mono(.subheadline))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -58,7 +61,7 @@ struct CommandExecutionCardBody: View {
                 Spacer(minLength: 4)
 
                 Text(statusLabel)
-                    .font(AppFont.mono(.caption2))
+                    .font(AppFont.mono(.caption))
                     .foregroundStyle(accent.color)
 
                 Image(systemName: "chevron.right")
@@ -70,6 +73,10 @@ struct CommandExecutionCardBody: View {
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
+        // Tool rows update often while commands stream; keep the subtree static to avoid whole-row flashing.
+        .transaction { transaction in
+            transaction.animation = nil
+        }
     }
 }
 
@@ -80,7 +87,7 @@ struct CommandExecutionDetailSheet: View {
     let details: CommandExecutionDetails?
     @Environment(\.dismiss) private var dismiss
     @State private var isOutputExpanded = false
-    private let commandAccent = Color.orange
+    private let commandAccent = CommandExecutionStatusAccent.running.color
 
     var body: some View {
         ScrollView {
@@ -99,7 +106,7 @@ struct CommandExecutionDetailSheet: View {
     private var commandSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Command", systemImage: "terminal.fill")
-                .font(AppFont.caption())
+                .font(AppFont.mono(.caption))
                 .foregroundStyle(commandAccent)
 
             Text(details?.fullCommand ?? status.command)
@@ -136,7 +143,7 @@ struct CommandExecutionDetailSheet: View {
     private func metadataRow(label: String, value: String, valueColor: Color = .primary) -> some View {
         HStack {
             Text(label)
-                .font(AppFont.caption())
+                .font(AppFont.mono(.caption))
                 .foregroundStyle(.secondary)
             Spacer()
             Text(value)
@@ -157,7 +164,7 @@ struct CommandExecutionDetailSheet: View {
                     Image(systemName: isOutputExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 10, weight: .semibold))
                     Text("Output (last \(CommandExecutionDetails.maxOutputLines) lines)")
-                        .font(AppFont.caption())
+                        .font(AppFont.mono(.caption))
                 }
                 .foregroundStyle(.secondary)
             }
