@@ -82,14 +82,14 @@ struct SettingsView: View {
 
     @ViewBuilder private var connectionSection: some View {
         SettingsCard(title: "Connection") {
-            Text(codex.isConnected ? "Status: connected" : "Status: disconnected")
+            Text("Status: \(connectionStatusLabel)")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
-            if codex.isConnecting {
+            if connectionPhaseShowsProgress {
                 HStack(spacing: 8) {
                     ProgressView()
-                    Text("Connecting to relay...")
+                    Text(connectionProgressLabel)
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
                 }
@@ -114,6 +114,43 @@ struct SettingsView: View {
                     disconnectRelay()
                 }
             }
+        }
+    }
+
+    private var connectionPhaseShowsProgress: Bool {
+        switch codex.connectionPhase {
+        case .connecting, .loadingChats, .syncing:
+            return true
+        case .offline, .connected:
+            return false
+        }
+    }
+
+    private var connectionStatusLabel: String {
+        switch codex.connectionPhase {
+        case .offline:
+            return "offline"
+        case .connecting:
+            return "connecting"
+        case .loadingChats:
+            return "loading chats"
+        case .syncing:
+            return "syncing"
+        case .connected:
+            return "connected"
+        }
+    }
+
+    private var connectionProgressLabel: String {
+        switch codex.connectionPhase {
+        case .connecting:
+            return "Connecting to relay..."
+        case .loadingChats:
+            return "Loading chats..."
+        case .syncing:
+            return "Syncing workspace..."
+        case .offline, .connected:
+            return ""
         }
     }
 

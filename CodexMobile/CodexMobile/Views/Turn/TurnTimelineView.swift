@@ -149,19 +149,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         viewportHeight: viewportHeight
                     )
                 }
-                // Observe a lightweight revision token so scroll/layout updates do not compare huge message arrays.
+                // React to every timeline mutation so streamed text growth stays pinned
+                // when the user is already at the bottom.
                 .onChange(of: timelineChangeToken) { _, _ in
                     recomputeBlockInfoIfNeeded()
-                }
-                .onChange(of: messages.count) { _, _ in
-                    if shouldAnchorToAssistantResponse {
-                        anchorToAssistantResponseIfNeeded(using: proxy)
-                        return
-                    }
-
-                    if isScrolledToBottom {
-                        scrollToBottom(using: proxy, animated: false)
-                    }
+                    handleTimelineMutation(using: proxy)
                 }
                 .onChange(of: isThreadRunning) { _, _ in
                     recomputeBlockInfoIfNeeded()
@@ -358,6 +350,19 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             proxy.scrollTo(assistantMessageID, anchor: .top)
         }
         shouldAnchorToAssistantResponse = false
+    }
+
+    // Keeps bottom-pinned chats following streamed height changes instead of only
+    // reacting when a new message row is inserted.
+    private func handleTimelineMutation(using proxy: ScrollViewProxy) {
+        if shouldAnchorToAssistantResponse {
+            anchorToAssistantResponseIfNeeded(using: proxy)
+            return
+        }
+
+        if isScrolledToBottom {
+            scrollToBottom(using: proxy, animated: false)
+        }
     }
 
     /// For each message index, returns the aggregated assistant block text if the message

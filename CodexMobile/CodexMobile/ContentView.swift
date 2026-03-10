@@ -171,8 +171,7 @@ struct ContentView: View {
                 }
         } else {
             HomeEmptyStateView(
-                isConnected: codex.isConnected,
-                isConnecting: codex.isConnecting || viewModel.isAttemptingAutoReconnect,
+                connectionPhase: homeConnectionPhase,
                 onToggleConnection: {
                     Task {
                         await viewModel.toggleConnection(codex: codex)
@@ -286,6 +285,14 @@ struct ContentView: View {
     // Shows the remembered pairing shell after app relaunch so the user can reconnect without rescanning.
     private var shouldShowReconnectShell: Bool {
         codex.hasSavedRelaySession && !isShowingManualScanner
+    }
+
+    // Keeps home status honest during reconnect loops while letting post-connect sync show separately.
+    private var homeConnectionPhase: CodexConnectionPhase {
+        if viewModel.isAttemptingAutoReconnect && !codex.isConnected {
+            return .connecting
+        }
+        return codex.connectionPhase
     }
 
     private func finishGesture(open: Bool) {

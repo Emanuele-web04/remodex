@@ -62,6 +62,14 @@ enum CodexConnectionRecoveryState: Equatable, Sendable {
     case retrying(attempt: Int, message: String)
 }
 
+enum CodexConnectionPhase: Equatable, Sendable {
+    case offline
+    case connecting
+    case loadingChats
+    case syncing
+    case connected
+}
+
 @MainActor
 @Observable
 final class CodexService {
@@ -72,6 +80,8 @@ final class CodexService {
     var isConnecting = false
     var isInitialized = false
     var isLoadingThreads = false
+    // Tracks the non-blocking bootstrap that hydrates chats/models after the socket is ready.
+    var isBootstrappingConnectionSync = false
     var currentOutput = ""
     var activeThreadId: String?
     var activeTurnId: String?
@@ -141,6 +151,8 @@ final class CodexService {
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
+    var postConnectSyncTask: Task<Void, Never>?
+    var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
@@ -240,6 +252,27 @@ final class CodexService {
         relayUrl?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
+    }
+
+    // Separates transport readiness from post-connect hydration so the UI can explain delays honestly.
+    var connectionPhase: CodexConnectionPhase {
+        if isConnecting {
+            return .connecting
+        }
+
+        guard isConnected else {
+            return .offline
+        }
+
+        if threads.isEmpty && (isBootstrappingConnectionSync || isLoadingThreads) {
+            return .loadingChats
+        }
+
+        if isBootstrappingConnectionSync || isLoadingModels || isLoadingThreads {
+            return .syncing
+        }
+
+        return .connected
     }
 }
 

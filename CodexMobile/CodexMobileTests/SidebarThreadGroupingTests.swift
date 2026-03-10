@@ -194,6 +194,52 @@ final class SidebarThreadGroupingTests: XCTestCase {
         )
     }
 
+    func testProjectExpansionStateKeepsPersistedCollapsedGroupsClosedWhenThreadsLoadLater() {
+        let groups = [
+            makeProjectGroup(id: "project:/Users/me/work/app"),
+            makeProjectGroup(id: "project:/Users/me/work/site"),
+        ]
+
+        let initialSnapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: [],
+            knownGroupIDs: [],
+            visibleGroups: [],
+            hasInitialized: false,
+            persistedCollapsedGroupIDs: Set(["project:/Users/me/work/site"])
+        )
+        let loadedSnapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: initialSnapshot.expandedGroupIDs,
+            knownGroupIDs: initialSnapshot.knownGroupIDs,
+            visibleGroups: groups,
+            hasInitialized: true,
+            persistedCollapsedGroupIDs: Set(["project:/Users/me/work/site"])
+        )
+
+        XCTAssertEqual(loadedSnapshot.expandedGroupIDs, Set(["project:/Users/me/work/app"]))
+    }
+
+    func testProjectExpansionStateKeepsPersistedCollapsedGroupsClosedWhenTheyReappear() {
+        let appGroup = makeProjectGroup(id: "project:/Users/me/work/app")
+        let siteGroup = makeProjectGroup(id: "project:/Users/me/work/site")
+
+        let hiddenSnapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: ["project:/Users/me/work/app"],
+            knownGroupIDs: Set([appGroup.id, siteGroup.id]),
+            visibleGroups: [appGroup],
+            hasInitialized: true,
+            persistedCollapsedGroupIDs: Set([siteGroup.id])
+        )
+        let restoredSnapshot = SidebarProjectExpansionState.synchronizedState(
+            currentExpandedGroupIDs: hiddenSnapshot.expandedGroupIDs,
+            knownGroupIDs: hiddenSnapshot.knownGroupIDs,
+            visibleGroups: [appGroup, siteGroup],
+            hasInitialized: true,
+            persistedCollapsedGroupIDs: Set([siteGroup.id])
+        )
+
+        XCTAssertEqual(restoredSnapshot.expandedGroupIDs, Set([appGroup.id]))
+    }
+
     func testGroupIDContainingSelectedThreadReturnsOwningProjectGroup() {
         let selectedThread = makeThread(
             id: "thread-a",

@@ -253,6 +253,7 @@ struct SidebarProjectExpansionSnapshot: Equatable {
 
 enum SidebarProjectExpansionState {
     // Preserves user collapse choices while still auto-opening project groups that appear for the first time.
+    // This also applies the persisted closed-state to groups that load late from thread/cwd data.
     static func synchronizedState(
         currentExpandedGroupIDs: Set<String>,
         knownGroupIDs: Set<String>,
@@ -274,7 +275,9 @@ enum SidebarProjectExpansionState {
 
         let newGroupIDs = visibleGroupIDs.subtracting(knownGroupIDs)
         return SidebarProjectExpansionSnapshot(
-            expandedGroupIDs: currentExpandedGroupIDs.intersection(visibleGroupIDs).union(newGroupIDs),
+            expandedGroupIDs: currentExpandedGroupIDs
+                .intersection(visibleGroupIDs)
+                .union(newGroupIDs.subtracting(persistedCollapsedGroupIDs)),
             knownGroupIDs: visibleGroupIDs
         )
     }

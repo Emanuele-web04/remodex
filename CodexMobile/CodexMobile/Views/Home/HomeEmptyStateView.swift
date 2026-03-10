@@ -7,8 +7,7 @@
 import SwiftUI
 
 struct HomeEmptyStateView<AuthSection: View>: View {
-    let isConnected: Bool
-    let isConnecting: Bool
+    let connectionPhase: CodexConnectionPhase
     let onToggleConnection: () -> Void
     @ViewBuilder let authSection: () -> AuthSection
 
@@ -34,7 +33,7 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                         .scaleEffect(dotPulse ? 1.4 : 1.0)
                         .opacity(dotPulse ? 0.6 : 1.0)
                         .animation(
-                            isConnecting
+                            isBusy
                                 ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
                                 : .default,
                             value: dotPulse
@@ -58,7 +57,7 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                 // Keeps the remembered relay pairing actionable after app relaunch or stale reconnects.
                 Button(action: onToggleConnection) {
                     HStack(spacing: 10) {
-                        if isConnecting {
+                        if isBusy {
                             ProgressView()
                                 .tint(.gray)
                                 .scaleEffect(0.9)
@@ -74,7 +73,7 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                     .background(primaryButtonBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .disabled(isConnecting)
+                .disabled(isBusy)
                 .padding(.top, 6)
 
                 authSection()
@@ -87,46 +86,86 @@ struct HomeEmptyStateView<AuthSection: View>: View {
         .navigationTitle("Remodex")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
-            if isConnecting {
+            if connectionPhase == .connecting {
                 connectionAttemptStartedAt = Date()
-                dotPulse = true
             }
+            dotPulse = isBusy
         }
-        .onChange(of: isConnecting) { _, connecting in
-            connectionAttemptStartedAt = connecting ? Date() : nil
-            dotPulse = connecting
+        .onChange(of: connectionPhase) { _, phase in
+            connectionAttemptStartedAt = phase == .connecting ? Date() : nil
+            dotPulse = isBusy
         }
     }
 
     // MARK: - Helpers
 
+    private var isBusy: Bool {
+        switch connectionPhase {
+        case .connecting, .loadingChats, .syncing:
+            return true
+        case .offline, .connected:
+            return false
+        }
+    }
+
     private var statusDotColor: Color {
-        if isConnecting { return .orange }
-        return isConnected ? .green : Color(.tertiaryLabel)
+        switch connectionPhase {
+        case .connecting, .loadingChats, .syncing:
+            return .orange
+        case .connected:
+            return .green
+        case .offline:
+            return Color(.tertiaryLabel)
+        }
     }
 
     private var statusLabel: String {
-        if isConnecting {
+        switch connectionPhase {
+        case .connecting:
             guard let connectionAttemptStartedAt else { return "Connecting" }
             let elapsed = Date().timeIntervalSince(connectionAttemptStartedAt)
             if elapsed >= 12 { return "Still connecting…" }
             return "Connecting"
+        case .loadingChats:
+            return "Loading chats"
+        case .syncing:
+            return "Syncing"
+        case .connected:
+            return "Connected"
+        case .offline:
+            return "Offline"
         }
-        return isConnected ? "Connected" : "Offline"
     }
 
     private var primaryButtonTitle: String {
-        if isConnecting {
+        switch connectionPhase {
+        case .connecting:
             return "Reconnecting..."
+        case .loadingChats:
+            return "Loading chats..."
+        case .syncing:
+            return "Syncing..."
+        case .connected:
+            return "Disconnect"
+        case .offline:
+            return "Reconnect"
         }
-        return isConnected ? "Disconnect" : "Reconnect"
     }
 
     private var primaryButtonBackground: Color {
-        isConnected ? Color(.secondarySystemFill) : .black
+        isSocketReady ? Color(.secondarySystemFill) : .black
     }
 
     private var primaryButtonForeground: Color {
-        isConnected ? Color.primary : .white
+        isSocketReady ? Color.primary : .white
+    }
+
+    private var isSocketReady: Bool {
+        switch connectionPhase {
+        case .loadingChats, .syncing, .connected:
+            return true
+        case .offline, .connecting:
+            return false
+        }
     }
 }

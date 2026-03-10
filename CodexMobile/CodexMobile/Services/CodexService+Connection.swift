@@ -68,7 +68,7 @@ extension CodexService {
 
             startSyncLoop()
             if performInitialSync {
-                await performPostConnectSyncPass()
+                schedulePostConnectSyncPass()
             }
         } catch {
             presentConnectionErrorIfNeeded(error)
@@ -89,6 +89,7 @@ extension CodexService {
         isInitialized = false
         isLoadingThreads = false
         isLoadingModels = false
+        isBootstrappingConnectionSync = false
         pendingApproval = nil
         finalizeAllStreamingState()
         messagePersistenceDebounceTask?.cancel()
@@ -110,6 +111,9 @@ extension CodexService {
         supportsStructuredSkillInput = true
         supportsTurnCollaborationMode = false
         stopSyncLoop()
+        postConnectSyncTask?.cancel()
+        postConnectSyncTask = nil
+        postConnectSyncToken = nil
         clearHydrationCaches()
         resumedThreadIDs.removeAll()
 
@@ -195,6 +199,10 @@ extension CodexService {
         if shouldClearSavedRelaySession {
             clearSavedRelaySession()
         }
+        postConnectSyncTask?.cancel()
+        postConnectSyncTask = nil
+        postConnectSyncToken = nil
+        isBootstrappingConnectionSync = false
         if shouldAttemptAutoRecovery {
             connectionRecoveryState = .retrying(attempt: 0, message: recoveryStatusMessage(for: error))
             lastErrorMessage = nil
@@ -214,6 +222,25 @@ extension CodexService {
 }
 
 extension CodexService {
+    func schedulePostConnectSyncPass(preferredThreadId: String? = nil) {
+        postConnectSyncTask?.cancel()
+        isBootstrappingConnectionSync = true
+
+        let syncToken = UUID()
+        postConnectSyncToken = syncToken
+        let preferredThreadId = preferredThreadId
+        postConnectSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                guard self.postConnectSyncToken == syncToken else { return }
+                self.isBootstrappingConnectionSync = false
+                self.postConnectSyncTask = nil
+                self.postConnectSyncToken = nil
+            }
+            await self.performPostConnectSyncPass(preferredThreadId: preferredThreadId)
+        }
+    }
+
     // Runs the post-connect sync work that is useful but not required to mark the socket usable.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
         try? await listModels()
