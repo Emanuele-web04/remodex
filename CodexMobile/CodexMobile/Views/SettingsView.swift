@@ -86,7 +86,7 @@ struct SettingsView: View {
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
-            if codex.isConnecting && !codex.isConnected {
+            if codex.isConnecting {
                 HStack(spacing: 8) {
                     ProgressView()
                     Text("Connecting to relay...")
@@ -95,8 +95,7 @@ struct SettingsView: View {
                 }
             }
 
-            if !codex.isConnected,
-               case .retrying(_, let message) = codex.connectionRecoveryState,
+            if case .retrying(_, let message) = codex.connectionRecoveryState,
                !message.isEmpty {
                 Text(message)
                     .font(AppFont.caption())

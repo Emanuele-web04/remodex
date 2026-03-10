@@ -60,18 +60,16 @@ extension CodexService {
         shouldAutoReconnectOnForeground = false
         connectionRecoveryState = .idle
         lastErrorMessage = nil
-        deferredPostConnectSyncTask?.cancel()
-        deferredPostConnectSyncTask = nil
         startReceiveLoop(with: connection)
         clearHydrationCaches()
 
         do {
             try await initializeSession()
 
+            startSyncLoop()
             if performInitialSync {
                 await performPostConnectSyncPass()
             }
-            startSyncLoop()
         } catch {
             presentConnectionErrorIfNeeded(error)
             await disconnect()
@@ -89,7 +87,6 @@ extension CodexService {
 
         isConnected = false
         isInitialized = false
-        isBootstrapSyncing = false
         isLoadingThreads = false
         isLoadingModels = false
         pendingApproval = nil
@@ -115,8 +112,6 @@ extension CodexService {
         stopSyncLoop()
         clearHydrationCaches()
         resumedThreadIDs.removeAll()
-        deferredPostConnectSyncTask?.cancel()
-        deferredPostConnectSyncTask = nil
 
         failAllPendingRequests(with: CodexServiceError.disconnected)
     }
@@ -195,7 +190,6 @@ extension CodexService {
             && (isRecoverableTransientConnectionError(error) || isBenignDisconnect)
         isConnected = false
         isInitialized = false
-        isBootstrapSyncing = false
         shouldAutoReconnectOnForeground = !shouldClearSavedRelaySession
             && (shouldSuppressMessage || shouldAttemptAutoRecovery)
         if shouldClearSavedRelaySession {
@@ -215,8 +209,6 @@ extension CodexService {
         finalizeAllStreamingState()
         endBackgroundRunGraceTask(reason: "receive-error")
         stopSyncLoop()
-        deferredPostConnectSyncTask?.cancel()
-        deferredPostConnectSyncTask = nil
         failAllPendingRequests(with: error)
     }
 }
@@ -224,30 +216,8 @@ extension CodexService {
 extension CodexService {
     // Runs the post-connect sync work that is useful but not required to mark the socket usable.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
-        isBootstrapSyncing = true
-        defer { isBootstrapSyncing = false }
-
-        // Keep the first bootstrap fetch short and lightweight so the shell can become usable
-        // quickly even when the relay is slow. The broader sync loop hydrates the rest after.
-        let maxBootstrapAttempts = 2
-        let bootstrapRetryDelayNs: UInt64 = 750_000_000
-        let bootstrapRequestTimeout: TimeInterval = 4
-        for attempt in 1...maxBootstrapAttempts {
-            guard isConnected else { return }
-            do {
-                try await listThreads(
-                    limit: 20,
-                    includeArchived: false,
-                    requestTimeout: bootstrapRequestTimeout
-                )
-                break
-            } catch {
-                debugSyncLog("bootstrap thread/list attempt \(attempt)/\(maxBootstrapAttempts) failed: \(error.localizedDescription)")
-                if attempt < maxBootstrapAttempts {
-                    try? await Task.sleep(nanoseconds: bootstrapRetryDelayNs)
-                }
-            }
-        }
+        try? await listModels()
+        try? await listThreads()
         let resolvedPreferredThreadId = normalizedInterruptIdentifier(preferredThreadId)
         if let resolvedPreferredThreadId {
             activeThreadId = resolvedPreferredThreadId
@@ -265,12 +235,6 @@ extension CodexService {
                         .text ?? ""
                 }
             }
-        }
-
-        deferredPostConnectSyncTask?.cancel()
-        deferredPostConnectSyncTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            try? await self.listModels()
         }
     }
 
@@ -422,9 +386,6 @@ extension CodexService {
 
     func isRecoverableTransientConnectionError(_ error: Error) -> Bool {
         if let serviceError = error as? CodexServiceError {
-            if case .requestTimeout = serviceError {
-                return true
-            }
             if case .invalidInput(let message) = serviceError {
                 return message.localizedCaseInsensitiveContains("timed out")
             }

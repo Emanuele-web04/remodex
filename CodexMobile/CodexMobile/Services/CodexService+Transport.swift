@@ -9,9 +9,7 @@ import Network
 
 extension CodexService {
     // Sends an RPC request and waits for the matching response by request id.
-    // Each request has a per-request timeout to avoid hanging indefinitely when
-    // the server is slow or unresponsive during startup or normal operation.
-    func sendRequest(method: String, params: JSONValue?, timeout: TimeInterval = 15) async throws -> RPCMessage {
+    func sendRequest(method: String, params: JSONValue?) async throws -> RPCMessage {
         if let requestTransportOverride {
             return try await requestTransportOverride(method, params)
         }
@@ -33,28 +31,13 @@ extension CodexService {
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[requestKey] = continuation
 
-            // Per-request timeout: if the server never responds, fail the request
-            // instead of hanging forever. The removeValue guard prevents double-resume
-            // when the response arrives before the timeout or the socket disconnects.
-            let timeoutTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                self?.pendingRequestTimeoutTasks.removeValue(forKey: requestKey)
-                if let pending = self?.pendingRequests.removeValue(forKey: requestKey) {
-                    pending.resume(throwing: CodexServiceError.requestTimeout(method: method))
-                }
-            }
-            pendingRequestTimeoutTasks[requestKey] = timeoutTask
-
-            Task { @MainActor [weak self] in
-                guard let self else { return }
+            Task {
                 do {
-                    try await self.sendMessage(request)
+                    try await sendMessage(request)
                 } catch {
-                    self.pendingRequestTimeoutTasks.removeValue(forKey: requestKey)?.cancel()
                     // Avoid double-resume if the request was already completed
                     // (for example by a disconnect race that fails all pending requests).
-                    if let pendingContinuation = self.pendingRequests.removeValue(forKey: requestKey) {
+                    if let pendingContinuation = pendingRequests.removeValue(forKey: requestKey) {
                         pendingContinuation.resume(throwing: error)
                     }
                 }
@@ -239,12 +222,6 @@ extension CodexService {
     }
 
     func failAllPendingRequests(with error: Error) {
-        let timeoutTasks = pendingRequestTimeoutTasks
-        pendingRequestTimeoutTasks.removeAll()
-        for task in timeoutTasks.values {
-            task.cancel()
-        }
-
         let continuations = pendingRequests
         pendingRequests.removeAll()
 

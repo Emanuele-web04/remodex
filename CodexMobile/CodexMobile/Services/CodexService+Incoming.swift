@@ -47,7 +47,6 @@ extension CodexService {
         guard let continuation = pendingRequests.removeValue(forKey: requestKey) else {
             return
         }
-        pendingRequestTimeoutTasks.removeValue(forKey: requestKey)?.cancel()
 
         if let rpcError = message.error {
             continuation.resume(throwing: CodexServiceError.rpcError(rpcError))

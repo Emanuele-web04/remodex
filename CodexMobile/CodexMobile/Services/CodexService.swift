@@ -71,9 +71,6 @@ final class CodexService {
     var isConnected = false
     var isConnecting = false
     var isInitialized = false
-    // True while the post-connect bootstrap (first thread list + thread selection) is still in flight.
-    // The UI uses this to show a loading indicator instead of a bare "Connected" empty state.
-    var isBootstrapSyncing = false
     var isLoadingThreads = false
     var currentOutput = ""
     var activeThreadId: String?
@@ -123,7 +120,6 @@ final class CodexService {
     var webSocketConnection: NWConnection?
     let webSocketQueue = DispatchQueue(label: "CodexMobile.WebSocket", qos: .userInitiated)
     var pendingRequests: [String: CheckedContinuation<RPCMessage, Error>] = [:]
-    var pendingRequestTimeoutTasks: [String: Task<Void, Never>] = [:]
     // Test hook: intercepts outbound RPC requests without requiring a live socket.
     @ObservationIgnored var requestTransportOverride: ((String, JSONValue?) async throws -> RPCMessage)?
     var streamingAssistantMessageByTurnID: [String: String] = [:]
@@ -145,7 +141,6 @@ final class CodexService {
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
-    var deferredPostConnectSyncTask: Task<Void, Never>?
     var connectedServerIdentity: String?
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
