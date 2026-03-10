@@ -36,6 +36,7 @@ final class ContentViewModel {
 
     // Connects to the relay WebSocket using a scanned QR code payload.
     func connectToRelay(sessionId: String, relayUrl: String, codex: CodexService) async {
+        await stopAutoReconnectForManualScan(codex: codex)
         let fullURL = "\(relayUrl)/\(sessionId)"
 
         // Persist for reconnection
@@ -85,6 +86,17 @@ final class ContentViewModel {
             if codex.lastErrorMessage?.isEmpty ?? true {
                 codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
             }
+        }
+    }
+
+    // Lets the manual QR flow take over instead of competing with the foreground reconnect loop.
+    func stopAutoReconnectForManualScan(codex: CodexService) async {
+        codex.shouldAutoReconnectOnForeground = false
+        codex.connectionRecoveryState = .idle
+        codex.lastErrorMessage = nil
+
+        while isRunningAutoReconnect || codex.isConnecting {
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
     }
 

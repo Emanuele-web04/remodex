@@ -10,6 +10,11 @@ import SwiftUI
 import Textual
 import UIKit
 
+// Diagnostic toggle: Textual's selection interaction rebuilds text layouts while
+// scrolling, so we can disable it temporarily to confirm the source of the
+// `AnyTextLayoutCollection` warning without affecting code-block copy actions.
+private let enablesMarkdownSelectionInteraction = false
+
 // ─── Message content views ──────────────────────────────────────────
 
 private struct CodeBlockView: View {
@@ -275,10 +280,16 @@ struct MarkdownTextView: View {
 
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
-        StructuredText(markdown: transformed)
+        let baseView = StructuredText(markdown: transformed)
             .font(AppFont.body())
             .textual.inlineStyle(.gitHub)
-            .textual.textSelection(.enabled)
+
+        if enablesMarkdownSelectionInteraction {
+            baseView
+                .textual.textSelection(.enabled)
+        } else {
+            baseView
+        }
     }
 }
 

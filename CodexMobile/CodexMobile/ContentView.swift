@@ -91,6 +91,8 @@ struct ContentView: View {
             OnboardingView {
                 withAnimation { hasSeenOnboarding = true }
             }
+        } else if isShowingManualScanner && !codex.isConnected {
+            qrScannerBody
         } else if codex.isConnected || viewModel.isAttemptingAutoReconnect || shouldShowReconnectShell {
             mainAppBody
         } else {
@@ -180,10 +182,14 @@ struct ContentView: View {
             ) {
                 if codex.hasSavedRelaySession && !codex.isConnected {
                     Button("Scan New QR Code") {
+                        Task {
+                            await viewModel.stopAutoReconnectForManualScan(codex: codex)
+                        }
                         isShowingManualScanner = true
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(codex.isConnecting || viewModel.isAttemptingAutoReconnect)
+                    .font(AppFont.body(weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .buttonStyle(.plain)
                 }
             }
             .toolbar {

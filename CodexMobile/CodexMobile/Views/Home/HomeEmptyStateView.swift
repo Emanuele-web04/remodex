@@ -76,6 +76,14 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                 .disabled(isBusy)
                 .padding(.top, 6)
 
+                if let reconnectHintText {
+                    Text(reconnectHintText)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 authSection()
             }
             .frame(maxWidth: 280)
@@ -167,5 +175,10 @@ struct HomeEmptyStateView<AuthSection: View>: View {
         case .offline, .connecting:
             return false
         }
+    }
+
+    private var reconnectHintText: String? {
+        guard connectionPhase == .connecting else { return nil }
+        return "If this takes too long, disconnect from your phone and scan a new QR code again below."
     }
 }
