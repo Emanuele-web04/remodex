@@ -29,6 +29,7 @@ struct ContentView: View {
             // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
             .task {
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
+                syncSelectedThread(with: codex.threads)
             }
             .onChange(of: showSettings) { _, show in
                 if show {
@@ -169,10 +170,25 @@ struct ContentView: View {
                         hamburgerButton
                     }
                 }
+        } else if codex.isBootstrapSyncing {
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Loading...")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .navigationTitle("Remodex")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    hamburgerButton
+                }
+            }
         } else {
             HomeEmptyStateView(
                 isConnected: codex.isConnected,
-                isConnecting: codex.isConnecting || viewModel.isAttemptingAutoReconnect,
+                isConnecting: !codex.isConnected && (codex.isConnecting || viewModel.isAttemptingAutoReconnect),
                 onToggleConnection: {
                     Task {
                         await viewModel.toggleConnection(codex: codex)
@@ -184,7 +200,7 @@ struct ContentView: View {
                         isShowingManualScanner = true
                     }
                     .buttonStyle(.bordered)
-                    .disabled(codex.isConnecting || viewModel.isAttemptingAutoReconnect)
+                    .disabled(!codex.isConnected && (codex.isConnecting || viewModel.isAttemptingAutoReconnect))
                 }
             }
             .toolbar {
@@ -298,11 +314,20 @@ struct ContentView: View {
 
     // Keeps selected thread coherent with server list updates.
     private func syncSelectedThread(with threads: [CodexThread]) {
-        if let selected = selectedThread,
-           !threads.contains(where: { $0.id == selected.id }) {
-            if codex.activeThreadId == selected.id {
+        if let activeThreadId = codex.activeThreadId {
+            if let activeThread = threads.first(where: { $0.id == activeThreadId }) {
+                if selectedThread?.id != activeThread.id {
+                    selectedThread = activeThread
+                }
                 return
             }
+
+            // Reconnects can leave a stale active thread id behind; clear it so the UI can recover.
+            codex.activeThreadId = nil
+        }
+
+        if let selected = selectedThread,
+           !threads.contains(where: { $0.id == selected.id }) {
             selectedThread = codex.pendingNotificationOpenThreadID == nil ? threads.first : nil
             return
         }
@@ -314,10 +339,10 @@ struct ContentView: View {
         }
 
         if selectedThread == nil,
-           codex.activeThreadId == nil,
            codex.pendingNotificationOpenThreadID == nil,
-           let first = threads.first {
+           let first = threads.first(where: { $0.syncState == .live }) ?? threads.first {
             selectedThread = first
+            codex.activeThreadId = first.id
         }
     }
 }

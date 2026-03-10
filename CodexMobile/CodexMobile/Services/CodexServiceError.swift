@@ -14,6 +14,7 @@ enum CodexServiceError: LocalizedError {
     case disconnected
     case noPendingApproval
     case rpcError(RPCError)
+    case requestTimeout(method: String)
 
     var errorDescription: String? {
         switch self {
@@ -31,6 +32,8 @@ enum CodexServiceError: LocalizedError {
             return "No pending approval request"
         case .rpcError(let rpcError):
             return "RPC error \(rpcError.code): \(rpcError.message)"
+        case .requestTimeout(let method):
+            return "Request timed out: \(method)"
         }
     }
 }

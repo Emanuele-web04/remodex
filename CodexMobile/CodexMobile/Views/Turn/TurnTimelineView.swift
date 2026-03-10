@@ -40,6 +40,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var cachedBlockInfoByMessageID: [String: String] = [:]
     @State private var cachedLastFileChangeMessageID: String? = nil
     @State private var blockInfoInputKey: Int = 0
+    @State private var scrollAwayDebounceTask: Task<Void, Never>?
 
     /// The tail slice of messages currently rendered in the timeline.
     private var visibleMessages: ArraySlice<CodexMessage> {
@@ -65,6 +66,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     footer()
                 }
                 .onChange(of: threadID) { _, _ in
+                    scrollAwayDebounceTask?.cancel()
                     visibleTailCount = Self.pageSize
                     isScrolledToBottom = true
                     shouldAnchorToAssistantResponse = false
@@ -165,6 +167,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     recomputeBlockInfoIfNeeded()
                 }
                 .onChange(of: threadID) { _, _ in
+                    scrollAwayDebounceTask?.cancel()
                     visibleTailCount = Self.pageSize
                     isScrolledToBottom = true
                     shouldAnchorToAssistantResponse = false
@@ -188,6 +191,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 }
                 .onAppear {
                     recomputeBlockInfoIfNeeded()
+                }
+                .onDisappear {
+                    scrollAwayDebounceTask?.cancel()
                 }
             }
         }
@@ -266,6 +272,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func footer(scrollToBottomAction: (() -> Void)? = nil) -> some View {
         VStack(spacing: 0) {
+            if let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+            }
+
+            composer()
+        }
+        .overlay(alignment: .top) {
             if shouldShowScrollToLatestButton, let scrollToBottomAction {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback(style: .light)
@@ -282,19 +299,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .buttonStyle(TurnFloatingButtonPressStyle())
                 .contentShape(Circle())
                 .accessibilityLabel("Scroll to latest message")
-                .padding(.bottom, 18)
+                .offset(y: -(44 + 18))
                 .transition(.opacity.combined(with: .scale(scale: 0.85)))
             }
-
-            if let errorMessage, !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-            }
-
-            composer()
         }
         .animation(.easeInOut(duration: 0.2), value: shouldShowScrollToLatestButton)
     }
@@ -315,8 +322,26 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             hasMessages: !messages.isEmpty
         )
 
-        if nextValue != isScrolledToBottom {
-            isScrolledToBottom = nextValue
+        guard nextValue != isScrolledToBottom else {
+            scrollAwayDebounceTask?.cancel()
+            scrollAwayDebounceTask = nil
+            return
+        }
+
+        if nextValue {
+            // false → true (scroll back to bottom): immediate
+            scrollAwayDebounceTask?.cancel()
+            scrollAwayDebounceTask = nil
+            isScrolledToBottom = true
+        } else {
+            // true → false (scroll away): debounce 80ms
+            guard scrollAwayDebounceTask == nil else { return }
+            scrollAwayDebounceTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 80_000_000)
+                guard !Task.isCancelled else { return }
+                isScrolledToBottom = false
+                scrollAwayDebounceTask = nil
+            }
         }
     }
 

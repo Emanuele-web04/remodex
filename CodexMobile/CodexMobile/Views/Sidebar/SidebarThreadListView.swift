@@ -234,7 +234,13 @@ struct SidebarThreadListView: View {
         if let selectedGroupID = SidebarProjectExpansionState.groupIDContainingSelectedThread(
             selectedThread,
             in: groups
-        ) {
+        ),
+           SidebarProjectExpansionState.shouldAutoRevealSelectedGroup(
+               selectedGroupID,
+               persistedCollapsedGroupIDs: SidebarProjectExpansionState.decodePersistedGroupIDs(
+                   collapsedProjectGroupIDsStorage
+               )
+           ) {
             expandedProjectGroupIDs.insert(selectedGroupID)
         }
     }
@@ -280,6 +286,13 @@ enum SidebarProjectExpansionState {
         }
 
         return groups.first(where: { $0.kind == .project && $0.contains(selectedThread) })?.id
+    }
+
+    static func shouldAutoRevealSelectedGroup(
+        _ groupID: String,
+        persistedCollapsedGroupIDs: Set<String>
+    ) -> Bool {
+        !persistedCollapsedGroupIDs.contains(groupID)
     }
 
     static func decodePersistedGroupIDs(_ rawValue: String) -> Set<String> {

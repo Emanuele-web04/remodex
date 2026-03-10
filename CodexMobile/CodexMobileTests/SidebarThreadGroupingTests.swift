@@ -231,6 +231,15 @@ final class SidebarThreadGroupingTests: XCTestCase {
         ]))
     }
 
+    func testShouldAutoRevealSelectedGroupSkipsPersistedCollapsedGroup() {
+        let shouldReveal = SidebarProjectExpansionState.shouldAutoRevealSelectedGroup(
+            "project:/Users/me/work/app",
+            persistedCollapsedGroupIDs: Set(["project:/Users/me/work/app"])
+        )
+
+        XCTAssertFalse(shouldReveal)
+    }
+
     private func makeThread(
         id: String,
         updatedAt: Date,

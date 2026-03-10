@@ -19,11 +19,9 @@ private struct CodeBlockView: View {
     @State private var copied = false
 
     // Uses strict patch validation to avoid rendering prose snippets as diffs.
+    // Result is cached to avoid O(n) line scan on every cell creation during scroll.
     private var isDiffBlock: Bool {
-        switch profile {
-        case .assistantProse, .fileChangeSystem:
-            return TurnDiffLineKind.detectVerifiedPatch(in: code)
-        }
+        DiffBlockDetectionCache.isDiffBlock(code: code, profile: profile)
     }
 
     var body: some View {

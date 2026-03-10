@@ -410,6 +410,41 @@ enum ThinkingDisclosureContentCache {
     }
 }
 
+// ─── Diff Block Detection Cache ─────────────────────────────────────
+
+enum DiffBlockDetectionCache {
+    static let maxEntries = 512
+    static let lock = NSLock()
+    static var cache: [Int: Bool] = [:]
+
+    static func isDiffBlock(code: String, profile: MarkdownRenderProfile) -> Bool {
+        switch profile {
+        case .assistantProse, .fileChangeSystem:
+            break
+        }
+
+        let key = code.hashValue
+
+        lock.lock()
+        if let cached = cache[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let result = TurnDiffLineKind.detectVerifiedPatch(in: code)
+
+        lock.lock()
+        if cache.count >= maxEntries {
+            cache.removeAll(keepingCapacity: true)
+        }
+        cache[key] = result
+        lock.unlock()
+
+        return result
+    }
+}
+
 // ─── File Change Grouping Cache ─────────────────────────────────────
 
 struct FileChangeGroup: Identifiable {

@@ -11,18 +11,31 @@ extension CodexService {
     // other active project groups when the latest chats all belong to one repo.
     var recentThreadListLimit: Int { 40 }
 
-    func listThreads(limit: Int? = nil) async throws {
+    func listThreads(
+        limit: Int? = nil,
+        includeArchived: Bool = true,
+        requestTimeout: TimeInterval? = nil
+    ) async throws {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
         let effectiveLimit = limit ?? recentThreadListLimit
-        let activeThreads = try await fetchServerThreads(limit: effectiveLimit)
+        let activeThreads = try await fetchServerThreads(
+            limit: effectiveLimit,
+            requestTimeout: requestTimeout
+        )
 
         var archivedThreads: [CodexThread] = []
-        do {
-            archivedThreads = try await fetchServerThreads(limit: effectiveLimit, archived: true)
-        } catch {
-            debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
+        if includeArchived {
+            do {
+                archivedThreads = try await fetchServerThreads(
+                    limit: effectiveLimit,
+                    archived: true,
+                    requestTimeout: requestTimeout
+                )
+            } catch {
+                debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
+            }
         }
 
         reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
@@ -429,7 +442,11 @@ enum CodexThreadStartProjectBinding {
 }
 
 extension CodexService {
-    func fetchServerThreads(limit: Int? = nil, archived: Bool = false) async throws -> [CodexThread] {
+    func fetchServerThreads(
+        limit: Int? = nil,
+        archived: Bool = false,
+        requestTimeout: TimeInterval? = nil
+    ) async throws -> [CodexThread] {
         var allThreads: [CodexThread] = []
         var nextCursor: JSONValue = .null
         var hasRequestedFirstPage = false
@@ -448,7 +465,11 @@ extension CodexService {
                 params["archived"] = .bool(true)
             }
 
-            let response = try await sendRequest(method: "thread/list", params: .object(params))
+            let response = try await sendRequest(
+                method: "thread/list",
+                params: .object(params),
+                timeout: requestTimeout ?? 15
+            )
 
             guard let resultObject = response.result?.objectValue else {
                 throw CodexServiceError.invalidResponse("thread/list response missing payload")

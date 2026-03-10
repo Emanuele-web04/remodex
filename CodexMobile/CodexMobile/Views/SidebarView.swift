@@ -44,6 +44,19 @@ struct SidebarView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 10)
 
+            if shouldShowSyncingStatus {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+
+                    Text("Syncing…")
+                        .font(AppFont.caption(weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+            }
+
             SidebarThreadListView(
                 isFiltering: !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                 isConnected: codex.isConnected,
@@ -185,6 +198,10 @@ struct SidebarView: View {
         } catch {
             // Error stored in CodexService.
         }
+    }
+
+    private var shouldShowSyncingStatus: Bool {
+        codex.isConnected && (!codex.isInitialized || codex.isLoadingThreads)
     }
 
     // Shows a native sheet so folder names and full paths stay readable on small screens.

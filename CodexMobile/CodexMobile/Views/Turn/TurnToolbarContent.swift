@@ -96,7 +96,6 @@ private struct TurnToolbarDiffTotalsLabel: View {
             }
         }
         .font(AppFont.mono(.caption))
-        .padding(.horizontal, 4)
         .frame(minHeight: 24)
         .fixedSize(horizontal: true, vertical: false)
         .adaptiveToolbarItem(in: Capsule())
