@@ -10,10 +10,9 @@ import SwiftUI
 import Textual
 import UIKit
 
-// Diagnostic toggle: Textual's selection interaction rebuilds text layouts while
-// scrolling, so we can disable it temporarily to confirm the source of the
-// `AnyTextLayoutCollection` warning without affecting code-block copy actions.
-private let enablesMarkdownSelectionInteraction = false
+// Keep Textual selection out of the scrolling timeline. We expose selection from
+// a dedicated sheet instead, which avoids repeated layout churn while cells scroll.
+private let enablesInlineMarkdownSelectionInTimeline = false
 
 // ─── Message content views ──────────────────────────────────────────
 
@@ -277,6 +276,7 @@ private struct FileChangeDiffSheet: View {
 struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
+    var enablesSelection: Bool = false
 
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
@@ -284,7 +284,7 @@ struct MarkdownTextView: View {
             .font(AppFont.body())
             .textual.inlineStyle(.gitHub)
 
-        if enablesMarkdownSelectionInteraction {
+        if enablesSelection {
             baseView
                 .textual.textSelection(.enabled)
         } else {
@@ -766,6 +766,7 @@ struct MessageRow: View, Equatable {
     @Environment(\.assistantRevertAction) private var assistantRevertAction
     @State private var previewAttachment: CodexImageAttachment?
     @State private var showRevertConfirmation = false
+    @State private var selectableTextSheet: SelectableMessageTextSheetState?
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
         lhs.message == rhs.message
@@ -979,7 +980,11 @@ struct MessageRow: View, Equatable {
                 ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                     switch segment {
                     case .prose(let prose):
-                        MarkdownTextView(text: prose, profile: .assistantProse)
+                        MarkdownTextView(
+                            text: prose,
+                            profile: .assistantProse,
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                        )
                     case .codeBlock(let language, let code):
                         CodeBlockView(language: language, code: code, profile: .assistantProse)
                     }
@@ -999,6 +1004,12 @@ struct MessageRow: View, Equatable {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contextMenu {
+            selectableTextActions(text: text, usesMarkdownSelection: true)
+        }
+        .sheet(item: $selectableTextSheet) { sheet in
+            SelectableMessageTextSheet(state: sheet)
+        }
     }
 
     @ViewBuilder
@@ -1097,6 +1108,12 @@ struct MessageRow: View, Equatable {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contextMenu {
+            selectableTextActions(text: text, usesMarkdownSelection: false)
+        }
+        .sheet(item: $selectableTextSheet) { sheet in
+            SelectableMessageTextSheet(state: sheet)
+        }
     }
 
     private func defaultSystemView(text: String) -> some View {
@@ -1105,6 +1122,12 @@ struct MessageRow: View, Equatable {
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 4)
+            .contextMenu {
+                selectableTextActions(text: text, usesMarkdownSelection: false)
+            }
+            .sheet(item: $selectableTextSheet) { sheet in
+                SelectableMessageTextSheet(state: sheet)
+            }
     }
 
     @ViewBuilder
@@ -1160,6 +1183,85 @@ struct MessageRow: View, Equatable {
         } message: {
             Text("Are you sure you want to discard these changes?")
         }
+    }
+
+    @ViewBuilder
+    private func selectableTextActions(text: String, usesMarkdownSelection: Bool) -> some View {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedText.isEmpty {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                selectableTextSheet = SelectableMessageTextSheetState(
+                    role: message.role,
+                    text: trimmedText,
+                    usesMarkdownSelection: usesMarkdownSelection
+                )
+            } label: {
+                Label("Select Text", systemImage: "text.cursor")
+            }
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                UIPasteboard.general.string = trimmedText
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
+    }
+}
+
+private struct SelectableMessageTextSheetState: Identifiable {
+    let id = UUID()
+    let role: CodexMessageRole
+    let text: String
+    let usesMarkdownSelection: Bool
+
+    var title: String {
+        switch role {
+        case .assistant:
+            return "Assistant Message"
+        case .system:
+            return "System Message"
+        case .user:
+            return "Message"
+        }
+    }
+}
+
+private struct SelectableMessageTextSheet: View {
+    let state: SelectableMessageTextSheetState
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    if state.usesMarkdownSelection {
+                        MarkdownTextView(
+                            text: state.text,
+                            profile: .assistantProse,
+                            enablesSelection: true
+                        )
+                    } else {
+                        Text(state.text)
+                            .font(AppFont.body())
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(16)
+            }
+            .navigationTitle(state.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .adaptiveNavigationBar()
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

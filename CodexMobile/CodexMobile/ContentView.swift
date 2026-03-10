@@ -180,14 +180,14 @@ struct ContentView: View {
                     }
                 }
             ) {
-                if codex.hasSavedRelaySession && !codex.isConnected {
+                if homeConnectionPhase == .connecting || (codex.hasSavedRelaySession && !codex.isConnected) {
                     Button("Scan New QR Code") {
                         Task {
                             await viewModel.stopAutoReconnectForManualScan(codex: codex)
                         }
                         isShowingManualScanner = true
                     }
-                    .font(AppFont.body(weight: .semibold))
+                    .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
                     .buttonStyle(.plain)
                 }
