@@ -5,6 +5,7 @@
 // Depends on: CodexMessage, JSONValue
 
 import Foundation
+import UIKit
 
 extension CodexService {
     // Returns the full persisted timeline for a single thread.
