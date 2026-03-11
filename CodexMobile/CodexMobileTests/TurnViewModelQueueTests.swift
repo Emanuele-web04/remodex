@@ -12,16 +12,18 @@ final class TurnViewModelQueueTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
     private static var retainedViewModels: [TurnViewModel] = []
 
-    func testSendTurnQueuesDraftWhenThreadBusy() {
+    func testSendTurnSteersImmediatelyWhenThreadBusy() async {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-live"
 
         let viewModel = makeViewModel()
         let attachment = CodexImageAttachment(
             thumbnailBase64JPEG: "thumb",
             payloadDataURL: "data:image/jpeg;base64,AAAA"
         )
+        var recordedMethods: [String] = []
 
         viewModel.input = "Please inspect @TurnView.swift"
         viewModel.composerMentionedFiles = [
@@ -40,25 +42,31 @@ final class TurnViewModelQueueTests: XCTestCase {
         viewModel.composerAttachments = [
             TurnComposerImageAttachment(id: "att-1", state: .ready(attachment))
         ]
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            XCTAssertEqual(method, "turn/steer")
+            let paramsObject = try XCTUnwrap(params?.objectValue)
+            XCTAssertEqual(paramsObject["threadId"]?.stringValue, "thread-queue")
+            XCTAssertEqual(paramsObject["expectedTurnId"]?.stringValue, "turn-live")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-live")]),
+                includeJSONRPC: false
+            )
+        }
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
+        await waitForSendCompletion(viewModel)
 
-        XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
+        XCTAssertEqual(recordedMethods, ["turn/steer"])
+        XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
         XCTAssertTrue(viewModel.input.isEmpty)
         XCTAssertTrue(viewModel.composerMentionedFiles.isEmpty)
         XCTAssertTrue(viewModel.composerMentionedSkills.isEmpty)
         XCTAssertTrue(viewModel.composerAttachments.isEmpty)
         XCTAssertFalse(viewModel.isQueuePaused(codex: service, threadID: "thread-queue"))
-
-        guard let queued = service.queuedTurnDraftsByThread["thread-queue"]?.first else {
-            XCTFail("Expected one queued draft")
-            return
-        }
-
-        XCTAssertEqual(queued.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
-        XCTAssertEqual(queued.attachments, [attachment])
-        XCTAssertEqual(queued.skillMentions.count, 1)
-        XCTAssertEqual(queued.skillMentions.first?.id, "check-code")
+        XCTAssertEqual(service.messagesByThread["thread-queue"]?.last?.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
+        XCTAssertEqual(service.messagesByThread["thread-queue"]?.last?.deliveryState, .confirmed)
     }
 
     func testFlushQueueDoesNothingWhenDisconnected() {
@@ -170,6 +178,103 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(recordedMethods, ["thread/read", "turn/start"])
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
         XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
+    }
+
+    func testSendTurnResolvesFallbackTurnIDAndSteersActiveRun() async {
+        let service = makeService()
+        service.isConnected = true
+        service.runningThreadIDs.insert("thread-queue")
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            if method == "thread/read" {
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "turns": .array([
+                                .object([
+                                    "id": .string("turn-fallback"),
+                                    "status": .string("in_progress"),
+                                ])
+                            ])
+                        ])
+                    ]),
+                    includeJSONRPC: false
+                )
+            }
+
+            XCTAssertEqual(method, "turn/steer")
+            XCTAssertEqual(params?.objectValue?["expectedTurnId"]?.stringValue, "turn-fallback")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-fallback")]),
+                includeJSONRPC: false
+            )
+        }
+
+        let viewModel = makeViewModel()
+        viewModel.input = "Follow up now"
+
+        viewModel.sendTurn(codex: service, threadID: "thread-queue")
+        await waitForSendCompletion(viewModel)
+
+        XCTAssertEqual(recordedMethods, ["thread/read", "turn/steer"])
+        XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
+        XCTAssertEqual(service.messagesByThread["thread-queue"]?.last?.deliveryState, .confirmed)
+        XCTAssertEqual(service.messagesByThread["thread-queue"]?.last?.turnId, "turn-fallback")
+    }
+
+    func testSendTurnRemovesFailedSteerRowBeforeFallbackStartTurn() async {
+        let service = makeService()
+        service.isConnected = true
+        service.runningThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-live"
+        service.resumedThreadIDs.insert("thread-queue")
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            switch method {
+            case "turn/steer":
+                throw CodexServiceError.rpcError(
+                    RPCError(code: -32000, message: "turn already completed")
+                )
+            case "thread/read":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "turns": .array([])
+                        ])
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "turn/start":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["turnId": .string("turn-new")]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        let viewModel = makeViewModel()
+        viewModel.input = "Retry as new turn"
+
+        viewModel.sendTurn(codex: service, threadID: "thread-queue")
+        await waitForSendCompletion(viewModel)
+
+        XCTAssertEqual(recordedMethods, ["turn/steer", "thread/read", "turn/start"])
+        let userMessages = service.messagesByThread["thread-queue"]?.filter { $0.role == .user } ?? []
+        XCTAssertEqual(userMessages.count, 1)
+        XCTAssertEqual(userMessages.first?.text, "Retry as new turn")
+        XCTAssertEqual(userMessages.first?.deliveryState, .confirmed)
+        XCTAssertEqual(userMessages.first?.turnId, "turn-new")
     }
 
     func testSteerQueuedDraftRemovesOnlySelectedRowAndPreservesOrder() async {

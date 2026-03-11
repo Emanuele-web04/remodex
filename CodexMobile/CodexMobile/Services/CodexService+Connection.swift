@@ -427,11 +427,25 @@ extension CodexService {
         }
 
         if case .posix(let code) = nwError,
-           code == .ECONNABORTED || code == .ECANCELED || code == .ENOTCONN {
+           code == .ECONNABORTED || code == .ECANCELED || code == .ENOTCONN || code == .ENODATA {
             return true
         }
 
         return false
+    }
+
+    // Treats write-side socket loss the same as receive-side disconnects so UI can recover instead of hanging.
+    func shouldTreatSendFailureAsDisconnect(_ error: Error) -> Bool {
+        if isBenignBackgroundDisconnect(error) || isRecoverableTransientConnectionError(error) {
+            return true
+        }
+
+        guard let nwError = error as? NWError,
+              case .posix(let code) = nwError else {
+            return false
+        }
+
+        return code == .EPIPE || code == .ECONNRESET
     }
 
     func isRecoverableTransientConnectionError(_ error: Error) -> Bool {

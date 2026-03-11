@@ -35,6 +35,11 @@ extension CodexService {
                 do {
                     try await sendMessage(request)
                 } catch {
+                    if shouldTreatSendFailureAsDisconnect(error) {
+                        handleReceiveError(error)
+                        return
+                    }
+
                     // Avoid double-resume if the request was already completed
                     // (for example by a disconnect race that fails all pending requests).
                     if let pendingContinuation = pendingRequests.removeValue(forKey: requestKey) {

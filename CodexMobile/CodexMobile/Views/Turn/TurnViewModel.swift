@@ -618,7 +618,7 @@ final class TurnViewModel {
         composerAttachments[index].state = state
     }
 
-    // Sends a standard turn while preserving all existing preflight guards.
+    // Sends a composer payload, preferring turn/steer when a run is already active.
     func sendTurn(codex: CodexService, threadID: String) {
         let payload = buildPayloadWithMentions()
         let attachments = readyComposerAttachments
@@ -658,14 +658,21 @@ final class TurnViewModel {
             defer { isSending = false }
 
             let stillBusy = await refreshBusyStateIfNeeded(codex: codex, threadID: threadID, wasBusy: threadBusy)
-            if stillBusy || queuePaused {
+            if stillBusy {
+                await performBusyThreadSend(
+                    pendingSend,
+                    codex: codex,
+                    threadID: threadID
+                )
+                return
+            }
+
+            if queuePaused {
                 appendQueuedDraft(queuedDraft, codex: codex, threadID: threadID)
                 shouldAnchorToAssistantResponse = true
                 clearComposer()
 
-                if queuePaused && !stillBusy {
-                    resumeQueueAndFlushIfPossible(codex: codex, threadID: threadID)
-                }
+                resumeQueueAndFlushIfPossible(codex: codex, threadID: threadID)
                 return
             }
 
@@ -1241,6 +1248,53 @@ final class TurnViewModel {
 
     private func isThreadBusy(codex: CodexService, threadID: String) -> Bool {
         codex.activeTurnID(for: threadID) != nil || codex.runningThreadIDs.contains(threadID)
+    }
+
+    // Reuses the active turn when possible so follow-up chat sends steer the current run instead of waiting in queue.
+    private func performBusyThreadSend(
+        _ pendingSend: PendingTurnSend,
+        codex: CodexService,
+        threadID: String
+    ) async {
+        isPlanModeArmed = false
+        shouldAnchorToAssistantResponse = true
+        clearComposer()
+
+        do {
+            let expectedTurnID = try await resolveSteerExpectedTurnID(
+                codex: codex,
+                threadID: threadID
+            )
+
+            try await codex.steerTurn(
+                userInput: pendingSend.payload,
+                threadId: threadID,
+                expectedTurnId: expectedTurnID,
+                attachments: pendingSend.attachments,
+                skillMentions: pendingSend.skillMentions,
+                shouldAppendUserMessage: true
+            )
+        } catch {
+            let stillBusy = await refreshBusyStateIfNeeded(codex: codex, threadID: threadID, wasBusy: true)
+            if !stillBusy {
+                codex.removeLatestFailedUserMessage(
+                    threadId: threadID,
+                    matchingText: pendingSend.payload,
+                    matchingAttachments: pendingSend.attachments
+                )
+                await performTurnSend(pendingSend, codex: codex, threadID: threadID)
+                return
+            }
+
+            shouldAnchorToAssistantResponse = false
+            input = pendingSend.rawInput
+            composerMentionedFiles = pendingSend.rawFileMentions
+            composerMentionedSkills = pendingSend.rawSkillMentions
+            composerAttachments = pendingSend.rawAttachments
+            if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
+            }
+        }
     }
 
     // Sends the prepared payload and restores the exact raw composer state if startTurn fails.

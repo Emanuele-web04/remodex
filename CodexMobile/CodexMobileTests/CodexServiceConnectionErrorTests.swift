@@ -19,6 +19,16 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertTrue(service.shouldSuppressUserFacingConnectionError(error))
     }
 
+    func testSendSideNoDataDisconnectIsTreatedAsBenign() {
+        let service = CodexService()
+        let error = NWError.posix(.ENODATA)
+        service.isAppInForeground = false
+
+        XCTAssertTrue(service.isBenignBackgroundDisconnect(error))
+        XCTAssertTrue(service.shouldTreatSendFailureAsDisconnect(error))
+        XCTAssertTrue(service.shouldSuppressUserFacingConnectionError(error))
+    }
+
     func testTransientTimeoutStillSurfacesToUser() {
         let service = CodexService()
         let error = NWError.posix(.ETIMEDOUT)

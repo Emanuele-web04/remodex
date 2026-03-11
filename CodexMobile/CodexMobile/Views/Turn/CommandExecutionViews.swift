@@ -36,6 +36,25 @@ struct CommandExecutionStatusModel {
 
 // MARK: - Card Body
 
+// The inline status pill is shared by command cards and worth keeping standalone for reuse and previewing.
+struct CommandExecutionStatusBadge: View {
+    let statusLabel: String
+    let accent: CommandExecutionStatusAccent
+
+    var body: some View {
+        Text(statusLabel)
+            .font(AppFont.mono(.caption))
+            .foregroundStyle(accent.color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 1)
+            
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(accent.color.opacity(0.18), lineWidth: 1)
+            )
+    }
+}
+
 struct CommandExecutionCardBody: View {
     let command: String
     let statusLabel: String
@@ -45,7 +64,17 @@ struct CommandExecutionCardBody: View {
         HStack(spacing: 10) {
             accent.color.opacity(0.95)
                 .frame(width: 3)
-                .clipShape(Capsule())
+                .clipShape(
+                    UnevenRoundedRectangle(
+                        cornerRadii: .init(
+                            topLeading: 8,
+                            bottomLeading: 8,
+                            bottomTrailing: 0,
+                            topTrailing: 0
+                        ),
+                        style: .continuous
+                    )
+                )
 
             HStack(spacing: 8) {
                 Image(systemName: "terminal.fill")
@@ -60,15 +89,16 @@ struct CommandExecutionCardBody: View {
 
                 Spacer(minLength: 4)
 
-                Text(statusLabel)
-                    .font(AppFont.mono(.caption))
-                    .foregroundStyle(accent.color)
+                CommandExecutionStatusBadge(
+                    statusLabel: statusLabel,
+                    accent: accent
+                )
 
                 Image(systemName: "chevron.right")
                     .font(AppFont.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(.vertical, 2)
+            .padding(.vertical, 1)
         }
         .fixedSize(horizontal: false, vertical: true)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -195,6 +225,15 @@ struct CommandExecutionDetailSheet: View {
 }
 
 // MARK: - Previews
+
+#Preview("Status Badge") {
+    HStack(spacing: 12) {
+        CommandExecutionStatusBadge(statusLabel: "running", accent: .running)
+        CommandExecutionStatusBadge(statusLabel: "completed", accent: .completed)
+        CommandExecutionStatusBadge(statusLabel: "failed", accent: .failed)
+    }
+    .padding()
+}
 
 #Preview("Command Card — Interactive") {
     struct InteractivePreview: View {
