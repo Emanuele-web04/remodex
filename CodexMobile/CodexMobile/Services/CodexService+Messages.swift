@@ -77,6 +77,9 @@ extension CodexService {
     func markThreadAsViewed(_ threadId: String) {
         clearRunningThreadWatch(threadId)
         clearOutcomeBadge(for: threadId)
+        if threadCompletionBanner?.threadId == threadId {
+            threadCompletionBanner = nil
+        }
     }
 
     // Marks thread as actively running while ensuring stale outcomes are cleared.
@@ -96,11 +99,16 @@ extension CodexService {
     // Marks a thread as ready only when the user is not already viewing it.
     func markReadyIfUnread(threadId: String) {
         clearRunningThreadWatch(threadId)
+        let wasAlreadyReady = readyThreadIDs.contains(threadId)
         clearOutcomeBadge(for: threadId)
         guard activeThreadId != threadId else {
             return
         }
         readyThreadIDs.insert(threadId)
+        // Show the banner only on the first unread completion, not on every later sync refresh.
+        if !wasAlreadyReady {
+            presentThreadCompletionBannerIfNeeded(threadId: threadId)
+        }
     }
 
     // Marks a thread as failed only when the user is not already viewing it.
@@ -129,10 +137,16 @@ extension CodexService {
         turnId: String?,
         state: CodexTurnTerminalState
     ) {
+        let previousState = latestTurnTerminalStateByThread[threadId]
         latestTurnTerminalStateByThread[threadId] = state
         if let turnId {
             terminalStateByTurnID[turnId] = state
         }
+        triggerRunCompletionHapticIfNeeded(
+            threadId: threadId,
+            state: state,
+            previousState: previousState
+        )
     }
 
     // Sets the active thread and lazily hydrates old messages from server history.
@@ -1664,9 +1678,43 @@ extension CodexService {
 // ─── Private helpers ──────────────────────────────────────────
 
 private extension CodexService {
+    // Reuses the sidebar "ready" signal to surface a lightweight in-app banner for off-screen chats.
+    func presentThreadCompletionBannerIfNeeded(threadId: String) {
+        guard let thread = threads.first(where: { $0.id == threadId }) else {
+            return
+        }
+
+        threadCompletionBanner = CodexThreadCompletionBanner(
+            threadId: threadId,
+            title: thread.displayTitle
+        )
+    }
+
     // Bumps a thread-local revision whenever its message timeline changes.
     func noteMessagesChanged(for threadId: String) {
         messageRevisionByThread[threadId, default: 0] &+= 1
+    }
+
+    // Mirrors the stop-button teardown moment with a single success haptic when a live run really finishes.
+    func triggerRunCompletionHapticIfNeeded(
+        threadId: String,
+        state: CodexTurnTerminalState,
+        previousState: CodexTurnTerminalState?
+    ) {
+        guard state == .completed,
+              previousState != .completed,
+              isAppInForeground else {
+            return
+        }
+
+        let wasActivelyRunning = activeTurnIdByThread[threadId] != nil
+            || runningThreadIDs.contains(threadId)
+            || protectedRunningFallbackThreadIDs.contains(threadId)
+        guard wasActivelyRunning else {
+            return
+        }
+
+        HapticFeedback.shared.triggerNotificationFeedback(type: .success)
     }
 
     // Late activity notifications can arrive after turn/completed.

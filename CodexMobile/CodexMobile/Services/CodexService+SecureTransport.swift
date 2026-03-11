@@ -65,6 +65,9 @@ extension CodexService {
             phoneEphemeralPublicKey: clientHello.phoneEphemeralPublicKey
         )
         guard serverHello.protocolVersion == codexSecureProtocolVersion else {
+            presentBridgeUpdatePrompt(
+                message: "This bridge is using a different secure transport version. Update the Remodex package on your Mac and try again."
+            )
             throw CodexSecureTransportError.incompatibleVersion(
                 "This bridge is using a different secure transport version. Update Remodex on the iPhone or Mac and try again."
             )
@@ -175,6 +178,7 @@ extension CodexService {
         pendingHandshake = nil
         secureConnectionState = .encrypted
         secureMacFingerprint = codexSecureFingerprint(for: serverHello.macIdentityPublicKey)
+        bridgeUpdatePrompt = nil
 
         if handshakeMode == .qrBootstrap {
             trustMac(deviceId: macDeviceId, publicKey: serverHello.macIdentityPublicKey)
@@ -289,6 +293,15 @@ extension CodexService {
 }
 
 private extension CodexService {
+    // Centralizes the bridge-update guidance so every mismatch shows the same Mac command.
+    func presentBridgeUpdatePrompt(message: String) {
+        bridgeUpdatePrompt = CodexBridgeUpdatePrompt(
+            title: "Update the Remodex package on your Mac",
+            message: message,
+            command: "npm install -g remodex@latest"
+        )
+    }
+
     func sendWireControlMessage<Value: Encodable>(_ value: Value) async throws {
         let data = try JSONEncoder().encode(value)
         guard let text = String(data: data, encoding: .utf8) else {
@@ -336,6 +349,7 @@ private extension CodexService {
             lastErrorMessage = secureError.message
             if secureError.code == "update_required" {
                 secureConnectionState = .updateRequired
+                presentBridgeUpdatePrompt(message: secureError.message)
             } else if secureError.code == "pairing_expired"
                 || secureError.code == "phone_not_trusted"
                 || secureError.code == "phone_identity_changed"

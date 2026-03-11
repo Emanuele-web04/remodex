@@ -36,6 +36,18 @@ struct CodexSecureControlWaiter {
     let continuation: CheckedContinuation<String, Error>
 }
 
+struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let command: String
+}
+
+struct CodexThreadCompletionBanner: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let threadId: String
+    let title: String
+}
 
 enum CodexThreadRunBadgeState: Equatable, Sendable {
     case running
@@ -135,6 +147,10 @@ final class CodexService {
     var lastAppliedBridgeOutboundSeq = 0
     var secureConnectionState: CodexSecureConnectionState = .notPaired
     var secureMacFingerprint: String?
+    // Keeps the bridge-update UX visible even if connection cleanup resets secure transport state.
+    var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
+    // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
+    var threadCompletionBanner: CodexThreadCompletionBanner?
 
     // --- Internal wiring ------------------------------------------------------
 

@@ -187,39 +187,17 @@ private struct FileChangeActionButtons: View {
     }
 }
 
-private let remodexMarkdownGitHubSecondaryBackground = DynamicColor(
-    light: Color(red: 247 / 255, green: 247 / 255, blue: 249 / 255),
-    dark: Color(red: 37 / 255, green: 38 / 255, blue: 42 / 255)
-)
-
-private let remodexMarkdownGitHubLink = DynamicColor(
-    light: Color(red: 44 / 255, green: 101 / 255, blue: 207 / 255),
-    dark: Color(red: 76 / 255, green: 142 / 255, blue: 248 / 255)
-)
-
 struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
     var enablesSelection: Bool = false
 
-    // Mirrors Textual's GitHub inline style and only swaps the code font to the app mono font.
-    private var inlineStyle: InlineStyle {
-        InlineStyle()
-            .code(
-                .font(AppFont.mono(.body)),
-                .fontScale(0.85),
-                .backgroundColor(remodexMarkdownGitHubSecondaryBackground)
-            )
-            .strong(.fontWeight(.semibold))
-            .link(.foregroundColor(remodexMarkdownGitHubLink))
-    }
-
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
+        // Keep prose on the app font, but let Textual own markdown/code layout to avoid block sizing regressions.
         let baseView = StructuredText(markdown: transformed)
             .font(AppFont.body())
-            .textual.inlineStyle(inlineStyle)
-            .textual.codeBlockStyle(RemodexMarkdownCodeBlockStyle())
+            .textual.structuredTextStyle(.gitHub)
 
         if enablesSelection {
             baseView
@@ -227,22 +205,6 @@ struct MarkdownTextView: View {
         } else {
             baseView
         }
-    }
-}
-
-private struct RemodexMarkdownCodeBlockStyle: StructuredText.CodeBlockStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        Overflow {
-            configuration.label
-                .font(AppFont.mono(.body))
-                .textual.lineSpacing(.fontScaled(0.225))
-                .textual.fontScale(0.85)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(16)
-        }
-        .background(remodexMarkdownGitHubSecondaryBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .textual.blockSpacing(.init(top: 0, bottom: 16))
     }
 }
 

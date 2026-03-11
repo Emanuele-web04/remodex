@@ -19,6 +19,8 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var isShowingManualScanner = false
     @State private var isSearchActive = false
+    @State private var isRetryingBridgeUpdate = false
+    @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
 
     private let sidebarWidth: CGFloat = 330
@@ -83,6 +85,47 @@ struct ContentView: View {
                     await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
                 }
             }
+            .onChange(of: codex.threadCompletionBanner) { _, banner in
+                scheduleThreadCompletionBannerDismiss(for: banner)
+            }
+            // Presents actionable recovery when the saved bridge package is too old/new for this app build.
+            .sheet(item: bridgeUpdatePromptBinding, onDismiss: {
+                codex.bridgeUpdatePrompt = nil
+                isRetryingBridgeUpdate = false
+            }) { prompt in
+                BridgeUpdateSheet(
+                    prompt: prompt,
+                    isRetrying: isRetryingBridgeUpdate,
+                    onRetry: {
+                        retryBridgeConnectionAfterUpdate()
+                    },
+                    onScanNewQR: {
+                        presentManualScannerForBridgeRecovery()
+                    },
+                    onDismiss: {
+                        codex.bridgeUpdatePrompt = nil
+                    }
+                )
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+            .overlay(alignment: .top) {
+                if let banner = codex.threadCompletionBanner {
+                    ThreadCompletionBannerView(
+                        banner: banner,
+                        onTap: {
+                            openCompletedThreadFromBanner(banner)
+                        },
+                        onDismiss: {
+                            dismissThreadCompletionBanner()
+                        }
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.88), value: codex.threadCompletionBanner?.id)
     }
 
     @ViewBuilder
@@ -307,6 +350,84 @@ struct ContentView: View {
             isSidebarOpen = open
             sidebarDragOffset = 0
         }
+    }
+
+    private var bridgeUpdatePromptBinding: Binding<CodexBridgeUpdatePrompt?> {
+        Binding(
+            get: { codex.bridgeUpdatePrompt },
+            set: { codex.bridgeUpdatePrompt = $0 }
+        )
+    }
+
+    // Re-tries the saved relay session after the user updates the Mac package.
+    private func retryBridgeConnectionAfterUpdate() {
+        guard !isRetryingBridgeUpdate else {
+            return
+        }
+
+        isRetryingBridgeUpdate = true
+
+        Task {
+            await viewModel.toggleConnection(codex: codex)
+            await MainActor.run {
+                isRetryingBridgeUpdate = false
+            }
+        }
+    }
+
+    // Switches the user back to the QR path when the old relay session is no longer useful.
+    private func presentManualScannerForBridgeRecovery() {
+        codex.bridgeUpdatePrompt = nil
+        isRetryingBridgeUpdate = false
+
+        Task {
+            await viewModel.stopAutoReconnectForManualScan(codex: codex)
+            await MainActor.run {
+                isShowingManualScanner = true
+            }
+        }
+    }
+
+    // Auto-hides the banner unless the user taps through to the finished chat first.
+    private func scheduleThreadCompletionBannerDismiss(for banner: CodexThreadCompletionBanner?) {
+        threadCompletionBannerDismissTask?.cancel()
+
+        guard let banner else {
+            threadCompletionBannerDismissTask = nil
+            return
+        }
+
+        threadCompletionBannerDismissTask = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                if codex.threadCompletionBanner?.id == banner.id {
+                    codex.threadCompletionBanner = nil
+                }
+            }
+        }
+    }
+
+    // Lets the user jump straight to the chat that produced the ready sidebar badge.
+    private func openCompletedThreadFromBanner(_ banner: CodexThreadCompletionBanner) {
+        threadCompletionBannerDismissTask?.cancel()
+        codex.threadCompletionBanner = nil
+
+        guard let thread = codex.threads.first(where: { $0.id == banner.threadId }) else {
+            return
+        }
+
+        if isSidebarOpen {
+            closeSidebar()
+        }
+        selectedThread = thread
+        codex.activeThreadId = thread.id
+        codex.markThreadAsViewed(thread.id)
+    }
+
+    private func dismissThreadCompletionBanner() {
+        threadCompletionBannerDismissTask?.cancel()
+        codex.threadCompletionBanner = nil
     }
 
     // Keeps selected thread coherent with server list updates.

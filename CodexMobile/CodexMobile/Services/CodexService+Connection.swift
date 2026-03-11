@@ -104,6 +104,7 @@ extension CodexService {
         failedThreadIDs.removeAll()
         runningThreadWatchByID.removeAll()
         pendingNotificationOpenThreadID = nil
+        clearTransientConnectionPrompts()
         endBackgroundRunGraceTask(reason: "disconnect")
         if !preserveReconnectIntent {
             shouldAutoReconnectOnForeground = false
@@ -138,6 +139,7 @@ extension CodexService {
         lastAppliedBridgeOutboundSeq = 0
         secureConnectionState = .notPaired
         secureMacFingerprint = nil
+        clearTransientConnectionPrompts()
     }
 
     func initializeSession() async throws {
@@ -297,6 +299,7 @@ extension CodexService {
         failedThreadIDs.removeAll()
         runningThreadWatchByID.removeAll()
         pendingNotificationOpenThreadID = nil
+        clearTransientConnectionPrompts()
         endBackgroundRunGraceTask(reason: "server-switch")
         shouldAutoReconnectOnForeground = false
         connectionRecoveryState = .idle
@@ -305,6 +308,12 @@ extension CodexService {
         resumedThreadIDs.removeAll()
         clearHydrationCaches()
         resetSecureTransportState()
+    }
+
+    // Clears UI-only recovery prompts that should not survive a relay/context teardown.
+    func clearTransientConnectionPrompts() {
+        bridgeUpdatePrompt = nil
+        threadCompletionBanner = nil
     }
 
     // Detects runtimes that still reject `initialize.capabilities`.

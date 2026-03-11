@@ -11,6 +11,12 @@ class HapticFeedback {
 
     private init() {}
 
+    // Uses the system notification generator for stateful success/failure cues.
+    func triggerNotificationFeedback(type: UINotificationFeedbackGenerator.FeedbackType = .success) {
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(type)
+    }
+
     func triggerImpactFeedback(style: UIImpactFeedbackGenerator.FeedbackStyle = .medium) {
         let generator = UIImpactFeedbackGenerator(style: style)
         generator.impactOccurred()
