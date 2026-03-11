@@ -591,6 +591,10 @@ struct TurnView: View {
                 .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             Text("Hi! How can I help you?")
                 .font(AppFont.title2(weight: .semibold))
+            // Reinforces the secure transport upgrade right where a new chat starts.
+            Text("Chats are End-to-end encrypted")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

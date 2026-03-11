@@ -89,23 +89,14 @@ struct OnboardingView: View {
                             .buttonStyle(.plain)
                             .padding(.top, 4)
 
-                            // GitHub link
-                            Button {
-                                if let url = URL(string: "https://github.com/Emanuele-web04/remodex") {
-                                    UIApplication.shared.open(url)
-                                }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image("GitHub_Invertocat_Black")
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(width: 14, height: 14)
-                                    Text("Star on GitHub")
-                                        .font(AppFont.caption(weight: .medium))
-                                }
-                                .foregroundStyle(.secondary)
+                            // Calls out the new privacy posture without adding another action to onboarding.
+                            HStack(spacing: 6) {
+                                Image(systemName: "lock.shield")
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text("End-to-end encrypted")
+                                    .font(AppFont.caption(weight: .medium))
                             }
-                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                             .padding(.top, 2)
                         }
                         .padding(.horizontal, 24)

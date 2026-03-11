@@ -414,7 +414,7 @@ private struct SettingsArchivedChatsCard: View {
 private struct SettingsAboutCard: View {
     var body: some View {
         SettingsCard(title: "About") {
-            Text("Remodex connects to Codex running locally on your Mac via a relay WebSocket. The relay sees only ciphertext and connection metadata once the secure handshake completes.")
+            Text("Chats are End-to-end encrypted between your iPhone and Mac. The relay only sees ciphertext and connection metadata after the secure handshake completes.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
         }
