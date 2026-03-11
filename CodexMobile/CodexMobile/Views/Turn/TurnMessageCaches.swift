@@ -2,10 +2,10 @@
 // Purpose: Thread-safe caches for parsed markdown, file-change state, command status, diff chunks,
 //   code comment directives, and file-change grouping.
 // Layer: View Support
-// Exports: MarkdownRenderableTextCache, MessageRowMarkdownSegmentCache, FileChangeRenderState,
+// Exports: MarkdownRenderableTextCache, FileChangeRenderState,
 //   CommandExecutionStatusCache, FileChangeSystemRenderCache, PerFileDiffChunk, PerFileDiffParser,
 //   PerFileDiffChunkCache, CodeCommentDirectiveContentCache, FileChangeGroupingCache
-// Depends on: Foundation, TurnMessageRegexCache, TurnFileChangeSummaryParser, TurnDiffLineKind, MarkdownRenderProfile, MarkdownSegment
+// Depends on: Foundation, TurnMessageRegexCache, TurnFileChangeSummaryParser, TurnDiffLineKind, MarkdownRenderProfile
 
 import Foundation
 
@@ -39,35 +39,6 @@ enum MarkdownRenderableTextCache {
         lock.unlock()
 
         return rendered
-    }
-}
-
-enum MessageRowMarkdownSegmentCache {
-    static let maxEntries = 512
-    static let lock = NSLock()
-    static var segmentsByKey: [String: [MarkdownSegment]] = [:]
-
-    // Reuses parsed segments during stream updates to avoid repeated regex work.
-    static func segments(messageID: String, text: String) -> [MarkdownSegment] {
-        let cacheKey = "\(messageID)|\(text.hashValue)"
-
-        lock.lock()
-        if let cached = segmentsByKey[cacheKey] {
-            lock.unlock()
-            return cached
-        }
-        lock.unlock()
-
-        let parsed = parseMarkdownSegments(text)
-
-        lock.lock()
-        if segmentsByKey.count >= maxEntries {
-            segmentsByKey.removeAll(keepingCapacity: true)
-        }
-        segmentsByKey[cacheKey] = parsed
-        lock.unlock()
-
-        return parsed
     }
 }
 

@@ -57,6 +57,8 @@ struct TurnGitActionsToolbarButton: View {
     let gitSyncState: String?
     let onSelect: (TurnGitActionKind) -> Void
 
+    private let minToolbarButtonSize: CGFloat = 28
+
     private var syncStatusColor: Color? {
         switch gitSyncState {
         case "behind_only", "diverged", "dirty_and_behind":
@@ -132,6 +134,9 @@ struct TurnGitActionsToolbarButton: View {
         .controlSize(.small)
         .buttonStyle(.plain)
         .foregroundStyle(.primary)
+        .padding(4)
+        .frame(minWidth: minToolbarButtonSize, minHeight: minToolbarButtonSize)
+        .contentShape(Circle())
         .adaptiveToolbarItem(in: Circle())
         .accessibilityLabel("Git actions")
         .accessibilityValue(syncStatusAccessibilityValue ?? "Repository status unavailable")

@@ -39,7 +39,7 @@ struct SidebarSearchField: View {
             }
             .padding(.leading, 10)
             .padding(.trailing, 16)
-            .padding(.vertical, 12)
+            .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 Color(.tertiarySystemFill).opacity(0.8),

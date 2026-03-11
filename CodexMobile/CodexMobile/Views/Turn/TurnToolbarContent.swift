@@ -133,7 +133,7 @@ private struct TurnToolbarDiffTotalsLabel: View {
             }
         }
         .font(AppFont.mono(.caption))
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 4)
         .frame(minWidth: minPillWidth, minHeight: 28)
         .contentShape(Capsule())
         .fixedSize(horizontal: true, vertical: false)

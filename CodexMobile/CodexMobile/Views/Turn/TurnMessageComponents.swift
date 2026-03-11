@@ -16,68 +16,6 @@ private let enablesInlineMarkdownSelectionInTimeline = false
 
 // ─── Message content views ──────────────────────────────────────────
 
-private struct CodeBlockView: View {
-    let language: String?
-    let code: String
-    let profile: MarkdownRenderProfile
-    @State private var copied = false
-
-    // Uses strict patch validation to avoid rendering prose snippets as diffs.
-    // Result is cached to avoid O(n) line scan on every cell creation during scroll.
-    private var isDiffBlock: Bool {
-        DiffBlockDetectionCache.isDiffBlock(code: code, profile: profile)
-    }
-
-    var body: some View {
-        if isDiffBlock {
-            ScrollView(.horizontal, showsIndicators: false) {
-                TurnDiffCodeBlockView(code: code)
-            }
-            .padding(.vertical, 4)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            VStack(alignment: .leading, spacing: 0) {
-                // Header bar: language label + copy button
-                HStack {
-                    Text(language?.isEmpty == false ? language! : "code")
-                        .font(AppFont.caption2())
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button {
-                        UIPasteboard.general.string = code
-                        withAnimation { copied = true }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            withAnimation { copied = false }
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                            Text(copied ? "Copied" : "Copy")
-                        }
-                        .font(AppFont.caption2())
-                        .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(.quaternarySystemFill))
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(code)
-                        .font(AppFont.mono(.callout))
-                        .textSelection(.enabled)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color(.tertiarySystemGroupedBackground))
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-        }
-    }
-}
-
 // ─── File-Change Recap UI ─────────────────────────────────────
 
 // MARK: - FileChangeInlineActionRow
@@ -891,22 +829,11 @@ struct MessageRow: View, Equatable {
             }
 
             if !bodyText.isEmpty {
-                let segments = MessageRowMarkdownSegmentCache.segments(
-                    messageID: message.id,
-                    text: bodyText
+                MarkdownTextView(
+                    text: bodyText,
+                    profile: .assistantProse,
+                    enablesSelection: enablesInlineMarkdownSelectionInTimeline
                 )
-                ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
-                    switch segment {
-                    case .prose(let prose):
-                        MarkdownTextView(
-                            text: prose,
-                            profile: .assistantProse,
-                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
-                        )
-                    case .codeBlock(let language, let code):
-                        CodeBlockView(language: language, code: code, profile: .assistantProse)
-                    }
-                }
             }
 
             if message.isStreaming && showsStreamingAnimations {
