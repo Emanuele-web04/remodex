@@ -79,6 +79,8 @@ This is a monorepo with a local bridge, an iOS app target, and its tests:
 
 ## Install the Bridge
 
+<sub>Current npm package version: `1.1.3`</sub>
+
 ```sh
 npm install -g remodex
 ```

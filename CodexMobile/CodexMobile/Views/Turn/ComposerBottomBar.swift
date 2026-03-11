@@ -18,6 +18,7 @@ struct ComposerBottomBar: View {
     let selectedReasoningEffort: String?
     let selectedReasoningTitle: String
     let reasoningMenuDisabled: Bool
+    let selectedServiceTier: CodexServiceTier?
     let remainingAttachmentSlots: Int
     let isComposerInteractionLocked: Bool
     let isSendDisabled: Bool
@@ -30,6 +31,7 @@ struct ComposerBottomBar: View {
     // Callbacks
     let onSelectModel: (String) -> Void
     let onSelectReasoning: (String) -> Void
+    let onSelectServiceTier: (CodexServiceTier?) -> Void
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
@@ -87,6 +89,8 @@ struct ComposerBottomBar: View {
                 }
                 .accessibilityLabel("Resume queued messages")
             }
+
+            serviceTierMenu
 
             if isThreadRunning {
                 Button {
@@ -228,6 +232,35 @@ struct ComposerBottomBar: View {
         .padding(.vertical, metaVerticalPadding)
         .padding(.horizontal, 4)
         .foregroundStyle(Color(.plan))
+    }
+
+    private var serviceTierMenu: some View {
+        Menu {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                onSelectServiceTier(nil)
+            } label: {
+                Label("Normal", systemImage: "tortoise")
+            }
+
+            ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onSelectServiceTier(tier)
+                } label: {
+                    Label(tier.displayName, systemImage: tier.iconName)
+                }
+            }
+        } label: {
+            // Keep speed compact in the composer so it reads like a per-message meta toggle.
+            Image(systemName: selectedServiceTier?.iconName ?? "tortoise")
+                .font(metaTextFont)
+                .fontWeight(.regular)
+                .frame(width: plusTapTargetSide, height: plusTapTargetSide)
+                .contentShape(Capsule())
+        }
+        .accessibilityLabel(selectedServiceTier?.displayName ?? "Normal speed")
+        .tint(metaLabelColor)
     }
 
     private var queueBadge: some View {

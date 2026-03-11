@@ -2,7 +2,7 @@
 // Purpose: Thread-safe caches for parsed markdown, file-change state, command status, diff chunks,
 //   code comment directives, and file-change grouping.
 // Layer: View Support
-// Exports: MarkdownRenderableTextCache, FileChangeRenderState,
+// Exports: MarkdownRenderableTextCache, FileChangeRenderState, MessageRowRenderModel,
 //   CommandExecutionStatusCache, FileChangeSystemRenderCache, PerFileDiffChunk, PerFileDiffParser,
 //   PerFileDiffChunkCache, CodeCommentDirectiveContentCache, FileChangeGroupingCache
 // Depends on: Foundation, TurnMessageRegexCache, TurnFileChangeSummaryParser, TurnDiffLineKind, MarkdownRenderProfile
@@ -46,6 +46,110 @@ struct FileChangeRenderState {
     let summary: TurnFileChangeSummary?
     let actionEntries: [TurnFileChangeSummaryEntry]
     let bodyText: String
+}
+
+struct MessageRowRenderModel {
+    let codeCommentContent: CodeCommentDirectiveContent?
+    let fileChangeState: FileChangeRenderState?
+    let fileChangeGroups: [FileChangeGroup]
+    let thinkingContent: ThinkingDisclosureContent?
+    let thinkingText: String?
+    let commandStatus: CommandExecutionStatusModel?
+
+    static let empty = MessageRowRenderModel(
+        codeCommentContent: nil,
+        fileChangeState: nil,
+        fileChangeGroups: [],
+        thinkingContent: nil,
+        thinkingText: nil,
+        commandStatus: nil
+    )
+}
+
+enum MessageRowRenderModelCache {
+    static let maxEntries = 512
+    static let lock = NSLock()
+    static var cache: [String: MessageRowRenderModel] = [:]
+
+    // Bundles all row-level parsing into one cache hit so timeline cells avoid repeated parser churn.
+    static func model(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
+        let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(displayText.hashValue)"
+
+        lock.lock()
+        if let cached = cache[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+
+        let built = buildModel(for: message, displayText: displayText)
+
+        lock.lock()
+        if cache.count >= maxEntries {
+            cache.removeAll(keepingCapacity: true)
+        }
+        cache[key] = built
+        lock.unlock()
+
+        return built
+    }
+
+    private static func buildModel(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
+        switch message.role {
+        case .assistant:
+            return MessageRowRenderModel(
+                codeCommentContent: CodeCommentDirectiveContentCache.content(messageID: message.id, text: displayText),
+                fileChangeState: nil,
+                fileChangeGroups: [],
+                thinkingContent: nil,
+                thinkingText: nil,
+                commandStatus: nil
+            )
+        case .user:
+            return .empty
+        case .system:
+            switch message.kind {
+            case .thinking:
+                let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(from: message.text)
+                return MessageRowRenderModel(
+                    codeCommentContent: nil,
+                    fileChangeState: nil,
+                    fileChangeGroups: [],
+                    thinkingContent: thinkingText.isEmpty
+                        ? ThinkingDisclosureContent(sections: [], fallbackText: "")
+                        : ThinkingDisclosureContentCache.content(messageID: message.id, text: thinkingText),
+                    thinkingText: thinkingText,
+                    commandStatus: nil
+                )
+            case .fileChange:
+                let fileChangeState = FileChangeSystemRenderCache.renderState(
+                    messageID: message.id,
+                    sourceText: displayText
+                )
+                let actionEntries = fileChangeState.actionEntries
+                let allEntries = actionEntries.isEmpty ? (fileChangeState.summary?.entries ?? []) : actionEntries
+                return MessageRowRenderModel(
+                    codeCommentContent: nil,
+                    fileChangeState: fileChangeState,
+                    fileChangeGroups: FileChangeGroupingCache.grouped(messageID: message.id, entries: allEntries),
+                    thinkingContent: nil,
+                    thinkingText: nil,
+                    commandStatus: nil
+                )
+            case .commandExecution:
+                return MessageRowRenderModel(
+                    codeCommentContent: nil,
+                    fileChangeState: nil,
+                    fileChangeGroups: [],
+                    thinkingContent: nil,
+                    thinkingText: nil,
+                    commandStatus: CommandExecutionStatusCache.status(messageID: message.id, text: displayText)
+                )
+            case .plan, .userInputPrompt, .chat:
+                return .empty
+            }
+        }
+    }
 }
 
 enum CommandExecutionStatusCache {

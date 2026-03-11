@@ -8,6 +8,7 @@ import SwiftUI
 
 struct AssistantRevertSheetState: Identifiable, Equatable {
     let changeSet: AIChangeSet
+    let presentation: AssistantRevertPresentation
     var preview: RevertPreviewResult?
     var isLoadingPreview: Bool
     var isApplying: Bool
@@ -43,6 +44,17 @@ struct AssistantRevertSheet: View {
         return preview.canRevert && !state.isLoadingPreview && !state.isApplying
     }
 
+    // Uses preview outcome as the final gate while preserving the initial safe/warning intent.
+    private var effectiveRiskLevel: AssistantRevertRiskLevel {
+        if let preview = state.preview, !preview.canRevert {
+            return .blocked
+        }
+        if let errorMessage = state.errorMessage, !errorMessage.isEmpty {
+            return .blocked
+        }
+        return state.presentation.riskLevel
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -61,7 +73,7 @@ struct AssistantRevertSheet: View {
                 }
                 .padding(16)
             }
-            .navigationTitle("Revert changes")
+            .navigationTitle("Undo this response")
             .navigationBarTitleDisplayMode(.inline)
             .adaptiveNavigationBar()
             .toolbar {
@@ -74,7 +86,7 @@ struct AssistantRevertSheet: View {
 
                 ToolbarItem(placement: .confirmationAction) {
                     if canConfirm {
-                        Button(state.isApplying ? "Reverting..." : "Revert") {
+                        Button(state.isApplying ? "Undoing..." : "Undo") {
                             onConfirm()
                         }
                         .disabled(state.isApplying)
@@ -87,7 +99,7 @@ struct AssistantRevertSheet: View {
 
     private var infoCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Only changes from this AI response will be reverted. Other local changes stay untouched unless they overlap.")
+            Text("This action will try to undo only the changes from this response. Later local edits stay untouched unless they overlap.")
                 .font(AppFont.body())
                 .foregroundStyle(.primary)
 
@@ -114,6 +126,13 @@ struct AssistantRevertSheet: View {
                     }
                 }
             }
+
+            if effectiveRiskLevel == .warning {
+                issueSection(
+                    title: "Needs review",
+                    lines: warningLines
+                )
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -134,15 +153,7 @@ struct AssistantRevertSheet: View {
 
     private func previewCard(_ preview: RevertPreviewResult) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            if preview.canRevert {
-                Label("This response can be safely reverted.", systemImage: "checkmark.circle.fill")
-                    .font(AppFont.body(weight: .semibold))
-                    .foregroundStyle(.green)
-            } else {
-                Label("Could not safely revert.", systemImage: "exclamationmark.triangle.fill")
-                    .font(AppFont.body(weight: .semibold))
-                    .foregroundStyle(.orange)
-            }
+            previewStatusLabel(preview)
 
             if !preview.stagedFiles.isEmpty {
                 issueSection(
@@ -167,6 +178,39 @@ struct AssistantRevertSheet: View {
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var warningLines: [String] {
+        var lines: [String] = []
+        if let warningText = state.presentation.warningText, !warningText.isEmpty {
+            lines.append(warningText)
+        }
+        lines.append(contentsOf: state.presentation.overlappingFiles.map { "\($0): also touched by another chat." })
+        return lines
+    }
+
+    @ViewBuilder
+    private func previewStatusLabel(_ preview: RevertPreviewResult) -> some View {
+        switch effectiveRiskLevel {
+        case .safe:
+            Label("This response can be undone cleanly.", systemImage: "checkmark.circle.fill")
+                .font(AppFont.body(weight: .semibold))
+                .foregroundStyle(.green)
+        case .warning:
+            if preview.canRevert {
+                Label("Undo looks clean, but other chats touched some of these files.", systemImage: "exclamationmark.circle.fill")
+                    .font(AppFont.body(weight: .semibold))
+                    .foregroundStyle(.orange)
+            } else {
+                Label("Could not safely undo this response.", systemImage: "exclamationmark.triangle.fill")
+                    .font(AppFont.body(weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+        case .blocked:
+            Label("Could not safely undo this response.", systemImage: "exclamationmark.triangle.fill")
+                .font(AppFont.body(weight: .semibold))
+                .foregroundStyle(.orange)
+        }
     }
 
     private func errorCard(_ errorMessage: String) -> some View {

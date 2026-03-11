@@ -1,7 +1,8 @@
 // FILE: AIChangeSetModels.swift
 // Purpose: Models assistant-scoped code change sets and revert preview/apply results.
 // Layer: Model
-// Exports: AIChangeSet, AIFileChange, RevertPreviewResult, RevertApplyResult, AssistantRevertPresentation
+// Exports: AIChangeSet, AIFileChange, RevertPreviewResult, RevertApplyResult,
+//   AssistantRevertRiskLevel, AssistantRevertPresentation
 // Depends on: Foundation, CryptoKit
 
 import Foundation
@@ -195,10 +196,35 @@ struct RevertApplyResult: Sendable {
     }
 }
 
+enum AssistantRevertRiskLevel: String, Equatable, Hashable, Sendable {
+    case safe
+    case warning
+    case blocked
+}
+
 struct AssistantRevertPresentation: Equatable, Hashable, Sendable {
     let title: String
     let isEnabled: Bool
     let helperText: String?
+    let riskLevel: AssistantRevertRiskLevel
+    let warningText: String?
+    let overlappingFiles: [String]
+
+    init(
+        title: String,
+        isEnabled: Bool,
+        helperText: String?,
+        riskLevel: AssistantRevertRiskLevel = .safe,
+        warningText: String? = nil,
+        overlappingFiles: [String] = []
+    ) {
+        self.title = title
+        self.isEnabled = isEnabled
+        self.helperText = helperText
+        self.riskLevel = riskLevel
+        self.warningText = warningText
+        self.overlappingFiles = overlappingFiles
+    }
 }
 
 struct AIUnifiedPatchAnalysis: Hashable, Sendable {

@@ -84,6 +84,11 @@ extension CodexService {
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
+    func setSelectedServiceTier(_ serviceTier: CodexServiceTier?) {
+        selectedServiceTier = serviceTier
+        persistRuntimeSelections()
+    }
+
     func setSelectedAccessMode(_ accessMode: CodexAccessMode) {
         selectedAccessMode = accessMode
         persistRuntimeSelections()
@@ -126,6 +131,13 @@ extension CodexService {
 
     func runtimeModelIdentifierForTurn() -> String? {
         selectedModelOption()?.model
+    }
+
+    func runtimeServiceTierForTurn() -> String? {
+        guard supportsServiceTier else {
+            return nil
+        }
+        return selectedServiceTier?.rawValue
     }
 
     func runtimeSandboxPolicyObject(for accessMode: CodexAccessMode) -> JSONValue {
@@ -303,6 +315,12 @@ private extension CodexService {
             defaults.set(selectedReasoningEffort, forKey: Self.selectedReasoningEffortDefaultsKey)
         } else {
             defaults.removeObject(forKey: Self.selectedReasoningEffortDefaultsKey)
+        }
+
+        if let selectedServiceTier {
+            defaults.set(selectedServiceTier.rawValue, forKey: Self.selectedServiceTierDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.selectedServiceTierDefaultsKey)
         }
 
         defaults.set(selectedAccessMode.rawValue, forKey: Self.selectedAccessModeDefaultsKey)

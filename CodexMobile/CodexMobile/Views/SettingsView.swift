@@ -12,6 +12,8 @@ struct SettingsView: View {
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
 
     private let runtimeAutoValue = "__AUTO__"
+    private let runtimeNormalValue = "__NORMAL__"
+    private let settingsAccentColor = Color(.plan)
 
     var body: some View {
         ScrollView {
@@ -52,7 +54,7 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .tint(.cyan)
+                .tint(settingsAccentColor)
             }
 
             HStack {
@@ -66,8 +68,22 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .tint(.cyan)
+                .tint(settingsAccentColor)
                 .disabled(runtimeReasoningOptions.isEmpty)
+            }
+
+            HStack {
+                Text("Speed")
+                Spacer()
+                Picker("Speed", selection: runtimeServiceTierSelection) {
+                    Text("Normal").tag(runtimeNormalValue)
+                    ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
+                        Text(tier.displayName).tag(tier.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(settingsAccentColor)
             }
 
             HStack {
@@ -80,7 +96,7 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .tint(.cyan)
+                .tint(settingsAccentColor)
             }
         }
     }
@@ -216,6 +232,17 @@ struct SettingsView: View {
             set: { codex.setSelectedAccessMode($0) }
         )
     }
+
+    private var runtimeServiceTierSelection: Binding<String> {
+        Binding(
+            get: { codex.selectedServiceTier?.rawValue ?? runtimeNormalValue },
+            set: { selection in
+                codex.setSelectedServiceTier(
+                    selection == runtimeNormalValue ? nil : CodexServiceTier(rawValue: selection)
+                )
+            }
+        )
+    }
 }
 
 // MARK: - Reusable card / button components
@@ -282,6 +309,7 @@ struct SettingsButton: View {
 private struct SettingsAppearanceCard: View {
     @Binding var appFontStyle: AppFont.Style
     @AppStorage("codex.useLiquidGlass") private var useLiquidGlass = true
+    private let settingsAccentColor = Color(.plan)
 
     var body: some View {
         SettingsCard(title: "Appearance") {
@@ -295,7 +323,7 @@ private struct SettingsAppearanceCard: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .tint(.cyan)
+                .tint(settingsAccentColor)
             }
 
             Text(appFontStyle.subtitle)
@@ -306,7 +334,7 @@ private struct SettingsAppearanceCard: View {
                 Divider()
 
                 Toggle("Liquid Glass", isOn: $useLiquidGlass)
-                    .tint(.cyan)
+                    .tint(settingsAccentColor)
 
                 Text(useLiquidGlass
                      ? "Liquid Glass effects are enabled."

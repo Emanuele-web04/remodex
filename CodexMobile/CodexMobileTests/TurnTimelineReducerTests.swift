@@ -627,6 +627,42 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(blockInfo, [nil])
     }
 
+    func testScrollTrackerPausesAutomaticScrollingDuringUserDrag() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.isAutomaticScrollingPaused(
+                isUserDragging: true,
+                cooldownUntil: nil,
+                now: Date()
+            )
+        )
+    }
+
+    func testScrollTrackerPausesAutomaticScrollingDuringCooldown() {
+        let now = Date()
+
+        XCTAssertTrue(
+            TurnScrollStateTracker.isAutomaticScrollingPaused(
+                isUserDragging: false,
+                cooldownUntil: now.addingTimeInterval(0.1),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.isAutomaticScrollingPaused(
+                isUserDragging: false,
+                cooldownUntil: now.addingTimeInterval(-0.1),
+                now: now
+            )
+        )
+    }
+
+    func testScrollTrackerBuildsCooldownDeadlineInFuture() {
+        let now = Date()
+        let deadline = TurnScrollStateTracker.cooldownDeadline(after: now)
+
+        XCTAssertGreaterThan(deadline.timeIntervalSince(now), 0)
+    }
+
     // Builds compact fixtures for reducer invariants.
     private func makeMessage(
         id: String,
@@ -658,4 +694,59 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
         return message
     }
+}
+
+private enum MarkdownSegment {
+    case text(String)
+    case codeBlock(language: String?, code: String)
+}
+
+private func parseMarkdownSegments(_ source: String) -> [MarkdownSegment] {
+    let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    var segments: [MarkdownSegment] = []
+    var currentText: [String] = []
+    var currentCode: [String] = []
+    var currentLanguage: String?
+    var isInsideCodeBlock = false
+
+    func flushText() {
+        guard !currentText.isEmpty else { return }
+        segments.append(.text(currentText.joined(separator: "\n")))
+        currentText.removeAll(keepingCapacity: true)
+    }
+
+    func flushCode() {
+        segments.append(.codeBlock(language: currentLanguage, code: currentCode.joined(separator: "\n")))
+        currentCode.removeAll(keepingCapacity: true)
+        currentLanguage = nil
+    }
+
+    for line in lines {
+        if line.hasPrefix("```") {
+            if isInsideCodeBlock {
+                flushCode()
+                isInsideCodeBlock = false
+            } else {
+                flushText()
+                let languageTag = String(line.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+                currentLanguage = languageTag.isEmpty ? nil : languageTag
+                isInsideCodeBlock = true
+            }
+            continue
+        }
+
+        if isInsideCodeBlock {
+            currentCode.append(line)
+        } else {
+            currentText.append(line)
+        }
+    }
+
+    if isInsideCodeBlock {
+        flushCode()
+    } else {
+        flushText()
+    }
+
+    return segments
 }

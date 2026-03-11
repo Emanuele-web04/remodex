@@ -400,9 +400,9 @@ extension CodexService {
         }
 
         if let threadId, let turnID {
-            activeTurnIdByThread[threadId] = turnID
+            setActiveTurnID(turnID, for: threadId)
             threadIdByTurnID[turnID] = threadId
-            protectedRunningFallbackThreadIDs.remove(threadId)
+            setProtectedRunningFallback(false, for: threadId)
             confirmLatestPendingUserMessage(threadId: threadId, turnId: turnID)
             // Do NOT create the assistant placeholder here.
             // It will be created lazily by ensureStreamingAssistantMessage()
@@ -410,7 +410,7 @@ extension CodexService {
             // gives it an orderIndex lower than thinking/reasoning messages
             // that arrive before the actual response, causing wrong visual order.
         } else if let threadId {
-            protectedRunningFallbackThreadIDs.insert(threadId)
+            setProtectedRunningFallback(true, for: threadId)
         }
 
         if let turnID {
@@ -588,7 +588,7 @@ extension CodexService {
                 }
             }
             markTurnCompleted(threadId: threadId, turnId: activeTurnIdForThread)
-            runningThreadIDs.remove(threadId)
+            clearRunningState(for: threadId)
 
             if normalizedStatusType.contains("error") {
                 markFailedIfUnread(threadId: threadId)
@@ -2704,6 +2704,18 @@ extension CodexService {
 
         let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // Reuses the same "first meaningful string wins" rule for array-built candidate lists.
+    private func firstNonEmptyString(_ candidates: [String?]) -> String? {
+        for candidate in candidates {
+            guard let candidate else { continue }
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
     }
 
     private func hasStreamingMessage(in threadId: String) -> Bool {

@@ -35,27 +35,39 @@ extension CodexService {
     // Starts a new thread and stores it in local state.
     func startThread(preferredProjectPath: String? = nil) async throws -> CodexThread {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
-        let params = CodexThreadStartProjectBinding.makeThreadStartParams(
-            modelIdentifier: runtimeModelIdentifierForTurn(),
-            preferredProjectPath: normalizedPreferredProjectPath
-        )
-        let response = try await sendRequestWithSandboxFallback(method: "thread/start", baseParams: params)
+        var includesServiceTier = runtimeServiceTierForTurn() != nil
 
-        guard let result = response.result,
-              let resultObject = result.objectValue,
-              let threadValue = resultObject["thread"],
-              let decodedThread = decodeModel(CodexThread.self, from: threadValue) else {
-            throw CodexServiceError.invalidResponse("thread/start response missing thread")
+        while true {
+            let params = CodexThreadStartProjectBinding.makeThreadStartParams(
+                modelIdentifier: runtimeModelIdentifierForTurn(),
+                preferredProjectPath: normalizedPreferredProjectPath,
+                serviceTier: includesServiceTier ? runtimeServiceTierForTurn() : nil
+            )
+
+            do {
+                let response = try await sendRequestWithSandboxFallback(method: "thread/start", baseParams: params)
+
+                guard let result = response.result,
+                      let resultObject = result.objectValue,
+                      let threadValue = resultObject["thread"],
+                      let decodedThread = decodeModel(CodexThread.self, from: threadValue) else {
+                    throw CodexServiceError.invalidResponse("thread/start response missing thread")
+                }
+
+                let thread = CodexThreadStartProjectBinding.applyPreferredProjectFallback(
+                    to: decodedThread,
+                    preferredProjectPath: normalizedPreferredProjectPath
+                )
+                upsertThread(thread)
+                resumedThreadIDs.insert(thread.id)
+                activeThreadId = thread.id
+                return thread
+            } catch {
+                guard consumeUnsupportedServiceTier(error, includesServiceTier: &includesServiceTier) else {
+                    throw error
+                }
+            }
         }
-
-        let thread = CodexThreadStartProjectBinding.applyPreferredProjectFallback(
-            to: decodedThread,
-            preferredProjectPath: normalizedPreferredProjectPath
-        )
-        upsertThread(thread)
-        resumedThreadIDs.insert(thread.id)
-        activeThreadId = thread.id
-        return thread
     }
 
     // Sends user input as a new turn against an existing (or newly created) thread.
@@ -205,7 +217,7 @@ extension CodexService {
                         threadId: resolvedThreadID,
                         useSnakeCaseParams: false
                     )
-                    activeTurnIdByThread[resolvedThreadID] = refreshedTurnID
+                    setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
                     threadIdByTurnID[refreshedTurnID] = resolvedThreadID
                     return
                 } catch {
@@ -217,7 +229,7 @@ extension CodexService {
                                 threadId: resolvedThreadID,
                                 useSnakeCaseParams: true
                             )
-                            activeTurnIdByThread[resolvedThreadID] = refreshedTurnID
+                            setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
                             threadIdByTurnID[refreshedTurnID] = resolvedThreadID
                             return
                         } catch {
@@ -401,7 +413,11 @@ enum CodexThreadStartProjectBinding {
         return normalized.isEmpty ? "/" : normalized
     }
 
-    static func makeThreadStartParams(modelIdentifier: String?, preferredProjectPath: String?) -> RPCObject {
+    static func makeThreadStartParams(
+        modelIdentifier: String?,
+        preferredProjectPath: String?,
+        serviceTier: String?
+    ) -> RPCObject {
         var params: RPCObject = [:]
 
         if let modelIdentifier {
@@ -410,6 +426,10 @@ enum CodexThreadStartProjectBinding {
 
         if let preferredProjectPath {
             params["cwd"] = .string(preferredProjectPath)
+        }
+
+        if let serviceTier {
+            params["serviceTier"] = .string(serviceTier)
         }
 
         return params
@@ -610,8 +630,8 @@ extension CodexService {
 
             if let runningTurnID = snapshot.interruptibleTurnID {
                 markThreadAsRunning(normalizedThreadID)
-                protectedRunningFallbackThreadIDs.remove(normalizedThreadID)
-                activeTurnIdByThread[normalizedThreadID] = runningTurnID
+                setProtectedRunningFallback(false, for: normalizedThreadID)
+                setActiveTurnID(runningTurnID, for: normalizedThreadID)
                 threadIdByTurnID[runningTurnID] = normalizedThreadID
                 activeTurnId = runningTurnID
                 return true
@@ -619,13 +639,13 @@ extension CodexService {
 
             if snapshot.hasInterruptibleTurnWithoutID {
                 markThreadAsRunning(normalizedThreadID)
-                protectedRunningFallbackThreadIDs.insert(normalizedThreadID)
+                setProtectedRunningFallback(true, for: normalizedThreadID)
             } else {
-                runningThreadIDs.remove(normalizedThreadID)
-                protectedRunningFallbackThreadIDs.remove(normalizedThreadID)
+                clearRunningState(for: normalizedThreadID)
             }
 
-            if let existingTurnID = activeTurnIdByThread.removeValue(forKey: normalizedThreadID) {
+            if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                setActiveTurnID(nil, for: normalizedThreadID)
                 if threadIdByTurnID[existingTurnID] == normalizedThreadID {
                     threadIdByTurnID.removeValue(forKey: existingTurnID)
                 }
@@ -653,12 +673,13 @@ extension CodexService {
             : ""
         activeThreadId = threadId
         markThreadAsRunning(threadId)
-        protectedRunningFallbackThreadIDs.insert(threadId)
+        setProtectedRunningFallback(true, for: threadId)
 
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
+        var includesServiceTier = runtimeServiceTierForTurn() != nil
 
         while true {
             do {
@@ -669,7 +690,8 @@ extension CodexService {
                     skillMentions: skillMentions,
                     imageURLKey: imageURLKey,
                     includeStructuredSkillItems: includeStructuredSkillItems,
-                    collaborationMode: effectiveCollaborationMode
+                    collaborationMode: effectiveCollaborationMode,
+                    includeServiceTier: includesServiceTier
                 )
                 let response = try await sendRequestWithSandboxFallback(
                     method: "turn/start",
@@ -709,6 +731,10 @@ extension CodexService {
                     supportsTurnCollaborationMode = false
                     effectiveCollaborationMode = nil
                     didDowngradePlanModeForRuntime = true
+                    continue
+                }
+
+                if consumeUnsupportedServiceTier(error, includesServiceTier: &includesServiceTier) {
                     continue
                 }
 
@@ -781,10 +807,10 @@ extension CodexService {
                     turnId: resolvedTurnID
                 )
                 activeTurnId = resolvedTurnID
-                activeTurnIdByThread[normalizedThreadID] = resolvedTurnID
+                setActiveTurnID(resolvedTurnID, for: normalizedThreadID)
                 threadIdByTurnID[resolvedTurnID] = normalizedThreadID
                 markThreadAsRunning(normalizedThreadID)
-                protectedRunningFallbackThreadIDs.remove(normalizedThreadID)
+                setProtectedRunningFallback(false, for: normalizedThreadID)
                 return
             } catch {
                 if includeStructuredSkillItems,
@@ -809,7 +835,7 @@ extension CodexService {
                             didRetryWithRefreshedTurnID = true
                             currentExpectedTurnID = refreshedTurnID
                             activeTurnId = refreshedTurnID
-                            activeTurnIdByThread[normalizedThreadID] = refreshedTurnID
+                            setActiveTurnID(refreshedTurnID, for: normalizedThreadID)
                             threadIdByTurnID[refreshedTurnID] = normalizedThreadID
                             continue
                         }
@@ -912,7 +938,8 @@ extension CodexService {
         skillMentions: [CodexTurnSkillMention],
         imageURLKey: String,
         includeStructuredSkillItems: Bool,
-        collaborationMode: CodexCollaborationModeKind?
+        collaborationMode: CodexCollaborationModeKind?,
+        includeServiceTier: Bool
     ) throws -> RPCObject {
         var params: RPCObject = [
             "threadId": .string(threadId),
@@ -933,6 +960,10 @@ extension CodexService {
         }
         if let effort = selectedReasoningEffortForSelectedModel() {
             params["effort"] = .string(effort)
+        }
+        if includeServiceTier,
+           let serviceTier = runtimeServiceTierForTurn() {
+            params["serviceTier"] = .string(serviceTier)
         }
         if let collaborationModePayload = try buildCollaborationModePayload(for: collaborationMode) {
             params["collaborationMode"] = collaborationModePayload
@@ -974,7 +1005,7 @@ extension CodexService {
         threadId: String
     ) throws {
         markMessageDeliveryState(threadId: threadId, messageId: pendingMessageId, state: .failed)
-        runningThreadIDs.remove(threadId)
+        clearRunningState(for: threadId)
         if shouldTreatAsThreadNotFound(error) {
             throw error
         }
@@ -1003,9 +1034,9 @@ extension CodexService {
 
         if let turnID = resolvedTurnID {
             activeTurnId = turnID
-            activeTurnIdByThread[threadId] = turnID
+            setActiveTurnID(turnID, for: threadId)
             threadIdByTurnID[turnID] = threadId
-            protectedRunningFallbackThreadIDs.remove(threadId)
+            setProtectedRunningFallback(false, for: threadId)
             beginAssistantMessage(threadId: threadId, turnId: turnID)
         }
 

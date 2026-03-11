@@ -22,42 +22,22 @@ struct TurnView: View {
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
-        let activeTurnID = codex.activeTurnID(for: thread.id)
+        let timelineState = codex.timelineState(for: thread.id)
+        let renderSnapshot = timelineState.renderSnapshot
+        let activeTurnID = renderSnapshot.activeTurnID
         let gitWorkingDirectory = thread.gitWorkingDirectory
-        let isThreadRunning = activeTurnID != nil || codex.runningThreadIDs.contains(thread.id)
+        let isThreadRunning = renderSnapshot.isThreadRunning
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
-        let latestTurnTerminalState = codex.latestTurnTerminalState(for: thread.id)
-        let stoppedTurnIDs = codex.stoppedTurnIDs(for: thread.id)
-        let rawMessages = codex.messages(for: thread.id)
-        let timelineChangeToken = codex.messageRevision(for: thread.id)
-        let projectedMessages: [CodexMessage] = {
-            viewModel.updateProjectedTimeline(
-                threadID: thread.id,
-                messages: rawMessages,
-                changeToken: timelineChangeToken
-            )
-            return viewModel.projectedMessages
-        }()
-        let assistantRevertStatesByMessageID = projectedMessages.reduce(into: [String: AssistantRevertPresentation]()) {
-            partialResult, message in
-            if let presentation = codex.assistantRevertPresentation(
-                for: message,
-                workingDirectory: gitWorkingDirectory
-            ) {
-                partialResult[message.id] = presentation
-            }
-        }
-        let liveRepoRefreshSignal = repoRefreshSignal(from: rawMessages)
 
         return TurnConversationContainerView(
             threadID: thread.id,
-            messages: projectedMessages,
-            timelineChangeToken: timelineChangeToken,
+            messages: renderSnapshot.messages,
+            timelineChangeToken: renderSnapshot.timelineChangeToken,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning,
-            latestTurnTerminalState: latestTurnTerminalState,
-            stoppedTurnIDs: stoppedTurnIDs,
-            assistantRevertStatesByMessageID: assistantRevertStatesByMessageID,
+            latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
+            stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
+            assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
             errorMessage: codex.lastErrorMessage,
             shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
             isScrolledToBottom: isScrolledToBottomBinding,
@@ -224,8 +204,8 @@ struct TurnView: View {
                 alertApprovalRequest = approvalForThread
             }
         )
-        .onChange(of: liveRepoRefreshSignal) { _, _ in
-            guard showsGitControls, liveRepoRefreshSignal != nil else { return }
+        .onChange(of: renderSnapshot.repoRefreshSignal) { _, newValue in
+            guard showsGitControls, newValue != nil else { return }
             viewModel.scheduleGitStatusRefresh(
                 codex: codex,
                 workingDirectory: gitWorkingDirectory,
@@ -396,12 +376,18 @@ struct TurnView: View {
 
     private func startAssistantRevertPreview(message: CodexMessage, gitWorkingDirectory: String?) {
         guard let gitWorkingDirectory,
-              let changeSet = codex.readyChangeSet(forAssistantMessage: message) else {
+              let changeSet = codex.readyChangeSet(forAssistantMessage: message),
+              let presentation = codex.assistantRevertPresentation(
+                for: message,
+                workingDirectory: gitWorkingDirectory
+              ),
+              presentation.isEnabled else {
             return
         }
 
         assistantRevertSheetState = AssistantRevertSheetState(
             changeSet: changeSet,
+            presentation: presentation,
             preview: nil,
             isLoadingPreview: true,
             isApplying: false,
@@ -489,18 +475,6 @@ struct TurnView: View {
             workingDirectory: gitWorkingDirectory,
             threadID: thread.id
         )
-    }
-
-    // Tracks the latest repo-affecting system row so git totals can refresh during active runs.
-    private func repoRefreshSignal(from messages: [CodexMessage]) -> String? {
-        guard let latestRepoMessage = messages.last(where: { message in
-            guard message.role == .system else { return false }
-            return message.kind == .fileChange || message.kind == .commandExecution
-        }) else {
-            return nil
-        }
-
-        return "\(latestRepoMessage.id)|\(latestRepoMessage.text.count)|\(latestRepoMessage.isStreaming)"
     }
 
     private var isPhotoPickerPresentedBinding: Binding<Bool> {

@@ -243,6 +243,9 @@ extension CodexService {
         }
 
         threads = sortThreads(Array(merged.values))
+        assistantRevertStateCacheByThread.removeAll()
+        refreshBusyRepoRootsAndDependentTimelineStates()
+        refreshAllThreadTimelineStates()
 
         if activeThreadId == nil {
             activeThreadId = threads.first(where: { $0.syncState == .live })?.id
@@ -250,8 +253,7 @@ extension CodexService {
     }
 
     func handleMissingThread(_ threadId: String) {
-        runningThreadIDs.remove(threadId)
-        protectedRunningFallbackThreadIDs.remove(threadId)
+        clearRunningState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
         if let index = threads.firstIndex(where: { $0.id == threadId }) {
@@ -268,7 +270,8 @@ extension CodexService {
             !key.hasPrefix("\(threadId)|item:")
         }
 
-        if let turnId = activeTurnIdByThread.removeValue(forKey: threadId) {
+        if let turnId = activeTurnID(for: threadId) {
+            setActiveTurnID(nil, for: threadId)
             threadIdByTurnID.removeValue(forKey: turnId)
             if activeTurnId == turnId {
                 activeTurnId = nil
@@ -289,12 +292,14 @@ extension CodexService {
             }
         }
 
+        removeThreadTimelineState(for: threadId)
+
         debugSyncLog("thread archived locally: \(threadId)")
     }
 
     func archiveThread(_ threadId: String) {
-        runningThreadIDs.remove(threadId)
-        protectedRunningFallbackThreadIDs.remove(threadId)
+        clearRunningState(for: threadId)
+        removeThreadTimelineState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
         if let index = threads.firstIndex(where: { $0.id == threadId }) {
@@ -304,7 +309,8 @@ extension CodexService {
         hydratedThreadIDs.remove(threadId)
         resumedThreadIDs.remove(threadId)
 
-        if let turnId = activeTurnIdByThread.removeValue(forKey: threadId) {
+        if let turnId = activeTurnID(for: threadId) {
+            setActiveTurnID(nil, for: threadId)
             threadIdByTurnID.removeValue(forKey: turnId)
             if activeTurnId == turnId { activeTurnId = nil }
         }
@@ -383,8 +389,8 @@ extension CodexService {
 
     // Centralizes local-only thread cleanup so repo-group deletion can reuse it safely.
     private func removeThreadLocally(_ threadId: String, persistAsDeleted: Bool) {
-        runningThreadIDs.remove(threadId)
-        protectedRunningFallbackThreadIDs.remove(threadId)
+        clearRunningState(for: threadId)
+        removeThreadTimelineState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
         threads.removeAll { $0.id == threadId }
@@ -398,7 +404,8 @@ extension CodexService {
             !key.hasPrefix("\(threadId)|item:")
         }
 
-        if let turnId = activeTurnIdByThread.removeValue(forKey: threadId) {
+        if let turnId = activeTurnID(for: threadId) {
+            setActiveTurnID(nil, for: threadId)
             threadIdByTurnID.removeValue(forKey: turnId)
             if activeTurnId == turnId { activeTurnId = nil }
         }

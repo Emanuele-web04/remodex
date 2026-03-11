@@ -235,6 +235,34 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.turnTerminalState(for: turnID), .stopped)
     }
 
+    func testStoppedCompletionUpdatesThreadStoppedTurnCache() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        sendTurnCompletedStopped(service: service, threadID: threadID, turnID: turnID)
+
+        XCTAssertEqual(service.stoppedTurnIDs(for: threadID), Set([turnID]))
+        XCTAssertEqual(service.timelineState(for: threadID).renderSnapshot.stoppedTurnIDs, Set([turnID]))
+    }
+
+    func testTimelineStateTracksLatestRepoRefreshSignal() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.appendSystemMessage(
+            threadId: threadID,
+            text: "Status: completed\n\nPath: Sources/App.swift\nKind: update\nTotals: +1 -0",
+            kind: .fileChange
+        )
+
+        let state = service.timelineState(for: threadID)
+
+        XCTAssertNotNil(state.repoRefreshSignal)
+        XCTAssertEqual(state.repoRefreshSignal, state.renderSnapshot.repoRefreshSignal)
+    }
+
     func testErrorWithWillRetryDoesNotMarkFailed() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

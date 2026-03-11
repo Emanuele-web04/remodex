@@ -43,12 +43,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Cached per-render artifacts to avoid O(n) recomputation inside the body.
     @State private var cachedBlockInfoByMessageID: [String: String] = [:]
     @State private var cachedLastFileChangeMessageID: String? = nil
+    @State private var cachedNewestStreamingMessageID: String? = nil
     @State private var blockInfoInputKey: Int = 0
     @State private var scrollSessionThreadID: String?
     @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
     @State private var initialRecoverySnapPendingThreadID: String?
     @State private var initialRecoverySnapTask: Task<Void, Never>?
     @State private var followBottomScrollTask: Task<Void, Never>?
+    @State private var isUserDraggingScroll = false
+    @State private var userScrollCooldownUntil: Date?
 
     /// The tail slice of messages currently rendered in the timeline.
     private var visibleMessages: ArraySlice<CodexMessage> {
@@ -111,6 +114,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                                     copyBlockText: cachedBlockInfoByMessageID[message.id],
                                     showInlineCommit: message.id == cachedLastFileChangeMessageID,
                                     showsStreamingAnimations: isScrolledToBottom
+                                        && message.id == cachedNewestStreamingMessageID
                                 )
                                 .equatable()
                                 .environment(\.assistantRevertAction, onTapAssistantRevert)
@@ -136,6 +140,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     TapGesture().onEnded {
                         onTapOutsideComposer()
                     }
+                )
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { _ in
+                            handleUserScrollDragChanged()
+                        }
+                        .onEnded { _ in
+                            handleUserScrollDragEnded()
+                        }
                 )
                 .onScrollGeometryChange(for: ScrollBottomGeometry.self) { geometry in
                     let vh = geometry.visibleRect.height
@@ -195,6 +208,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     footer(scrollToBottomAction: {
                         autoScrollMode = .followBottom
                         initialRecoverySnapPendingThreadID = nil
+                        isUserDraggingScroll = false
+                        userScrollCooldownUntil = nil
                         scrollToBottom(using: proxy, animated: true)
                     })
                 }
@@ -234,13 +249,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         cachedLastFileChangeMessageID = !isThreadRunning
             ? visible.last(where: { $0.role == .system && $0.kind == .fileChange })?.id
             : nil
+        cachedNewestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
     }
 
-    // Hashes structural fields that drive block aggregation and inline commit placement.
-    // Excludes message.text intentionally: text hashing is O(n) over potentially large
-    // strings and the copy-button text is hidden during streaming anyway.  Structural
-    // changes (count, isStreaming flip, isThreadRunning) already trigger a fresh recompute
-    // that picks up the final text content.
+    // Hashes the fields that change copy-block aggregation or inline action placement.
+    // Include message text too because thread/resume can reconcile completed rows in place.
     private func blockInfoInputKey(for messages: [CodexMessage]) -> Int {
         var hasher = Hasher()
         hasher.combine(messages.count)
@@ -255,6 +268,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             hasher.combine(message.kind)
             hasher.combine(message.turnId)
             hasher.combine(message.isStreaming)
+            hasher.combine(message.text)
         }
 
         return hasher.finalize()
@@ -333,6 +347,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         scrollSessionThreadID = threadID
         visibleTailCount = Self.pageSize
         isScrolledToBottom = true
+        isUserDraggingScroll = false
+        userScrollCooldownUntil = nil
         autoScrollMode = shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
         initialRecoverySnapPendingThreadID = threadID
     }
@@ -364,6 +380,24 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
+    // Gives user drag intent precedence over follow-bottom so streaming never wrestles the scroll gesture.
+    private func handleUserScrollDragChanged() {
+        guard !isUserDraggingScroll else { return }
+        isUserDraggingScroll = true
+        userScrollCooldownUntil = nil
+        followBottomScrollTask?.cancel()
+        followBottomScrollTask = nil
+        if autoScrollMode != .anchorAssistantResponse, !isScrolledToBottom {
+            autoScrollMode = .manual
+        }
+    }
+
+    // Preserves user-controlled deceleration for a short cooldown before auto-follow can resume.
+    private func handleUserScrollDragEnded() {
+        isUserDraggingScroll = false
+        userScrollCooldownUntil = TurnScrollStateTracker.cooldownDeadline()
+    }
+
     // Repairs the initial white/blank viewport race by doing a deferred snap, then
     // one follow-up verification snap after the footer/lazy rows finish settling.
     private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
@@ -372,6 +406,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
               !messages.isEmpty,
               viewportHeight > 0,
               autoScrollMode == .followBottom,
+              !shouldPauseAutomaticScrolling,
               !shouldAnchorToAssistantResponse else {
             return
         }
@@ -385,6 +420,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                   !messages.isEmpty,
                   viewportHeight > 0,
                   autoScrollMode == .followBottom,
+                  !shouldPauseAutomaticScrolling,
                   !shouldAnchorToAssistantResponse else {
                 initialRecoverySnapTask = nil
                 return
@@ -401,6 +437,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                   !messages.isEmpty,
                   viewportHeight > 0,
                   autoScrollMode == .followBottom,
+                  !shouldPauseAutomaticScrolling,
                   !shouldAnchorToAssistantResponse else {
                 initialRecoverySnapTask = nil
                 return
@@ -433,6 +470,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Centralizes all automatic scrolling so first-load recovery, response anchoring,
     // and bottom-following do not compete with one another.
     private func handleTimelineMutation(using proxy: ScrollViewProxy) {
+        guard !shouldPauseAutomaticScrolling else { return }
         performInitialRecoverySnapIfNeeded(using: proxy)
 
         switch autoScrollMode {
@@ -458,11 +496,19 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             guard !Task.isCancelled,
                   scrollSessionThreadID == expectedThreadID,
                   autoScrollMode == .followBottom,
+                  !shouldPauseAutomaticScrolling,
                   isScrolledToBottom else {
                 return
             }
             proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
         }
+    }
+
+    private var shouldPauseAutomaticScrolling: Bool {
+        TurnScrollStateTracker.isAutomaticScrollingPaused(
+            isUserDragging: isUserDraggingScroll,
+            cooldownUntil: userScrollCooldownUntil
+        )
     }
 
     /// For each message index, returns the aggregated assistant block text if the message

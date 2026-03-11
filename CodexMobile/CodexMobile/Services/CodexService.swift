@@ -87,6 +87,65 @@ enum CodexConnectionPhase: Equatable, Sendable {
     case connected
 }
 
+struct TurnTimelineRenderSnapshot: Equatable {
+    let threadID: String
+    let messages: [CodexMessage]
+    let timelineChangeToken: Int
+    let activeTurnID: String?
+    let isThreadRunning: Bool
+    let latestTurnTerminalState: CodexTurnTerminalState?
+    let stoppedTurnIDs: Set<String>
+    let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
+    let repoRefreshSignal: String?
+
+    static func empty(threadID: String) -> TurnTimelineRenderSnapshot {
+        TurnTimelineRenderSnapshot(
+            threadID: threadID,
+            messages: [],
+            timelineChangeToken: 0,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: [],
+            assistantRevertStatesByMessageID: [:],
+            repoRefreshSignal: nil
+        )
+    }
+}
+
+@MainActor
+@Observable
+final class ThreadTimelineState {
+    let threadID: String
+    var messages: [CodexMessage]
+    var messageRevision: Int
+    var activeTurnID: String?
+    var isThreadRunning: Bool
+    var latestTurnTerminalState: CodexTurnTerminalState?
+    var stoppedTurnIDs: Set<String>
+    var repoRefreshSignal: String?
+    var renderSnapshot: TurnTimelineRenderSnapshot
+
+    init(threadID: String) {
+        self.threadID = threadID
+        self.messages = []
+        self.messageRevision = 0
+        self.activeTurnID = nil
+        self.isThreadRunning = false
+        self.latestTurnTerminalState = nil
+        self.stoppedTurnIDs = []
+        self.repoRefreshSignal = nil
+        self.renderSnapshot = TurnTimelineRenderSnapshot.empty(threadID: threadID)
+    }
+}
+
+struct AssistantRevertStateCacheEntry {
+    let messageRevision: Int
+    let busyRepoRevision: Int
+    let revertStateRevision: Int
+    let statesByMessageID: [String: AssistantRevertPresentation]
+}
+
 @MainActor
 @Observable
 final class CodexService {
@@ -129,6 +188,7 @@ final class CodexService {
     var availableModels: [CodexModelOption] = []
     var selectedModelId: String?
     var selectedReasoningEffort: String?
+    var selectedServiceTier: CodexServiceTier?
     var selectedAccessMode: CodexAccessMode = .onRequest
     var isLoadingModels = false
     var modelsErrorMessage: String?
@@ -137,6 +197,8 @@ final class CodexService {
     var supportsStructuredSkillInput = true
     // Runtime compatibility flag for `turn/start.collaborationMode` plan turns.
     var supportsTurnCollaborationMode = false
+    // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
+    var supportsServiceTier = true
 
     // Relay session persistence
     var relaySessionId: String?
@@ -149,6 +211,7 @@ final class CodexService {
     var secureMacFingerprint: String?
     // Keeps the bridge-update UX visible even if connection cleanup resets secure transport state.
     var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
+    var hasPresentedServiceTierBridgeUpdatePrompt = false
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
 
@@ -200,6 +263,15 @@ final class CodexService {
     // Canonical repo roots keyed by observed working directories from bridge git/status responses.
     var repoRootByWorkingDirectory: [String: String] = [:]
     var knownRepoRoots: Set<String> = []
+    // Service-owned per-thread UI state keeps the active chat isolated from unrelated thread mutations.
+    @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
+    @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
+    @ObservationIgnored var latestAssistantOutputByThread: [String: String] = [:]
+    @ObservationIgnored var latestRepoAffectingMessageSignalByThread: [String: String] = [:]
+    @ObservationIgnored var assistantRevertStateCacheByThread: [String: AssistantRevertStateCacheEntry] = [:]
+    @ObservationIgnored var assistantRevertStateRevision: Int = 0
+    @ObservationIgnored var busyRepoRoots: Set<String> = []
+    @ObservationIgnored var busyRepoRootsRevision: Int = 0
 
     let encoder: JSONEncoder
     let decoder: JSONDecoder
@@ -210,6 +282,7 @@ final class CodexService {
 
     static let selectedModelIdDefaultsKey = "codex.selectedModelId"
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
+    static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
@@ -257,6 +330,17 @@ final class CodexService {
         let savedReasoning = defaults.string(forKey: Self.selectedReasoningEffortDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedReasoningEffort = (savedReasoning?.isEmpty == false) ? savedReasoning : nil
+
+        let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if savedServiceTier == "flex" {
+            self.selectedServiceTier = nil
+        } else if let savedServiceTier,
+           let parsedServiceTier = CodexServiceTier(rawValue: savedServiceTier) {
+            self.selectedServiceTier = parsedServiceTier
+        } else {
+            self.selectedServiceTier = nil
+        }
 
         if let savedAccessMode = defaults.string(forKey: Self.selectedAccessModeDefaultsKey),
            let parsedAccessMode = CodexAccessMode(rawValue: savedAccessMode) {

@@ -45,6 +45,7 @@ struct TurnComposerView: View {
     let selectedReasoningEffort: String?
     let selectedReasoningTitle: String
     let reasoningMenuDisabled: Bool
+    let selectedServiceTier: CodexServiceTier?
 
     let selectedAccessMode: CodexAccessMode
 
@@ -62,6 +63,7 @@ struct TurnComposerView: View {
 
     let onSelectModel: (String) -> Void
     let onSelectReasoning: (String) -> Void
+    let onSelectServiceTier: (CodexServiceTier?) -> Void
     let onSelectAccessMode: (CodexAccessMode) -> Void
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
@@ -207,6 +209,7 @@ struct TurnComposerView: View {
                     selectedReasoningEffort: selectedReasoningEffort,
                     selectedReasoningTitle: selectedReasoningTitle,
                     reasoningMenuDisabled: reasoningMenuDisabled,
+                    selectedServiceTier: selectedServiceTier,
                     remainingAttachmentSlots: remainingAttachmentSlots,
                     isComposerInteractionLocked: isComposerInteractionLocked,
                     isSendDisabled: isSendDisabled,
@@ -217,6 +220,7 @@ struct TurnComposerView: View {
                     isThreadRunning: isThreadRunning,
                     onSelectModel: onSelectModel,
                     onSelectReasoning: onSelectReasoning,
+                    onSelectServiceTier: onSelectServiceTier,
                     onTapAddImage: onTapAddImage,
                     onTapTakePhoto: onTapTakePhoto,
                     onSetPlanModeArmed: onSetPlanModeArmed,
@@ -396,6 +400,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 selectedReasoningEffort: nil,
                 selectedReasoningTitle: "High",
                 reasoningMenuDisabled: true,
+                selectedServiceTier: .fast,
                 selectedAccessMode: .onRequest,
                 showsGitBranchSelector: false,
                 isGitBranchSelectorEnabled: false,
@@ -410,6 +415,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 onRefreshGitBranches: {},
                 onSelectModel: { _ in },
                 onSelectReasoning: { _ in },
+                onSelectServiceTier: { _ in },
                 onSelectAccessMode: { _ in },
                 onTapAddImage: {},
                 onTapTakePhoto: {},

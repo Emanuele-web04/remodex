@@ -18,18 +18,50 @@ extension CodexService {
         messageRevisionByThread[threadId] ?? 0
     }
 
+    // Returns the service-owned timeline state for a single thread.
+    func timelineState(for threadId: String) -> ThreadTimelineState {
+        if let existing = threadTimelineStateByThread[threadId] {
+            return existing
+        }
+
+        let state = ThreadTimelineState(threadID: threadId)
+        threadTimelineStateByThread[threadId] = state
+        refreshThreadTimelineState(for: threadId)
+        return state
+    }
+
+    // Prunes service-owned render caches so removed/archived threads do not keep stale snapshots alive.
+    func removeThreadTimelineState(for threadId: String) {
+        threadTimelineStateByThread.removeValue(forKey: threadId)
+        stoppedTurnIDsByThread.removeValue(forKey: threadId)
+        latestAssistantOutputByThread.removeValue(forKey: threadId)
+        latestRepoAffectingMessageSignalByThread.removeValue(forKey: threadId)
+        assistantRevertStateCacheByThread.removeValue(forKey: threadId)
+    }
+
+    // Clears every service-owned timeline cache during global teardown.
+    func removeAllThreadTimelineState() {
+        threadTimelineStateByThread.removeAll()
+        stoppedTurnIDsByThread.removeAll()
+        latestAssistantOutputByThread.removeAll()
+        latestRepoAffectingMessageSignalByThread.removeAll()
+        assistantRevertStateCacheByThread.removeAll()
+    }
+
     // Refreshes the derived output cache and bumps the thread timeline revision.
     func updateCurrentOutput(for threadId: String) {
         noteMessagesChanged(for: threadId)
-
-        guard activeThreadId == threadId else {
-            return
-        }
 
         let latestAssistantText = messagesByThread[threadId]?
             .reversed()
             .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
             .text ?? ""
+        latestAssistantOutputByThread[threadId] = latestAssistantText
+        refreshThreadTimelineState(for: threadId)
+
+        guard activeThreadId == threadId else {
+            return
+        }
 
         currentOutput = latestAssistantText
     }
@@ -37,6 +69,44 @@ extension CodexService {
     // Returns the currently running turn id for a specific thread, if any.
     func activeTurnID(for threadId: String) -> String? {
         activeTurnIdByThread[threadId]
+    }
+
+    // Updates the per-thread active turn mapping and refreshes dependent repo/timeline state.
+    func setActiveTurnID(_ turnId: String?, for threadId: String) {
+        if let turnId, !turnId.isEmpty {
+            activeTurnIdByThread[threadId] = turnId
+        } else {
+            activeTurnIdByThread.removeValue(forKey: threadId)
+        }
+        refreshBusyRepoRootsAndDependentTimelineStates()
+        refreshThreadTimelineState(for: threadId)
+    }
+
+    // Toggles the fallback running marker for pre-turn activity while keeping repo-busy state in sync.
+    func setProtectedRunningFallback(_ isActive: Bool, for threadId: String) {
+        if isActive {
+            protectedRunningFallbackThreadIDs.insert(threadId)
+        } else {
+            protectedRunningFallbackThreadIDs.remove(threadId)
+        }
+        refreshBusyRepoRootsAndDependentTimelineStates()
+        refreshThreadTimelineState(for: threadId)
+    }
+
+    // Clears running/fallback flags together when a thread finishes or disappears.
+    func clearRunningState(for threadId: String) {
+        runningThreadIDs.remove(threadId)
+        protectedRunningFallbackThreadIDs.remove(threadId)
+        refreshBusyRepoRootsAndDependentTimelineStates()
+        refreshThreadTimelineState(for: threadId)
+    }
+
+    // Clears every running marker during disconnect/cleanup so stale repo-busy state cannot leak.
+    func clearAllRunningState() {
+        runningThreadIDs.removeAll()
+        protectedRunningFallbackThreadIDs.removeAll()
+        refreshBusyRepoRootsAndDependentTimelineStates()
+        refreshAllThreadTimelineStates()
     }
 
     // Returns the latest real terminal outcome seen for a thread.
@@ -52,11 +122,7 @@ extension CodexService {
 
     // Returns turn ids that ended via interruption so copy actions can stay hidden.
     func stoppedTurnIDs(for threadId: String) -> Set<String> {
-        Set(
-            messages(for: threadId)
-                .compactMap(\.turnId)
-                .filter { terminalStateByTurnID[$0] == .stopped }
-        )
+        stoppedTurnIDsByThread[threadId] ?? []
     }
 
     // Returns the sidebar run badge state for a thread with deterministic priority.
@@ -88,6 +154,8 @@ extension CodexService {
         runningThreadIDs.insert(threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         clearOutcomeBadge(for: threadId)
+        refreshBusyRepoRootsAndDependentTimelineStates()
+        refreshThreadTimelineState(for: threadId)
         updateBackgroundRunGraceTask()
     }
 
@@ -143,6 +211,7 @@ extension CodexService {
         if let turnId {
             terminalStateByTurnID[turnId] = state
         }
+        refreshThreadTimelineState(for: threadId)
         triggerRunCompletionHapticIfNeeded(
             threadId: threadId,
             state: state,
@@ -1523,8 +1592,7 @@ extension CodexService {
 
     // Marks streaming assistant state complete once turn/completed arrives.
     func markTurnCompleted(threadId: String, turnId: String?) {
-        runningThreadIDs.remove(threadId)
-        protectedRunningFallbackThreadIDs.remove(threadId)
+        clearRunningState(for: threadId)
         clearRunningThreadWatch(threadId)
         let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
 
@@ -1551,9 +1619,9 @@ extension CodexService {
 
         if let resolvedTurnId,
            activeTurnIdByThread[threadId] == resolvedTurnId {
-            activeTurnIdByThread[threadId] = nil
+            setActiveTurnID(nil, for: threadId)
         } else if resolvedTurnId == nil {
-            activeTurnIdByThread[threadId] = nil
+            setActiveTurnID(nil, for: threadId)
         }
 
         if let resolvedTurnId,
@@ -1649,8 +1717,8 @@ extension CodexService {
 
         activeTurnId = nil
         activeTurnIdByThread.removeAll()
-        runningThreadIDs.removeAll()
-        protectedRunningFallbackThreadIDs.removeAll()
+        clearAllRunningState()
+        refreshAllThreadTimelineStates()
         streamingAssistantMessageByTurnID.removeAll()
         streamingSystemMessageByItemID.removeAll()
         threadIdByTurnID.removeAll()
@@ -1678,7 +1746,7 @@ extension CodexService {
 
 // ─── Private helpers ──────────────────────────────────────────
 
-private extension CodexService {
+extension CodexService {
     // Reuses the sidebar "ready" signal to surface a lightweight in-app banner for off-screen chats.
     func presentThreadCompletionBannerIfNeeded(threadId: String) {
         guard let thread = threads.first(where: { $0.id == threadId }) else {
@@ -1694,6 +1762,139 @@ private extension CodexService {
     // Bumps a thread-local revision whenever its message timeline changes.
     func noteMessagesChanged(for threadId: String) {
         messageRevisionByThread[threadId, default: 0] &+= 1
+    }
+
+    // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
+    func refreshThreadTimelineState(for threadId: String) {
+        let state = timelineState(for: threadId)
+        let messages = messagesByThread[threadId] ?? []
+        let revision = messageRevisionByThread[threadId] ?? 0
+        let activeTurnID = activeTurnIdByThread[threadId]
+        let isThreadRunning = activeTurnID != nil || runningThreadIDs.contains(threadId)
+        let stoppedTurnIDs = rebuildStoppedTurnIDs(for: threadId, messages: messages)
+        let latestTurnTerminalState = latestTurnTerminalStateByThread[threadId]
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        let repoRefreshSignal = buildRepoRefreshSignal(for: messages)
+        latestRepoAffectingMessageSignalByThread[threadId] = repoRefreshSignal
+        let assistantRevertStates = assistantRevertStates(
+            for: threadId,
+            projectedMessages: projectedMessages,
+            workingDirectory: gitWorkingDirectory(for: threadId),
+            messageRevision: revision,
+            revertStateRevision: assistantRevertStateRevision
+        )
+
+        state.messages = messages
+        state.messageRevision = revision
+        state.activeTurnID = activeTurnID
+        state.isThreadRunning = isThreadRunning
+        state.latestTurnTerminalState = latestTurnTerminalState
+        state.stoppedTurnIDs = stoppedTurnIDs
+        state.repoRefreshSignal = repoRefreshSignal
+        state.renderSnapshot = TurnTimelineRenderSnapshot(
+            threadID: threadId,
+            messages: projectedMessages,
+            timelineChangeToken: revision,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning,
+            latestTurnTerminalState: latestTurnTerminalState,
+            stoppedTurnIDs: stoppedTurnIDs,
+            assistantRevertStatesByMessageID: assistantRevertStates,
+            repoRefreshSignal: repoRefreshSignal
+        )
+    }
+
+    // Refreshes every known timeline state when repo-busy status changes across threads.
+    func refreshAllThreadTimelineStates() {
+        for threadId in threadTimelineStateByThread.keys {
+            refreshThreadTimelineState(for: threadId)
+        }
+    }
+
+    // Recomputes which repos are currently busy so revert buttons update without scanning all threads per row.
+    func refreshBusyRepoRootsAndDependentTimelineStates() {
+        let nextBusyRepoRoots = Set(
+            threads.compactMap { thread -> String? in
+                guard runningThreadIDs.contains(thread.id)
+                    || activeTurnIdByThread[thread.id] != nil
+                    || protectedRunningFallbackThreadIDs.contains(thread.id) else {
+                    return nil
+                }
+
+                return canonicalRepoIdentifier(for: thread.gitWorkingDirectory) ?? thread.gitWorkingDirectory
+            }
+        )
+
+        guard nextBusyRepoRoots != busyRepoRoots else {
+            return
+        }
+
+        busyRepoRoots = nextBusyRepoRoots
+        busyRepoRootsRevision &+= 1
+        refreshAllThreadTimelineStates()
+    }
+
+    // Keeps stopped-turn lookup thread-local so scroll/render code never rescans full transcripts.
+    func rebuildStoppedTurnIDs(for threadId: String, messages: [CodexMessage]) -> Set<String> {
+        let stoppedTurnIDs = Set(
+            messages.compactMap(\.turnId)
+                .filter { terminalStateByTurnID[$0] == .stopped }
+        )
+        stoppedTurnIDsByThread[threadId] = stoppedTurnIDs
+        return stoppedTurnIDs
+    }
+
+    // Tracks the latest repo-affecting system row so git refresh logic can stay out of the view body.
+    func buildRepoRefreshSignal(for messages: [CodexMessage]) -> String? {
+        guard let latestRepoMessage = messages.last(where: { message in
+            guard message.role == .system else { return false }
+            return message.kind == .fileChange || message.kind == .commandExecution
+        }) else {
+            return nil
+        }
+
+        return "\(latestRepoMessage.id)|\(latestRepoMessage.text.count)|\(latestRepoMessage.isStreaming)"
+    }
+
+    // Reuses a thread-local cache so assistant revert buttons only rebuild when timeline or repo-busy state changes.
+    func assistantRevertStates(
+        for threadId: String,
+        projectedMessages: [CodexMessage],
+        workingDirectory: String?,
+        messageRevision: Int,
+        revertStateRevision: Int
+    ) -> [String: AssistantRevertPresentation] {
+        if let cached = assistantRevertStateCacheByThread[threadId],
+           cached.messageRevision == messageRevision,
+           cached.busyRepoRevision == busyRepoRootsRevision,
+           cached.revertStateRevision == revertStateRevision {
+            return cached.statesByMessageID
+        }
+
+        let statesByMessageID = projectedMessages.reduce(into: [String: AssistantRevertPresentation]()) {
+            partialResult, message in
+            if let presentation = assistantRevertPresentation(
+                for: message,
+                workingDirectory: workingDirectory
+            ) {
+                partialResult[message.id] = presentation
+            }
+        }
+
+        assistantRevertStateCacheByThread[threadId] = AssistantRevertStateCacheEntry(
+            messageRevision: messageRevision,
+            busyRepoRevision: busyRepoRootsRevision,
+            revertStateRevision: revertStateRevision,
+            statesByMessageID: statesByMessageID
+        )
+        return statesByMessageID
+    }
+
+    // Invalidates revert presentations globally because sibling threads can change file-overlap risk.
+    func invalidateAssistantRevertStates() {
+        assistantRevertStateRevision &+= 1
+        assistantRevertStateCacheByThread.removeAll(keepingCapacity: true)
+        refreshAllThreadTimelineStates()
     }
 
     // Mirrors the stop-button teardown moment with a single success haptic when a live run really finishes.

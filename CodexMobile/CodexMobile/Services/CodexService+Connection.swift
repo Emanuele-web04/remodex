@@ -98,8 +98,12 @@ extension CodexService {
         messagePersistence.save(messagesByThread)
         assistantCompletionFingerprintByThread.removeAll()
         recentActivityLineByThread.removeAll()
-        runningThreadIDs.removeAll()
-        protectedRunningFallbackThreadIDs.removeAll()
+        removeAllThreadTimelineState()
+        assistantRevertStateCacheByThread.removeAll()
+        assistantRevertStateRevision = 0
+        supportsServiceTier = true
+        hasPresentedServiceTierBridgeUpdatePrompt = false
+        clearAllRunningState()
         readyThreadIDs.removeAll()
         failedThreadIDs.removeAll()
         runningThreadWatchByID.removeAll()
@@ -285,6 +289,7 @@ extension CodexService {
         activeThreadId = nil
         activeTurnId = nil
         activeTurnIdByThread.removeAll()
+        refreshAllThreadTimelineStates()
         threadIdByTurnID.removeAll()
         pendingApproval = nil
         currentOutput = ""
@@ -293,8 +298,12 @@ extension CodexService {
         modelsErrorMessage = nil
         assistantCompletionFingerprintByThread.removeAll()
         recentActivityLineByThread.removeAll()
-        runningThreadIDs.removeAll()
-        protectedRunningFallbackThreadIDs.removeAll()
+        removeAllThreadTimelineState()
+        assistantRevertStateCacheByThread.removeAll()
+        assistantRevertStateRevision = 0
+        supportsServiceTier = true
+        hasPresentedServiceTierBridgeUpdatePrompt = false
+        clearAllRunningState()
         readyThreadIDs.removeAll()
         failedThreadIDs.removeAll()
         runningThreadWatchByID.removeAll()

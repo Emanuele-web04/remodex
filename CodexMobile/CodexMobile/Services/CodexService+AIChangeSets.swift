@@ -30,6 +30,16 @@ enum AIChangeSetError: LocalizedError {
     }
 }
 
+private struct AIRevertOverlapAnalysis {
+    let affectedFiles: [String]
+    let overlappingFiles: [String]
+    let competingChangeSetIDs: [String]
+
+    var hasOverlap: Bool {
+        !overlappingFiles.isEmpty
+    }
+}
+
 extension CodexService {
     // Returns the change set associated with a specific assistant response, falling back to turn scope while streaming.
     func aiChangeSet(forAssistantMessage message: CodexMessage) -> AIChangeSet? {
@@ -47,7 +57,7 @@ extension CodexService {
         return nil
     }
 
-    // Builds assistant-row button state while keeping repo-wide run safety in one place.
+    // Builds assistant-row button state from response-local patch data plus same-repo safety checks.
     func assistantRevertPresentation(
         for message: CodexMessage,
         workingDirectory: String?
@@ -60,57 +70,78 @@ extension CodexService {
             return nil
         }
 
-        let repoBusy = hasActiveRun(in: changeSet.repoRoot ?? workingDirectory)
         let hasWorkingDirectory = normalizedWorkingDirectory(workingDirectory) != nil
+        let repoBusy = hasActiveRun(in: changeSet.repoRoot ?? workingDirectory)
+        let overlapAnalysis = revertOverlapAnalysis(for: changeSet, workingDirectory: workingDirectory)
 
         switch changeSet.status {
         case .ready:
-            if repoBusy {
-                return AssistantRevertPresentation(
-                    title: "Revert changes",
-                    isEnabled: false,
-                    helperText: "Finish the active run in this repo before reverting."
-                )
-            }
             if !hasWorkingDirectory {
                 return AssistantRevertPresentation(
-                    title: "Cannot revert",
+                    title: "Cannot undo",
                     isEnabled: false,
-                    helperText: "The selected local folder is not available on this Mac."
+                    helperText: "The selected local folder is not available on this Mac.",
+                    riskLevel: .blocked
                 )
             }
-            return AssistantRevertPresentation(title: "Revert changes", isEnabled: true, helperText: nil)
+            // Keep undo blocked while the repo is still live so preview/apply cannot race new writes.
+            if repoBusy {
+                return AssistantRevertPresentation(
+                    title: "Cannot undo",
+                    isEnabled: false,
+                    helperText: "Finish the active run in this repo before undoing this response.",
+                    riskLevel: .blocked
+                )
+            }
+            if overlapAnalysis.hasOverlap {
+                let warningText = "Other chats also changed \(overlapAnalysis.overlappingFiles.count) of these file\(overlapAnalysis.overlappingFiles.count == 1 ? "" : "s")."
+                return AssistantRevertPresentation(
+                    title: "Undo changes",
+                    isEnabled: true,
+                    helperText: "Review overlapping files before undoing this response.",
+                    riskLevel: .warning,
+                    warningText: warningText,
+                    overlappingFiles: overlapAnalysis.overlappingFiles
+                )
+            }
+            return AssistantRevertPresentation(
+                title: "Undo changes",
+                isEnabled: true,
+                helperText: "Only changes from this response will be reverted unless later edits overlap.",
+                riskLevel: .safe
+            )
         case .collecting:
             return AssistantRevertPresentation(
-                title: "Revert changes",
+                title: "Undo changes",
                 isEnabled: false,
-                helperText: "This response is still collecting its final patch."
+                helperText: "This response is still collecting its final patch.",
+                riskLevel: .blocked
             )
         case .reverted:
-            return AssistantRevertPresentation(title: "Reverted", isEnabled: false, helperText: nil)
+            return AssistantRevertPresentation(
+                title: "Already undone",
+                isEnabled: false,
+                helperText: nil,
+                riskLevel: .blocked
+            )
         case .failed, .notRevertable:
             return AssistantRevertPresentation(
-                title: "Cannot revert",
+                title: "Cannot undo",
                 isEnabled: false,
-                helperText: changeSet.unsupportedReasons.first
+                helperText: changeSet.unsupportedReasons.first,
+                riskLevel: .blocked
             )
         }
     }
 
-    // Blocks repo-scoped revert actions while any thread bound to the same repo is still running.
+    // Reuses the shared busy-repo snapshot so undo stays disabled during in-flight sibling runs.
     func hasActiveRun(in workingDirectory: String?) -> Bool {
         guard let normalizedWorkingDirectory = normalizedWorkingDirectory(workingDirectory) else {
             return false
         }
 
-        return threads.contains { thread in
-            guard repositoriesOverlap(thread.gitWorkingDirectory, normalizedWorkingDirectory) else {
-                return false
-            }
-            return runningThreadIDs.contains(thread.id)
-                || activeTurnIdByThread[thread.id] != nil
-                || protectedRunningFallbackThreadIDs.contains(thread.id)
-        }
+        let repoIdentifier = canonicalRepoIdentifier(for: normalizedWorkingDirectory) ?? normalizedWorkingDirectory
+        return busyRepoRoots.contains(repoIdentifier)
     }
 
     // Provides the latest finalized patch metadata for UI sheets and action handlers.
@@ -249,6 +280,7 @@ extension CodexService {
         aiChangeSetIDByAssistantMessageID[normalizedAssistantMessageId] = changeSetId
         finalizeChangeSetIfPossible(changeSetId: changeSetId)
         persistAIChangeSets()
+        invalidateAssistantRevertStates()
     }
 
     // Finalizes the change set once the turn has finished, even if the diff arrives slightly later.
@@ -260,6 +292,7 @@ extension CodexService {
 
         finalizeChangeSetIfPossible(changeSetId: changeSetId)
         persistAIChangeSets()
+        invalidateAssistantRevertStates()
     }
 
     // Remembers canonical repo roots so repo-scoped safety checks stay consistent across sibling chat folders.
@@ -268,11 +301,25 @@ extension CodexService {
             return
         }
 
+        var didChange = false
+
         knownRepoRoots.insert(normalizedRepoRoot)
-        repoRootByWorkingDirectory[normalizedRepoRoot] = normalizedRepoRoot
+        if repoRootByWorkingDirectory[normalizedRepoRoot] != normalizedRepoRoot {
+            repoRootByWorkingDirectory[normalizedRepoRoot] = normalizedRepoRoot
+            didChange = true
+        }
 
         if let normalizedWorkingDirectory = normalizedWorkingDirectory(workingDirectory) {
-            repoRootByWorkingDirectory[normalizedWorkingDirectory] = normalizedRepoRoot
+            if repoRootByWorkingDirectory[normalizedWorkingDirectory] != normalizedRepoRoot {
+                repoRootByWorkingDirectory[normalizedWorkingDirectory] = normalizedRepoRoot
+                didChange = true
+            }
+        }
+
+        // Rebuild repo-busy state immediately so sibling threads pick up the canonical root mid-run.
+        if didChange {
+            invalidateAssistantRevertStates()
+            refreshBusyRepoRootsAndDependentTimelineStates()
         }
     }
 
@@ -287,6 +334,30 @@ extension CodexService {
 }
 
 // ─── Private helpers ───────────────────────────────────────────────
+
+extension CodexService {
+    // Shares the thread-bound working directory with timeline/revert UI without exposing the full change-set helper surface.
+    func gitWorkingDirectory(for threadId: String) -> String? {
+        let workingDirectory = threads.first(where: { $0.id == threadId })?.gitWorkingDirectory
+        return canonicalRepoIdentifier(for: workingDirectory) ?? workingDirectory
+    }
+
+    // Resolves sibling subdirectories to one canonical repo id once the bridge reports a repo root.
+    func canonicalRepoIdentifier(for workingDirectory: String?) -> String? {
+        guard let normalizedWorkingDirectory = normalizedWorkingDirectory(workingDirectory) else {
+            return nil
+        }
+
+        if let knownRoot = repoRootByWorkingDirectory[normalizedWorkingDirectory] {
+            return knownRoot
+        }
+
+        let matchingRoot = knownRepoRoots
+            .sorted { $0.count > $1.count }
+            .first { isSameOrDescendantPath(normalizedWorkingDirectory, root: $0) }
+        return matchingRoot ?? normalizedWorkingDirectory
+    }
+}
 
 private extension CodexService {
     func recordChangeSetPatch(
@@ -347,6 +418,7 @@ private extension CodexService {
 
         finalizeChangeSetIfPossible(changeSetId: changeSetId)
         persistAIChangeSets()
+        invalidateAssistantRevertStates()
     }
     func finalizeChangeSetIfPossible(changeSetId: String) {
         guard var changeSet = aiChangeSetsByID[changeSetId] else {
@@ -407,11 +479,6 @@ private extension CodexService {
         })?.id
     }
 
-    func gitWorkingDirectory(for threadId: String) -> String? {
-        let workingDirectory = threads.first(where: { $0.id == threadId })?.gitWorkingDirectory
-        return canonicalRepoIdentifier(for: workingDirectory) ?? workingDirectory
-    }
-
     func normalizedWorkingDirectory(_ rawValue: String?) -> String? {
         guard let rawValue else {
             return nil
@@ -439,6 +506,7 @@ private extension CodexService {
         changeSet.revertMetadata.lastRevertError = nil
         aiChangeSetsByID[changeSetId] = changeSet
         persistAIChangeSets()
+        invalidateAssistantRevertStates()
     }
 
     func markChangeSetReverted(changeSetId: String) {
@@ -448,6 +516,7 @@ private extension CodexService {
         changeSet.revertMetadata.lastRevertError = nil
         aiChangeSetsByID[changeSetId] = changeSet
         persistAIChangeSets()
+        invalidateAssistantRevertStates()
     }
 
     func recordChangeSetError(changeSetId: String, message: String) {
@@ -455,6 +524,49 @@ private extension CodexService {
         changeSet.revertMetadata.lastRevertError = message
         aiChangeSetsByID[changeSetId] = changeSet
         persistAIChangeSets()
+        invalidateAssistantRevertStates()
+    }
+
+    // Computes file-level overlap for one change set against same-repo responses that are still active/revertable.
+    func revertOverlapAnalysis(
+        for changeSet: AIChangeSet,
+        workingDirectory: String?
+    ) -> AIRevertOverlapAnalysis {
+        let affectedFiles = changeSet.fileChanges.map(\.path).sorted()
+        guard let repoIdentifier = canonicalRepoIdentifier(for: changeSet.repoRoot ?? workingDirectory)
+            ?? normalizedWorkingDirectory(changeSet.repoRoot ?? workingDirectory),
+            !affectedFiles.isEmpty else {
+            return AIRevertOverlapAnalysis(
+                affectedFiles: affectedFiles,
+                overlappingFiles: [],
+                competingChangeSetIDs: []
+            )
+        }
+
+        let affectedFileSet = Set(affectedFiles)
+        var overlappingFiles: Set<String> = []
+        var competingChangeSetIDs: [String] = []
+
+        for candidate in aiChangeSetsByID.values {
+            guard candidate.id != changeSet.id else { continue }
+            guard candidate.status == .ready || candidate.status == .collecting else { continue }
+
+            let candidateRepoIdentifier = canonicalRepoIdentifier(for: candidate.repoRoot ?? gitWorkingDirectory(for: candidate.threadId))
+                ?? normalizedWorkingDirectory(candidate.repoRoot ?? gitWorkingDirectory(for: candidate.threadId))
+            guard candidateRepoIdentifier == repoIdentifier else { continue }
+
+            let overlap = Set(candidate.fileChanges.map(\.path)).intersection(affectedFileSet)
+            guard !overlap.isEmpty else { continue }
+
+            overlappingFiles.formUnion(overlap)
+            competingChangeSetIDs.append(candidate.id)
+        }
+
+        return AIRevertOverlapAnalysis(
+            affectedFiles: affectedFiles,
+            overlappingFiles: overlappingFiles.sorted(),
+            competingChangeSetIDs: competingChangeSetIDs.sorted()
+        )
     }
 
     func firstNonEmptyString(_ candidates: String?...) -> String? {
@@ -466,21 +578,6 @@ private extension CodexService {
             }
         }
         return nil
-    }
-
-    func canonicalRepoIdentifier(for workingDirectory: String?) -> String? {
-        guard let normalizedWorkingDirectory = normalizedWorkingDirectory(workingDirectory) else {
-            return nil
-        }
-
-        if let knownRoot = repoRootByWorkingDirectory[normalizedWorkingDirectory] {
-            return knownRoot
-        }
-
-        let matchingRoot = knownRepoRoots
-            .sorted { $0.count > $1.count }
-            .first { isSameOrDescendantPath(normalizedWorkingDirectory, root: $0) }
-        return matchingRoot ?? normalizedWorkingDirectory
     }
 
     func repositoriesOverlap(_ lhs: String?, _ rhs: String?) -> Bool {

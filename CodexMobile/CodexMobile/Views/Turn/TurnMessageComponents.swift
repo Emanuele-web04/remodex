@@ -620,7 +620,6 @@ struct MessageRow: View, Equatable {
     var showsStreamingAnimations: Bool = true
     @Environment(\.assistantRevertAction) private var assistantRevertAction
     @State private var previewAttachment: CodexImageAttachment?
-    @State private var showRevertConfirmation = false
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
@@ -653,14 +652,15 @@ struct MessageRow: View, Equatable {
 
     var body: some View {
         let text = displayText
+        let renderModel = MessageRowRenderModelCache.model(for: message, displayText: text)
         switch message.role {
         case .user:
             userBubble(text: text)
         case .assistant:
-            assistantView(text: text)
+            assistantView(text: text, renderModel: renderModel)
         case .system:
             VStack(alignment: .leading, spacing: 8) {
-                systemView(text: text)
+                systemView(text: text, renderModel: renderModel)
                 if let blockText = copyBlockText {
                     CopyBlockButton(text: blockText)
                 }
@@ -812,15 +812,12 @@ struct MessageRow: View, Equatable {
         return (path, trailing)
     }
 
-    private func assistantView(text: String) -> some View {
-        let commentContent = CodeCommentDirectiveContentCache.content(
-            messageID: message.id,
-            text: text
-        )
-        let bodyText = commentContent.fallbackText
+    private func assistantView(text: String, renderModel: MessageRowRenderModel) -> some View {
+        let commentContent = renderModel.codeCommentContent
+        let bodyText = commentContent?.fallbackText ?? text
 
         return VStack(alignment: .leading, spacing: 8) {
-            if commentContent.hasFindings {
+            if let commentContent, commentContent.hasFindings {
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(commentContent.findings) { finding in
                         CodeCommentFindingCard(finding: finding)
@@ -858,14 +855,14 @@ struct MessageRow: View, Equatable {
     }
 
     @ViewBuilder
-    private func systemView(text: String) -> some View {
+    private func systemView(text: String, renderModel: MessageRowRenderModel) -> some View {
         switch message.kind {
         case .thinking:
-            thinkingSystemView
+            thinkingSystemView(renderModel: renderModel)
         case .fileChange:
-            fileChangeSystemView(text: text)
+            fileChangeSystemView(text: text, renderModel: renderModel)
         case .commandExecution:
-            commandExecutionSystemView(text: text)
+            commandExecutionSystemView(text: text, renderModel: renderModel)
         case .plan:
             PlanSystemCard(message: message)
         case .userInputPrompt:
@@ -880,9 +877,11 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    private var thinkingSystemView: some View {
-        let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(from: message.text)
-        return Group {
+    @ViewBuilder
+    private func thinkingSystemView(renderModel: MessageRowRenderModel) -> some View {
+        let thinkingText = renderModel.thinkingText ?? ""
+        let thinkingContent = renderModel.thinkingContent ?? ThinkingDisclosureContent(sections: [], fallbackText: "")
+        Group {
             // Keep completed reasoning visible too; older builds showed thinking blocks
             // even after stream completion whenever content was present.
             if message.isStreaming || !thinkingText.isEmpty {
@@ -892,16 +891,13 @@ struct MessageRow: View, Equatable {
                         .fontWeight(.regular)
                         .italic()
                         .foregroundStyle(.secondary.opacity(0.9))
-                        .modifier(ShimmerModifier(isActive: message.isStreaming && showsStreamingAnimations))
 
                     if !thinkingText.isEmpty {
                         ThinkingDisclosureView(
                             messageID: message.id,
-                            text: thinkingText,
-                            isStreaming: message.isStreaming
+                            content: thinkingContent
                         )
                     }
-
                 }
                 .padding(.vertical, 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -909,20 +905,16 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    private func fileChangeSystemView(text: String) -> some View {
-        let renderState = FileChangeSystemRenderCache.renderState(
-            messageID: message.id,
-            sourceText: text
+    private func fileChangeSystemView(text: String, renderModel: MessageRowRenderModel) -> some View {
+        let renderState = renderModel.fileChangeState ?? FileChangeRenderState(
+            summary: nil,
+            actionEntries: [],
+            bodyText: text
         )
         let actionEntries = renderState.actionEntries
         let hasActionRows = !actionEntries.isEmpty
         let allEntries = hasActionRows ? actionEntries : (renderState.summary?.entries ?? [])
-
-        // Group entries by action so the label appears only once per group.
-        let grouped = FileChangeGroupingCache.grouped(
-            messageID: message.id,
-            entries: allEntries
-        )
+        let grouped = renderModel.fileChangeGroups
 
         return VStack(alignment: .leading, spacing: 8) {
             ForEach(grouped, id: \.key) { group in
@@ -976,11 +968,11 @@ struct MessageRow: View, Equatable {
     }
 
     @ViewBuilder
-    private func commandExecutionSystemView(text: String) -> some View {
+    private func commandExecutionSystemView(text: String, renderModel: MessageRowRenderModel) -> some View {
         if message.role == .system,
            message.kind == .commandExecution,
            !text.isEmpty,
-           let commandStatus = CommandExecutionStatusCache.status(messageID: message.id, text: text) {
+           let commandStatus = renderModel.commandStatus {
             CommandExecutionStatusCard(status: commandStatus, itemId: message.itemId)
         } else {
             defaultSystemView(text: text)
@@ -1001,15 +993,37 @@ struct MessageRow: View, Equatable {
     }
 
     private func assistantRevertButton(presentation: AssistantRevertPresentation) -> some View {
-        Button {
+        let iconName: String = {
+            switch presentation.riskLevel {
+            case .safe:
+                return "arrow.uturn.backward.circle"
+            case .warning:
+                return "exclamationmark.circle"
+            case .blocked:
+                return "exclamationmark.triangle"
+            }
+        }()
+        let accentColor: Color = {
+            switch presentation.riskLevel {
+            case .safe:
+                return .primary
+            case .warning:
+                return .orange
+            case .blocked:
+                return .secondary
+            }
+        }()
+
+        return Button {
             guard presentation.isEnabled else { return }
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            showRevertConfirmation = true
+            assistantRevertAction?(message)
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: presentation.isEnabled ? "arrow.uturn.backward.circle" : "exclamationmark.circle")
+                Image(systemName: iconName)
                     .font(AppFont.system(size: 10, weight: .medium))
-                Text("Undo")
+                    .foregroundStyle(accentColor)
+                Text(presentation.title)
                     .lineLimit(1)
             }
             .font(AppFont.mono(.body))
@@ -1019,15 +1033,7 @@ struct MessageRow: View, Equatable {
         }
         .buttonStyle(.plain)
         .disabled(!presentation.isEnabled)
-        .accessibilityHint(presentation.helperText ?? "")
-        .alert("Revert Changes", isPresented: $showRevertConfirmation) {
-            Button("Cancel", role: .cancel) { }
-            Button("Revert", role: .destructive) {
-                assistantRevertAction?(message)
-            }
-        } message: {
-            Text("Are you sure you want to discard these changes?")
-        }
+        .accessibilityHint(presentation.warningText ?? presentation.helperText ?? "")
     }
 
     @ViewBuilder
@@ -1113,14 +1119,11 @@ private struct SelectableMessageTextSheet: View {
 // Owns disclosure state for compact reasoning summaries without invalidating MessageRow.
 private struct ThinkingDisclosureView: View {
     let messageID: String
-    let text: String
-    let isStreaming: Bool
+    let content: ThinkingDisclosureContent
 
     @State private var expandedSectionIDs: Set<String> = []
 
     var body: some View {
-        let content = ThinkingDisclosureContentCache.content(messageID: messageID, text: text)
-
         return VStack(alignment: .leading, spacing: 8) {
             if content.showsDisclosure {
                 ForEach(content.sections) { section in
@@ -1252,44 +1255,6 @@ private struct AttachmentPreviewScreen: View {
                     .padding(18)
             }
             .buttonStyle(.plain)
-        }
-    }
-}
-
-// ─── Shimmer modifier ───────────────────────────────────────────────
-
-private struct ShimmerModifier: ViewModifier {
-    let isActive: Bool
-    private let duration: TimeInterval = 1.1
-
-    func body(content: Content) -> some View {
-        if isActive {
-            TimelineView(.animation(minimumInterval: 1.0 / 8.0, paused: false)) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate
-                let phase = CGFloat(t / duration - floor(t / duration))
-                content
-                    .overlay {
-                        GeometryReader { geo in
-                            let bandWidth = max(20, geo.size.width * 0.42)
-                            LinearGradient(
-                                stops: [
-                                    .init(color: .clear, location: 0),
-                                    .init(color: .white.opacity(0.95), location: 0.5),
-                                    .init(color: .clear, location: 1),
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                            .frame(width: bandWidth, height: geo.size.height)
-                            .offset(x: -bandWidth + (geo.size.width + bandWidth) * phase)
-                        }
-                        // Masking with the text shape keeps shimmer strictly inside glyphs.
-                        .mask(content)
-                        .allowsHitTesting(false)
-                    }
-            }
-        } else {
-            content
         }
     }
 }
