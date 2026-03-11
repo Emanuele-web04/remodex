@@ -73,6 +73,10 @@ func parseMarkdownSegments(_ text: String) -> [MarkdownSegment] {
 }
 
 enum MarkdownSegmentRegexCache {
-    // Accepts full fence info strings (for example: c++, objective-c, shell-session).
-    static let codeFence = try? NSRegularExpression(pattern: #"```([^\n`]*)\n([\s\S]*?)(?:\n```|$)"#)
+    // Accepts full fence info strings (for example: c++, objective-c, shell-session),
+    // but only when the fence starts its own line. This avoids accidental matches from
+    // prose like: `blocco ```bash` that would otherwise swallow the rest of the message.
+    static let codeFence = try? NSRegularExpression(
+        pattern: #"(?m)^[ \t]{0,3}```([^\n`]*)\n([\s\S]*?)(?:\n[ \t]{0,3}```|$)"#
+    )
 }

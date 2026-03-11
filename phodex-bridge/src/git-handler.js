@@ -62,6 +62,8 @@ async function handleGitMethod(method, params) {
   switch (method) {
     case "git/status":
       return gitStatus(cwd);
+    case "git/diff":
+      return gitDiff(cwd);
     case "git/commit":
       return gitCommit(cwd, params);
     case "git/push":
@@ -123,6 +125,25 @@ async function gitStatus(cwd) {
   }).catch(() => ({ additions: 0, deletions: 0, binaryFiles: 0 }));
 
   return { repoRoot, branch, tracking, dirty, ahead, behind, state, canPush, files, diff };
+}
+
+// ─── Git Diff ─────────────────────────────────────────────────
+
+async function gitDiff(cwd) {
+  const porcelain = await git(cwd, "status", "--porcelain=v1", "-b");
+  const lines = porcelain.trim().split("\n").filter(Boolean);
+  const branchLine = lines[0] || "";
+  const fileLines = lines.slice(1);
+  const tracking = parseTrackingFromStatus(branchLine);
+  const baseRef = await resolveRepoDiffBase(cwd, tracking);
+  const trackedPatch = await gitDiffAgainstBase(cwd, baseRef);
+  const untrackedPaths = fileLines
+    .filter((line) => line.startsWith("?? "))
+    .map((line) => line.substring(3).trim())
+    .filter(Boolean);
+  const untrackedPatch = await diffPatchForUntrackedFiles(cwd, untrackedPaths);
+  const patch = [trackedPatch.trim(), untrackedPatch.trim()].filter(Boolean).join("\n\n").trim();
+  return { patch };
 }
 
 // ─── Git Commit ───────────────────────────────────────────────
@@ -436,6 +457,10 @@ async function diffTotalsAgainstBase(cwd, baseRef) {
   return parseNumstatTotals(output);
 }
 
+async function gitDiffAgainstBase(cwd, baseRef) {
+  return git(cwd, "diff", "--binary", "--find-renames", baseRef);
+}
+
 async function diffTotalsForUntrackedFiles(cwd, filePaths) {
   if (!filePaths.length) {
     return { additions: 0, deletions: 0, binaryFiles: 0 };
@@ -485,6 +510,32 @@ async function gitDiffNoIndexNumstat(cwd, filePath) {
     const { stdout } = await execFileAsync(
       "git",
       ["diff", "--no-index", "--numstat", "--", "/dev/null", filePath],
+      { cwd, timeout: GIT_TIMEOUT_MS }
+    );
+    return stdout;
+  } catch (err) {
+    if (typeof err?.code === "number" && err.code === 1) {
+      return err.stdout || "";
+    }
+    const msg = (err.stderr || err.message || "").trim();
+    throw new Error(msg || "git diff --no-index failed");
+  }
+}
+
+async function diffPatchForUntrackedFiles(cwd, filePaths) {
+  if (!filePaths.length) {
+    return "";
+  }
+
+  const patches = await Promise.all(filePaths.map((filePath) => gitDiffNoIndexPatch(cwd, filePath)));
+  return patches.filter(Boolean).join("\n\n");
+}
+
+async function gitDiffNoIndexPatch(cwd, filePath) {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["diff", "--no-index", "--binary", "--", "/dev/null", filePath],
       { cwd, timeout: GIT_TIMEOUT_MS }
     );
     return stdout;

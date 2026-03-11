@@ -80,7 +80,7 @@ struct ComposerBottomBar: View {
                     onResumeQueue()
                 } label: {
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(AppFont.system(size: 12, weight: .bold))
                         .foregroundStyle(Color(.systemBackground))
                         .frame(width: 28, height: 28)
                         .background(Color.orange, in: Circle())
@@ -94,7 +94,7 @@ struct ComposerBottomBar: View {
                     onStopTurn(activeTurnID)
                 } label: {
                     Image(systemName: "stop.fill")
-                        .font(.system(size: 12, weight: .bold))
+                        .font(AppFont.system(size: 12, weight: .bold))
                         .foregroundStyle(Color(.systemBackground))
                         .frame(width: 32, height: 32)
                         .background(Color(.label), in: Circle())
@@ -106,7 +106,7 @@ struct ComposerBottomBar: View {
                 onSend()
             } label: {
                 Image(systemName: "arrow.up")
-                    .font(.system(size: 12, weight: .bold))
+                    .font(AppFont.system(size: 12, weight: .bold))
                     .foregroundStyle(sendButtonIconColor)
                     .frame(width: 32, height: 32)
                     .background(sendButtonBackgroundColor, in: Circle())

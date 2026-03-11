@@ -75,11 +75,9 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         )
     }
 
+    // Mirrors the shared font setting so the UIKit composer stays aligned with SwiftUI text.
     private func composerUIFont() -> UIFont {
-        if AppFont.useJetBrainsMono, let jetBrains = UIFont(name: "JetBrainsMono-Regular", size: 14) {
-            return jetBrains
-        }
-        return UIFont.preferredFont(forTextStyle: .body)
+        AppFont.uiFont(size: 14, textStyle: .body)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {

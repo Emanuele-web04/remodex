@@ -33,7 +33,7 @@ struct ComposerAttachmentTile: View {
                     placeholderTile
                         .overlay(
                             Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(AppFont.system(size: 16, weight: .semibold))
                                 .foregroundStyle(.orange)
                         )
                 }
@@ -53,7 +53,7 @@ struct ComposerAttachmentTile: View {
                 onRemove(attachment.id)
             } label: {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(AppFont.system(size: 17, weight: .semibold))
                     .foregroundStyle(.white, .black.opacity(0.65))
             }
             .offset(x: 8, y: -8)

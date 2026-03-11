@@ -27,7 +27,7 @@ struct CopyBlockButton: View {
                 Group {
                     if showCopiedFeedback {
                         Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .medium))
+                            .font(AppFont.system(size: 11, weight: .medium))
                     } else {
                         Image("copy")
                             .renderingMode(.template)
@@ -54,7 +54,7 @@ struct CopyBlockButton: View {
 #Preview("Default") {
     VStack(alignment: .leading, spacing: 16) {
         Text("This is a sample assistant response with some content that the user might want to copy.")
-            .font(.body)
+            .font(AppFont.body())
             .padding(.horizontal, 16)
 
         CopyBlockButton(text: "This is a sample assistant response with some content that the user might want to copy.")
@@ -67,7 +67,7 @@ struct CopyBlockButton: View {
 #Preview("Long block") {
     VStack(alignment: .leading, spacing: 16) {
         Text("Here is the first paragraph of the response.\n\nAnd here is a second paragraph with more detail about the topic at hand.")
-            .font(.body)
+            .font(AppFont.body())
             .padding(.horizontal, 16)
 
         CopyBlockButton(text: "Here is the first paragraph of the response.\n\nAnd here is a second paragraph with more detail about the topic at hand.")

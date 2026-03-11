@@ -58,6 +58,10 @@
 		<string>JetBrainsMono-Regular.ttf</string>
 		<string>JetBrainsMono-Medium.ttf</string>
 		<string>JetBrainsMono-Bold.ttf</string>
+		<string>Geist-Regular.ttf</string>
+		<string>Geist-Medium.ttf</string>
+		<string>Geist-SemiBold.ttf</string>
+		<string>Geist-Bold.ttf</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

@@ -49,7 +49,7 @@ struct CommandExecutionCardBody: View {
 
             HStack(spacing: 8) {
                 Image(systemName: "terminal.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(AppFont.system(size: 11, weight: .semibold))
                     .foregroundStyle(accent.color)
 
                 Text(command)
@@ -65,7 +65,7 @@ struct CommandExecutionCardBody: View {
                     .foregroundStyle(accent.color)
 
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(AppFont.system(size: 10, weight: .semibold))
                     .foregroundStyle(.tertiary)
             }
             .padding(.vertical, 2)
@@ -162,7 +162,7 @@ struct CommandExecutionDetailSheet: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: isOutputExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppFont.system(size: 10, weight: .semibold))
                     Text("Output (last \(CommandExecutionDetails.maxOutputLines) lines)")
                         .font(AppFont.mono(.caption))
                 }

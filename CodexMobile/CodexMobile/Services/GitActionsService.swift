@@ -62,6 +62,11 @@ final class GitActionsService {
         return result
     }
 
+    func diff() async throws -> GitRepoDiffResult {
+        let json = try await request(method: "git/diff")
+        return GitRepoDiffResult(from: json)
+    }
+
     func commit(message: String?) async throws -> GitCommitResult {
         var params: [String: JSONValue] = [:]
         if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

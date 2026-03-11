@@ -15,6 +15,8 @@ struct TurnView: View {
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
+    @State private var isLoadingRepositoryDiff = false
+    @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
     @State private var alertApprovalRequest: CodexApprovalRequest?
 
@@ -132,6 +134,7 @@ struct TurnView: View {
                 displayTitle: thread.displayTitle,
                 navigationContext: threadNavigationContext,
                 repoDiffTotals: viewModel.gitRepoSync?.repoDiffTotals,
+                isLoadingRepoDiff: isLoadingRepositoryDiff,
                 showsGitActions: showsGitControls,
                 isGitActionEnabled: canRunGitAction(
                     isThreadRunning: isThreadRunning,
@@ -148,6 +151,9 @@ struct TurnView: View {
                         try? await codex.compactContext(threadId: thread.id)
                     }
                 },
+                onTapRepoDiff: showsGitControls ? {
+                    presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
+                } : nil,
                 onGitAction: { action in
                     handleGitActionSelection(
                         action,
@@ -231,6 +237,14 @@ struct TurnView: View {
                 TurnThreadPathSheet(context: context)
             }
         }
+        .sheet(item: $repositoryDiffPresentation) { presentation in
+            TurnDiffSheet(
+                title: presentation.title,
+                entries: presentation.entries,
+                bodyText: presentation.bodyText,
+                messageID: presentation.messageID
+            )
+        }
         .sheet(isPresented: assistantRevertSheetPresentedBinding) {
             if let assistantRevertSheetState {
                 AssistantRevertSheet(
@@ -278,6 +292,43 @@ struct TurnView: View {
             get: { viewModel.isScrolledToBottom },
             set: { viewModel.isScrolledToBottom = $0 }
         )
+    }
+
+    // Fetches the repo-wide local patch on demand so the toolbar pill opens the same diff UI as turn changes.
+    private func presentRepositoryDiff(workingDirectory: String?) {
+        guard !isLoadingRepositoryDiff else { return }
+        isLoadingRepositoryDiff = true
+
+        Task { @MainActor in
+            defer { isLoadingRepositoryDiff = false }
+
+            let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
+
+            do {
+                let result = try await gitService.diff()
+                guard let presentation = TurnDiffPresentationBuilder.repositoryPresentation(from: result.patch) else {
+                    viewModel.gitSyncAlert = TurnGitSyncAlert(
+                        title: "Git Error",
+                        message: "There are no repository changes to show.",
+                        action: .dismissOnly
+                    )
+                    return
+                }
+                repositoryDiffPresentation = presentation
+            } catch let error as GitActionsError {
+                viewModel.gitSyncAlert = TurnGitSyncAlert(
+                    title: "Git Error",
+                    message: error.errorDescription ?? "Could not load repository changes.",
+                    action: .dismissOnly
+                )
+            } catch {
+                viewModel.gitSyncAlert = TurnGitSyncAlert(
+                    title: "Git Error",
+                    message: error.localizedDescription,
+                    action: .dismissOnly
+                )
+            }
+        }
     }
 
     private var isShowingNothingToCommitAlertBinding: Binding<Bool> {

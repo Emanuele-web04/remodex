@@ -1,7 +1,7 @@
 // FILE: GitActionModels.swift
 // Purpose: Data models for git operations executed via the phodex-bridge.
 // Layer: Model
-// Exports: GitDiffTotals, GitRepoSyncResult, GitCommitResult, GitPushResult, GitBranchesResult, GitCheckoutResult, GitPullResult, GitResetResult, TurnGitActionKind, TurnGitSyncAlert, TurnGitSyncAlertAction
+// Exports: GitDiffTotals, GitRepoSyncResult, GitRepoDiffResult, GitCommitResult, GitPushResult, GitBranchesResult, GitCheckoutResult, GitPullResult, GitResetResult, TurnGitActionKind, TurnGitSyncAlert, TurnGitSyncAlertAction
 // Depends on: JSONValue
 
 import Foundation
@@ -61,6 +61,14 @@ struct GitRepoSyncResult: Sendable {
         self.state = json["state"]?.stringValue ?? "up_to_date"
         self.canPush = json["canPush"]?.boolValue ?? false
         self.repoDiffTotals = GitDiffTotals(from: json["diff"]?.objectValue)
+    }
+}
+
+struct GitRepoDiffResult: Sendable {
+    let patch: String
+
+    init(from json: [String: JSONValue]) {
+        self.patch = json["patch"]?.stringValue ?? ""
     }
 }
 

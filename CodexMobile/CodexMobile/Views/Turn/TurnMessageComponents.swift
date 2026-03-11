@@ -139,7 +139,7 @@ private struct FileChangeActionButtons: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(AppFont.system(size: 10, weight: .medium))
                         Text("Diff")
                         Text("+\(totalAdditions)")
                             .foregroundStyle(Color.green)
@@ -177,7 +177,8 @@ private struct FileChangeActionButtons: View {
             }
         }
         .sheet(isPresented: $isShowingDiffSheet) {
-            FileChangeDiffSheet(
+            TurnDiffSheet(
+                title: "Changes",
                 entries: entries,
                 bodyText: bodyText,
                 messageID: messageID
@@ -186,103 +187,39 @@ private struct FileChangeActionButtons: View {
     }
 }
 
-// ─── File-Change Diff Sheet ─────────────────────────────────────────
+private let remodexMarkdownGitHubSecondaryBackground = DynamicColor(
+    light: Color(red: 247 / 255, green: 247 / 255, blue: 249 / 255),
+    dark: Color(red: 37 / 255, green: 38 / 255, blue: 42 / 255)
+)
 
-// MARK: - FileChangeDiffSheet
-// Sheet presented by the Diff button. Per-file collapsible cards with clean diff rendering.
-private struct FileChangeDiffSheet: View {
-    let entries: [TurnFileChangeSummaryEntry]
-    let bodyText: String
-    let messageID: String
-    @Environment(\.dismiss) private var dismiss
-    @State private var expandedFileIDs: Set<String> = []
-
-    private var chunks: [PerFileDiffChunk] {
-        PerFileDiffChunkCache.chunks(messageID: messageID, bodyText: bodyText, entries: entries)
-    }
-
-    private var allExpanded: Bool {
-        let ids = Set(chunks.map(\.id))
-        return !ids.isEmpty && ids.isSubset(of: expandedFileIDs)
-    }
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    // Summary header
-                    HStack {
-                        Text("\(chunks.count) file\(chunks.count == 1 ? "" : "s") changed")
-                            .font(AppFont.mono(.subheadline))
-                            .foregroundStyle(.secondary)
-
-                        Spacer()
-
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                if allExpanded {
-                                    expandedFileIDs.removeAll()
-                                } else {
-                                    expandedFileIDs = Set(chunks.map(\.id))
-                                }
-                            }
-                        } label: {
-                            Text(allExpanded ? "Collapse All" : "Expand All")
-                                .font(AppFont.mono(.caption))
-                                .foregroundStyle(.blue)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 4)
-
-                    // Per-file cards
-                    LazyVStack(spacing: 12) {
-                        ForEach(chunks) { chunk in
-                            FileChangeDiffFileCard(
-                                chunk: chunk,
-                                isExpanded: Binding(
-                                    get: { expandedFileIDs.contains(chunk.id) },
-                                    set: { newValue in
-                                        if newValue {
-                                            expandedFileIDs.insert(chunk.id)
-                                        } else {
-                                            expandedFileIDs.remove(chunk.id)
-                                        }
-                                    }
-                                )
-                            )
-                        }
-                    }
-                }
-                .padding(.vertical)
-                .padding(.horizontal, 8)
-            }
-            .navigationTitle("Changes")
-            .navigationBarTitleDisplayMode(.inline)
-            .adaptiveNavigationBar()
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .onAppear {
-            expandedFileIDs = Set(chunks.map(\.id))
-        }
-    }
-}
+private let remodexMarkdownGitHubLink = DynamicColor(
+    light: Color(red: 44 / 255, green: 101 / 255, blue: 207 / 255),
+    dark: Color(red: 76 / 255, green: 142 / 255, blue: 248 / 255)
+)
 
 struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
     var enablesSelection: Bool = false
 
+    // Mirrors Textual's GitHub inline style and only swaps the code font to the app mono font.
+    private var inlineStyle: InlineStyle {
+        InlineStyle()
+            .code(
+                .font(AppFont.mono(.body)),
+                .fontScale(0.85),
+                .backgroundColor(remodexMarkdownGitHubSecondaryBackground)
+            )
+            .strong(.fontWeight(.semibold))
+            .link(.foregroundColor(remodexMarkdownGitHubLink))
+    }
+
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
         let baseView = StructuredText(markdown: transformed)
             .font(AppFont.body())
-            .textual.inlineStyle(.gitHub)
+            .textual.inlineStyle(inlineStyle)
+            .textual.codeBlockStyle(RemodexMarkdownCodeBlockStyle())
 
         if enablesSelection {
             baseView
@@ -290,6 +227,22 @@ struct MarkdownTextView: View {
         } else {
             baseView
         }
+    }
+}
+
+private struct RemodexMarkdownCodeBlockStyle: StructuredText.CodeBlockStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Overflow {
+            configuration.label
+                .font(AppFont.mono(.body))
+                .textual.lineSpacing(.fontScaled(0.225))
+                .textual.fontScale(0.85)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(16)
+        }
+        .background(remodexMarkdownGitHubSecondaryBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .textual.blockSpacing(.init(top: 0, bottom: 16))
     }
 }
 
@@ -763,6 +716,8 @@ struct MessageRow: View, Equatable {
     /// a copy button should be shown. The string is the aggregated block text.
     var copyBlockText: String? = nil
     var showInlineCommit: Bool = false
+    // Disables timer-driven adornments while the user reads older content.
+    var showsStreamingAnimations: Bool = true
     @Environment(\.assistantRevertAction) private var assistantRevertAction
     @State private var previewAttachment: CodexImageAttachment?
     @State private var showRevertConfirmation = false
@@ -774,6 +729,7 @@ struct MessageRow: View, Equatable {
             && lhs.assistantRevertPresentation == rhs.assistantRevertPresentation
             && lhs.copyBlockText == rhs.copyBlockText
             && lhs.showInlineCommit == rhs.showInlineCommit
+            && lhs.showsStreamingAnimations == rhs.showsStreamingAnimations
     }
 
     // Computed once per body evaluation and reused by all sub-views.
@@ -991,7 +947,7 @@ struct MessageRow: View, Equatable {
                 }
             }
 
-            if message.isStreaming {
+            if message.isStreaming && showsStreamingAnimations {
                 TypingIndicator()
             }
 
@@ -1047,7 +1003,7 @@ struct MessageRow: View, Equatable {
                         .fontWeight(.regular)
                         .italic()
                         .foregroundStyle(.secondary.opacity(0.9))
-                        .modifier(ShimmerModifier(isActive: message.isStreaming))
+                        .modifier(ShimmerModifier(isActive: message.isStreaming && showsStreamingAnimations))
 
                     if !thinkingText.isEmpty {
                         ThinkingDisclosureView(
@@ -1103,7 +1059,7 @@ struct MessageRow: View, Equatable {
                 )
             }
 
-            if message.isStreaming {
+            if message.isStreaming && showsStreamingAnimations {
                 TypingIndicator()
             }
         }
@@ -1163,7 +1119,7 @@ struct MessageRow: View, Equatable {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: presentation.isEnabled ? "arrow.uturn.backward.circle" : "exclamationmark.circle")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(AppFont.system(size: 10, weight: .medium))
                 Text("Undo")
                     .lineLimit(1)
             }
@@ -1308,7 +1264,7 @@ private struct ThinkingDisclosureView: View {
             } label: {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(AppFont.system(size: 10, weight: .semibold))
                         .foregroundStyle(hasDetail ? .secondary : .tertiary)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .frame(width: 10)
@@ -1373,110 +1329,6 @@ private struct CommandExecutionStatusCard: View {
     }
 }
 
-// ─── File Change Diff File Card ─────────────────────────────────────
-
-private struct FileChangeDiffFileCard: View {
-    let chunk: PerFileDiffChunk
-    @Binding var isExpanded: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isExpanded.toggle()
-                }
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 10)
-
-                        Image(systemName: actionIcon)
-                            .font(.system(size: 12))
-                            .foregroundStyle(actionColor)
-
-                        Text(chunk.compactPath)
-                            .font(AppFont.mono(.subheadline))
-                            .fontWeight(.medium)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(.primary)
-
-                        Spacer(minLength: 4)
-
-                        Text(chunk.action.rawValue)
-                            .font(AppFont.mono(.caption2))
-                            .foregroundStyle(actionColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(actionColor.opacity(0.12), in: Capsule())
-
-                        HStack(spacing: 4) {
-                            if chunk.additions > 0 {
-                                Text("+\(chunk.additions)")
-                                    .font(AppFont.mono(.caption))
-                                    .foregroundStyle(Color(red: 0.13, green: 0.77, blue: 0.37))
-                            }
-                            if chunk.deletions > 0 {
-                                Text("-\(chunk.deletions)")
-                                    .font(AppFont.mono(.caption))
-                                    .foregroundStyle(Color(red: 0.94, green: 0.27, blue: 0.27))
-                            }
-                        }
-                    }
-
-                    if let dir = chunk.fullDirectoryPath, dir != chunk.compactPath {
-                        Text(dir)
-                            .font(AppFont.mono(.caption2))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .padding(.leading, 30)
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            // Body
-            if isExpanded, !chunk.diffCode.isEmpty {
-                Divider()
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    CleanDiffCodeBlockView(code: chunk.diffCode)
-                        .padding(.vertical, 4)
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var actionIcon: String {
-        switch chunk.action {
-        case .edited: return "pencil"
-        case .added: return "plus"
-        case .deleted: return "minus"
-        case .renamed: return "arrow.right"
-        }
-    }
-
-    private var actionColor: Color {
-        switch chunk.action {
-        case .edited: return .orange
-        case .added: return Color(red: 0.13, green: 0.77, blue: 0.37)
-        case .deleted: return Color(red: 0.94, green: 0.27, blue: 0.27)
-        case .renamed: return .blue
-        }
-    }
-}
-
 // ─── Attachment Preview ─────────────────────────────────────────────
 
 private struct AttachmentPreviewScreen: View {
@@ -1497,7 +1349,7 @@ private struct AttachmentPreviewScreen: View {
                     .padding(20)
             } else {
                 Image(systemName: "photo")
-                    .font(.system(size: 42, weight: .regular))
+                    .font(AppFont.system(size: 42, weight: .regular))
                     .foregroundStyle(.white.opacity(0.85))
             }
 
@@ -1506,7 +1358,7 @@ private struct AttachmentPreviewScreen: View {
                 onDismiss()
             }) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 30, weight: .semibold))
+                    .font(AppFont.system(size: 30, weight: .semibold))
                     .foregroundStyle(.white, .black.opacity(0.6))
                     .padding(18)
             }

@@ -76,7 +76,7 @@ struct ContextWindowProgressRing: View {
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.trianglehead.2.clockwise")
-                                .font(.system(size: 13))
+                                .font(AppFont.system(size: 13))
                             Text("Compact context")
                                 .font(AppFont.subheadline())
                         }

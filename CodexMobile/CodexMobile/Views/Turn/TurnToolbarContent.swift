@@ -15,6 +15,7 @@ struct TurnToolbarContent: ToolbarContent {
     let displayTitle: String
     let navigationContext: TurnThreadNavigationContext?
     let repoDiffTotals: GitDiffTotals?
+    let isLoadingRepoDiff: Bool
     let showsGitActions: Bool
     let isGitActionEnabled: Bool
     let isRunningGitAction: Bool
@@ -24,6 +25,7 @@ struct TurnToolbarContent: ToolbarContent {
     var threadId: String = ""
     var isCompacting: Bool = false
     var onCompactContext: (() -> Void)?
+    var onTapRepoDiff: (() -> Void)?
     let onGitAction: (TurnGitActionKind) -> Void
 
     @Binding var isShowingPathSheet: Bool
@@ -54,28 +56,34 @@ struct TurnToolbarContent: ToolbarContent {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        ToolbarItemGroup(placement: .topBarTrailing) {
-            if let contextWindowUsage {
-                ContextWindowProgressRing(
-                    usage: contextWindowUsage,
-                    threadId: threadId,
-                    isCompacting: isCompacting,
-                    onCompact: onCompactContext
-                )
-            }
+        ToolbarItem(placement: .topBarTrailing) {
+            HStack(spacing: 10) {
+                if let contextWindowUsage {
+                    ContextWindowProgressRing(
+                        usage: contextWindowUsage,
+                        threadId: threadId,
+                        isCompacting: isCompacting,
+                        onCompact: onCompactContext
+                    )
+                }
 
-            if let repoDiffTotals {
-                TurnToolbarDiffTotalsLabel(totals: repoDiffTotals)
-            }
+                if let repoDiffTotals {
+                    TurnToolbarDiffTotalsLabel(
+                        totals: repoDiffTotals,
+                        isLoading: isLoadingRepoDiff,
+                        onTap: onTapRepoDiff
+                    )
+                }
 
-            if showsGitActions {
-                TurnGitActionsToolbarButton(
-                    isEnabled: isGitActionEnabled,
-                    isRunningAction: isRunningGitAction,
-                    showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
-                    gitSyncState: gitSyncState,
-                    onSelect: onGitAction
-                )
+                if showsGitActions {
+                    TurnGitActionsToolbarButton(
+                        isEnabled: isGitActionEnabled,
+                        isRunningAction: isRunningGitAction,
+                        showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+                        gitSyncState: gitSyncState,
+                        onSelect: onGitAction
+                    )
+                }
             }
         }
     }
@@ -83,9 +91,35 @@ struct TurnToolbarContent: ToolbarContent {
 
 private struct TurnToolbarDiffTotalsLabel: View {
     let totals: GitDiffTotals
+    let isLoading: Bool
+    let onTap: (() -> Void)?
 
     var body: some View {
+        Group {
+            if let onTap {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onTap()
+                } label: {
+                    labelContent
+                }
+                .buttonStyle(.plain)
+                .disabled(isLoading)
+            } else {
+                labelContent
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Repository diff total")
+        .accessibilityValue(accessibilityValue)
+    }
+
+    private var labelContent: some View {
         HStack(spacing: 4) {
+            if isLoading {
+                ProgressView()
+                    .controlSize(.mini)
+            }
             Text("+\(totals.additions)")
                 .foregroundStyle(Color.green)
             Text("-\(totals.deletions)")
@@ -98,10 +132,8 @@ private struct TurnToolbarDiffTotalsLabel: View {
         .font(AppFont.mono(.caption))
         .frame(minHeight: 24)
         .fixedSize(horizontal: true, vertical: false)
+        .opacity(isLoading ? 0.8 : 1)
         .adaptiveToolbarItem(in: Capsule())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Repository diff total")
-        .accessibilityValue(accessibilityValue)
     }
 
     private var accessibilityValue: String {

@@ -109,7 +109,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                                     onRetryUserMessage: onRetryUserMessage,
                                     assistantRevertPresentation: assistantRevertStatesByMessageID[message.id],
                                     copyBlockText: cachedBlockInfoByMessageID[message.id],
-                                    showInlineCommit: message.id == cachedLastFileChangeMessageID
+                                    showInlineCommit: message.id == cachedLastFileChangeMessageID,
+                                    showsStreamingAnimations: isScrolledToBottom
                                 )
                                 .equatable()
                                 .environment(\.assistantRevertAction, onTapAssistantRevert)

@@ -6,6 +6,9 @@
 import SwiftUI
 
 struct SidebarSearchField: View {
+    // Mirrors the selected sidebar row so the search field feels like part of the same list system.
+    private let selectedRowCornerRadius: CGFloat = 14
+
     @Binding var text: String
     @Binding var isActive: Bool
     @FocusState private var isFocused: Bool
@@ -34,9 +37,14 @@ struct SidebarSearchField: View {
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(height: 36)
-            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+            .padding(.leading, 10)
+            .padding(.trailing, 16)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Color(.tertiarySystemFill).opacity(0.8),
+                in: RoundedRectangle(cornerRadius: selectedRowCornerRadius, style: .continuous)
+            )
 
             if isFocused {
                 Button("Cancel") {

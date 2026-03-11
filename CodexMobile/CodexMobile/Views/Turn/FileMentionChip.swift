@@ -16,7 +16,7 @@ struct FileMentionChip: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 9, weight: .semibold))
+                .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(Color.blue)
 
             Text(fileName)
@@ -27,7 +27,7 @@ struct FileMentionChip: View {
             if let onRemove {
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(AppFont.system(size: 8, weight: .bold))
                         .foregroundStyle(Color.blue)
                         .frame(width: 14, height: 14)
                         .background(Color.blue.opacity(0.14), in: Circle())
@@ -50,7 +50,7 @@ struct SkillMentionChip: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "bolt.horizontal.circle")
-                .font(.system(size: 9, weight: .semibold))
+                .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(Color.indigo)
 
             Text(SkillDisplayNameFormatter.displayName(for: skillName))
@@ -61,7 +61,7 @@ struct SkillMentionChip: View {
             if let onRemove {
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
-                        .font(.system(size: 8, weight: .bold))
+                        .font(AppFont.system(size: 8, weight: .bold))
                         .foregroundStyle(Color.indigo)
                         .frame(width: 14, height: 14)
                         .background(Color.indigo.opacity(0.14), in: Circle())

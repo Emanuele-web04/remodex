@@ -9,7 +9,7 @@ import UIKit
 struct SettingsView: View {
     @Environment(CodexService.self) private var codex
 
-    @AppStorage("codex.useJetBrainsMono") private var useJetBrainsMono = false
+    @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
 
     private let runtimeAutoValue = "__AUTO__"
 
@@ -17,7 +17,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(spacing: 24) {
                 SettingsArchivedChatsCard()
-                SettingsAppearanceCard(useJetBrainsMono: $useJetBrainsMono)
+                SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
                 runtimeDefaultsSection
                 connectionSection
@@ -27,6 +27,13 @@ struct SettingsView: View {
         }
         .font(AppFont.body())
         .navigationTitle("Settings")
+    }
+
+    private var appFontStyleBinding: Binding<AppFont.Style> {
+        Binding(
+            get: { AppFont.Style(rawValue: appFontStyleRawValue) ?? AppFont.defaultStyle },
+            set: { appFontStyleRawValue = $0.rawValue }
+        )
     }
 
     // MARK: - Runtime defaults
@@ -273,17 +280,25 @@ struct SettingsButton: View {
 // MARK: - Extracted independent section views
 
 private struct SettingsAppearanceCard: View {
-    @Binding var useJetBrainsMono: Bool
+    @Binding var appFontStyle: AppFont.Style
     @AppStorage("codex.useLiquidGlass") private var useLiquidGlass = true
 
     var body: some View {
         SettingsCard(title: "Appearance") {
-            Toggle("Use JetBrains Mono", isOn: $useJetBrainsMono)
+            HStack {
+                Text("Font")
+                Spacer()
+                Picker("Font", selection: $appFontStyle) {
+                    ForEach(AppFont.Style.allCases) { style in
+                        Text(style.title).tag(style)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
                 .tint(.cyan)
+            }
 
-            Text(useJetBrainsMono
-                 ? "JetBrains Mono is the default font."
-                 : "Using the system font.")
+            Text(appFontStyle.subtitle)
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
