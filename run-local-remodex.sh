@@ -15,6 +15,7 @@ RELAY_HOST="${RELAY_HOST:-0.0.0.0}"
 RELAY_PORT="${RELAY_PORT:-9000}"
 RELAY_PUBLIC_HOST="${RELAY_PUBLIC_HOST:-}"
 RELAY_URL="${RELAY_URL:-}"
+RELAY_URL_WAS_SET=0
 
 RELAY_PID=""
 BRIDGE_DEPENDENCIES=("ws" "qrcode-terminal" "uuid")
@@ -245,6 +246,10 @@ wait_for_relay() {
 }
 
 print_host_notice() {
+  if [[ "${RELAY_URL_WAS_SET}" -eq 1 ]]; then
+    return
+  fi
+
   if ! python3 - <<'PY' "${RELAY_PUBLIC_HOST}" >/dev/null 2>&1
 import socket
 import sys
@@ -268,6 +273,7 @@ start_embedded_relay() {
   HOST="${RELAY_HOST}" \
   PORT="${RELAY_PORT}" \
   RELAY_MODULE="${RELAY_MODULE}" \
+  NODE_PATH="${BRIDGE_DIR}/node_modules${NODE_PATH:+:${NODE_PATH}}" \
   BRIDGE_DIR="${BRIDGE_DIR}" \
   node <<'NODE' &
 const http = require("http");
@@ -355,18 +361,26 @@ start_bridge() {
 trap cleanup EXIT INT TERM
 
 parse_args "$@"
-RELAY_PUBLIC_HOST="$(default_public_host)"
 
-if [[ -z "${RELAY_URL}" ]]; then
+if [[ -n "${RELAY_URL}" ]]; then
+  RELAY_URL_WAS_SET=1
+else
+  RELAY_PUBLIC_HOST="$(default_public_host)"
   RELAY_URL="ws://${RELAY_PUBLIC_HOST}:${RELAY_PORT}/relay"
 fi
 
 ensure_prerequisites
 ensure_dependencies
 print_host_notice
-ensure_port_available
 print_runtime_summary
-start_embedded_relay
-wait_for_relay
-log "Relay is healthy."
+
+if [[ "${RELAY_URL_WAS_SET}" -eq 0 ]]; then
+  ensure_port_available
+  start_embedded_relay
+  wait_for_relay
+  log "Relay is healthy."
+else
+  log "Skipping embedded relay because RELAY_URL is set."
+fi
+
 start_bridge
