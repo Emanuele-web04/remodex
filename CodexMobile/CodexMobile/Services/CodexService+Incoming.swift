@@ -193,6 +193,9 @@ extension CodexService {
         case "thread/tokenUsage/updated":
             handleThreadTokenUsageUpdated(paramsObject)
 
+        case "account/rateLimits/updated":
+            handleRateLimitsUpdated(paramsObject)
+
         case "item/completed", "codex/event/item_completed", "codex/event/agent_message":
             appendCompletedAgentText(from: paramsObject)
 
@@ -508,22 +511,8 @@ extension CodexService {
             ?? eventObject?["usage"]?.objectValue
             ?? paramsObject
 
-        let tokensUsed = firstIntValue(
-            in: usageObject,
-            keys: ["tokensUsed", "tokens_used", "totalTokens", "total_tokens"]
-        ) ?? 0
-
-        let tokenLimit = firstIntValue(
-            in: usageObject,
-            keys: ["tokenLimit", "token_limit", "maxTokens", "max_tokens", "contextWindow", "context_window"]
-        ) ?? 0
-
-        guard tokenLimit > 0 else { return }
-
-        contextWindowUsageByThread[threadId] = ContextWindowUsage(
-            tokensUsed: tokensUsed,
-            tokenLimit: tokenLimit
-        )
+        guard let usage = extractContextWindowUsage(from: usageObject) else { return }
+        contextWindowUsageByThread[threadId] = usage
     }
 
     private func handleThreadStatusChanged(_ paramsObject: IncomingParamsObject?) {
@@ -1157,6 +1146,11 @@ extension CodexService {
                 payload: payload,
                 paramsObject: paramsObject
             )
+        case "token_count":
+            return handleLegacyTokenCountEvent(
+                payload: payload,
+                paramsObject: paramsObject
+            )
         case "background_event", "read", "search", "list_files":
             return handleEssentialActivityEvent(
                 eventType: eventType,
@@ -1166,6 +1160,53 @@ extension CodexService {
         default:
             return false
         }
+    }
+
+    // Accepts legacy Codex token_count events, even when the runtime omits thread ids.
+    private func handleLegacyTokenCountEvent(
+        payload: IncomingParamsObject,
+        paramsObject: IncomingParamsObject?
+    ) -> Bool {
+        var normalizedParams = paramsObject ?? [:]
+        if normalizedParams["event"] == nil {
+            normalizedParams["event"] = .object(payload)
+        }
+
+        if normalizedParams["threadId"] == nil,
+           let threadId = firstStringValue(
+            in: payload,
+            keys: ["threadId", "thread_id", "conversationId", "conversation_id"]
+           ) {
+            normalizedParams["threadId"] = .string(threadId)
+        }
+
+        if normalizedParams["turnId"] == nil,
+           let turnId = firstStringValue(in: payload, keys: ["turnId", "turn_id", "id"]) {
+            normalizedParams["turnId"] = .string(turnId)
+        }
+
+        let usageObject = payload["info"]?.objectValue
+            ?? payload["usage"]?.objectValue
+            ?? payload
+        let usage = extractContextWindowUsageFromTokenCountPayload(payload)
+            ?? extractContextWindowUsage(from: usageObject)
+        guard let usage else {
+            return false
+        }
+
+        let turnId = extractTurnID(from: normalizedParams)
+        guard let threadId = resolveContextUsageThreadID(
+            from: normalizedParams,
+            turnIdHint: turnId
+        ) else {
+            return false
+        }
+
+        if let turnId {
+            threadIdByTurnID[turnId] = threadId
+        }
+        contextWindowUsageByThread[threadId] = usage
+        return true
     }
 
     private func handleLegacyPatchApplyMethod(
@@ -1657,6 +1698,7 @@ extension CodexService {
             || itemType == "commandexecution"
             || itemType == "diff"
             || itemType == "plan"
+            || itemType == "enteredreviewmode"
             || itemType == "contextcompaction" else {
             return false
         }
@@ -1671,14 +1713,6 @@ extension CodexService {
 
         let eventObject = envelopeEventObject(from: paramsObject)
         let itemId = extractItemID(from: paramsObject, eventObject: eventObject, itemObject: itemObject)
-
-        if itemType == "contextcompaction" {
-            if isCompleted {
-                compactingThreadIDs.remove(threadId)
-            } else {
-                compactingThreadIDs.insert(threadId)
-            }
-        }
 
         let kind: CodexMessageKind
         let body: String
@@ -1707,6 +1741,13 @@ extension CodexService {
         case "plan":
             kind = .plan
             body = decodePlanItemBody(itemObject)
+        case "enteredreviewmode":
+            kind = .commandExecution
+            let reviewLabel = firstNonEmptyString([
+                itemObject["review"]?.stringValue,
+                firstString(forKey: "review", in: .object(itemObject)),
+            ]) ?? "changes"
+            body = "Reviewing \(reviewLabel)..."
         case "contextcompaction":
             kind = .commandExecution
             body = isCompleted ? "Context compacted" : "Compacting context…"
@@ -2750,6 +2791,23 @@ extension CodexService {
            messagesByThread.keys.count <= 1,
            let activeThreadId {
             return activeThreadId
+        }
+
+        return nil
+    }
+
+    // Token-count events can be session-scoped, so only fall back when one running thread is unambiguous.
+    func resolveContextUsageThreadID(
+        from paramsObject: IncomingParamsObject?,
+        turnIdHint: String? = nil
+    ) -> String? {
+        if let resolved = resolveThreadID(from: paramsObject, turnIdHint: turnIdHint) {
+            return resolved
+        }
+
+        let runtimeScopedCandidates = runningThreadIDs.union(protectedRunningFallbackThreadIDs)
+        if runtimeScopedCandidates.count == 1 {
+            return runtimeScopedCandidates.first
         }
 
         return nil

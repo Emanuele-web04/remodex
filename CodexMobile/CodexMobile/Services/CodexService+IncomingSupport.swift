@@ -77,11 +77,124 @@ func firstStringValue(in object: IncomingParamsObject?, keys: [String]) -> Strin
 func firstIntValue(in object: IncomingParamsObject?, keys: [String]) -> Int? {
     guard let object else { return nil }
     for key in keys {
-        if let value = object[key]?.intValue {
+        if let value = jsonIntValue(object[key]) {
             return value
         }
     }
     return nil
+}
+
+func extractContextWindowUsage(from object: IncomingParamsObject?) -> ContextWindowUsage? {
+    guard let object else { return nil }
+
+    let root = JSONValue.object(object)
+    let tokensUsed = firstInt(forAnyKey: [
+        "tokensUsed",
+        "tokens_used",
+        "totalTokens",
+        "total_tokens",
+        "usedTokens",
+        "used_tokens",
+        "inputTokens",
+        "input_tokens",
+    ], in: root)
+
+    let explicitLimit = firstInt(forAnyKey: [
+        "tokenLimit",
+        "token_limit",
+        "maxTokens",
+        "max_tokens",
+        "contextWindow",
+        "context_window",
+        "contextSize",
+        "context_size",
+        "maxContextTokens",
+        "max_context_tokens",
+        "inputTokenLimit",
+        "input_token_limit",
+        "maxInputTokens",
+        "max_input_tokens",
+    ], in: root)
+
+    let tokensRemaining = firstInt(forAnyKey: [
+        "tokensRemaining",
+        "tokens_remaining",
+        "remainingTokens",
+        "remaining_tokens",
+        "remainingInputTokens",
+        "remaining_input_tokens",
+    ], in: root)
+
+    let resolvedTokensUsed = max(0, tokensUsed ?? 0)
+    let resolvedTokenLimit = explicitLimit ?? {
+        guard let tokensRemaining else { return nil }
+        return resolvedTokensUsed + max(0, tokensRemaining)
+    }()
+
+    guard let resolvedTokenLimit, resolvedTokenLimit > 0 else {
+        return nil
+    }
+
+    return ContextWindowUsage(
+        tokensUsed: min(resolvedTokensUsed, resolvedTokenLimit),
+        tokenLimit: resolvedTokenLimit
+    )
+}
+
+// Decodes persisted/live `token_count` payloads that wrap totals under `info`.
+func extractContextWindowUsageFromTokenCountPayload(_ payload: IncomingParamsObject?) -> ContextWindowUsage? {
+    guard let payload else { return nil }
+
+    let infoObject = payload["info"]?.objectValue ?? payload
+    let infoRoot = JSONValue.object(infoObject)
+    let lastUsageRoot = firstValue(forAnyKey: [
+        "last_token_usage",
+        "lastTokenUsage",
+    ], in: infoRoot)
+    let totalUsageRoot = firstValue(forAnyKey: [
+        "total_token_usage",
+        "totalTokenUsage",
+        "last_token_usage",
+        "lastTokenUsage",
+    ], in: infoRoot) ?? infoRoot
+    let preferredUsageRoot = lastUsageRoot ?? totalUsageRoot
+
+    let explicitTotal = firstInt(forAnyKey: [
+        "total_tokens",
+        "totalTokens",
+    ], in: preferredUsageRoot)
+    let inputTokens = firstInt(forAnyKey: [
+        "input_tokens",
+        "inputTokens",
+    ], in: preferredUsageRoot) ?? 0
+    let outputTokens = firstInt(forAnyKey: [
+        "output_tokens",
+        "outputTokens",
+    ], in: preferredUsageRoot) ?? 0
+    let reasoningTokens = firstInt(forAnyKey: [
+        "reasoning_output_tokens",
+        "reasoningOutputTokens",
+    ], in: preferredUsageRoot) ?? 0
+
+    let tokenLimit = firstInt(forAnyKey: [
+        "model_context_window",
+        "modelContextWindow",
+        "context_window",
+        "contextWindow",
+        "tokenLimit",
+        "token_limit",
+    ], in: infoRoot)
+
+    guard let tokenLimit, tokenLimit > 0 else {
+        return nil
+    }
+
+    let resolvedTokensUsed = explicitTotal ?? (inputTokens + outputTokens + reasoningTokens)
+
+    return ContextWindowUsage(
+        tokensUsed: min(resolvedTokensUsed, tokenLimit),
+        tokenLimit: tokenLimit
+    )
 }
 
 func hasAnyValue(in object: IncomingParamsObject?, keys: [String]) -> Bool {
@@ -325,6 +438,36 @@ private func trimmedNonEmptyString(_ candidate: String?) -> String? {
     guard let candidate else { return nil }
     let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
+}
+
+private func jsonIntValue(_ value: JSONValue?) -> Int? {
+    guard let value else { return nil }
+
+    if let directInt = value.intValue {
+        return directInt
+    }
+
+    if let directDouble = value.doubleValue {
+        return Int(directDouble)
+    }
+
+    if let directString = value.stringValue?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+       let parsed = Int(directString) {
+        return parsed
+    }
+
+    return nil
+}
+
+private func firstInt(forAnyKey keys: [String], in root: JSONValue, maxDepth: Int = 8) -> Int? {
+    for key in keys {
+        if let value = firstValue(forKey: key, in: root, maxDepth: maxDepth),
+           let parsed = jsonIntValue(value) {
+            return parsed
+        }
+    }
+    return nil
 }
 
 private func isEmptyJSONValue(_ value: JSONValue) -> Bool {

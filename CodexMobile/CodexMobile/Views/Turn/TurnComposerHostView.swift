@@ -22,27 +22,12 @@ struct TurnComposerHostView: View {
     let isGitBranchSelectorEnabled: Bool
     let onSelectGitBranch: (String) -> Void
     let onRefreshGitBranches: () -> Void
+    let onShowStatus: () -> Void
     let onSend: () -> Void
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
-        TurnComposerView(
-            input: $viewModel.input,
-            isInputFocused: isInputFocused,
-            composerAttachments: viewModel.composerAttachments,
-            remainingAttachmentSlots: viewModel.remainingAttachmentSlots,
-            isComposerInteractionLocked: viewModel.isComposerInteractionLocked(activeTurnID: activeTurnID),
-            isSendDisabled: viewModel.isSendDisabled(isConnected: codex.isConnected, activeTurnID: activeTurnID),
-            isPlanModeArmed: viewModel.isPlanModeArmed,
-            queuedDrafts: viewModel.queuedDraftsList(codex: codex, threadID: thread.id),
-            queuedCount: viewModel.queuedCount(codex: codex, threadID: thread.id),
-            isQueuePaused: viewModel.isQueuePaused(codex: codex, threadID: thread.id),
-            canSteerQueuedDrafts: isThreadRunning,
-            steeringDraftID: viewModel.steeringDraftID,
-            activeTurnID: activeTurnID,
-            isThreadRunning: isThreadRunning,
-            composerMentionedFiles: viewModel.composerMentionedFiles,
-            composerMentionedSkills: viewModel.composerMentionedSkills,
+        let autocompleteState = TurnComposerAutocompleteState(
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,
             isFileAutocompleteLoading: viewModel.isFileAutocompleteLoading,
@@ -51,6 +36,36 @@ struct TurnComposerHostView: View {
             isSkillAutocompleteVisible: viewModel.isSkillAutocompleteVisible,
             isSkillAutocompleteLoading: viewModel.isSkillAutocompleteLoading,
             skillAutocompleteQuery: viewModel.skillAutocompleteQuery,
+            slashCommandPanelState: viewModel.slashCommandPanelState,
+            hasComposerContentConflictingWithReview: viewModel.hasComposerContentConflictingWithReview,
+            showsGitBranchSelector: showsGitControls,
+            isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
+            selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
+            gitDefaultBranch: viewModel.gitDefaultBranch
+        )
+        let accessoryState = TurnComposerAccessoryState(
+            queuedDrafts: viewModel.queuedDraftsList(codex: codex, threadID: thread.id),
+            canSteerQueuedDrafts: isThreadRunning,
+            steeringDraftID: viewModel.steeringDraftID,
+            composerAttachments: viewModel.composerAttachments,
+            composerMentionedFiles: viewModel.composerMentionedFiles,
+            composerMentionedSkills: viewModel.composerMentionedSkills,
+            composerReviewSelection: viewModel.composerReviewSelection
+        )
+
+        TurnComposerView(
+            input: $viewModel.input,
+            isInputFocused: isInputFocused,
+            accessoryState: accessoryState,
+            autocompleteState: autocompleteState,
+            remainingAttachmentSlots: viewModel.remainingAttachmentSlots,
+            isComposerInteractionLocked: viewModel.isComposerInteractionLocked(activeTurnID: activeTurnID),
+            isSendDisabled: viewModel.isSendDisabled(isConnected: codex.isConnected, activeTurnID: activeTurnID),
+            isPlanModeArmed: viewModel.isPlanModeArmed,
+            queuedCount: viewModel.queuedCount(codex: codex, threadID: thread.id),
+            isQueuePaused: viewModel.isQueuePaused(codex: codex, threadID: thread.id),
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning,
             orderedModelOptions: orderedModelOptions,
             selectedModelID: codex.selectedModelOption()?.id,
             selectedModelTitle: selectedModelTitle,
@@ -61,6 +76,7 @@ struct TurnComposerHostView: View {
             reasoningMenuDisabled: reasoningDisplayOptions.isEmpty || codex.selectedModelOption() == nil,
             selectedServiceTier: codex.selectedServiceTier,
             selectedAccessMode: codex.selectedAccessMode,
+            contextWindowUsage: codex.contextWindowUsageByThread[thread.id],
             showsGitBranchSelector: showsGitControls,
             isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
             availableGitBranchTargets: viewModel.availableGitBranchTargets,
@@ -72,6 +88,9 @@ struct TurnComposerHostView: View {
             onSelectGitBranch: onSelectGitBranch,
             onSelectGitBaseBranch: viewModel.selectGitBaseBranch,
             onRefreshGitBranches: onRefreshGitBranches,
+            onRefreshContextWindowUsage: {
+                await codex.refreshContextWindowUsage(threadId: thread.id)
+            },
             onSelectModel: codex.setSelectedModelId,
             onSelectReasoning: codex.setSelectedReasoningEffort,
             onSelectServiceTier: codex.setSelectedServiceTier,
@@ -99,10 +118,24 @@ struct TurnComposerHostView: View {
                     activeTurnID: activeTurnID
                 )
             },
+            onInputChangedForSlashCommandAutocomplete: { text in
+                viewModel.onInputChangedForSlashCommandAutocomplete(
+                    text,
+                    activeTurnID: activeTurnID
+                )
+            },
             onSelectFileAutocomplete: viewModel.onSelectFileAutocomplete,
             onSelectSkillAutocomplete: viewModel.onSelectSkillAutocomplete,
+            onSelectSlashCommand: { command in
+                viewModel.onSelectSlashCommand(command)
+                if command == .status {
+                    onShowStatus()
+                }
+            },
+            onSelectCodeReviewTarget: viewModel.onSelectCodeReviewTarget,
             onRemoveMentionedFile: viewModel.removeMentionedFile,
             onRemoveMentionedSkill: viewModel.removeMentionedSkill,
+            onRemoveComposerReviewSelection: viewModel.clearComposerReviewSelection,
             onPasteImageData: { imageDataItems in
                 viewModel.enqueuePastedImageData(imageDataItems, codex: codex)
             },

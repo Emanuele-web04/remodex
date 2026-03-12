@@ -2,7 +2,7 @@
 // Purpose: Runs Codex locally, bridges relay traffic, and coordinates desktop refreshes for Codex.app.
 // Layer: CLI service
 // Exports: startBridge
-// Depends on: ws, uuid, ./qr, ./codex-desktop-refresher, ./codex-transport
+// Depends on: ws, uuid, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch
 
 const WebSocket = require("ws");
 const { v4: uuidv4 } = require("uuid");
@@ -11,9 +11,11 @@ const {
   readBridgeConfig,
 } = require("./codex-desktop-refresher");
 const { createCodexTransport } = require("./codex-transport");
+const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
 const { handleGitRequest } = require("./git-handler");
+const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
 const { loadOrCreateBridgeDeviceState } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
@@ -45,6 +47,8 @@ function startBridge() {
     relayUrl: relayBaseUrl,
     deviceState,
   });
+  let contextUsageWatcher = null;
+  let watchedContextUsageKey = null;
 
   const codex = createCodexTransport({
     endpoint: config.codexEndpoint,
@@ -154,6 +158,7 @@ function startBridge() {
       if (socket === nextSocket) {
         socket = null;
       }
+      stopContextUsageWatcher();
       desktopRefresher.handleTransportReset();
       scheduleRelayReconnect(code);
     });
@@ -181,6 +186,7 @@ function startBridge() {
     logConnectionStatus("disconnected");
     isShuttingDown = true;
     clearReconnectTimer();
+    stopContextUsageWatcher();
     desktopRefresher.handleTransportReset();
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
       socket.close();
@@ -199,6 +205,9 @@ function startBridge() {
   // Routes decrypted app payloads through the same bridge handlers as before.
   function handleApplicationMessage(rawMessage) {
     if (handleBridgeManagedHandshakeMessage(rawMessage)) {
+      return;
+    }
+    if (handleThreadContextRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
     if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
@@ -222,12 +231,78 @@ function startBridge() {
   }
 
   function rememberThreadFromMessage(source, rawMessage) {
-    const threadId = extractThreadId(rawMessage);
-    if (!threadId) {
+    const context = extractBridgeMessageContext(rawMessage);
+    if (!context.threadId) {
       return;
     }
 
-    rememberActiveThread(threadId, source);
+    rememberActiveThread(context.threadId, source);
+    if (shouldStartContextUsageWatcher(context)) {
+      ensureContextUsageWatcher(context);
+    }
+  }
+
+  // Mirrors CodexMonitor's persisted token_count fallback so the phone keeps
+  // receiving context-window usage even when the runtime omits live thread usage.
+  function ensureContextUsageWatcher({ threadId, turnId }) {
+    const normalizedThreadId = readString(threadId);
+    const normalizedTurnId = readString(turnId);
+    if (!normalizedThreadId) {
+      return;
+    }
+
+    const nextWatcherKey = `${normalizedThreadId}|${normalizedTurnId || "pending-turn"}`;
+    if (watchedContextUsageKey === nextWatcherKey && contextUsageWatcher) {
+      return;
+    }
+
+    stopContextUsageWatcher();
+    watchedContextUsageKey = nextWatcherKey;
+    contextUsageWatcher = createThreadRolloutActivityWatcher({
+      threadId: normalizedThreadId,
+      turnId: normalizedTurnId,
+      onUsage: ({ threadId: usageThreadId, usage }) => {
+        sendContextUsageNotification(usageThreadId, usage);
+      },
+      onIdle: () => {
+        if (watchedContextUsageKey === nextWatcherKey) {
+          stopContextUsageWatcher();
+        }
+      },
+      onTimeout: () => {
+        if (watchedContextUsageKey === nextWatcherKey) {
+          stopContextUsageWatcher();
+        }
+      },
+      onError: () => {
+        if (watchedContextUsageKey === nextWatcherKey) {
+          stopContextUsageWatcher();
+        }
+      },
+    });
+  }
+
+  function stopContextUsageWatcher() {
+    if (contextUsageWatcher) {
+      contextUsageWatcher.stop();
+    }
+
+    contextUsageWatcher = null;
+    watchedContextUsageKey = null;
+  }
+
+  function sendContextUsageNotification(threadId, usage) {
+    if (!threadId || !usage) {
+      return;
+    }
+
+    sendApplicationResponse(JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId,
+        usage,
+      },
+    }));
   }
 
   // The spawned/shared Codex app-server stays warm across phone reconnects.
@@ -316,19 +391,43 @@ function shutdown(codex, getSocket, beforeExit = () => {}) {
   setTimeout(() => process.exit(0), 100);
 }
 
-function extractThreadId(rawMessage) {
+function extractBridgeMessageContext(rawMessage) {
   let parsed = null;
   try {
     parsed = JSON.parse(rawMessage);
   } catch {
-    return null;
+    return { method: "", threadId: null, turnId: null };
   }
 
   const method = parsed?.method;
   const params = parsed?.params;
+  const threadId = extractThreadId(method, params);
+  const turnId = extractTurnId(method, params);
 
-  if (method === "turn/start") {
-    return readString(params?.threadId) || readString(params?.thread_id);
+  return {
+    method: typeof method === "string" ? method : "",
+    threadId,
+    turnId,
+  };
+}
+
+function shouldStartContextUsageWatcher(context) {
+  if (!context?.threadId) {
+    return false;
+  }
+
+  return context.method === "turn/start"
+    || context.method === "turn/started";
+}
+
+function extractThreadId(method, params) {
+  if (method === "turn/start" || method === "turn/started") {
+    return (
+      readString(params?.threadId)
+      || readString(params?.thread_id)
+      || readString(params?.turn?.threadId)
+      || readString(params?.turn?.thread_id)
+    );
   }
 
   if (method === "thread/start" || method === "thread/started") {
@@ -347,6 +446,21 @@ function extractThreadId(rawMessage) {
       || readString(params?.thread_id)
       || readString(params?.turn?.threadId)
       || readString(params?.turn?.thread_id)
+    );
+  }
+
+  return null;
+}
+
+function extractTurnId(method, params) {
+  if (method === "turn/started" || method === "turn/completed") {
+    return (
+      readString(params?.turnId)
+      || readString(params?.turn_id)
+      || readString(params?.id)
+      || readString(params?.turn?.id)
+      || readString(params?.turn?.turnId)
+      || readString(params?.turn?.turn_id)
     );
   }
 

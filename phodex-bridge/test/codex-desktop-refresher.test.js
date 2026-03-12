@@ -484,7 +484,13 @@ test("rollout watcher retries transient filesystem errors before succeeding", as
           isFile: () => true,
         }];
       },
-      statSync: () => ({ size: 12 }),
+      statSync: () => ({ size: 12, mtimeMs: Date.now() }),
+      openSync: () => 1,
+      readSync: (_fd, buffer) => {
+        buffer.write('{"x":1}\n', 0, "utf8");
+        return 8;
+      },
+      closeSync: () => {},
     },
     onEvent: (event) => events.push(event),
     onError: (error) => errors.push(error),

@@ -163,12 +163,13 @@ final class CodexService {
     var activeTurnId: String?
     var activeTurnIdByThread: [String: String] = [:]
 
-    var compactingThreadIDs: Set<String> = []
     var runningThreadIDs: Set<String> = []
     // Protects active runs that are real but have not yielded a stable turnId yet.
     var protectedRunningFallbackThreadIDs: Set<String> = []
     var readyThreadIDs: Set<String> = []
     var failedThreadIDs: Set<String> = []
+    // Threads that started a real run and haven't completed yet; survives sync-poll clearing.
+    @ObservationIgnored var threadsPendingCompletionHaptic: Set<String> = []
     // Keeps the latest terminal outcome per thread so UI can react to real run completion.
     var latestTurnTerminalStateByThread: [String: CodexTurnTerminalState] = [:]
     // Preserves terminal outcome per turn so completed/stopped blocks stay distinguishable.
@@ -233,6 +234,9 @@ final class CodexService {
     // Dedupes concise activity feed lines per thread/turn to avoid visual spam.
     var recentActivityLineByThread: [String: CodexRecentActivityLine] = [:]
     var contextWindowUsageByThread: [String: ContextWindowUsage] = [:]
+    var rateLimitBuckets: [CodexRateLimitBucket] = []
+    var isLoadingRateLimits = false
+    var rateLimitsErrorMessage: String?
     var threadIdByTurnID: [String: String] = [:]
     var hydratedThreadIDs: Set<String> = []
     var loadingThreadIDs: Set<String> = []

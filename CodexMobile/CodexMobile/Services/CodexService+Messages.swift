@@ -37,6 +37,7 @@ extension CodexService {
         latestAssistantOutputByThread.removeValue(forKey: threadId)
         latestRepoAffectingMessageSignalByThread.removeValue(forKey: threadId)
         assistantRevertStateCacheByThread.removeValue(forKey: threadId)
+        threadsPendingCompletionHaptic.remove(threadId)
     }
 
     // Clears every service-owned timeline cache during global teardown.
@@ -152,6 +153,7 @@ extension CodexService {
     // Marks thread as actively running while ensuring stale outcomes are cleared.
     func markThreadAsRunning(_ threadId: String) {
         runningThreadIDs.insert(threadId)
+        threadsPendingCompletionHaptic.insert(threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         clearOutcomeBadge(for: threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
@@ -326,6 +328,8 @@ extension CodexService {
             throw CodexServiceError.invalidResponse("thread/read response missing thread payload")
         }
 
+        extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
+
         // A turn may have started while the thread/read request was in flight.
         // Merging stale history would overwrite live streaming text and clear
         // isStreaming flags, causing messages to flicker (disappear then reappear).
@@ -334,8 +338,6 @@ extension CodexService {
             hydratedThreadIDs.insert(threadId)
             return
         }
-
-        extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
 
         let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
         if !historyMessages.isEmpty {
@@ -359,28 +361,8 @@ extension CodexService {
 
     // Extracts context window usage from thread/read response if the runtime includes it.
     func extractContextWindowUsageIfAvailable(threadId: String, threadObject: [String: JSONValue]) {
-        let usageObject = threadObject["usage"]?.objectValue
-            ?? threadObject["tokenUsage"]?.objectValue
-            ?? threadObject["token_usage"]?.objectValue
-            ?? threadObject["contextWindow"]?.objectValue
-            ?? threadObject["context_window"]?.objectValue
-
-        let tokensUsed = firstIntValue(
-            in: usageObject,
-            keys: ["tokensUsed", "tokens_used", "totalTokens", "total_tokens"]
-        ) ?? 0
-
-        let tokenLimit = firstIntValue(
-            in: usageObject,
-            keys: ["tokenLimit", "token_limit", "maxTokens", "max_tokens", "contextWindow", "context_window"]
-        ) ?? 0
-
-        guard tokenLimit > 0 else { return }
-
-        contextWindowUsageByThread[threadId] = ContextWindowUsage(
-            tokensUsed: tokensUsed,
-            tokenLimit: tokenLimit
-        )
+        guard let usage = extractContextWindowUsage(from: threadObject) else { return }
+        contextWindowUsageByThread[threadId] = usage
     }
 
     // Appends a user message immediately so UI feels instant before server events arrive.
@@ -1717,6 +1699,7 @@ extension CodexService {
 
         activeTurnId = nil
         activeTurnIdByThread.removeAll()
+        threadsPendingCompletionHaptic.removeAll()
         clearAllRunningState()
         refreshAllThreadTimelineStates()
         streamingAssistantMessageByTurnID.removeAll()
@@ -1903,16 +1886,12 @@ extension CodexService {
         state: CodexTurnTerminalState,
         previousState: CodexTurnTerminalState?
     ) {
+        // Always consume the pending marker so stopped/failed turns don't leak.
+        let wasPending = threadsPendingCompletionHaptic.remove(threadId) != nil
         guard state == .completed,
               previousState != .completed,
-              isAppInForeground else {
-            return
-        }
-
-        let wasActivelyRunning = activeTurnIdByThread[threadId] != nil
-            || runningThreadIDs.contains(threadId)
-            || protectedRunningFallbackThreadIDs.contains(threadId)
-        guard wasActivelyRunning else {
+              isAppInForeground,
+              wasPending else {
             return
         }
 

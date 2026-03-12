@@ -87,6 +87,25 @@ extension CodexService {
             return
         }
 
+        if itemType == "exitedreviewmode" {
+            guard let text = extractCompletedReviewText(from: itemObject), !text.isEmpty else {
+                return
+            }
+
+            guard let context = resolveAssistantEventContext(
+                paramsObject: paramsObject,
+                eventObject: eventObject,
+                itemObject: itemObject
+            ) else { return }
+            completeAssistantMessage(
+                threadId: context.threadId,
+                turnId: context.identity.turnId,
+                itemId: context.identity.itemId,
+                text: text
+            )
+            return
+        }
+
         guard isAssistantMessageItem(
             itemType: itemType,
             role: itemObject["role"]?.stringValue
@@ -130,6 +149,24 @@ extension CodexService {
             itemType: itemType,
             isCompleted: false
         ) {
+            return
+        }
+
+        if itemType == "exitedreviewmode" {
+            guard let context = resolveAssistantEventContext(
+                paramsObject: paramsObject,
+                eventObject: eventObject,
+                itemObject: itemObject,
+                requiresTurnId: true
+            ),
+            let turnId = context.identity.turnId else {
+                return
+            }
+            beginAssistantMessage(
+                threadId: context.threadId,
+                turnId: turnId,
+                itemId: context.identity.itemId
+            )
             return
         }
 
@@ -224,7 +261,17 @@ private extension CodexService {
         let normalizedRole = role?.lowercased() ?? ""
         return itemType == "agentmessage"
             || itemType == "assistantmessage"
+            || itemType == "exitedreviewmode"
             || (itemType == "message" && !normalizedRole.contains("user"))
+    }
+
+    // Review mode exits deliver the final review text under `review` instead of message content.
+    func extractCompletedReviewText(from itemObject: IncomingParamsObject) -> String? {
+        let reviewText = firstNonEmptyString([
+            itemObject["review"]?.stringValue,
+            firstString(forKey: "review", in: .object(itemObject)),
+        ])
+        return reviewText?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // Legacy codex/event assistant notifications can encode turn id in params.id.

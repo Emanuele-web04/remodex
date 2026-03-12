@@ -149,12 +149,6 @@ extension CodexService {
         activeThreadId = initialThreadId
     }
 
-    // Requests context compaction for a thread.
-    func compactContext(threadId: String) async throws {
-        let params: RPCObject = ["threadId": .string(threadId)]
-        _ = try await sendRequest(method: "thread/compact/start", params: .object(params))
-    }
-
     // Requests interruption for the active turn.
     func interruptTurn(turnId: String?, threadId: String? = nil) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId)

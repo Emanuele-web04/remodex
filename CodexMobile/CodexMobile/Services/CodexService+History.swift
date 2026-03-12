@@ -128,6 +128,51 @@ extension CodexService {
                         createdAt: timestamp
                     )
 
+                case "enteredreviewmode":
+                    let normalizedReviewLabel = decodeHistoryFirstString(
+                        forAnyKey: ["review"],
+                        in: .object(itemObject)
+                    ) ?? "changes"
+                    let message = "Reviewing \(normalizedReviewLabel)..."
+                    appendHistoryMessage(
+                        to: &result,
+                        role: .system,
+                        kind: .commandExecution,
+                        text: message,
+                        threadId: threadId,
+                        turnId: turnID,
+                        itemId: itemID,
+                        createdAt: timestamp
+                    )
+
+                case "exitedreviewmode":
+                    guard let reviewText = decodeHistoryFirstString(
+                        forAnyKey: ["review"],
+                        in: .object(itemObject)
+                    ) else { continue }
+                    appendHistoryMessage(
+                        to: &result,
+                        role: .assistant,
+                        kind: .chat,
+                        text: reviewText,
+                        threadId: threadId,
+                        turnId: turnID,
+                        itemId: itemID,
+                        createdAt: timestamp
+                    )
+
+                case "contextcompaction":
+                    appendHistoryMessage(
+                        to: &result,
+                        role: .system,
+                        kind: .commandExecution,
+                        text: "Context compacted",
+                        threadId: threadId,
+                        turnId: turnID,
+                        itemId: itemID,
+                        createdAt: timestamp
+                    )
+
                 case "plan":
                     appendHistoryMessage(
                         to: &result,

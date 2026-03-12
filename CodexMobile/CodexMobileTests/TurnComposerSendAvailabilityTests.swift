@@ -44,6 +44,21 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertFalse(imageState.isSendDisabled)
     }
 
+    func testSendEnabledWhenReviewSelectionIsPresentWithoutText() {
+        let reviewState = makeState(trimmedInput: "", hasReadyImages: false, hasReviewSelection: true)
+        XCTAssertFalse(reviewState.isSendDisabled)
+    }
+
+    func testSendDisabledWhileReviewSelectionIsWaitingForTarget() {
+        let reviewState = makeState(
+            trimmedInput: "follow up",
+            hasReadyImages: false,
+            hasReviewSelection: false,
+            hasPendingReviewSelection: true
+        )
+        XCTAssertTrue(reviewState.isSendDisabled)
+    }
+
     func testSendTurnRestoresRawDraftWhenStartTurnFails() async {
         let service = makeService()
         service.isConnected = true
@@ -80,14 +95,18 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         isConnected: Bool = true,
         trimmedInput: String = "hello",
         hasReadyImages: Bool = false,
-        hasBlockingAttachmentState: Bool = false
+        hasBlockingAttachmentState: Bool = false,
+        hasReviewSelection: Bool = false,
+        hasPendingReviewSelection: Bool = false
     ) -> TurnComposerSendAvailability {
         TurnComposerSendAvailability(
             isSending: isSending,
             isConnected: isConnected,
             trimmedInput: trimmedInput,
             hasReadyImages: hasReadyImages,
-            hasBlockingAttachmentState: hasBlockingAttachmentState
+            hasBlockingAttachmentState: hasBlockingAttachmentState,
+            hasReviewSelection: hasReviewSelection,
+            hasPendingReviewSelection: hasPendingReviewSelection
         )
     }
 

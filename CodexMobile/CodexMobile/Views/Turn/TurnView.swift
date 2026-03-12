@@ -15,6 +15,7 @@ struct TurnView: View {
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
+    @State private var isShowingStatusSheet = false
     @State private var isLoadingRepositoryDiff = false
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
@@ -81,6 +82,7 @@ struct TurnView: View {
                             threadID: thread.id
                         )
                     },
+                    onShowStatus: presentStatusSheet,
                     onSend: handleSend
                 )
             ),
@@ -123,14 +125,6 @@ struct TurnView: View {
                 isRunningGitAction: viewModel.isRunningGitAction,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
-                contextWindowUsage: codex.contextWindowUsageByThread[thread.id],
-                threadId: thread.id,
-                isCompacting: codex.compactingThreadIDs.contains(thread.id),
-                onCompactContext: {
-                    Task {
-                        try? await codex.compactContext(threadId: thread.id)
-                    }
-                },
                 onTapRepoDiff: showsGitControls ? {
                     presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
                 } : nil,
@@ -216,6 +210,14 @@ struct TurnView: View {
             if let context = threadNavigationContext {
                 TurnThreadPathSheet(context: context)
             }
+        }
+        .sheet(isPresented: $isShowingStatusSheet) {
+            TurnStatusSheet(
+                contextWindowUsage: codex.contextWindowUsageByThread[thread.id],
+                rateLimitBuckets: codex.rateLimitBuckets,
+                isLoadingRateLimits: codex.isLoadingRateLimits,
+                rateLimitsErrorMessage: codex.rateLimitsErrorMessage
+            )
         }
         .sheet(item: $repositoryDiffPresentation) { presentation in
             TurnDiffSheet(
@@ -316,6 +318,15 @@ struct TurnView: View {
             get: { viewModel.isShowingNothingToCommitAlert },
             set: { viewModel.isShowingNothingToCommitAlert = $0 }
         )
+    }
+
+    // Opens the local session summary and refreshes rate limits in the background.
+    private func presentStatusSheet() {
+        isShowingStatusSheet = true
+
+        Task {
+            await codex.refreshRateLimits()
+        }
     }
 
     private var gitSyncAlertBinding: Binding<TurnGitSyncAlert?> {
@@ -468,6 +479,7 @@ struct TurnView: View {
 
     private func prepareThreadIfReady(gitWorkingDirectory: String?) async {
         await codex.prepareThreadForDisplay(threadId: thread.id)
+        await codex.refreshContextWindowUsage(threadId: thread.id)
         viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
         guard gitWorkingDirectory != nil else { return }
         viewModel.refreshGitBranchTargets(

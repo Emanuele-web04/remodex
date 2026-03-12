@@ -21,10 +21,6 @@ struct TurnToolbarContent: ToolbarContent {
     let isRunningGitAction: Bool
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
-    let contextWindowUsage: ContextWindowUsage?
-    var threadId: String = ""
-    var isCompacting: Bool = false
-    var onCompactContext: (() -> Void)?
     var onTapRepoDiff: (() -> Void)?
     let onGitAction: (TurnGitActionKind) -> Void
 
@@ -58,15 +54,6 @@ struct TurnToolbarContent: ToolbarContent {
 
         ToolbarItem(placement: .topBarTrailing) {
             HStack(spacing: 10) {
-                if let contextWindowUsage {
-                    ContextWindowProgressRing(
-                        usage: contextWindowUsage,
-                        threadId: threadId,
-                        isCompacting: isCompacting,
-                        onCompact: onCompactContext
-                    )
-                }
-
                 if let repoDiffTotals {
                     TurnToolbarDiffTotalsLabel(
                         totals: repoDiffTotals,
