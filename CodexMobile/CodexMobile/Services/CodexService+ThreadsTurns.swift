@@ -33,7 +33,10 @@ extension CodexService {
     }
 
     // Starts a new thread and stores it in local state.
-    func startThread(preferredProjectPath: String? = nil) async throws -> CodexThread {
+    func startThread(
+        preferredProjectPath: String? = nil,
+        pendingComposerAction: CodexPendingThreadComposerAction? = nil
+    ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
         var includesServiceTier = runtimeServiceTierForTurn() != nil
 
@@ -58,6 +61,9 @@ extension CodexService {
                     to: decodedThread,
                     preferredProjectPath: normalizedPreferredProjectPath
                 )
+                if let pendingComposerAction {
+                    queuePendingComposerAction(pendingComposerAction, for: thread.id)
+                }
                 upsertThread(thread)
                 resumedThreadIDs.insert(thread.id)
                 activeThreadId = thread.id
@@ -68,6 +74,16 @@ extension CodexService {
                 }
             }
         }
+    }
+
+    // Stores one-shot composer setup so a newly created thread can open in the requested mode.
+    func queuePendingComposerAction(_ action: CodexPendingThreadComposerAction, for threadId: String) {
+        pendingComposerActionByThreadID[threadId] = action
+    }
+
+    // Consumes the pending composer setup once the destination thread view appears.
+    func consumePendingComposerAction(for threadId: String) -> CodexPendingThreadComposerAction? {
+        pendingComposerActionByThreadID.removeValue(forKey: threadId)
     }
 
     // Sends user input as a new turn against an existing (or newly created) thread.

@@ -88,7 +88,7 @@ final class CodexServiceTierTests: XCTestCase {
             service.bridgeUpdatePrompt?.message,
             "This Mac bridge does not support the selected speed setting yet. Update the Remodex npm package to use Fast Mode and other speed controls."
         )
-        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@1.1.3")
+        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@1.1.4")
     }
 
     private func makeService() -> CodexService {

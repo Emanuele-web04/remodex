@@ -303,6 +303,23 @@ final class TurnViewModel {
         resetSlashCommandState(clearPendingSelection: true)
     }
 
+    // Clears the transient slash token before routing the user into another composer flow.
+    func prepareForThreadRerouteFromSlashCommand() {
+        removeTrailingSlashCommandTokenFromInputIfNeeded()
+        resetSlashCommandState(clearPendingSelection: true)
+    }
+
+    // Applies one-shot composer state that a fresh thread should show on first open.
+    func applyPendingComposerAction(_ action: CodexPendingThreadComposerAction) {
+        switch action {
+        case .codeReview(let target):
+            armCodeReviewSelection(
+                command: .codeReview,
+                target: Self.turnComposerReviewTarget(for: target)
+            )
+        }
+    }
+
     func removeComposerAttachment(id: String) {
         composerAttachments.removeAll(where: { $0.id == id })
     }
@@ -1581,6 +1598,17 @@ final class TurnViewModel {
         }
 
         clearComposerReviewSelection()
+    }
+
+    private static func turnComposerReviewTarget(
+        for target: CodexPendingCodeReviewTarget
+    ) -> TurnComposerReviewTarget {
+        switch target {
+        case .uncommittedChanges:
+            return .uncommittedChanges
+        case .baseBranch:
+            return .baseBranch
+        }
     }
 
     // Replaces inline `@filename` with `@fullpath` for each mentioned file.

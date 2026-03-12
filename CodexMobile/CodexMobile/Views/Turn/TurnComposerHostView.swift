@@ -22,6 +22,7 @@ struct TurnComposerHostView: View {
     let isGitBranchSelectorEnabled: Bool
     let onSelectGitBranch: (String) -> Void
     let onRefreshGitBranches: () -> Void
+    let onStartCodeReviewThread: (TurnComposerReviewTarget) -> Void
     let onShowStatus: () -> Void
     let onSend: () -> Void
 
@@ -127,12 +128,18 @@ struct TurnComposerHostView: View {
             onSelectFileAutocomplete: viewModel.onSelectFileAutocomplete,
             onSelectSkillAutocomplete: viewModel.onSelectSkillAutocomplete,
             onSelectSlashCommand: { command in
-                viewModel.onSelectSlashCommand(command)
-                if command == .status {
+                switch command {
+                case .codeReview:
+                    viewModel.onSelectSlashCommand(command)
+                case .status:
+                    viewModel.onSelectSlashCommand(command)
                     onShowStatus()
                 }
             },
-            onSelectCodeReviewTarget: viewModel.onSelectCodeReviewTarget,
+            onSelectCodeReviewTarget: { target in
+                viewModel.prepareForThreadRerouteFromSlashCommand()
+                onStartCodeReviewThread(target)
+            },
             onRemoveMentionedFile: viewModel.removeMentionedFile,
             onRemoveMentionedSkill: viewModel.removeMentionedSkill,
             onRemoveComposerReviewSelection: viewModel.clearComposerReviewSelection,

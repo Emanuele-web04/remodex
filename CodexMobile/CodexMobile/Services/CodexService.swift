@@ -87,6 +87,15 @@ enum CodexConnectionPhase: Equatable, Sendable {
     case connected
 }
 
+enum CodexPendingThreadComposerAction: Equatable, Sendable {
+    case codeReview(target: CodexPendingCodeReviewTarget)
+}
+
+enum CodexPendingCodeReviewTarget: Equatable, Sendable {
+    case uncommittedChanges
+    case baseBranch
+}
+
 struct TurnTimelineRenderSnapshot: Equatable {
     let threadID: String
     let messages: [CodexMessage]
@@ -200,6 +209,8 @@ final class CodexService {
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
+    // Seeds brand-new chats with one-shot composer actions like code review.
+    var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
 
     // Relay session persistence
     var relaySessionId: String?

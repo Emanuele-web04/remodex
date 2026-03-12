@@ -95,10 +95,10 @@ This is a monorepo with a local bridge, an iOS app target, and its tests:
 
 ## Install the Bridge
 
-<sub>Current npm package version: `1.1.3`</sub>
+<sub>Install from npm with `@latest` so you always get the newest bridge fixes.</sub>
 
 ```sh
-npm install -g remodex
+npm install -g remodex@latest
 ```
 
 To update an existing global install later:

@@ -82,6 +82,7 @@ struct TurnView: View {
                             threadID: thread.id
                         )
                     },
+                    onStartCodeReviewThread: startCodeReviewThread,
                     onShowStatus: presentStatusSheet,
                     onSend: handleSend
                 )
@@ -378,6 +379,10 @@ struct TurnView: View {
 
     private func handleInitialAppear(activeTurnID: String?) {
         alertApprovalRequest = approvalForThread
+        if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
+            viewModel.applyPendingComposerAction(pendingComposerAction)
+            isInputFocused = true
+        }
     }
 
     private func handlePhotoPickerItemsChanged(_ newItems: [PhotosPickerItem]) {
@@ -487,6 +492,43 @@ struct TurnView: View {
             workingDirectory: gitWorkingDirectory,
             threadID: thread.id
         )
+    }
+
+    // Creates a fresh thread in the same project and opens it straight into the review flow.
+    private func startCodeReviewThread(target: TurnComposerReviewTarget) {
+        Task { @MainActor in
+            guard codex.isConnected else {
+                codex.lastErrorMessage = "Connect to runtime first."
+                return
+            }
+            guard codex.isInitialized else {
+                codex.lastErrorMessage = "Runtime is still initializing. Wait a moment and retry."
+                return
+            }
+
+            do {
+                _ = try await codex.startThread(
+                    preferredProjectPath: thread.normalizedProjectPath,
+                    pendingComposerAction: .codeReview(target: pendingCodeReviewTarget(for: target))
+                )
+                viewModel.clearComposerReviewSelection()
+            } catch {
+                if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                    codex.lastErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func pendingCodeReviewTarget(
+        for target: TurnComposerReviewTarget
+    ) -> CodexPendingCodeReviewTarget {
+        switch target {
+        case .uncommittedChanges:
+            return .uncommittedChanges
+        case .baseBranch:
+            return .baseBranch
+        }
     }
 
     private var isPhotoPickerPresentedBinding: Binding<Bool> {

@@ -90,8 +90,6 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
-            serviceTierMenu
-
             if isThreadRunning {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback()
@@ -189,26 +187,58 @@ struct ComposerBottomBar: View {
                 }
             }
         } label: {
-            composerMenuLabel(title: selectedModelTitle)
+            composerMenuLabel(
+                title: selectedModelTitle,
+                leadingImageName: selectedServiceTier != nil ? "bolt.fill" : nil,
+                leadingImageIsSystem: true
+            )
         }
         .tint(metaLabelColor)
     }
 
     private var reasoningMenu: some View {
         Menu {
-            Text("Select reasoning")
-            if reasoningDisplayOptions.isEmpty {
-                Text("No reasoning options")
-            } else {
-                ForEach(reasoningDisplayOptions, id: \.id) { option in
+            Section("Reasoning") {
+                if reasoningDisplayOptions.isEmpty {
+                    Text("No reasoning options")
+                } else {
+                    ForEach(reasoningDisplayOptions, id: \.id) { option in
+                        Button {
+                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                            onSelectReasoning(option.effort)
+                        } label: {
+                            if selectedReasoningEffort == option.effort {
+                                Label(option.title, systemImage: "checkmark")
+                            } else {
+                                Text(option.title)
+                            }
+                        }
+                        .disabled(reasoningMenuDisabled)
+                    }
+                }
+            }
+
+            Section("Speed") {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onSelectServiceTier(nil)
+                } label: {
+                    if selectedServiceTier == nil {
+                        Label("Normal", systemImage: "checkmark")
+                    } else {
+                        Text("Normal")
+                    }
+                }
+
+                ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
                     Button {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onSelectReasoning(option.effort)
+                        onSelectServiceTier(tier)
                     } label: {
-                        if selectedReasoningEffort == option.effort {
-                            Label(option.title, systemImage: "checkmark")
+                        if selectedServiceTier == tier {
+                            Label(tier.displayName, systemImage: "checkmark")
                         } else {
-                            Text(option.title)
+                            Text(tier.displayName)
                         }
                     }
                 }
@@ -216,7 +246,6 @@ struct ComposerBottomBar: View {
         } label: {
             composerMenuLabel(title: selectedReasoningTitle, leadingImageName: reasoningSymbolName, leadingImageIsSystem: false)
         }
-        .disabled(reasoningMenuDisabled)
         .tint(metaLabelColor)
     }
 
@@ -234,34 +263,6 @@ struct ComposerBottomBar: View {
         .foregroundStyle(Color(.plan))
     }
 
-    private var serviceTierMenu: some View {
-        Menu {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onSelectServiceTier(nil)
-            } label: {
-                Label("Normal", systemImage: "tortoise")
-            }
-
-            ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onSelectServiceTier(tier)
-                } label: {
-                    Label(tier.displayName, systemImage: tier.iconName)
-                }
-            }
-        } label: {
-            // Keep speed compact in the composer so it reads like a per-message meta toggle.
-            Image(systemName: selectedServiceTier?.iconName ?? "tortoise")
-                .font(metaTextFont)
-                .fontWeight(.regular)
-                .frame(width: plusTapTargetSide, height: plusTapTargetSide)
-                .contentShape(Capsule())
-        }
-        .accessibilityLabel(selectedServiceTier?.displayName ?? "Normal speed")
-        .tint(metaLabelColor)
-    }
 
     private var queueBadge: some View {
         HStack(spacing: 3) {
