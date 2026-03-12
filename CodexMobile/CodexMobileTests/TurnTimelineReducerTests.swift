@@ -273,6 +273,49 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["diff-2"])
     }
 
+    func testRemoveDuplicateFileChangeMessagesIgnoresStatusOnlyDifferences() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: inProgress
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "filechange-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "turn-diff-1",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["diff-2"])
+    }
+
     func testRemoveDuplicateFileChangeMessagesKeepsDistinctTurnSnapshots() {
         let now = Date()
         let messages = [

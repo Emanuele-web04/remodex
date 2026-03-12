@@ -227,8 +227,31 @@ enum TurnFileChangeSummaryParser {
             )
         }
 
-        guard !entries.isEmpty else { return nil }
-        return TurnFileChangeSummary(entries: entries)
+        let consolidatedEntries = consolidate(entries: entries)
+        guard !consolidatedEntries.isEmpty else { return nil }
+        return TurnFileChangeSummary(entries: consolidatedEntries)
+    }
+
+    static func dedupeKey(from text: String) -> String? {
+        guard let summary = parse(from: text) else {
+            return nil
+        }
+
+        let parts = summary.entries
+            .sorted { lhs, rhs in
+                if lhs.path != rhs.path { return lhs.path < rhs.path }
+                if lhs.action?.rawValue != rhs.action?.rawValue {
+                    return (lhs.action?.rawValue ?? "") < (rhs.action?.rawValue ?? "")
+                }
+                if lhs.additions != rhs.additions { return lhs.additions < rhs.additions }
+                return lhs.deletions < rhs.deletions
+            }
+            .map { entry in
+                "\(entry.path)|\(entry.action?.rawValue ?? "")|+\(entry.additions)|-\(entry.deletions)"
+            }
+
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "||")
     }
 
     private static func parsePathLine(_ line: String) -> String? {
@@ -530,5 +553,27 @@ enum TurnFileChangeSummaryParser {
         template: String
     ) -> String {
         TurnMessageRegexCache.replaceMatches(in: text, regex: regex, template: template)
+    }
+
+    private static func consolidate(entries: [TurnFileChangeSummaryEntry]) -> [TurnFileChangeSummaryEntry] {
+        var orderedPaths: [String] = []
+        var entriesByPath: [String: TurnFileChangeSummaryEntry] = [:]
+
+        for entry in entries {
+            if var existing = entriesByPath[entry.path] {
+                existing.additions += entry.additions
+                existing.deletions += entry.deletions
+                if existing.action == nil {
+                    existing.action = entry.action
+                }
+                entriesByPath[entry.path] = existing
+                continue
+            }
+
+            orderedPaths.append(entry.path)
+            entriesByPath[entry.path] = entry
+        }
+
+        return orderedPaths.compactMap { entriesByPath[$0] }
     }
 }

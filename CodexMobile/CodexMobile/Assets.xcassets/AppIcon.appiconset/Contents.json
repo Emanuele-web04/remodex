@@ -1,7 +1,6 @@
 {
   "images" : [
     {
-      "filename" : "outlinejust.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"
@@ -13,6 +12,7 @@
           "value" : "dark"
         }
       ],
+      "filename" : "Frame 30.png",
       "idiom" : "universal",
       "platform" : "ios",
       "size" : "1024x1024"

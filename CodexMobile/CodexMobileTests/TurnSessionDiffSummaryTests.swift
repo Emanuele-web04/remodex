@@ -111,11 +111,82 @@ final class TurnSessionDiffSummaryTests: XCTestCase {
         XCTAssertEqual(totals?.distinctDiffCount, 1)
     }
 
+    func testTotalsDeduplicateEquivalentFileChangeMessagesWithDifferentIDs() {
+        let messages = [
+            makeMessage(
+                id: "diff-streaming",
+                kind: .fileChange,
+                text: """
+                Status: inProgress
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-final",
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                turnID: "turn-1"
+            ),
+        ]
+
+        let totals = TurnSessionDiffSummaryCalculator.totals(from: messages)
+
+        XCTAssertEqual(totals?.additions, 2)
+        XCTAssertEqual(totals?.deletions, 1)
+        XCTAssertEqual(totals?.distinctDiffCount, 1)
+    }
+
+    func testTotalsKeepEquivalentFileChangeMessagesFromDifferentTurns() {
+        let messages = [
+            makeMessage(
+                id: "diff-turn-1",
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-turn-2",
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                turnID: "turn-2"
+            ),
+        ]
+
+        let totals = TurnSessionDiffSummaryCalculator.totals(from: messages)
+
+        XCTAssertEqual(totals?.additions, 4)
+        XCTAssertEqual(totals?.deletions, 2)
+        XCTAssertEqual(totals?.distinctDiffCount, 2)
+    }
+
     private func makeMessage(
         id: String,
         kind: CodexMessageKind,
         text: String,
-        itemID: String? = nil
+        itemID: String? = nil,
+        turnID: String? = nil
     ) -> CodexMessage {
         CodexMessage(
             id: id,
@@ -124,6 +195,7 @@ final class TurnSessionDiffSummaryTests: XCTestCase {
             kind: kind,
             text: text,
             createdAt: Date(),
+            turnId: turnID,
             itemId: itemID,
             orderIndex: 0
         )

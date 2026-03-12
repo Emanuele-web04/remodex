@@ -323,9 +323,16 @@ enum TurnTimelineReducer {
 
     // Keys file-change cards by turn + rendered payload so repeated turn/diff snapshots collapse to one row.
     private static func duplicateFileChangeKey(for message: CodexMessage) -> String? {
+        guard let turnId = normalizedIdentifier(message.turnId) else {
+            return nil
+        }
+
+        if let summaryKey = TurnFileChangeSummaryParser.dedupeKey(from: message.text) {
+            return "\(turnId)|\(summaryKey)"
+        }
+
         let normalizedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedText.isEmpty,
-              let turnId = normalizedIdentifier(message.turnId) else {
+        guard !normalizedText.isEmpty else {
             return nil
         }
         return "\(turnId)|\(normalizedText)"

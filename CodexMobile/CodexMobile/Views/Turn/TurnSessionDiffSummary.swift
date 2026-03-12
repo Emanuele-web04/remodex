@@ -62,15 +62,24 @@ enum TurnSessionDiffSummaryCalculator {
         scope: TurnSessionDiffScope = .unpushedSession
     ) -> TurnSessionDiffTotals? {
         let relevantMessages = relevantMessages(in: messages, scope: scope)
-        var seenMessageIDs: Set<String> = []
+        var seenKeys: Set<String> = []
         var additions = 0
         var deletions = 0
         var distinctDiffCount = 0
 
         for message in relevantMessages {
             guard message.role == .system, message.kind == .fileChange else { continue }
-            guard seenMessageIDs.insert(message.id).inserted else { continue }
             guard let summary = TurnFileChangeSummaryParser.parse(from: message.text) else { continue }
+
+            // Collapse streaming/final duplicates only within the same turn so repeated
+            // edits across separate turns still count toward the unpushed badge.
+            let dedupeKey = TurnFileChangeSummaryParser.dedupeKey(from: message.text)
+                .map { summaryKey in
+                    let turnScope = message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return "\(turnScope ?? "message-id:\(message.id)")|\(summaryKey)"
+                }
+                ?? "message-id:\(message.id)"
+            guard seenKeys.insert(dedupeKey).inserted else { continue }
 
             additions += summary.entries.reduce(0) { $0 + $1.additions }
             deletions += summary.entries.reduce(0) { $0 + $1.deletions }
