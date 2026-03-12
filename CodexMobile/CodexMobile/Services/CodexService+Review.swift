@@ -76,7 +76,7 @@ extension CodexService {
         }
     }
 
-    // Uses the app-server review target schema from the Codex app-server docs.
+    // Uses the review/start target schema expected by the local Codex runtime.
     private func buildReviewStartParams(
         threadId: String,
         target: CodexReviewTarget,
