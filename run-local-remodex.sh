@@ -166,8 +166,26 @@ require_command() {
   command -v "${command_name}" >/dev/null 2>&1 || die "Missing required command: ${command_name}"
 }
 
+require_supported_node() {
+  local node_version
+  local node_major
+
+  node_version="$(node -p 'process.versions.node' 2>/dev/null || true)"
+  [[ -n "${node_version}" ]] || die "Unable to determine the installed Node.js version."
+
+  node_major="${node_version%%.*}"
+  [[ "${node_major}" =~ ^[0-9]+$ ]] || die "Unable to parse the installed Node.js version: ${node_version}"
+
+  if (( node_major < 22 )); then
+    die "Please use Node.js 22 or greater."
+  fi
+}
+
 ensure_prerequisites() {
   require_command node
+  # Check the active Node.js runtime before touching npm so installs use the
+  # expected toolchain.
+  require_supported_node
   require_command npm
   require_command curl
   require_command lsof
