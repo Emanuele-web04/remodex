@@ -125,6 +125,42 @@ npm install
 npm start
 ```
 
+## Run Locally
+
+Use the launcher script from the repo root to start a local relay and the bridge together:
+
+This launcher is intended for local development and self-hosted testing. It starts a local relay plus the bridge from this repository so you can exercise the full pairing flow without relying on the hosted relay.
+
+```sh
+./run-local-remodex.sh
+```
+
+Example:
+
+```sh
+./run-local-remodex.sh --hostname my-mac.local --port 9000
+./run-local-remodex.sh --hostname 192.168.1.50 --bind-host 0.0.0.0 --port 9000
+```
+
+The script prints the pairing QR code and, if bridge dependencies are missing, asks before installing `ws`, `qrcode-terminal`, and `uuid`.
+
+Parameters:
+- `--hostname`: Hostname or IP advertised to the bridge for relay access
+- `--bind-host`: Interface/address the local relay listens on
+- `--port`: Relay port to listen on and advertise
+- `--help`: Show usage text
+
+Environment overrides:
+- `RELAY_PUBLIC_HOST`
+- `RELAY_HOST`
+- `RELAY_PORT`
+- `RELAY_URL`
+
+Defaults:
+- Bind host: `0.0.0.0`
+- Port: `9000`
+- Hostname: macOS `LocalHostName + ".local"`, then `hostname`, then `localhost`
+
 ## Commands
 
 ### `remodex up`
