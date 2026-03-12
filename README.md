@@ -10,6 +10,21 @@
 
 Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a local-first open-source bridge + iOS app that keeps the Codex runtime on your Mac and lets your phone connect through a paired WebSocket relay session.
 
+## Key App Features
+
+- End-to-end encrypted pairing and chats between your iPhone and Mac
+- Fast mode for lower-latency turns
+- Plan mode for structured planning before execution
+- Steer active runs without starting over
+- Queue follow-up prompts while a turn is still running
+- In-app notifications when turns finish or need attention
+- Git actions from your phone, including commit, push, pull, and branch switching
+- Reasoning controls to tune how much thinking Codex uses
+- Access controls with On-Request or Full access
+- Photo attachments from camera or library
+- QR pairing with automatic reconnect
+- Shared thread history with Codex on your Mac
+
 Right now, testing the full phone-to-Mac flow still depends on `relay.example.invalid`.
 
 Right now I'm letting people use the hosted relay for free while I test things and clean up the experience. Longer term, the open-source path is for self-hosted setups, and the App Store version is meant to cover the managed relay and ongoing maintenance.
