@@ -1,0 +1,11 @@
+{
+  "name": "remodex-relay",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node main.js",
+    "start:bun": "bun main.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
