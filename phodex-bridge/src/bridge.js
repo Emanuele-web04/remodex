@@ -22,13 +22,13 @@ const { createBridgeSecureTransport } = require("./secure-transport");
 
 function startBridge(options = {}) {
   const config = readBridgeConfig();
-  if (options.relayUrlOverride) {
-    config.relayUrl = options.relayUrlOverride;
-  }
+  const transportRelayUrl = options.relayUrlOverride || config.relayUrl;
+  const pairingRelayUrl = options.pairingRelayUrlOverride || transportRelayUrl;
   const beforeShutdown = createSingleRunCallback(options.beforeShutdown);
   const sessionId = uuidv4();
-  const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
+  const relayBaseUrl = transportRelayUrl.replace(/\/+$/, "");
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
+  const pairingRelayBaseUrl = pairingRelayUrl.replace(/\/+$/, "");
   const deviceState = loadOrCreateBridgeDeviceState();
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
@@ -48,7 +48,7 @@ function startBridge(options = {}) {
   const forwardedInitializeRequestIds = new Set();
   const secureTransport = createBridgeSecureTransport({
     sessionId,
-    relayUrl: relayBaseUrl,
+    relayUrl: pairingRelayBaseUrl,
     deviceState,
   });
   let contextUsageWatcher = null;
@@ -174,7 +174,9 @@ function startBridge(options = {}) {
     });
   }
 
-  printQR(secureTransport.createPairingPayload());
+  if (!options.suppressInitialQr) {
+    printCurrentPairingQr();
+  }
   connectRelay();
 
   codex.onMessage((message) => {
@@ -385,6 +387,16 @@ function startBridge(options = {}) {
       codexHandshakeState = "warm";
     }
   }
+
+  function printCurrentPairingQr({ relayUrl } = {}) {
+    printQR(secureTransport.createPairingPayload({
+      relayUrlOverride: relayUrl,
+    }));
+  }
+
+  return {
+    printPairingQr: printCurrentPairingQr,
+  };
 }
 
 function shutdown(codex, getSocket, beforeExit = () => {}) {

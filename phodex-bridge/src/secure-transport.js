@@ -44,11 +44,12 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
   let outboundBufferBytes = 0;
   const outboundBuffer = [];
 
-  function createPairingPayload() {
+  function createPairingPayload({ relayUrlOverride } = {}) {
     currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
+    const pairingRelayUrl = normalizeNonEmptyString(relayUrlOverride) || relayUrl;
     return {
       v: PAIRING_QR_VERSION,
-      relay: relayUrl,
+      relay: pairingRelayUrl,
       sessionId,
       macDeviceId: currentDeviceState.macDeviceId,
       macIdentityPublicKey: currentDeviceState.macIdentityPublicKey,

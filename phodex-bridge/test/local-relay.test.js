@@ -129,9 +129,10 @@ test("waitForPublicTunnelReady fails with a clear timeout error when health chec
   );
 });
 
-test("startTryCloudflareTunnel fails when the public tunnel never becomes reachable", async () => {
+test("startTryCloudflareTunnel keeps waiting after the initial readiness window and resolves once the public tunnel is reachable", async () => {
   const child = createFakeChildProcess();
   const statuses = [];
+  let attempts = 0;
   const startup = startTryCloudflareTunnel({
     localUrl: "http://127.0.0.1:8787",
     cloudflaredBin: "cloudflared",
@@ -141,7 +142,13 @@ test("startTryCloudflareTunnel fails when the public tunnel never becomes reacha
       statuses.push(status.type);
     },
     async fetchImpl() {
-      throw new Error("connect ECONNRESET");
+      attempts += 1;
+      if (attempts === 1) {
+        await delay(25);
+        throw new Error("connect ECONNRESET");
+      }
+
+      return { ok: true, status: 200 };
     },
     spawnImpl() {
       queueMicrotask(() => {
@@ -154,12 +161,13 @@ test("startTryCloudflareTunnel fails when the public tunnel never becomes reacha
     },
   });
 
-  await assert.rejects(
-    startup,
-    /did not become reachable within 20 ms/
-  );
+  const tunnel = await startup;
 
-  assert.deepEqual(statuses, ["public_url_discovered"]);
+  assert.equal(tunnel.publicUrl, "https://alpha-beta.trycloudflare.com");
+  assert.equal(tunnel.socketBaseUrl, "wss://alpha-beta.trycloudflare.com");
+  assert.deepEqual(statuses, ["public_url_discovered", "public_pending", "public_ready"]);
+
+  await tunnel.close();
   assert.equal(child.killSignals[0], "SIGTERM");
 });
 
@@ -224,10 +232,25 @@ test("startLocalRelayServer forwards messages between the Mac and iPhone roles",
   await relay.close();
 });
 
+test("startLocalRelayServer exposes a websocket relay URL for the local bridge", async () => {
+  const relay = await startLocalRelayServer();
+
+  assert.match(relay.socketBaseUrl, /^ws:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(relay.relayUrl, /^ws:\/\/127\.0\.0\.1:\d+\/relay$/);
+
+  await relay.close();
+});
+
 function onceOpen(socket) {
   return new Promise((resolve, reject) => {
     socket.once("open", resolve);
     socket.once("error", reject);
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
 

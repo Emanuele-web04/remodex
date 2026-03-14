@@ -40,6 +40,7 @@ async function startLocalRelayServer({
   }
 
   const httpUrl = `http://${host}:${address.port}`;
+  const socketBaseUrl = upgradeHttpUrlToWebSocket(httpUrl);
   let closed = false;
 
   return {
@@ -47,6 +48,8 @@ async function startLocalRelayServer({
     port: address.port,
     httpUrl,
     healthUrl: `${httpUrl}/healthz`,
+    socketBaseUrl,
+    relayUrl: `${socketBaseUrl}/relay`,
     async close() {
       if (closed) {
         return;
@@ -218,10 +221,47 @@ async function startTryCloudflareTunnel({
           publicUrlDiscoveredAt,
         }));
       }).catch((error) => {
-        fail(createTunnelStartupError(
-          `TryCloudflare assigned ${publicUrl}, but it did not become reachable within ${readyTimeoutMs} ms. ${error.message}`,
-          recentLogs
-        ));
+        if (resolved) {
+          return;
+        }
+
+        emitStatus(onStatus, {
+          type: "public_pending",
+          publicUrl,
+          at: formatStatusTimestamp(),
+          warning: error.message,
+        });
+
+        publicReadyPromise = waitForPublicTunnelReady({
+          publicUrl,
+          timeoutMs: null,
+          pollIntervalMs: readyPollIntervalMs,
+          fetchImpl,
+          shouldContinue() {
+            return !closed && child.exitCode == null;
+          },
+        }).then((didBecomeReady) => {
+          if (!didBecomeReady || resolved) {
+            return;
+          }
+
+          resolved = true;
+          const publicReadyAt = formatStatusTimestamp();
+          emitStatus(onStatus, {
+            type: "public_ready",
+            publicUrl,
+            at: publicReadyAt,
+          });
+          resolve(createTunnelHandle(publicUrl, {
+            publicReadyAt,
+            publicUrlDiscoveredAt,
+          }));
+        }).catch((waitError) => {
+          fail(createTunnelStartupError(
+            `TryCloudflare assigned ${publicUrl}, but it did not become reachable. ${waitError.message}`,
+            recentLogs
+          ));
+        });
       });
     };
 

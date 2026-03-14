@@ -8,7 +8,8 @@
 const {
   parseCliArgs,
   startBridge,
-  startTryCloudflareRelay,
+  startLocalRelayServer,
+  startTryCloudflareTunnel,
   openLastActiveThread,
   watchThreadRollout,
 } = require("../src");
@@ -22,34 +23,57 @@ async function main() {
   const { command, options, positionals } = parseCliArgs(process.argv.slice(2));
 
   if (command === "up") {
-    let managedRelay = null;
-
     if (options.tryCloudflare) {
-      console.log("[remodex] Starting the local relay...");
-      console.log("[remodex] Requesting a TryCloudflare URL...");
+      let localRelay = null;
+      let managedTunnel = null;
 
-      managedRelay = await startTryCloudflareRelay({
+      console.log("[remodex] Starting the local relay...");
+      localRelay = await startLocalRelayServer({
         port: options.tryCloudflarePort,
-        onStatus(status) {
-          handleTryCloudflareStatus(status);
-        },
-        onTunnelExit(error) {
-          console.error(`[remodex] ${(error && error.message) || "TryCloudflare exited unexpectedly."}`);
-          process.exit(1);
+      });
+
+      console.log(`[remodex] Local relay: ${localRelay.httpUrl}`);
+      console.log(`[remodex] Health check: ${localRelay.healthUrl}`);
+      console.log("[remodex] Starting bridge on the local relay...");
+
+      const bridge = startBridge({
+        relayUrlOverride: localRelay.relayUrl,
+        suppressInitialQr: true,
+        beforeShutdown() {
+          const cleanup = [localRelay?.close()];
+          if (managedTunnel) {
+            cleanup.push(managedTunnel.close());
+          }
+          void Promise.allSettled(cleanup);
         },
       });
 
-      console.log(`[remodex] Local relay: ${managedRelay.httpUrl}`);
-      console.log(`[remodex] Health check: ${managedRelay.healthUrl}`);
-      console.log(`[remodex] TryCloudflare relay: ${managedRelay.relayUrl}`);
+      console.log("[remodex] Requesting a TryCloudflare URL...");
+      console.log("[remodex] The QR code will be printed once the public tunnel is reachable.");
+
+      startTryCloudflareTunnel({
+        localUrl: localRelay.httpUrl,
+        onStatus(status) {
+          handleTryCloudflareStatus(status);
+        },
+        onUnexpectedExit(error) {
+          console.error(`[remodex] ${(error && error.message) || "TryCloudflare exited unexpectedly."}`);
+        },
+      }).then((tunnel) => {
+        managedTunnel = tunnel;
+        const publicRelayUrl = `${tunnel.socketBaseUrl}/relay`;
+        console.log(`[remodex] TryCloudflare relay: ${publicRelayUrl}`);
+        bridge.printPairingQr({ relayUrl: publicRelayUrl });
+      }).catch(async (error) => {
+        console.error(`[remodex] ${(error && error.message) || "Failed to establish the TryCloudflare tunnel."}`);
+        await localRelay.close().catch(() => {});
+        process.exit(1);
+      });
+
+      return;
     }
 
-    startBridge({
-      relayUrlOverride: managedRelay?.relayUrl,
-      beforeShutdown() {
-        managedRelay?.close().catch(() => {});
-      },
-    });
+    startBridge();
     return;
   }
 
@@ -88,14 +112,21 @@ function handleTryCloudflareStatus(status) {
 
   if (status.type === "public_url_discovered") {
     console.log(
-      `[remodex] TryCloudflare assigned a public URL at ${formatStatusTime(status.at)}.`
+      `[remodex] TryCloudflare assigned a public URL at ${formatStatusTime(status.at)}. Waiting for public reachability before printing the QR code.`
+    );
+    return;
+  }
+
+  if (status.type === "public_pending") {
+    console.log(
+      `[remodex] Public tunnel still warming up as of ${formatStatusTime(status.at)}. The bridge stays connected locally; the QR code will appear once the tunnel is reachable.`
     );
     return;
   }
 
   if (status.type === "public_ready") {
     console.log(
-      `[remodex] Public tunnel reachable at ${formatStatusTime(status.at)}. You can scan the QR code now.`
+      `[remodex] Public tunnel reachable at ${formatStatusTime(status.at)}. Printing the QR code now.`
     );
   }
 }

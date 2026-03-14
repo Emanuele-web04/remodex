@@ -61,6 +61,28 @@ test("secure transport rejects plaintext JSON-RPC before the secure handshake", 
   assert.equal(controlMessages[0]?.code, "update_required");
 });
 
+test("createPairingPayload can publish a different relay URL without changing the bridge session", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const secureTransport = createBridgeSecureTransport({
+    sessionId: "session-override",
+    relayUrl: "ws://127.0.0.1:8787/relay",
+    deviceState: {
+      macDeviceId: "mac-override",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+
+  const pairingPayload = secureTransport.createPairingPayload({
+    relayUrlOverride: "wss://alpha-beta.trycloudflare.com/relay",
+  });
+
+  assert.equal(pairingPayload.sessionId, "session-override");
+  assert.equal(pairingPayload.relay, "wss://alpha-beta.trycloudflare.com/relay");
+  assert.equal(pairingPayload.macDeviceId, "mac-override");
+});
+
 test("secure transport round-trips encrypted payloads after a trusted reconnect handshake", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const phoneIdentity = createOkpKeyPair("ed25519");
