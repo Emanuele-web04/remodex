@@ -129,7 +129,7 @@ test("waitForPublicTunnelReady fails with a clear timeout error when health chec
   );
 });
 
-test("startTryCloudflareTunnel keeps startup alive when public readiness checks time out", async () => {
+test("startTryCloudflareTunnel fails when the public tunnel never becomes reachable", async () => {
   const child = createFakeChildProcess();
   const statuses = [];
   const startup = startTryCloudflareTunnel({
@@ -154,14 +154,12 @@ test("startTryCloudflareTunnel keeps startup alive when public readiness checks 
     },
   });
 
-  const tunnel = await startup;
+  await assert.rejects(
+    startup,
+    /did not become reachable within 20 ms/
+  );
 
-  assert.equal(tunnel.publicUrl, "https://alpha-beta.trycloudflare.com");
-  assert.equal(tunnel.socketBaseUrl, "wss://alpha-beta.trycloudflare.com");
-  assert.match(tunnel.readinessWarning, /Timed out waiting for public tunnel readiness/);
-  assert.deepEqual(statuses, ["public_url_discovered", "public_pending"]);
-
-  await tunnel.close();
+  assert.deepEqual(statuses, ["public_url_discovered"]);
   assert.equal(child.killSignals[0], "SIGTERM");
 });
 

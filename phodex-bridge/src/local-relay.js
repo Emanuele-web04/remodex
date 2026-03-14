@@ -218,23 +218,10 @@ async function startTryCloudflareTunnel({
           publicUrlDiscoveredAt,
         }));
       }).catch((error) => {
-        if (resolved) {
-          return;
-        }
-
-        resolved = true;
-        clearTimeout(readyTimeout);
-        emitStatus(onStatus, {
-          type: "public_pending",
-          publicUrl,
-          at: formatStatusTimestamp(),
-          warning: error.message,
-        });
-        resolve(createTunnelHandle(publicUrl, {
-          publicUrlDiscoveredAt,
-          readinessWarning: error.message,
-        }));
-        continueWaitingForPublicReady(publicUrl);
+        fail(createTunnelStartupError(
+          `TryCloudflare assigned ${publicUrl}, but it did not become reachable within ${readyTimeoutMs} ms. ${error.message}`,
+          recentLogs
+        ));
       });
     };
 
@@ -275,14 +262,12 @@ async function startTryCloudflareTunnel({
   function createTunnelHandle(publicUrl, {
     publicReadyAt = "",
     publicUrlDiscoveredAt = "",
-    readinessWarning = "",
   } = {}) {
     const socketBaseUrl = upgradeHttpUrlToWebSocket(publicUrl);
     return {
       publicUrl,
       publicReadyAt,
       publicUrlDiscoveredAt,
-      readinessWarning,
       socketBaseUrl,
       async close() {
         if (closed) {
@@ -297,27 +282,6 @@ async function startTryCloudflareTunnel({
     };
   }
 
-  function continueWaitingForPublicReady(publicUrl) {
-    waitForPublicTunnelReady({
-      publicUrl,
-      timeoutMs: null,
-      pollIntervalMs: readyPollIntervalMs,
-      fetchImpl,
-      shouldContinue() {
-        return !closed && child.exitCode == null;
-      },
-    }).then((didBecomeReady) => {
-      if (!didBecomeReady) {
-        return;
-      }
-
-      emitStatus(onStatus, {
-        type: "public_ready",
-        publicUrl,
-        at: formatStatusTimestamp(),
-      });
-    }).catch(() => {});
-  }
 }
 
 function upgradeHttpUrlToWebSocket(urlString) {

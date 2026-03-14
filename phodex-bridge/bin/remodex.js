@@ -42,11 +42,6 @@ async function main() {
       console.log(`[remodex] Local relay: ${managedRelay.httpUrl}`);
       console.log(`[remodex] Health check: ${managedRelay.healthUrl}`);
       console.log(`[remodex] TryCloudflare relay: ${managedRelay.relayUrl}`);
-      if (managedRelay.readinessWarning) {
-        console.warn(
-          `[remodex] The public tunnel is still warming up. The QR code below will work once the tunnel becomes reachable.`
-        );
-      }
     }
 
     startBridge({
@@ -94,13 +89,6 @@ function handleTryCloudflareStatus(status) {
   if (status.type === "public_url_discovered") {
     console.log(
       `[remodex] TryCloudflare assigned a public URL at ${formatStatusTime(status.at)}.`
-    );
-    return;
-  }
-
-  if (status.type === "public_pending") {
-    console.log(
-      `[remodex] Public tunnel not reachable yet as of ${formatStatusTime(status.at)}. Waiting a bit longer before giving up on readiness checks.`
     );
     return;
   }
