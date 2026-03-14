@@ -2,10 +2,11 @@
 // Purpose: Connection lifecycle and initialization handshake.
 // Layer: Service
 // Exports: CodexService connection APIs
-// Depends on: Network.NWConnection
+// Depends on: Network.NWConnection, UIKit
 
 import Foundation
 import Network
+import UIKit
 
 extension CodexService {
     private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003]
