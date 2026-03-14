@@ -2,10 +2,11 @@
 // Purpose: Verifies background disconnects stay silent while real connection failures still surface.
 // Layer: Unit Test
 // Exports: CodexServiceConnectionErrorTests
-// Depends on: XCTest, Network, CodexMobile
+// Depends on: XCTest, Network, UIKit, CodexMobile
 
 import XCTest
 import Network
+import UIKit
 @testable import CodexMobile
 
 @MainActor
@@ -35,6 +36,15 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.isAppInForeground = false
 
         XCTAssertTrue(service.isBenignBackgroundDisconnect(error))
+        XCTAssertTrue(service.shouldSuppressUserFacingConnectionError(error))
+    }
+
+    func testInactiveAppStateStillSuppressesBenignDisconnectNoise() {
+        let service = CodexService()
+        let error = NWError.posix(.ECONNRESET)
+        service.isAppInForeground = true
+        service.applicationStateProvider = { .inactive }
+
         XCTAssertTrue(service.shouldSuppressUserFacingConnectionError(error))
     }
 
@@ -79,5 +89,21 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
             service.userFacingConnectFailureMessage(NWError.posix(.ECONNABORTED)),
             "Connection was interrupted. Tap Reconnect to try again."
         )
+    }
+
+    func testPrepareForConnectionAttemptKeepsThreadStateWhenSocketAlreadyDropped() async {
+        let service = CodexService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.activeTurnIdByThread[threadID] = turnID
+        service.runningThreadIDs.insert(threadID)
+        service.bufferedSecureControlMessages["secureError"] = ["{\"kind\":\"secureError\",\"message\":\"stale\"}"]
+
+        await service.prepareForConnectionAttempt(preserveReconnectIntent: true)
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.bufferedSecureControlMessages.isEmpty)
     }
 }

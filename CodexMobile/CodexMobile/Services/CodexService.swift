@@ -295,6 +295,8 @@ final class CodexService {
     var remoteNotificationDeviceToken: String?
     var lastPushRegistrationSignature: String?
     var shouldAutoReconnectOnForeground = false
+    // Test hook so connection handling can model `.inactive` without waiting for real app lifecycle changes.
+    @ObservationIgnored var applicationStateProvider: () -> UIApplication.State = { UIApplication.shared.applicationState }
     var secureSession: CodexSecureSession?
     var pendingHandshake: CodexPendingHandshake?
     var phoneIdentityState: CodexPhoneIdentityState
