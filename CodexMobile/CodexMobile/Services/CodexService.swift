@@ -43,6 +43,24 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
     let command: String
 }
 
+struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
+    var reasoningEffort: String?
+    var serviceTierRawValue: String?
+    var overridesReasoning: Bool
+    var overridesServiceTier: Bool
+
+    var serviceTier: CodexServiceTier? {
+        guard let serviceTierRawValue else {
+            return nil
+        }
+        return CodexServiceTier(rawValue: serviceTierRawValue)
+    }
+
+    var isEmpty: Bool {
+        !overridesReasoning && !overridesServiceTier
+    }
+}
+
 struct CodexThreadCompletionBanner: Identifiable, Equatable, Sendable {
     let id = UUID()
     let threadId: String
@@ -204,6 +222,8 @@ final class CodexService {
     var selectedModelId: String?
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
+    // Per-chat runtime overrides let the composer diverge from app-wide defaults.
+    var threadRuntimeOverridesByThreadID: [String: CodexThreadRuntimeOverride] = [:]
     var selectedAccessMode: CodexAccessMode = .onRequest
     var isLoadingModels = false
     var modelsErrorMessage: String?
@@ -309,6 +329,7 @@ final class CodexService {
     static let selectedModelIdDefaultsKey = "codex.selectedModelId"
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
+    static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
@@ -358,6 +379,16 @@ final class CodexService {
         let savedReasoning = defaults.string(forKey: Self.selectedReasoningEffortDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedReasoningEffort = (savedReasoning?.isEmpty == false) ? savedReasoning : nil
+
+        if let savedThreadRuntimeOverrides = defaults.data(forKey: Self.threadRuntimeOverridesDefaultsKey),
+           let decodedThreadRuntimeOverrides = try? decoder.decode(
+               [String: CodexThreadRuntimeOverride].self,
+               from: savedThreadRuntimeOverrides
+           ) {
+            self.threadRuntimeOverridesByThreadID = decodedThreadRuntimeOverrides
+        } else {
+            self.threadRuntimeOverridesByThreadID = [:]
+        }
 
         let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)

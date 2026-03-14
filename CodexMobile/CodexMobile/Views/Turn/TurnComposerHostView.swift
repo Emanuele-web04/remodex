@@ -17,7 +17,6 @@ struct TurnComposerHostView: View {
     let orderedModelOptions: [CodexModelOption]
     let selectedModelTitle: String
     let reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
-    let selectedReasoningTitle: String
     let showsGitControls: Bool
     let isGitBranchSelectorEnabled: Bool
     let onSelectGitBranch: (String) -> Void
@@ -53,6 +52,11 @@ struct TurnComposerHostView: View {
             composerMentionedSkills: viewModel.composerMentionedSkills,
             composerReviewSelection: viewModel.composerReviewSelection
         )
+        let runtimeState = TurnComposerRuntimeState.resolve(
+            codex: codex,
+            reasoningDisplayOptions: reasoningDisplayOptions
+        )
+        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
 
         TurnComposerView(
             input: $viewModel.input,
@@ -71,11 +75,8 @@ struct TurnComposerHostView: View {
             selectedModelID: codex.selectedModelOption()?.id,
             selectedModelTitle: selectedModelTitle,
             isLoadingModels: codex.isLoadingModels,
-            reasoningDisplayOptions: reasoningDisplayOptions,
-            selectedReasoningEffort: codex.selectedReasoningEffortForSelectedModel(),
-            selectedReasoningTitle: selectedReasoningTitle,
-            reasoningMenuDisabled: reasoningDisplayOptions.isEmpty || codex.selectedModelOption() == nil,
-            selectedServiceTier: codex.selectedServiceTier,
+            runtimeState: runtimeState,
+            runtimeActions: runtimeActions,
             selectedAccessMode: codex.selectedAccessMode,
             contextWindowUsage: codex.contextWindowUsageByThread[thread.id],
             showsGitBranchSelector: showsGitControls,
@@ -92,9 +93,6 @@ struct TurnComposerHostView: View {
             onRefreshContextWindowUsage: {
                 await codex.refreshContextWindowUsage(threadId: thread.id)
             },
-            onSelectModel: codex.setSelectedModelId,
-            onSelectReasoning: codex.setSelectedReasoningEffort,
-            onSelectServiceTier: codex.setSelectedServiceTier,
             onSelectAccessMode: codex.setSelectedAccessMode,
             onTapAddImage: { viewModel.openPhotoLibraryPicker(codex: codex) },
             onTapTakePhoto: { viewModel.openCamera(codex: codex) },

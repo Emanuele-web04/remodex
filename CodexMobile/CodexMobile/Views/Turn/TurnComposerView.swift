@@ -27,11 +27,8 @@ struct TurnComposerView: View {
     let selectedModelTitle: String
     let isLoadingModels: Bool
 
-    let reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
-    let selectedReasoningEffort: String?
-    let selectedReasoningTitle: String
-    let reasoningMenuDisabled: Bool
-    let selectedServiceTier: CodexServiceTier?
+    let runtimeState: TurnComposerRuntimeState
+    let runtimeActions: TurnComposerRuntimeActions
 
     let selectedAccessMode: CodexAccessMode
     let contextWindowUsage: ContextWindowUsage?
@@ -49,9 +46,6 @@ struct TurnComposerView: View {
     let onRefreshGitBranches: () -> Void
     let onRefreshContextWindowUsage: () async -> Void
 
-    let onSelectModel: (String) -> Void
-    let onSelectReasoning: (String) -> Void
-    let onSelectServiceTier: (CodexServiceTier?) -> Void
     let onSelectAccessMode: (CodexAccessMode) -> Void
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
@@ -118,6 +112,8 @@ struct TurnComposerView: View {
                         isFocused: isInputFocused,
                         isEditable: !isComposerInteractionLocked,
                         dynamicHeight: $composerInputHeight,
+                        runtimeState: runtimeState,
+                        runtimeActions: runtimeActions,
                         onPasteImageData: { imageDataItems in
                             HapticFeedback.shared.triggerImpactFeedback(style: .light)
                             onPasteImageData(imageDataItems)
@@ -139,11 +135,7 @@ struct TurnComposerView: View {
                     selectedModelID: selectedModelID,
                     selectedModelTitle: selectedModelTitle,
                     isLoadingModels: isLoadingModels,
-                    reasoningDisplayOptions: reasoningDisplayOptions,
-                    selectedReasoningEffort: selectedReasoningEffort,
-                    selectedReasoningTitle: selectedReasoningTitle,
-                    reasoningMenuDisabled: reasoningMenuDisabled,
-                    selectedServiceTier: selectedServiceTier,
+                    runtimeState: runtimeState,
                     remainingAttachmentSlots: remainingAttachmentSlots,
                     isComposerInteractionLocked: isComposerInteractionLocked,
                     isSendDisabled: isSendDisabled,
@@ -152,9 +144,7 @@ struct TurnComposerView: View {
                     isQueuePaused: isQueuePaused,
                     activeTurnID: activeTurnID,
                     isThreadRunning: isThreadRunning,
-                    onSelectModel: onSelectModel,
-                    onSelectReasoning: onSelectReasoning,
-                    onSelectServiceTier: onSelectServiceTier,
+                    runtimeActions: runtimeActions,
                     onTapAddImage: onTapAddImage,
                     onTapTakePhoto: onTapTakePhoto,
                     onSetPlanModeArmed: onSetPlanModeArmed,
@@ -496,11 +486,19 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 selectedModelID: nil,
                 selectedModelTitle: "GPT-5.3-Codex",
                 isLoadingModels: false,
-                reasoningDisplayOptions: [],
-                selectedReasoningEffort: nil,
-                selectedReasoningTitle: "High",
-                reasoningMenuDisabled: true,
-                selectedServiceTier: .fast,
+                runtimeState: TurnComposerRuntimeState(
+                    reasoningDisplayOptions: [],
+                    effectiveReasoningEffort: nil,
+                    selectedReasoningEffort: nil,
+                    reasoningMenuDisabled: true,
+                    selectedServiceTier: .fast
+                ),
+                runtimeActions: TurnComposerRuntimeActions(
+                    selectModel: { _ in },
+                    selectAutomaticReasoning: {},
+                    selectReasoning: { _ in },
+                    selectServiceTier: { _ in }
+                ),
                 selectedAccessMode: .onRequest,
                 contextWindowUsage: nil,
                 showsGitBranchSelector: false,
@@ -515,9 +513,6 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 onSelectGitBaseBranch: { _ in },
                 onRefreshGitBranches: {},
                 onRefreshContextWindowUsage: {},
-                onSelectModel: { _ in },
-                onSelectReasoning: { _ in },
-                onSelectServiceTier: { _ in },
                 onSelectAccessMode: { _ in },
                 onTapAddImage: {},
                 onTapTakePhoto: {},

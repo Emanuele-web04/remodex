@@ -35,16 +35,21 @@ extension CodexService {
     // Starts a new thread and stores it in local state.
     func startThread(
         preferredProjectPath: String? = nil,
-        pendingComposerAction: CodexPendingThreadComposerAction? = nil
+        pendingComposerAction: CodexPendingThreadComposerAction? = nil,
+        runtimeOverride: CodexThreadRuntimeOverride? = nil
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
-        var includesServiceTier = runtimeServiceTierForTurn() != nil
+        // Brand-new chats start from app defaults; per-chat overrides are inherited only on continuation.
+        let explicitServiceTier = runtimeOverride?.overridesServiceTier == true
+            ? runtimeOverride?.serviceTierRawValue
+            : runtimeServiceTierForTurn()
+        var includesServiceTier = explicitServiceTier != nil
 
         while true {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
                 modelIdentifier: runtimeModelIdentifierForTurn(),
                 preferredProjectPath: normalizedPreferredProjectPath,
-                serviceTier: includesServiceTier ? runtimeServiceTierForTurn() : nil
+                serviceTier: includesServiceTier ? explicitServiceTier : nil
             )
 
             do {
@@ -63,6 +68,9 @@ extension CodexService {
                 )
                 if let pendingComposerAction {
                     queuePendingComposerAction(pendingComposerAction, for: thread.id)
+                }
+                if let runtimeOverride, !runtimeOverride.isEmpty {
+                    applyThreadRuntimeOverride(runtimeOverride, to: thread.id)
                 }
                 upsertThread(thread)
                 resumedThreadIDs.insert(thread.id)
@@ -547,7 +555,8 @@ extension CodexService {
     }
 
     func createContinuationThread(from archivedThreadId: String) async throws -> CodexThread {
-        let continuationThread = try await startThread()
+        let continuationRuntimeOverride = threadRuntimeOverride(for: archivedThreadId)
+        let continuationThread = try await startThread(runtimeOverride: continuationRuntimeOverride)
         appendSystemMessage(
             threadId: continuationThread.id,
             text: "Continued from archived thread `\(archivedThreadId)`"
@@ -689,7 +698,7 @@ extension CodexService {
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
-        var includesServiceTier = runtimeServiceTierForTurn() != nil
+        var includesServiceTier = runtimeServiceTierForTurn(threadId: threadId) != nil
 
         while true {
             do {
@@ -808,7 +817,10 @@ extension CodexService {
                     )
                 ),
             ]
-            if let collaborationModePayload = try buildCollaborationModePayload(for: effectiveCollaborationMode) {
+            if let collaborationModePayload = try buildCollaborationModePayload(
+                for: effectiveCollaborationMode,
+                threadId: normalizedThreadID
+            ) {
                 params["collaborationMode"] = collaborationModePayload
             }
 
@@ -981,21 +993,27 @@ extension CodexService {
         if let modelIdentifier = runtimeModelIdentifierForTurn() {
             params["model"] = .string(modelIdentifier)
         }
-        if let effort = selectedReasoningEffortForSelectedModel() {
+        if let effort = selectedReasoningEffortForSelectedModel(threadId: threadId) {
             params["effort"] = .string(effort)
         }
         if includeServiceTier,
-           let serviceTier = runtimeServiceTierForTurn() {
+           let serviceTier = runtimeServiceTierForTurn(threadId: threadId) {
             params["serviceTier"] = .string(serviceTier)
         }
-        if let collaborationModePayload = try buildCollaborationModePayload(for: collaborationMode) {
+        if let collaborationModePayload = try buildCollaborationModePayload(
+            for: collaborationMode,
+            threadId: threadId
+        ) {
             params["collaborationMode"] = collaborationModePayload
         }
         return params
     }
 
     // Encodes collaborationMode while allowing the selected mode to supply built-in instructions.
-    func buildCollaborationModePayload(for mode: CodexCollaborationModeKind?) throws -> JSONValue? {
+    func buildCollaborationModePayload(
+        for mode: CodexCollaborationModeKind?,
+        threadId: String?
+    ) throws -> JSONValue? {
         guard let mode else {
             return nil
         }
@@ -1015,7 +1033,9 @@ extension CodexService {
             "mode": .string(mode.rawValue),
             "settings": .object([
                 "model": .string(resolvedModel),
-                "reasoning_effort": selectedReasoningEffortForSelectedModel().map(JSONValue.string) ?? .null,
+                "reasoning_effort": selectedReasoningEffortForSelectedModel(
+                    threadId: threadId
+                ).map(JSONValue.string) ?? .null,
                 "developer_instructions": .null,
             ]),
         ])

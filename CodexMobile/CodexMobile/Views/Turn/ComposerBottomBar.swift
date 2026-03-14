@@ -14,11 +14,8 @@ struct ComposerBottomBar: View {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
-    let reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
-    let selectedReasoningEffort: String?
-    let selectedReasoningTitle: String
-    let reasoningMenuDisabled: Bool
-    let selectedServiceTier: CodexServiceTier?
+    let runtimeState: TurnComposerRuntimeState
+    let runtimeActions: TurnComposerRuntimeActions
     let remainingAttachmentSlots: Int
     let isComposerInteractionLocked: Bool
     let isSendDisabled: Bool
@@ -27,11 +24,6 @@ struct ComposerBottomBar: View {
     let isQueuePaused: Bool
     let activeTurnID: String?
     let isThreadRunning: Bool
-
-    // Callbacks
-    let onSelectModel: (String) -> Void
-    let onSelectReasoning: (String) -> Void
-    let onSelectServiceTier: (CodexServiceTier?) -> Void
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
@@ -176,7 +168,7 @@ struct ComposerBottomBar: View {
                 ForEach(orderedModelOptions, id: \.id) { model in
                     Button {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onSelectModel(model.id)
+                        runtimeActions.selectModel(model.id)
                     } label: {
                         if selectedModelID == model.id {
                             Label(TurnComposerMetaMapper.modelTitle(for: model), systemImage: "checkmark")
@@ -189,7 +181,7 @@ struct ComposerBottomBar: View {
         } label: {
             composerMenuLabel(
                 title: selectedModelTitle,
-                leadingImageName: selectedServiceTier != nil ? "bolt.fill" : nil,
+                leadingImageName: runtimeState.showsSpeedBadgeInModelMenu ? "bolt.fill" : nil,
                 leadingImageIsSystem: true
             )
         }
@@ -199,21 +191,32 @@ struct ComposerBottomBar: View {
     private var reasoningMenu: some View {
         Menu {
             Section("Reasoning") {
-                if reasoningDisplayOptions.isEmpty {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    runtimeActions.selectAutomaticReasoning()
+                } label: {
+                    if runtimeState.usesAutomaticReasoning {
+                        Label("Auto", systemImage: "checkmark")
+                    } else {
+                        Text("Auto")
+                    }
+                }
+
+                if runtimeState.reasoningDisplayOptions.isEmpty {
                     Text("No reasoning options")
                 } else {
-                    ForEach(reasoningDisplayOptions, id: \.id) { option in
+                    ForEach(runtimeState.reasoningDisplayOptions, id: \.id) { option in
                         Button {
                             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                            onSelectReasoning(option.effort)
+                            runtimeActions.selectReasoning(option.effort)
                         } label: {
-                            if selectedReasoningEffort == option.effort {
+                            if runtimeState.isSelectedReasoning(option.effort) {
                                 Label(option.title, systemImage: "checkmark")
                             } else {
                                 Text(option.title)
                             }
                         }
-                        .disabled(reasoningMenuDisabled)
+                        .disabled(runtimeState.reasoningMenuDisabled)
                     }
                 }
             }
@@ -221,9 +224,9 @@ struct ComposerBottomBar: View {
             Section("Speed") {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onSelectServiceTier(nil)
+                    runtimeActions.selectServiceTier(nil)
                 } label: {
-                    if selectedServiceTier == nil {
+                    if runtimeState.isSelectedServiceTier(nil) {
                         Label("Normal", systemImage: "checkmark")
                     } else {
                         Text("Normal")
@@ -233,9 +236,9 @@ struct ComposerBottomBar: View {
                 ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
                     Button {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        onSelectServiceTier(tier)
+                        runtimeActions.selectServiceTier(tier)
                     } label: {
-                        if selectedServiceTier == tier {
+                        if runtimeState.isSelectedServiceTier(tier) {
                             Label(tier.displayName, systemImage: "checkmark")
                         } else {
                             Text(tier.displayName)
@@ -244,7 +247,11 @@ struct ComposerBottomBar: View {
                 }
             }
         } label: {
-            composerMenuLabel(title: selectedReasoningTitle, leadingImageName: reasoningSymbolName, leadingImageIsSystem: false)
+            composerMenuLabel(
+                title: runtimeState.selectedReasoningTitle,
+                leadingImageName: reasoningSymbolName,
+                leadingImageIsSystem: false
+            )
         }
         .tint(metaLabelColor)
     }

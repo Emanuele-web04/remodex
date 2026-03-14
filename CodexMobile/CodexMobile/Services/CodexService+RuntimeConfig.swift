@@ -1,5 +1,5 @@
 // FILE: CodexService+RuntimeConfig.swift
-// Purpose: Runtime model/reasoning/access preferences and model/list loading.
+// Purpose: Runtime model/reasoning/access preferences, per-thread overrides, and model/list loading.
 // Layer: Service
 // Exports: CodexService runtime config APIs
 // Depends on: CodexModelOption, CodexReasoningEffortOption, CodexAccessMode
@@ -7,6 +7,14 @@
 import Foundation
 
 extension CodexService {
+    // Resolves the effective per-chat override record after normalizing the thread id.
+    func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return nil
+        }
+        return threadRuntimeOverridesByThreadID[normalizedThreadID]
+    }
+
     // Sends one request while trying approvalPolicy enum variants for cross-version compatibility.
     func sendRequestWithApprovalPolicyFallback(
         method: String,
@@ -84,9 +92,74 @@ extension CodexService {
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
+    func setThreadReasoningEffortOverride(_ effort: String, for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        let normalizedEffort = effort.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedEffort.isEmpty else {
+            clearThreadReasoningEffortOverride(for: normalizedThreadID)
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.reasoningEffort = normalizedEffort
+            override.overridesReasoning = true
+        }
+    }
+
+    func clearThreadReasoningEffortOverride(for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.reasoningEffort = nil
+            override.overridesReasoning = false
+        }
+    }
+
     func setSelectedServiceTier(_ serviceTier: CodexServiceTier?) {
         selectedServiceTier = serviceTier
         persistRuntimeSelections()
+    }
+
+    func setThreadServiceTierOverride(_ serviceTier: CodexServiceTier?, for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.serviceTierRawValue = serviceTier?.rawValue
+            override.overridesServiceTier = true
+        }
+    }
+
+    func clearThreadServiceTierOverride(for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.serviceTierRawValue = nil
+            override.overridesServiceTier = false
+        }
+    }
+
+    func applyThreadRuntimeOverride(_ runtimeOverride: CodexThreadRuntimeOverride?, to threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        guard let runtimeOverride, !runtimeOverride.isEmpty else {
+            threadRuntimeOverridesByThreadID.removeValue(forKey: normalizedThreadID)
+            persistThreadRuntimeOverrides()
+            return
+        }
+
+        threadRuntimeOverridesByThreadID[normalizedThreadID] = runtimeOverride
+        persistThreadRuntimeOverrides()
     }
 
     func setSelectedAccessMode(_ accessMode: CodexAccessMode) {
@@ -102,7 +175,24 @@ extension CodexService {
         selectedModelOption()?.supportedReasoningEfforts ?? []
     }
 
-    func selectedReasoningEffortForSelectedModel() -> String? {
+    func isThreadReasoningEffortOverridden(_ threadId: String?) -> Bool {
+        guard let threadOverride = threadRuntimeOverride(for: threadId),
+              threadOverride.overridesReasoning,
+              let selectedReasoning = threadOverride.reasoningEffort else {
+            return false
+        }
+
+        let supportedReasoningEfforts = Set(
+            supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+        )
+        return supportedReasoningEfforts.contains(selectedReasoning)
+    }
+
+    func isThreadServiceTierOverridden(_ threadId: String?) -> Bool {
+        threadRuntimeOverride(for: threadId)?.overridesServiceTier == true
+    }
+
+    func selectedReasoningEffortForSelectedModel(threadId: String? = nil) -> String? {
         guard let model = selectedModelOption() else {
             return nil
         }
@@ -110,6 +200,13 @@ extension CodexService {
         let supported = Set(model.supportedReasoningEfforts.map { $0.reasoningEffort })
         guard !supported.isEmpty else {
             return nil
+        }
+
+        if let threadOverride = threadRuntimeOverride(for: threadId),
+           threadOverride.overridesReasoning,
+           let selected = threadOverride.reasoningEffort,
+           supported.contains(selected) {
+            return selected
         }
 
         if let selected = selectedReasoningEffort,
@@ -133,11 +230,36 @@ extension CodexService {
         selectedModelOption()?.model
     }
 
-    func runtimeServiceTierForTurn() -> String? {
+    func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
+        if let threadOverride = threadRuntimeOverride(for: threadId),
+           threadOverride.overridesServiceTier {
+            return threadOverride.serviceTier
+        }
+
+        return selectedServiceTier
+    }
+
+    func runtimeServiceTierForTurn(threadId: String? = nil) -> String? {
         guard supportsServiceTier else {
             return nil
         }
-        return selectedServiceTier?.rawValue
+        return effectiveServiceTier(for: threadId)?.rawValue
+    }
+
+    // Copies per-chat runtime overrides forward when we continue an archived thread.
+    func inheritThreadRuntimeOverrides(from sourceThreadId: String?, to destinationThreadId: String?) {
+        guard let normalizedSourceThreadID = normalizedInterruptIdentifier(sourceThreadId),
+              let normalizedDestinationThreadID = normalizedInterruptIdentifier(destinationThreadId),
+              normalizedSourceThreadID != normalizedDestinationThreadID else {
+            return
+        }
+
+        guard let sourceOverride = threadRuntimeOverridesByThreadID[normalizedSourceThreadID] else {
+            applyThreadRuntimeOverride(nil, to: normalizedDestinationThreadID)
+            return
+        }
+
+        applyThreadRuntimeOverride(sourceOverride, to: normalizedDestinationThreadID)
     }
 
     func runtimeSandboxPolicyObject(for accessMode: CodexAccessMode) -> JSONValue {
@@ -253,6 +375,29 @@ extension CodexService {
 }
 
 private extension CodexService {
+    // Centralizes thread-override mutation so empty records never linger in storage.
+    func mutateThreadRuntimeOverride(
+        for threadId: String,
+        mutate: (inout CodexThreadRuntimeOverride) -> Void
+    ) {
+        var currentOverride = threadRuntimeOverridesByThreadID[threadId] ?? CodexThreadRuntimeOverride(
+            reasoningEffort: nil,
+            serviceTierRawValue: nil,
+            overridesReasoning: false,
+            overridesServiceTier: false
+        )
+
+        mutate(&currentOverride)
+
+        if currentOverride.isEmpty {
+            threadRuntimeOverridesByThreadID.removeValue(forKey: threadId)
+        } else {
+            threadRuntimeOverridesByThreadID[threadId] = currentOverride
+        }
+
+        persistThreadRuntimeOverrides()
+    }
+
     func normalizeRuntimeSelectionsAfterModelsUpdate() {
         guard !availableModels.isEmpty else {
             persistRuntimeSelections()
@@ -324,5 +469,16 @@ private extension CodexService {
         }
 
         defaults.set(selectedAccessMode.rawValue, forKey: Self.selectedAccessModeDefaultsKey)
+        persistThreadRuntimeOverrides()
+    }
+
+    func persistThreadRuntimeOverrides() {
+        guard !threadRuntimeOverridesByThreadID.isEmpty,
+              let encodedOverrides = try? encoder.encode(threadRuntimeOverridesByThreadID) else {
+            defaults.removeObject(forKey: Self.threadRuntimeOverridesDefaultsKey)
+            return
+        }
+
+        defaults.set(encodedOverrides, forKey: Self.threadRuntimeOverridesDefaultsKey)
     }
 }

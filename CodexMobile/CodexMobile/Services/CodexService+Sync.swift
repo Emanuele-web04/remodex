@@ -401,6 +401,10 @@ extension CodexService {
         removeThreadTimelineState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
+        // Drop local-only runtime overrides once a chat is fully removed from the device.
+        clearThreadReasoningEffortOverride(for: threadId)
+        clearThreadServiceTierOverride(for: threadId)
+
         threads.removeAll { $0.id == threadId }
         messagesByThread.removeValue(forKey: threadId)
         messagePersistence.save(messagesByThread)
