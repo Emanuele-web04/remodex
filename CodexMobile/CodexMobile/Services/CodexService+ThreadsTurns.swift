@@ -32,8 +32,33 @@ extension CodexService {
         }
     }
 
-    // Starts a new thread and stores it in local state.
+    // Preserves the older startThread symbol used by most call sites and incremental builds.
     func startThread(
+        preferredProjectPath: String? = nil,
+        runtimeOverride: CodexThreadRuntimeOverride? = nil
+    ) async throws -> CodexThread {
+        try await startThreadImpl(
+            preferredProjectPath: preferredProjectPath,
+            pendingComposerAction: nil,
+            runtimeOverride: runtimeOverride
+        )
+    }
+
+    // Starts a new thread and seeds a one-shot composer action for the destination thread.
+    func startThread(
+        preferredProjectPath: String? = nil,
+        pendingComposerAction: CodexPendingThreadComposerAction,
+        runtimeOverride: CodexThreadRuntimeOverride? = nil
+    ) async throws -> CodexThread {
+        try await startThreadImpl(
+            preferredProjectPath: preferredProjectPath,
+            pendingComposerAction: pendingComposerAction,
+            runtimeOverride: runtimeOverride
+        )
+    }
+
+    // Starts a new thread and stores it in local state.
+    private func startThreadImpl(
         preferredProjectPath: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction? = nil,
         runtimeOverride: CodexThreadRuntimeOverride? = nil
