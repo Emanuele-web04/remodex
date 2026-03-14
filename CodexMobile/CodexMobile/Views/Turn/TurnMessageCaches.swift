@@ -5,7 +5,8 @@
 // Exports: MarkdownRenderableTextCache, FileChangeRenderState, MessageRowRenderModel,
 //   CommandExecutionStatusCache, FileChangeSystemRenderCache, PerFileDiffChunk, PerFileDiffParser,
 //   PerFileDiffChunkCache, CodeCommentDirectiveContentCache, FileChangeGroupingCache
-// Depends on: Foundation, TurnMessageRegexCache, TurnFileChangeSummaryParser, TurnDiffLineKind, MarkdownRenderProfile
+// Depends on: Foundation, TurnMessageRegexCache, TurnFileChangeSummaryParser, TurnDiffLineKind,
+//   MarkdownRenderProfile, TurnMermaidRenderer
 
 import Foundation
 
@@ -50,6 +51,7 @@ struct FileChangeRenderState {
 
 struct MessageRowRenderModel {
     let codeCommentContent: CodeCommentDirectiveContent?
+    let mermaidContent: MermaidMarkdownContent?
     let fileChangeState: FileChangeRenderState?
     let fileChangeGroups: [FileChangeGroup]
     let thinkingContent: ThinkingDisclosureContent?
@@ -58,6 +60,7 @@ struct MessageRowRenderModel {
 
     static let empty = MessageRowRenderModel(
         codeCommentContent: nil,
+        mermaidContent: nil,
         fileChangeState: nil,
         fileChangeGroups: [],
         thinkingContent: nil,
@@ -73,7 +76,7 @@ enum MessageRowRenderModelCache {
 
     // Bundles all row-level parsing into one cache hit so timeline cells avoid repeated parser churn.
     static func model(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
-        let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(displayText.hashValue)"
+        let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(message.isStreaming)|\(displayText.hashValue)"
 
         lock.lock()
         if let cached = cache[key] {
@@ -94,11 +97,25 @@ enum MessageRowRenderModelCache {
         return built
     }
 
+    static func reset() {
+        lock.lock()
+        cache.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
+
     private static func buildModel(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
         switch message.role {
         case .assistant:
+            // Defer Mermaid parsing until the assistant row is finalized so streaming deltas
+            // keep the lightweight markdown path and avoid repeated WebKit churn.
             return MessageRowRenderModel(
                 codeCommentContent: CodeCommentDirectiveContentCache.content(messageID: message.id, text: displayText),
+                mermaidContent: message.isStreaming
+                    ? nil
+                    : MermaidMarkdownContentCache.content(
+                        messageID: message.id,
+                        text: displayText
+                    ),
                 fileChangeState: nil,
                 fileChangeGroups: [],
                 thinkingContent: nil,
@@ -113,6 +130,7 @@ enum MessageRowRenderModelCache {
                 let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(from: message.text)
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
+                    mermaidContent: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],
                     thinkingContent: thinkingText.isEmpty
@@ -130,6 +148,7 @@ enum MessageRowRenderModelCache {
                 let allEntries = actionEntries.isEmpty ? (fileChangeState.summary?.entries ?? []) : actionEntries
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
+                    mermaidContent: nil,
                     fileChangeState: fileChangeState,
                     fileChangeGroups: FileChangeGroupingCache.grouped(messageID: message.id, entries: allEntries),
                     thinkingContent: nil,
@@ -139,6 +158,7 @@ enum MessageRowRenderModelCache {
             case .commandExecution:
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
+                    mermaidContent: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],
                     thinkingContent: nil,

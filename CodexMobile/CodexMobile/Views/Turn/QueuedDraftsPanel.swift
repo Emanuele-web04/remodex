@@ -85,6 +85,7 @@ struct QueuedDraftsPanel: View {
                 text: "Refine the active run to focus only on failing tests first",
                 attachments: [],
                 skillMentions: [],
+                collaborationMode: nil,
                 createdAt: .now
             ),
             QueuedTurnDraft(
@@ -92,6 +93,7 @@ struct QueuedDraftsPanel: View {
                 text: "Then summarize the regression risk in the networking layer",
                 attachments: [],
                 skillMentions: [],
+                collaborationMode: nil,
                 createdAt: .now
             ),
         ],
@@ -110,6 +112,7 @@ struct QueuedDraftsPanel: View {
                 text: "Refine the active run to focus only on failing tests first",
                 attachments: [],
                 skillMentions: [],
+                collaborationMode: nil,
                 createdAt: .now
             ),
             QueuedTurnDraft(
@@ -117,6 +120,7 @@ struct QueuedDraftsPanel: View {
                 text: "Then summarize the regression risk in the networking layer",
                 attachments: [],
                 skillMentions: [],
+                collaborationMode: nil,
                 createdAt: .now
             ),
         ],

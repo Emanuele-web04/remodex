@@ -8,6 +8,7 @@ import SwiftUI
 @MainActor
 @main
 struct CodexMobileApp: App {
+    @UIApplicationDelegateAdaptor(CodexMobileAppDelegate.self) private var appDelegate
     @State private var codexService: CodexService
 
     init() {

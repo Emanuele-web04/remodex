@@ -1,7 +1,7 @@
 // FILE: relay.js
-// Purpose: Thin WebSocket relay used by the default hosted Remodex pairing flow.
+// Purpose: Thin self-hostable WebSocket relay for Remodex pairing and encrypted message forwarding.
 // Layer: Standalone server module
-// Exports: setupRelay, getRelayStats
+// Exports: setupRelay, getRelayStats, hasActiveMacSession, hasAuthenticatedMacSession
 
 const { WebSocket } = require("ws");
 
@@ -25,6 +25,7 @@ function setupRelay(wss) {
       ws.ping();
     }
   }, HEARTBEAT_INTERVAL_MS);
+  heartbeat.unref?.();
 
   wss.on("close", () => clearInterval(heartbeat));
 
@@ -55,6 +56,7 @@ function setupRelay(wss) {
         mac: null,
         clients: new Set(),
         cleanupTimer: null,
+        notificationSecret: null,
       });
     }
 
@@ -71,6 +73,9 @@ function setupRelay(wss) {
     }
 
     if (role === "mac") {
+      // The relay keeps a per-session push secret so first-time device registration
+      // cannot be claimed by someone who only knows the session id.
+      session.notificationSecret = readHeaderString(req.headers["x-notification-secret"]);
       if (session.mac && session.mac.readyState === WebSocket.OPEN) {
         session.mac.close(4001, "Replaced by new Mac connection");
       }
@@ -121,6 +126,7 @@ function setupRelay(wss) {
       if (role === "mac") {
         if (session.mac === ws) {
           session.mac = null;
+          session.notificationSecret = null;
           console.log(`[relay] Mac disconnected -> session ${sessionId}`);
           for (const client of session.clients) {
             if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
@@ -162,6 +168,7 @@ function scheduleCleanup(sessionId) {
       console.log(`[relay] Session ${sessionId} cleaned up`);
     }
   }, CLEANUP_DELAY_MS);
+  session.cleanupTimer.unref?.();
 }
 
 // Exposes lightweight runtime stats for health/status endpoints.
@@ -183,7 +190,34 @@ function getRelayStats() {
   };
 }
 
+// Lets the push-registration side verify that a session still belongs to a live Mac bridge.
+function hasActiveMacSession(sessionId) {
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    return false;
+  }
+
+  const session = sessions.get(sessionId.trim());
+  return Boolean(session?.mac && session.mac.readyState === WebSocket.OPEN);
+}
+
+// Used by: relay/server.js push registration gate.
+function hasAuthenticatedMacSession(sessionId, notificationSecret) {
+  if (!hasActiveMacSession(sessionId)) {
+    return false;
+  }
+
+  const session = sessions.get(sessionId.trim());
+  return session?.notificationSecret === readHeaderString(notificationSecret);
+}
+
+function readHeaderString(value) {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+}
+
 module.exports = {
   setupRelay,
   getRelayStats,
+  hasActiveMacSession,
+  hasAuthenticatedMacSession,
 };

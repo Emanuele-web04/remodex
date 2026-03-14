@@ -22,6 +22,9 @@ build/
 *.p12
 *.key
 *.cer
+CodexMobile/BuildSupport/PrivateOverrides.xcconfig
+phodex-bridge/src/private-defaults.json
+security_best_practices_report.md
 
 # Build artifacts
 *.swp

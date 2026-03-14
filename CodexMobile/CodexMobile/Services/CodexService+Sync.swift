@@ -250,6 +250,14 @@ extension CodexService {
         if activeThreadId == nil {
             activeThreadId = threads.first(where: { $0.syncState == .live })?.id
         }
+
+        if pendingNotificationOpenThreadID != nil {
+            // A successful thread/list refresh gives us fresh server truth, so retry
+            // any deferred push deep-link without forcing another list round-trip.
+            Task { @MainActor [weak self] in
+                _ = await self?.routePendingNotificationOpenIfPossible(refreshIfNeeded: false)
+            }
+        }
     }
 
     func handleMissingThread(_ threadId: String) {

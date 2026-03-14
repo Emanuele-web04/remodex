@@ -2,13 +2,34 @@
 // Purpose: Manages local notification permission, background run-completion alerts, and tap routing.
 // Layer: Service
 // Exports: CodexService notification helpers
-// Depends on: UserNotifications, CodexService+Messages
+// Depends on: UserNotifications, UIKit, CodexService+Messages
 
 import Foundation
+import UIKit
 import UserNotifications
 
 private enum CodexNotificationSource {
     static let runCompletion = "codex.runCompletion"
+}
+
+protocol CodexRemoteNotificationRegistering: AnyObject {
+    func registerForRemoteNotifications()
+}
+
+final class CodexApplicationRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
+    // Requests the APNs device token once alert permission is no longer denied.
+    func registerForRemoteNotifications() {
+#if targetEnvironment(simulator)
+        return
+#else
+        UIApplication.shared.registerForRemoteNotifications()
+#endif
+    }
+}
+
+private enum CodexPushAPNsEnvironment: String {
+    case development
+    case production
 }
 
 protocol CodexUserNotificationCentering: AnyObject {
@@ -82,10 +103,11 @@ extension CodexService {
         let delegateProxy = CodexNotificationCenterDelegateProxy(service: self)
         notificationCenterDelegateProxy = delegateProxy
         userNotificationCenter.delegate = delegateProxy
+        configureRemoteNotificationObservers()
         hasConfiguredNotifications = true
 
         Task { @MainActor [weak self] in
-            await self?.refreshNotificationAuthorizationStatus()
+            await self?.refreshManagedNotificationRegistrationState()
         }
     }
 
@@ -93,7 +115,7 @@ extension CodexService {
     func requestNotificationPermissionOnFirstLaunchIfNeeded() async {
         let promptedAlready = defaults.bool(forKey: Self.notificationsPromptedDefaultsKey)
         guard !promptedAlready else {
-            await refreshNotificationAuthorizationStatus()
+            await refreshManagedNotificationRegistrationState()
             return
         }
 
@@ -112,11 +134,85 @@ extension CodexService {
             defaults.set(true, forKey: Self.notificationsPromptedDefaultsKey)
         }
 
-        await refreshNotificationAuthorizationStatus()
+        await refreshManagedNotificationRegistrationState()
     }
 
     func refreshNotificationAuthorizationStatus() async {
         notificationAuthorizationStatus = await userNotificationCenter.authorizationStatus()
+    }
+
+    // Re-checks permission, APNs token registration, and bridge sync after app launch or Settings changes.
+    func refreshManagedNotificationRegistrationState() async {
+        await refreshNotificationAuthorizationStatus()
+        await registerForRemoteNotificationsIfAllowed()
+        await syncManagedPushRegistrationIfNeeded(force: true)
+    }
+
+    // Registers with APNs only after the user has not explicitly denied alert notifications.
+    func registerForRemoteNotificationsIfAllowed() async {
+        guard notificationAuthorizationStatus != .denied,
+              notificationAuthorizationStatus != .notDetermined else {
+            await syncManagedPushRegistrationIfNeeded(force: true)
+            return
+        }
+
+        remoteNotificationRegistrar.registerForRemoteNotifications()
+    }
+
+    // Persists the APNs token and syncs it to the paired bridge when possible.
+    func handleRemoteNotificationDeviceToken(_ deviceToken: Data) {
+        let token = deviceToken.map { String(format: "%02x", $0) }.joined()
+        guard !token.isEmpty else {
+            return
+        }
+
+        remoteNotificationDeviceToken = token
+        SecureStore.writeString(token, for: CodexSecureKeys.pushDeviceToken)
+
+        Task { @MainActor [weak self] in
+            await self?.syncManagedPushRegistrationIfNeeded(force: true)
+        }
+    }
+
+    // Push token sync is best-effort so reconnects stay resilient if the managed backend is unavailable.
+    func syncManagedPushRegistrationIfNeeded(force: Bool = false) async {
+        guard isConnected, isInitialized else {
+            return
+        }
+
+        let normalizedToken = remoteNotificationDeviceToken?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalizedToken, !normalizedToken.isEmpty else {
+            return
+        }
+
+        let alertsEnabled = canScheduleRunCompletionNotifications
+        let authorizationStatus = notificationAuthorizationStatus.pushRegistrationValue
+        let signature = [
+            normalizedRelaySessionId ?? "",
+            normalizedToken,
+            alertsEnabled ? "1" : "0",
+            authorizationStatus,
+            pushAPNsEnvironment.rawValue,
+        ].joined(separator: "|")
+
+        guard force || lastPushRegistrationSignature != signature else {
+            return
+        }
+
+        let params: JSONValue = .object([
+            "deviceToken": .string(normalizedToken),
+            "alertsEnabled": .bool(alertsEnabled),
+            "authorizationStatus": .string(authorizationStatus),
+            "appEnvironment": .string(pushAPNsEnvironment.rawValue),
+        ])
+
+        do {
+            _ = try await sendRequest(method: "notifications/push/register", params: params)
+            lastPushRegistrationSignature = signature
+        } catch {
+            debugRuntimeLog("push registration sync failed: \(error.localizedDescription)")
+        }
     }
 
     // Schedules a local alert only when a run finishes while the app is away from the foreground.
@@ -144,35 +240,145 @@ extension CodexService {
         Task { @MainActor [weak self] in
             guard let self else { return }
 
-            defer {
-                if pendingNotificationOpenThreadID == normalizedThreadId {
-                    pendingNotificationOpenThreadID = nil
-                }
-            }
-
-            if threads.contains(where: { $0.id == normalizedThreadId }) {
-                await prepareThreadForDisplay(threadId: normalizedThreadId)
-                return
-            }
-
-            await refreshThreadsForNotificationRouting()
-            if threads.contains(where: { $0.id == normalizedThreadId }) {
-                await prepareThreadForDisplay(threadId: normalizedThreadId)
-                return
-            }
-
-            if activeThreadId == nil {
-                activeThreadId = threads.first?.id
-            }
-
-            if turnId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-                debugRuntimeLog("notification target turn not routable thread=\(normalizedThreadId) turn=\(turnId ?? "")")
+            let routed = await routePendingNotificationOpenIfPossible()
+            if !routed,
+               turnId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                debugRuntimeLog("notification target turn deferred thread=\(normalizedThreadId) turn=\(turnId ?? "")")
             }
         }
     }
 }
 
+extension CodexService {
+    // Keeps push-tap intent alive across reconnect so cold-launch opens can resolve later.
+    @discardableResult
+    func routePendingNotificationOpenIfPossible(refreshIfNeeded: Bool = true) async -> Bool {
+        guard let pendingThreadId = pendingNotificationOpenThreadID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !pendingThreadId.isEmpty else {
+            return false
+        }
+
+        if hasNotificationRoutingCandidate(threadId: pendingThreadId) {
+            missingNotificationThreadPrompt = nil
+            if await prepareThreadForDisplay(threadId: pendingThreadId) {
+                if pendingNotificationOpenThreadID == pendingThreadId {
+                    pendingNotificationOpenThreadID = nil
+                }
+                return true
+            }
+            if hasNotificationRoutingCandidate(threadId: pendingThreadId) {
+                return false
+            }
+        }
+
+        guard isConnected else {
+            return false
+        }
+
+        let didRefreshThreads: Bool
+        if refreshIfNeeded {
+            didRefreshThreads = await refreshThreadsForNotificationRouting()
+        } else {
+            didRefreshThreads = true
+        }
+
+        guard hasNotificationRoutingCandidate(threadId: pendingThreadId) else {
+            guard didRefreshThreads else {
+                return false
+            }
+            return finalizeMissingNotificationRouteIfNeeded(
+                threadId: pendingThreadId,
+                isAuthoritativeMissingResult: isNotificationRouteKnownMissing(threadId: pendingThreadId)
+            )
+        }
+
+        missingNotificationThreadPrompt = nil
+        if await prepareThreadForDisplay(threadId: pendingThreadId) {
+            if pendingNotificationOpenThreadID == pendingThreadId {
+                pendingNotificationOpenThreadID = nil
+            }
+            return true
+        }
+
+        if !hasNotificationRoutingCandidate(threadId: pendingThreadId), didRefreshThreads {
+            return finalizeMissingNotificationRouteIfNeeded(
+                threadId: pendingThreadId,
+                isAuthoritativeMissingResult: isNotificationRouteKnownMissing(threadId: pendingThreadId)
+            )
+        }
+
+        return false
+    }
+}
+
 private extension CodexService {
+    // Only live threads can satisfy a notification open; archived placeholders mean the server rejected it.
+    func hasNotificationRoutingCandidate(threadId: String) -> Bool {
+        guard let thread = threads.first(where: { $0.id == threadId }) else {
+            return false
+        }
+
+        return thread.syncState != .archivedLocal
+    }
+
+    // `thread/list` can omit still-live threads, so only an explicit archived placeholder is authoritative.
+    func isNotificationRouteKnownMissing(threadId: String) -> Bool {
+        threads.first(where: { $0.id == threadId })?.syncState == .archivedLocal
+    }
+
+    // Consumes the pending deep-link only after a fresh thread refresh confirms the target is gone.
+    func finalizeMissingNotificationRouteIfNeeded(
+        threadId: String,
+        isAuthoritativeMissingResult: Bool
+    ) -> Bool {
+        guard isAuthoritativeMissingResult else {
+            return false
+        }
+
+        if pendingNotificationOpenThreadID == threadId {
+            pendingNotificationOpenThreadID = nil
+        }
+        if activeThreadId == nil || activeThreadId == threadId {
+            activeThreadId = threads.first(where: { $0.syncState == .live })?.id
+        }
+        missingNotificationThreadPrompt = CodexMissingNotificationThreadPrompt(threadId: threadId)
+        return false
+    }
+
+    // Keeps APNs callbacks wired even though SwiftUI owns the UIApplication lifecycle.
+    func configureRemoteNotificationObservers() {
+        guard notificationObserverTokens.isEmpty else {
+            return
+        }
+
+        let didRegisterObserver = NotificationCenter.default.addObserver(
+            forName: .codexDidRegisterForRemoteNotifications,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let tokenData = notification.userInfo?["deviceToken"] as? Data else {
+                return
+            }
+
+            self?.handleRemoteNotificationDeviceToken(tokenData)
+        }
+
+        let didFailObserver = NotificationCenter.default.addObserver(
+            forName: .codexDidFailToRegisterForRemoteNotifications,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let error = notification.userInfo?["error"] as? Error else {
+                return
+            }
+
+            self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+        }
+
+        notificationObserverTokens = [didRegisterObserver, didFailObserver]
+    }
+
     // Keeps local alerts deduped because some runtimes emit both turn/completed and thread/status terminal signals.
     func scheduleRunCompletionNotificationIfNeeded(
         threadId: String,
@@ -246,6 +452,14 @@ private extension CodexService {
         }
     }
 
+    var pushAPNsEnvironment: CodexPushAPNsEnvironment {
+#if DEBUG
+        .development
+#else
+        .production
+#endif
+    }
+
     func runCompletionNotificationDedupeKey(
         threadId: String,
         turnId: String?,
@@ -275,15 +489,36 @@ private extension CodexService {
     }
 
     // Refreshes the thread list before routing a notification tap to a thread created on another client.
-    func refreshThreadsForNotificationRouting() async {
+    func refreshThreadsForNotificationRouting() async -> Bool {
         guard isConnected else {
-            return
+            return false
         }
 
         do {
             try await listThreads()
+            return true
         } catch {
             debugRuntimeLog("thread refresh for notification routing failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+}
+
+private extension UNAuthorizationStatus {
+    var pushRegistrationValue: String {
+        switch self {
+        case .notDetermined:
+            return "notDetermined"
+        case .denied:
+            return "denied"
+        case .authorized:
+            return "authorized"
+        case .provisional:
+            return "provisional"
+        case .ephemeral:
+            return "ephemeral"
+        @unknown default:
+            return "unknown"
         }
     }
 }

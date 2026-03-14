@@ -1,0 +1,4 @@
+// Copy this file to PrivateOverrides.xcconfig and keep the real values local.
+// Xcode will load the private file automatically when it exists.
+
+PHODEX_DEFAULT_RELAY_URL =

@@ -45,14 +45,12 @@
 	<string>CodexMobile needs local network access to connect to your Codex app-server running on your Mac.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>CodexMobile needs photo library access to let you attach images to your messages.</string>
-	<key>PHODEX_API_URL</key>
-	<string>$(PHODEX_API_URL)</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Remodex needs photo library access to let you save rendered diagrams and attachments.</string>
 	<key>PHODEX_CHATGPT_CALLBACK_SCHEME</key>
 	<string>$(PHODEX_CHATGPT_CALLBACK_SCHEME)</string>
-	<key>PHODEX_CHATGPT_CALLBACK_URL</key>
-	<string>$(PHODEX_CHATGPT_CALLBACK_URL)</string>
-	<key>PHODEX_DEFAULT_WS_URL</key>
-	<string>$(PHODEX_DEFAULT_WS_URL)</string>
+	<key>PHODEX_DEFAULT_RELAY_URL</key>
+	<string>$(PHODEX_DEFAULT_RELAY_URL)</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>JetBrainsMono-Regular.ttf</string>

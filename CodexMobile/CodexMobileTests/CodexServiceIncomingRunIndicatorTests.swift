@@ -467,7 +467,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
     func testPermanentRelayCloseClearsSavedPairingAndDisablesReconnect() {
         let service = makeService()
 
-        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test") {
+        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
             service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
             service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
             service.isConnected = true
@@ -497,7 +497,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         service.relaySessionId = "session-1"
         XCTAssertFalse(service.hasSavedRelaySession)
 
-        service.relayUrl = "wss://relay.test"
+        service.relayUrl = "wss://relay.test/relay"
         XCTAssertTrue(service.hasSavedRelaySession)
     }
 

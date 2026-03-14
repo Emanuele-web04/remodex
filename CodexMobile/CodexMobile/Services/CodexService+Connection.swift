@@ -68,6 +68,11 @@ extension CodexService {
             try await initializeSession()
 
             startSyncLoop()
+            // Push registration is best-effort and talks to the bridge, so it must not
+            // hold the main connect path hostage when the managed backend is slow.
+            Task { @MainActor [weak self] in
+                await self?.syncManagedPushRegistrationIfNeeded(force: true)
+            }
             if performInitialSync {
                 schedulePostConnectSyncPass()
             }
@@ -107,7 +112,6 @@ extension CodexService {
         readyThreadIDs.removeAll()
         failedThreadIDs.removeAll()
         runningThreadWatchByID.removeAll()
-        pendingNotificationOpenThreadID = nil
         clearTransientConnectionPrompts()
         endBackgroundRunGraceTask(reason: "disconnect")
         if !preserveReconnectIntent {
@@ -143,6 +147,8 @@ extension CodexService {
         lastAppliedBridgeOutboundSeq = 0
         secureConnectionState = .notPaired
         secureMacFingerprint = nil
+        pendingNotificationOpenThreadID = nil
+        lastPushRegistrationSignature = nil
         clearTransientConnectionPrompts()
     }
 
@@ -264,6 +270,9 @@ extension CodexService {
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
         try? await listModels()
         try? await listThreads()
+        if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
+            return
+        }
         let resolvedPreferredThreadId = normalizedInterruptIdentifier(preferredThreadId)
         if let resolvedPreferredThreadId {
             activeThreadId = resolvedPreferredThreadId
@@ -323,6 +332,7 @@ extension CodexService {
     func clearTransientConnectionPrompts() {
         bridgeUpdatePrompt = nil
         threadCompletionBanner = nil
+        missingNotificationThreadPrompt = nil
     }
 
     // Detects runtimes that still reject `initialize.capabilities`.
@@ -424,6 +434,7 @@ extension CodexService {
         return error.localizedDescription
     }
 
+    // Treats common local relay socket teardowns as transient so foreground return can recover quietly.
     func isBenignBackgroundDisconnect(_ error: Error) -> Bool {
         if let serviceError = error as? CodexServiceError {
             if case .disconnected = serviceError {
@@ -436,7 +447,11 @@ extension CodexService {
         }
 
         if case .posix(let code) = nwError,
-           code == .ECONNABORTED || code == .ECANCELED || code == .ENOTCONN || code == .ENODATA {
+           code == .ECONNABORTED
+            || code == .ECANCELED
+            || code == .ENOTCONN
+            || code == .ENODATA
+            || code == .ECONNRESET {
             return true
         }
 
@@ -476,9 +491,27 @@ extension CodexService {
             && nsError.code == Int(POSIXErrorCode.ETIMEDOUT.rawValue)
     }
 
+    // Keeps auto-recovery reconnects visually quiet, even if stale in-flight sync calls fail after the socket drops.
+    func shouldSuppressRecoverableConnectionError(_ error: Error) -> Bool {
+        let isRecovering: Bool
+        switch connectionRecoveryState {
+        case .retrying:
+            isRecovering = true
+        case .idle:
+            isRecovering = false
+        }
+
+        guard shouldAutoReconnectOnForeground || isRecovering else {
+            return false
+        }
+
+        return isBenignBackgroundDisconnect(error) || isRecoverableTransientConnectionError(error)
+    }
+
     // Suppresses only background disconnect noise; foreground timeouts should still tell the user why sync stopped.
     func shouldSuppressUserFacingConnectionError(_ error: Error) -> Bool {
-        isBenignBackgroundDisconnect(error) && !isAppInForeground
+        shouldSuppressRecoverableConnectionError(error)
+            || (isBenignBackgroundDisconnect(error) && !isAppInForeground)
     }
 
     // Surfaces only meaningful connection failures to the UI and keeps reconnect noise silent.

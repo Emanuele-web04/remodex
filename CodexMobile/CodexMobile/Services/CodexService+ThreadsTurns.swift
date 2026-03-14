@@ -765,7 +765,8 @@ extension CodexService {
         expectedTurnId: String?,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
-        shouldAppendUserMessage: Bool = true
+        shouldAppendUserMessage: Bool = true,
+        collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
         let pendingMessageId = shouldAppendUserMessage
@@ -789,11 +790,12 @@ extension CodexService {
 
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
         var imageURLKey = "url"
+        var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var currentExpectedTurnID = initialTurnID
         var didRetryWithRefreshedTurnID = false
 
         while true {
-            let params: RPCObject = [
+            var params: RPCObject = [
                 "threadId": .string(normalizedThreadID),
                 "expectedTurnId": .string(currentExpectedTurnID),
                 "input": .array(
@@ -806,6 +808,9 @@ extension CodexService {
                     )
                 ),
             ]
+            if let collaborationModePayload = try buildCollaborationModePayload(for: effectiveCollaborationMode) {
+                params["collaborationMode"] = collaborationModePayload
+            }
 
             do {
                 let response = try await sendRequest(method: "turn/steer", params: .object(params))
@@ -834,6 +839,14 @@ extension CodexService {
                    !attachments.isEmpty,
                    shouldRetryTurnStartWithImageURLField(error) {
                     imageURLKey = "image_url"
+                    continue
+                }
+
+                if effectiveCollaborationMode != nil,
+                   shouldRetryTurnStartWithoutCollaborationMode(error) {
+                    // Keep steer compatible with runtimes that only support plain turns.
+                    supportsTurnCollaborationMode = false
+                    effectiveCollaborationMode = nil
                     continue
                 }
 

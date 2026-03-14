@@ -8,7 +8,7 @@
 [![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
 [Follow on X](https://x.com/emanueledpt)
 
-Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a local-first open-source bridge + iOS app that keeps the Codex runtime on your Mac and lets your phone connect through a paired WebSocket relay session.
+Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a local-first open-source bridge + iOS app that keeps the Codex runtime on your Mac and lets your phone connect through a paired secure session.
 
 ## Key App Features
 
@@ -25,11 +25,9 @@ Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a 
 - QR pairing with automatic reconnect
 - Shared thread history with Codex on your Mac
 
-Right now, testing the full phone-to-Mac flow still depends on `relay.example.invalid`.
+The repo stays local-first and self-host friendly: the iOS app source does not embed a public hosted endpoint, and the transport layer remains inspectable for anyone who wants to run their own setup.
 
-Right now I'm letting people use the hosted relay for free while I test things and clean up the experience. Longer term, the open-source path is for self-hosted setups, and the App Store version is meant to cover the managed relay and ongoing maintenance.
-
-The current TestFlight phase is free while I validate the app over the next few days. After that, the iOS app is planned to move to the App Store as a one-time paid app. That decision is mainly to help cover the cost of the VPS behind the pairing flow and the ongoing development/support needed to keep Remodex working well; final pricing will be shared separately.
+If you want the public-repo distribution model explained clearly, read [SELF_HOSTING_MODEL.md](SELF_HOSTING_MODEL.md).
 
 > **I am very early in this project. Expect bugs.**
 >
@@ -37,9 +35,7 @@ The current TestFlight phase is free while I validate the app over the next few 
 
 ## Get the App
 
-Install the Remodex app from [TestFlight](https://testflight.apple.com/join/PKZhBUVM) before you run `remodex up`.
-
-Once the app is installed, onboarding inside Remodex walks you through pairing and scanning the QR from inside the app.
+Build the iOS app from source in Xcode, install your own signed build on-device, then use the in-app onboarding flow to pair by scanning the QR from `remodex up`.
 
 If you scan the pairing QR with a generic camera or QR reader before installing the app, your device may treat the QR payload as plain text and open a web search instead of pairing.
 
@@ -66,13 +62,12 @@ If you scan the pairing QR with a generic camera or QR reader before installing 
 
 ## Repository Structure
 
-This is a monorepo with a local bridge, an iOS app target, and its tests:
+This repo contains the local bridge, the iOS app target, and their tests:
 
 ```
 ├── phodex-bridge/                # Node.js bridge package used by `remodex`
 │   ├── bin/                      # CLI entrypoints
 │   └── src/                      # Bridge runtime, git/workspace handlers, refresh helpers
-│
 ├── CodexMobile/                  # Xcode project root
 │   ├── CodexMobile/              # App source target
 │   │   ├── Services/             # Connection, sync, incoming-event, git, and persistence logic
@@ -81,7 +76,7 @@ This is a monorepo with a local bridge, an iOS app target, and its tests:
 │   │   └── Assets.xcassets/      # App icons and UI assets
 │   ├── CodexMobileTests/         # Unit tests
 │   ├── CodexMobileUITests/       # UI tests
-│   └── BuildSupport/             # Info.plist and build-time support files
+│   └── BuildSupport/             # Info.plist, xcconfig defaults, and local override templates
 ```
 
 ## Prerequisites
@@ -89,7 +84,7 @@ This is a monorepo with a local bridge, an iOS app target, and its tests:
 - **Node.js** v18+
 - **[Codex CLI](https://github.com/openai/codex)** installed and in your PATH
 - **[Codex desktop app](https://openai.com/index/codex/)** (optional — for viewing threads on your Mac)
-- **[Remodex iOS app via TestFlight](https://testflight.apple.com/join/PKZhBUVM)** installed on your iPhone or iPad before scanning the pairing QR
+- **A signed Remodex iOS build** installed on your iPhone or iPad before scanning the pairing QR
 - **macOS** (for desktop refresh features — the core bridge works on any OS)
 - **Xcode 16+** (only if building the iOS app from source)
 
@@ -111,18 +106,63 @@ If you only want to try Remodex, you can install it from npm and run it without 
 
 ## Quick Start
 
+Install the bridge, then run:
+
 ```sh
 remodex up
 ```
 
 Open the Remodex app, follow the onboarding flow, then scan the QR code from inside the app and start coding.
 
-## Local Development
+## Run Locally
+
+```sh
+git clone https://github.com/Emanuele-web04/remodex.git
+cd remodex
+./run-local-remodex.sh
+```
+
+That launcher starts a local pairing endpoint, points the bridge at `ws://<your-host>:9000/relay`, and prints the pairing QR for the iPhone app.
+
+Options:
+
+- `./run-local-remodex.sh --hostname <lan-hostname-or-ip>`
+- `./run-local-remodex.sh --bind-host 127.0.0.1 --port 9100`
+
+If your iPhone is pairing over LAN, use a hostname or IP the phone can actually reach.
+
+## Custom Pairing Endpoint
+
+For a full public self-hosting walkthrough, see [`Docs/self-hosting.md`](Docs/self-hosting.md).
+
+If you want the npm bridge to point at your own setup instead of the built-in default, override `REMODEX_RELAY` explicitly:
+
+```sh
+REMODEX_RELAY="ws://localhost:9000/relay" remodex up
+```
+
+Reverse-proxy subpaths work too, so a hosted relay behind Traefik can live under the same domain as other APIs:
+
+```sh
+REMODEX_RELAY="wss://api.example.com/remodex/relay" remodex up
+```
+
+In that setup, the public endpoints can look like this:
+
+- `wss://api.example.com/remodex/relay`
+- `https://api.example.com/remodex/v1/push/session/register-device`
+- `https://api.example.com/remodex/v1/push/session/notify-completion`
+
+Have the proxy strip `/remodex` before forwarding so the relay still receives `/relay/...` and `/v1/push/...`.
+
+If you point `REMODEX_RELAY` at your own self-hosted relay, managed push stays off unless you also set `REMODEX_PUSH_SERVICE_URL` on the bridge and explicitly enable push on the relay.
+
+You can also run the bridge from source:
 
 ```sh
 cd phodex-bridge
 npm install
-npm start
+REMODEX_RELAY="ws://localhost:9000/relay" npm start
 ```
 
 ## Commands
@@ -132,7 +172,7 @@ npm start
 Starts the bridge:
 
 - Spawns `codex app-server` (or connects to an existing endpoint)
-- Connects the Mac bridge to the relay session endpoint
+- Connects the Mac bridge to the paired session endpoint
 - Displays a QR code for phone pairing
 - Forwards JSON-RPC messages bidirectionally
 - Handles git commands from the phone
@@ -161,11 +201,16 @@ remodex watch
 
 ## Environment Variables
 
-All optional. Sensible defaults are provided.
+`REMODEX_RELAY` is optional, but the default depends on how you got Remodex:
+
+- public GitHub/source checkouts stay open-source and self-host friendly, so they do not ship with a hosted relay baked in
+- official published packages may include a default relay at publish time
+- if you are running from source, assume you should use `./run-local-remodex.sh` or set `REMODEX_RELAY` yourself
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REMODEX_RELAY` | `wss://relay.example.invalid/relay` | Relay base URL used for QR pairing and phone/Mac session routing |
+| `REMODEX_RELAY` | empty in source checkouts; optional in published packages | Session base URL used for QR pairing and phone/Mac session routing |
+| `REMODEX_PUSH_SERVICE_URL` | disabled by default | Optional HTTP base URL for managed push registration/completion |
 | `REMODEX_CODEX_ENDPOINT` | — | Connect to an existing Codex WebSocket instead of spawning a local `codex app-server` |
 | `REMODEX_REFRESH_ENABLED` | `false` | Auto-refresh Codex.app when phone activity is detected (`true` enables it explicitly) |
 | `REMODEX_REFRESH_DEBOUNCE_MS` | `1200` | Debounce window (ms) for coalescing refresh events |
@@ -180,26 +225,35 @@ REMODEX_REFRESH_ENABLED=true remodex up
 # Connect to an existing Codex instance
 REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
 
-# Use a custom relay endpoint (`ws://` is unencrypted)
-REMODEX_RELAY=ws://localhost:9000/relay remodex up
+# Use a custom self-hosted pairing endpoint (`ws://` is unencrypted)
+REMODEX_RELAY="ws://localhost:9000/relay" remodex up
+
+# Enable managed push only if your self-hosted relay also exposes a configured APNs push service
+REMODEX_RELAY="wss://relay.example/relay" \
+REMODEX_PUSH_SERVICE_URL="https://relay.example" \
+remodex up
 ```
+
+On the relay/VPS side, keep push disabled until you actually want it. The HTTP push endpoints are off by default and only turn on when you set `REMODEX_ENABLE_PUSH_SERVICE=true`.
 
 ## Pairing and Safety
 
 - Remodex is local-first: Codex, git operations, and workspace actions run on your Mac, while the iPhone acts as a paired remote control.
-- The pairing QR now carries the relay base URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and tries to reconnect automatically on relaunch or when the app returns to the foreground.
-- The default relay is `wss://relay.example.invalid/relay`, so the socket itself is protected with TLS in transit, and Remodex wraps application payloads in end-to-end encryption after the secure handshake completes.
-- If you want to inspect or self-host the relay, the server code is available in [`relay/`](relay/).
+- The pairing QR carries the connection URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and tries to reconnect automatically on relaunch or when the app returns to the foreground.
+- The CLI no longer prints the connection URL in plain text below the QR.
+- Set `REMODEX_RELAY` only when you want to self-host or test locally against your own setup.
+- Leave `REMODEX_TRUST_PROXY` unset for direct/self-hosted installs. Turn it on only when a trusted reverse proxy such as Traefik, Nginx, or Caddy is forwarding the relay traffic.
+- The transport implementation is public in [`relay/`](relay/), but your real deployed hostname and credentials should stay private.
 - On the iPhone, the default agent permission mode is `On-Request`. Switching the app to `Full access` auto-approves runtime approval prompts from the agent.
 
 ## Security and Privacy
 
-Remodex now uses an authenticated end-to-end encrypted channel between the paired iPhone and the bridge running on your Mac. The relay still carries the WebSocket traffic, but it does not get the plaintext contents of prompts, tool calls, Codex responses, git output, or workspace RPC payloads once the secure session is established.
+Remodex now uses an authenticated end-to-end encrypted channel between the paired iPhone and the bridge running on your Mac. The transport layer still carries the WebSocket traffic, but it does not get the plaintext contents of prompts, tool calls, Codex responses, git output, or workspace RPC payloads once the secure session is established.
 
 The secure channel is built in these steps:
 
 1. The bridge generates and persists a long-term device identity keypair on the Mac.
-2. The pairing QR shares the relay URL, session ID, bridge device ID, bridge identity public key, and a short expiry window.
+2. The pairing QR shares the connection URL, session ID, bridge device ID, bridge identity public key, and a short expiry window.
 3. During pairing, the iPhone and bridge exchange fresh X25519 ephemeral keys and nonces.
 4. The bridge signs the handshake transcript with its Ed25519 identity key, and the iPhone verifies that signature against the public key from the QR code or the previously trusted Mac record.
 5. The iPhone signs a client-auth transcript with its own Ed25519 identity key, and the bridge verifies that before accepting the session.
@@ -207,8 +261,8 @@ The secure channel is built in these steps:
 
 Privacy notes:
 
-- The relay can still see connection metadata and the plaintext secure control messages used to set up the encrypted session, including session IDs, device IDs, public keys, nonces, and handshake result codes.
-- The relay does not see decrypted application payloads after the secure handshake succeeds.
+- The transport layer can still see connection metadata and the plaintext secure control messages used to set up the encrypted session, including session IDs, device IDs, public keys, nonces, and handshake result codes.
+- The transport layer does not see decrypted application payloads after the secure handshake succeeds.
 - The iPhone currently trusts a single paired phone identity per Mac bridge state. Pairing a different iPhone requires resetting pairing on the Mac first.
 - On-device message history is also encrypted at rest on iPhone using a Keychain-backed AES key.
 
@@ -255,9 +309,9 @@ This triggers a debounced deep-link bounce (`codex://settings` → `codex://thre
 
 ## Connection Resilience
 
-- **Auto-reconnect**: If the relay connection drops, the bridge reconnects with exponential backoff (1 s → 5 s max)
+- **Auto-reconnect**: If the session connection drops, the bridge reconnects with exponential backoff (1 s → 5 s max)
 - **Secure catch-up**: The bridge keeps a bounded local outbound buffer and re-sends missed encrypted messages after a secure reconnect
-- **Codex persistence**: The Codex process stays alive across relay reconnects
+- **Codex persistence**: The Codex process stays alive across session reconnects
 - **Graceful shutdown**: SIGINT/SIGTERM cleanly close all connections
 
 ## Building the iOS App
@@ -279,10 +333,10 @@ I'm not actively accepting contributions yet. See [CONTRIBUTING.md](CONTRIBUTING
 Not for Remodex itself. You need Codex CLI set up and working independently.
 
 **Does this work on Linux/Windows?**
-The core bridge (relay + Codex forwarding + git) works on any OS. Desktop refresh (AppleScript) is macOS-only.
+The core bridge client (Codex forwarding + git) works on any OS. Desktop refresh (AppleScript) is macOS-only.
 
 **What happens if I close the terminal?**
-The bridge stops. Run `remodex up` again — your phone will reconnect when it detects the relay session.
+The bridge stops. Run `remodex up` again — your phone will reconnect when it detects the saved pairing session.
 
 **Can I connect to a remote Codex instance?**
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.
@@ -290,11 +344,11 @@ Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `co
 **Why don't my phone threads show up in the Codex desktop app immediately?**
 The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. Remodex keeps desktop refresh off by default for now because the current workaround bounces the Codex app route and can feel disruptive. If you still want that workaround, enable it explicitly with `REMODEX_REFRESH_ENABLED=true`.
 
-**Can I self-host the relay server?**
-Yes. The default hosted relay runs on my VPS, and the relay server code is available in [`relay/`](relay/) if you want to inspect it or run your own compatible relay. Then point Remodex at your relay with `REMODEX_RELAY`.
+**Can I self-host the pairing server?**
+Yes. That is the intended forking path. The transport and push-service code are in [`relay/`](relay/); point `REMODEX_RELAY` at the instance you run.
 
-**Is the default hosted relay safe for sensitive work?**
-For everyday use, it is now much stronger than a plain relay: traffic is protected in transit with TLS, application payloads are end-to-end encrypted after the secure handshake, and all Codex execution still happens on your Mac. The relay can still observe connection metadata and handshake control messages, so if you want the tightest control over routing and metadata exposure, set `REMODEX_RELAY` to a relay you run yourself.
+**Is the transport layer safe for sensitive work?**
+It is much stronger than a plain text proxy: traffic can be protected in transit with TLS, application payloads are end-to-end encrypted after the secure handshake, and all Codex execution still happens on your Mac. The transport can still observe connection metadata and handshake control messages, so the tightest trust model is to run it yourself.
 
 ## License
 

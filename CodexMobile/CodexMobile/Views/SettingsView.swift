@@ -384,14 +384,14 @@ private struct SettingsNotificationsCard: View {
             }
         }
         .task {
-            await codex.refreshNotificationAuthorizationStatus()
+            await codex.refreshManagedNotificationRegistrationState()
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
                 return
             }
             Task {
-                await codex.refreshNotificationAuthorizationStatus()
+                await codex.refreshManagedNotificationRegistrationState()
             }
         }
     }
