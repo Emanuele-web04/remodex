@@ -348,6 +348,7 @@ private final class MermaidSnapshotRendererCoordinator: NSObject, WKScriptMessag
     private var lastSignature: String?
     private var currentDescriptor: MermaidRenderDescriptor?
     private var hasCapturedSnapshot = false
+    private var lastResolvedSignature: String?
 
     init(renderHeight: Binding<CGFloat>, onResolved: @escaping (MermaidRenderedSnapshot) -> Void) {
         self.renderHeight = renderHeight
@@ -363,13 +364,17 @@ private final class MermaidSnapshotRendererCoordinator: NSObject, WKScriptMessag
             return
         }
 
+        let signature = descriptor.cacheKey
         if let cached = MermaidRenderedSnapshotCache.snapshot(for: descriptor) {
-            renderHeight.wrappedValue = cached.height
-            onResolved(cached)
+            // Defer binding writes so UIViewRepresentable updates never mutate SwiftUI state inline.
+            commitRenderHeightIfNeeded(cached.height, signature: signature)
+            lastSignature = signature
+            currentDescriptor = descriptor
+            hasCapturedSnapshot = true
+            resolveSnapshot(cached, signature: signature)
             return
         }
 
-        let signature = descriptor.cacheKey
         guard lastSignature != signature else {
             return
         }
@@ -377,8 +382,10 @@ private final class MermaidSnapshotRendererCoordinator: NSObject, WKScriptMessag
         lastSignature = signature
         currentDescriptor = descriptor
         hasCapturedSnapshot = false
-        renderHeight.wrappedValue = max(MermaidRenderedSnapshotCache.knownHeight(for: descriptor) ?? 160, 120)
-        webView.frame = CGRect(origin: .zero, size: CGSize(width: descriptor.targetWidth, height: renderHeight.wrappedValue))
+        lastResolvedSignature = nil
+        let fallbackHeight = max(MermaidRenderedSnapshotCache.knownHeight(for: descriptor) ?? 160, 120)
+        commitRenderHeightIfNeeded(fallbackHeight, signature: signature)
+        webView.frame = CGRect(origin: .zero, size: CGSize(width: descriptor.targetWidth, height: fallbackHeight))
 
         let html = MermaidHTMLBuilder.html(source: source, isDarkMode: descriptor.isDarkMode)
         if let assetDirectoryURL = MermaidBundledAsset.scriptURL()?.deletingLastPathComponent() {
@@ -414,10 +421,7 @@ private final class MermaidSnapshotRendererCoordinator: NSObject, WKScriptMessag
 
         let normalizedHeight = max(120, min(resolvedHeight, 1200))
         MermaidRenderedSnapshotCache.storeKnownHeight(normalizedHeight, for: descriptor)
-
-        DispatchQueue.main.async {
-            self.renderHeight.wrappedValue = normalizedHeight
-        }
+        commitRenderHeightIfNeeded(normalizedHeight, signature: descriptor.cacheKey)
 
         guard !hasCapturedSnapshot else {
             return
@@ -450,9 +454,39 @@ private final class MermaidSnapshotRendererCoordinator: NSObject, WKScriptMessag
 
             let snapshot = MermaidRenderedSnapshot(image: image, height: height)
             MermaidRenderedSnapshotCache.store(snapshot, for: descriptor)
-            DispatchQueue.main.async {
-                self.onResolved(snapshot)
+            self.resolveSnapshot(snapshot, signature: descriptor.cacheKey)
+        }
+    }
+
+    // Schedules height changes onto the next main-queue turn so SwiftUI never sees
+    // a binding mutation from inside make/updateUIView.
+    private func commitRenderHeightIfNeeded(_ height: CGFloat, signature: String) {
+        guard abs(renderHeight.wrappedValue - height) > 0.5 else {
+            return
+        }
+
+        DispatchQueue.main.async {
+            guard self.currentDescriptor?.cacheKey == signature else {
+                return
             }
+            guard abs(self.renderHeight.wrappedValue - height) > 0.5 else {
+                return
+            }
+            self.renderHeight.wrappedValue = height
+        }
+    }
+
+    // Bounces snapshot resolution out of the current representable update pass.
+    private func resolveSnapshot(_ snapshot: MermaidRenderedSnapshot, signature: String) {
+        DispatchQueue.main.async {
+            guard self.currentDescriptor?.cacheKey == signature else {
+                return
+            }
+            guard self.lastResolvedSignature != signature else {
+                return
+            }
+            self.lastResolvedSignature = signature
+            self.onResolved(snapshot)
         }
     }
 }
