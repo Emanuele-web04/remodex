@@ -25,7 +25,7 @@ Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a 
 - QR pairing with automatic reconnect
 - Shared thread history with Codex on your Mac
 
-Right now, testing the full phone-to-Mac flow still depends on `api.phodex.app`.
+By default, the phone-to-Mac flow uses the hosted relay at `api.phodex.app`, but you can now run the same relay yourself on your LAN or on your own server.
 
 Right now I'm letting people use the hosted relay for free while I test things and clean up the experience. Longer term, the open-source path is for self-hosted setups, and the App Store version is meant to cover the managed relay and ongoing maintenance.
 
@@ -138,6 +138,21 @@ Starts the bridge:
 - Handles git commands from the phone
 - Persists the active thread for later resumption
 
+### `remodex relay [--host HOST] [--port PORT]`
+
+Starts a self-hosted relay server with HTTP health endpoints:
+
+- Binds a WebSocket relay on `/relay/{sessionId}`
+- Serves `GET /healthz` and `GET /stats`
+- Prints LAN-reachable `ws://.../relay` URLs you can feed into `REMODEX_RELAY`
+
+```sh
+remodex relay --host 0.0.0.0 --port 9000
+# => [remodex relay] reachable WebSocket URLs:
+# => - ws://192.168.1.23:9000/relay
+# => REMODEX_RELAY=ws://192.168.1.23:9000/relay remodex up
+```
+
 ### `remodex resume`
 
 Reopens the last active thread in Codex.app on your Mac.
@@ -182,6 +197,10 @@ REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
 
 # Use a custom relay endpoint (`ws://` is unencrypted)
 REMODEX_RELAY=ws://localhost:9000/relay remodex up
+
+# Run a relay on your LAN, then point the bridge at it
+remodex relay --host 0.0.0.0 --port 9000
+REMODEX_RELAY=ws://192.168.1.23:9000/relay remodex up
 ```
 
 ## Pairing and Safety
@@ -189,8 +208,28 @@ REMODEX_RELAY=ws://localhost:9000/relay remodex up
 - Remodex is local-first: Codex, git operations, and workspace actions run on your Mac, while the iPhone acts as a paired remote control.
 - The pairing QR now carries the relay base URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and tries to reconnect automatically on relaunch or when the app returns to the foreground.
 - The default relay is `wss://api.phodex.app/relay`, so the socket itself is protected with TLS in transit, and Remodex wraps application payloads in end-to-end encryption after the secure handshake completes.
-- If you want to inspect or self-host the relay, the server code is available in [`relay/`](relay/).
+- If you want to inspect or self-host the relay, the server code is available in [`relay/`](relay/) and the npm package now exposes `remodex relay` for local/LAN use.
 - On the iPhone, the default agent permission mode is `On-Request`. Switching the app to `Full access` auto-approves runtime approval prompts from the agent.
+
+## Self-Hosted Relay
+
+For local testing on the same Wi-Fi or a trusted LAN:
+
+```sh
+# Terminal 1: run the relay on your Mac
+remodex relay --host 0.0.0.0 --port 9000
+
+# Terminal 2: point the bridge at the LAN IP that the relay command printed
+REMODEX_RELAY=ws://192.168.1.23:9000/relay remodex up
+```
+
+Then open the Remodex iPhone app and scan the QR code from `remodex up` as usual. The QR payload includes your custom relay URL, so the iPhone reconnect path follows the same self-hosted endpoint.
+
+Notes:
+
+- `ws://` is fine for a trusted LAN. If you expose the relay beyond your LAN, put TLS in front of it and use `wss://.../relay`.
+- The relay is still transport-only. Codex, git, and local file operations stay on your Mac.
+- The relay health endpoint is `http://HOST:PORT/healthz`, and stats are available at `/stats`.
 
 ## Security and Privacy
 

@@ -42,9 +42,19 @@ Remodex uses the relay as a transport hop, not as a trusted application server.
 
 ## Usage
 
-`relay.js` exports:
+If you installed the npm bridge package, the simplest way to run a self-hosted relay is now:
+
+```sh
+remodex relay --host 0.0.0.0 --port 9000
+REMODEX_RELAY=ws://YOUR-LAN-IP:9000/relay remodex up
+```
+
+The relay command also serves:
+
+- `GET /healthz`
+- `GET /stats`
+
+If you want to embed the relay into your own Node server instead, `relay.js` exports:
 
 - `setupRelay(wss)`
 - `getRelayStats()`
-
-It is meant to be attached to a `ws` `WebSocketServer` from your own HTTP server.
