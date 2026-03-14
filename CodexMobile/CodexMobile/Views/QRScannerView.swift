@@ -11,8 +11,22 @@ struct QRScannerView: View {
     let onScan: (CodexPairingQRPayload) -> Void
 
     @State private var scannerError: String?
+    @State private var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
+    @State private var didCopyBridgeUpdateCommand = false
     @State private var hasCameraPermission = false
     @State private var isCheckingPermission = true
+
+    init(
+        initialBridgeUpdatePrompt: CodexBridgeUpdatePrompt? = nil,
+        initialHasCameraPermission: Bool = false,
+        initialIsCheckingPermission: Bool = true,
+        onScan: @escaping (CodexPairingQRPayload) -> Void
+    ) {
+        self.onScan = onScan
+        _bridgeUpdatePrompt = State(initialValue: initialBridgeUpdatePrompt)
+        _hasCameraPermission = State(initialValue: initialHasCameraPermission)
+        _isCheckingPermission = State(initialValue: initialIsCheckingPermission)
+    }
 
     var body: some View {
         ZStack {
@@ -21,6 +35,8 @@ struct QRScannerView: View {
             if isCheckingPermission {
                 ProgressView()
                     .tint(.white)
+            } else if let bridgeUpdatePrompt {
+                bridgeUpdateView(prompt: bridgeUpdatePrompt)
             } else if hasCameraPermission {
                 QRCameraPreview { code, resetScanLock in
                     handleScanResult(code, resetScanLock: resetScanLock)
@@ -42,6 +58,99 @@ struct QRScannerView: View {
             Button("OK", role: .cancel) { scannerError = nil }
         } message: {
             Text(scannerError ?? "Invalid QR code")
+        }
+    }
+
+    // Blocks repeated scans when the camera spots a bridge QR from an incompatible npm release.
+    private func bridgeUpdateView(prompt: CodexBridgeUpdatePrompt) -> some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Spacer()
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text(prompt.title)
+                    .font(AppFont.title3(weight: .semibold))
+                    .foregroundStyle(.white)
+
+                Text(prompt.message)
+                    .font(AppFont.body())
+                    .foregroundStyle(.white.opacity(0.82))
+            }
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Do these steps on your Mac")
+                    .font(AppFont.caption(weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.7))
+
+                bridgeUpdateStep(number: "1", title: "Update Remodex", detail: prompt.command, showsCopyButton: true)
+                bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
+                bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
+                bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
+            }
+
+            Button("I Updated It") {
+                bridgeUpdatePrompt = nil
+                didCopyBridgeUpdateCommand = false
+            }
+            .font(AppFont.body(weight: .semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .foregroundStyle(.black)
+            .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .buttonStyle(.plain)
+
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private func bridgeUpdateStep(
+        number: String,
+        title: String,
+        detail: String,
+        showsCopyButton: Bool = false
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number)
+                .font(AppFont.caption2(weight: .bold))
+                .foregroundStyle(.black)
+                .frame(width: 20, height: 20)
+                .background(.white, in: Circle())
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.white)
+
+                Text(detail)
+                    .font(showsCopyButton ? AppFont.mono(.caption) : AppFont.caption())
+                    .foregroundStyle(.white.opacity(0.82))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white.opacity(0.08))
+                    )
+
+                if showsCopyButton {
+                    Button(didCopyBridgeUpdateCommand ? "Copied" : "Copy Command") {
+                        UIPasteboard.general.string = detail
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            didCopyBridgeUpdateCommand = true
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                didCopyBridgeUpdateCommand = false
+                            }
+                        }
+                    }
+                    .font(AppFont.caption(weight: .semibold))
+                    .foregroundStyle(.white)
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 
@@ -100,46 +209,35 @@ struct QRScannerView: View {
     }
 
     private func handleScanResult(_ code: String, resetScanLock: @escaping () -> Void) {
-        guard let data = code.data(using: .utf8) else {
-            scannerError = "QR code contains invalid text encoding."
+        switch validatePairingQRCode(code) {
+        case .success(let payload):
+            onScan(payload)
+        case .scanError(let message):
+            scannerError = message
             resetScanLock()
-            return
-        }
-
-        let decoder = JSONDecoder()
-        guard let payload = try? decoder.decode(CodexPairingQRPayload.self, from: data) else {
-            scannerError = "Not a valid secure pairing code. Make sure you're scanning a QR from the latest Remodex bridge."
+        case .bridgeUpdateRequired(let prompt):
+            didCopyBridgeUpdateCommand = false
+            bridgeUpdatePrompt = prompt
             resetScanLock()
-            return
         }
-
-        guard payload.v == codexPairingQRVersion else {
-            scannerError = "This QR code uses an unsupported pairing format. Update the iPhone app or the Mac bridge and try again."
-            resetScanLock()
-            return
-        }
-
-        guard !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            scannerError = "QR code is missing the relay URL. Re-generate the code from the bridge."
-            resetScanLock()
-            return
-        }
-
-        guard !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            scannerError = "QR code is missing the session ID. Re-generate the code from the bridge."
-            resetScanLock()
-            return
-        }
-
-        let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
-        if expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) < Date() {
-            scannerError = "This pairing QR code has expired. Generate a new one from the Mac bridge."
-            resetScanLock()
-            return
-        }
-
-        onScan(payload)
     }
+}
+
+private extension CodexBridgeUpdatePrompt {
+    static let previewScannerMismatch = CodexBridgeUpdatePrompt(
+        title: "Update Remodex on your Mac before scanning",
+        message: "This QR code was generated by a different Remodex npm version. Update the package on your Mac to the latest release before scanning a new QR code.",
+        command: "npm install -g remodex@latest"
+    )
+}
+
+// MARK: - Preview
+
+#Preview("Bridge Update Required") {
+    QRScannerView(
+        initialBridgeUpdatePrompt: .previewScannerMismatch,
+        initialIsCheckingPermission: false
+    ) { _ in }
 }
 
 // MARK: - Camera Preview UIViewRepresentable
