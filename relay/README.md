@@ -49,6 +49,12 @@ remodex relay --host 0.0.0.0 --port 9000
 REMODEX_RELAY=ws://YOUR-LAN-IP:9000/relay remodex up
 ```
 
+If both devices are on the same tailnet, you can swap `YOUR-LAN-IP` for the Mac's Tailscale IP and use the relay outside the local Wi-Fi:
+
+```sh
+REMODEX_RELAY=ws://100.x.y.z:9000/relay remodex up
+```
+
 The relay command also serves:
 
 - `GET /healthz`

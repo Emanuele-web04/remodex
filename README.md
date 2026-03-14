@@ -225,9 +225,20 @@ REMODEX_RELAY=ws://192.168.1.23:9000/relay remodex up
 
 Then open the Remodex iPhone app and scan the QR code from `remodex up` as usual. The QR payload includes your custom relay URL, so the iPhone reconnect path follows the same self-hosted endpoint.
 
+For access outside your current Wi-Fi, you can also run the relay over Tailscale. As long as the iPhone and Mac are on the same tailnet, point `REMODEX_RELAY` at the Mac's Tailscale IP instead of its LAN IP:
+
+```sh
+# Terminal 1: run the relay on the Mac
+remodex relay --host 0.0.0.0 --port 9000
+
+# Terminal 2: use the Mac's Tailscale IPv4 address
+REMODEX_RELAY=ws://100.x.y.z:9000/relay remodex up
+```
+
 Notes:
 
 - `ws://` is fine for a trusted LAN. If you expose the relay beyond your LAN, put TLS in front of it and use `wss://.../relay`.
+- `ws://` also works well over Tailscale because the tailnet transport is already encrypted, and Remodex still layers end-to-end encryption on top.
 - The relay is still transport-only. Codex, git, and local file operations stay on your Mac.
 - The relay health endpoint is `http://HOST:PORT/healthz`, and stats are available at `/stats`.
 
