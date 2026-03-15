@@ -25,7 +25,7 @@ Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a 
 - QR pairing with automatic reconnect
 - Shared thread history with Codex on your Mac
 
-The repo stays local-first and self-host friendly: the iOS app source does not embed a public hosted endpoint, and the transport layer remains inspectable for anyone who wants to run their own setup.
+The repo stays local-first and self-host friendly: source checkouts do not hardcode a public hosted endpoint, and you can run your own relay endpoint with `remodex relay`.
 
 If you want the public-repo distribution model explained clearly, read [SELF_HOSTING_MODEL.md](SELF_HOSTING_MODEL.md).
 
@@ -178,6 +178,21 @@ Starts the bridge:
 - Handles git commands from the phone
 - Persists the active thread for later resumption
 
+### `remodex relay [--host HOST] [--port PORT]`
+
+Starts a self-hosted relay server with HTTP health endpoints:
+
+- Binds a WebSocket relay on `/relay/{sessionId}`
+- Serves `GET /healthz` and `GET /stats`
+- Prints LAN-reachable `ws://.../relay` URLs you can feed into `REMODEX_RELAY`
+
+```sh
+remodex relay --host 0.0.0.0 --port 9000
+# => [remodex relay] reachable WebSocket URLs:
+# => - ws://192.168.1.23:9000/relay
+# => REMODEX_RELAY=ws://192.168.1.23:9000/relay remodex up
+```
+
 ### `remodex resume`
 
 Reopens the last active thread in Codex.app on your Mac.
@@ -228,6 +243,10 @@ REMODEX_CODEX_ENDPOINT=ws://localhost:8080 remodex up
 # Use a custom self-hosted pairing endpoint (`ws://` is unencrypted)
 REMODEX_RELAY="ws://localhost:9000/relay" remodex up
 
+# Run a relay on your LAN, then point the bridge at it
+remodex relay --host 0.0.0.0 --port 9000
+REMODEX_RELAY="ws://192.168.1.23:9000/relay" remodex up
+
 # Enable managed push only if your self-hosted relay also exposes a configured APNs push service
 REMODEX_RELAY="wss://relay.example/relay" \
 REMODEX_PUSH_SERVICE_URL="https://relay.example" \
@@ -243,8 +262,39 @@ On the relay/VPS side, keep push disabled until you actually want it. The HTTP p
 - The CLI no longer prints the connection URL in plain text below the QR.
 - Set `REMODEX_RELAY` only when you want to self-host or test locally against your own setup.
 - Leave `REMODEX_TRUST_PROXY` unset for direct/self-hosted installs. Turn it on only when a trusted reverse proxy such as Traefik, Nginx, or Caddy is forwarding the relay traffic.
-- The transport implementation is public in [`relay/`](relay/), but your real deployed hostname and credentials should stay private.
+- The transport implementation is public in [`relay/`](relay/), and the npm CLI exposes `remodex relay` for local/LAN use. Keep your real deployed hostname and credentials private.
 - On the iPhone, the default agent permission mode is `On-Request`. Switching the app to `Full access` auto-approves runtime approval prompts from the agent.
+
+## Self-Hosted Relay
+
+For local testing on the same Wi-Fi or a trusted LAN:
+
+```sh
+# Terminal 1: run the relay on your Mac
+remodex relay --host 0.0.0.0 --port 9000
+
+# Terminal 2: point the bridge at the LAN IP that the relay command printed
+REMODEX_RELAY=ws://192.168.1.23:9000/relay remodex up
+```
+
+Then open the Remodex iPhone app and scan the QR code from `remodex up` as usual. The QR payload includes your custom relay URL, so the iPhone reconnect path follows the same self-hosted endpoint.
+
+For access outside your current Wi-Fi, you can also run the relay over Tailscale. As long as the iPhone and Mac are on the same tailnet, point `REMODEX_RELAY` at the Mac's Tailscale IP instead of its LAN IP:
+
+```sh
+# Terminal 1: run the relay on the Mac
+remodex relay --host 0.0.0.0 --port 9000
+
+# Terminal 2: use the Mac's Tailscale IPv4 address
+REMODEX_RELAY=ws://100.x.y.z:9000/relay remodex up
+```
+
+Notes:
+
+- `ws://` is fine for a trusted LAN. If you expose the relay beyond your LAN, put TLS in front of it and use `wss://.../relay`.
+- `ws://` also works well over Tailscale because the tailnet transport is already encrypted, and Remodex still layers end-to-end encryption on top.
+- The relay is still transport-only. Codex, git, and local file operations stay on your Mac.
+- The relay health endpoint is `http://HOST:PORT/healthz`, and stats are available at `/stats`.
 
 ## Security and Privacy
 

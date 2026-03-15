@@ -105,10 +105,35 @@ Push is disabled by default. Enable it only when you are ready to wire APNs and 
 
 ## Usage
 
+You can run the standalone relay package directly:
+
 ```sh
 cd relay
 npm install
 npm start
 ```
 
-`server.js` exports `createRelayServer()`, and `relay.js` exports the lower-level `setupRelay(wss)` transport primitive if you want to embed the relay in your own server.
+If you installed the npm bridge package, the quickest local/self-host flow is:
+
+```sh
+remodex relay --host 0.0.0.0 --port 9000
+REMODEX_RELAY=ws://YOUR-LAN-IP:9000/relay remodex up
+```
+
+If both devices are on the same tailnet, you can swap `YOUR-LAN-IP` for the Mac's Tailscale IP and use the relay outside the local Wi-Fi:
+
+```sh
+REMODEX_RELAY=ws://100.x.y.z:9000/relay remodex up
+```
+
+The relay command also serves:
+
+- `GET /healthz`
+- `GET /stats`
+
+If you want to embed the relay into your own Node server instead, `relay.js` exports:
+
+- `setupRelay(wss)`
+- `getRelayStats()`
+
+`server.js` exports `createRelayServer()`, and `relay.js` exports the lower-level transport helpers if you want to embed relay behavior in your own server.
