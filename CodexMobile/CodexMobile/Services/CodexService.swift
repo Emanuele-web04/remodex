@@ -289,6 +289,10 @@ final class CodexService {
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
+    // Desktop-mirrored runs can miss assistant deltas, so we temporarily allow
+    // forced thread/resume catch-up while the turn is still active.
+    var mirroredRunningCatchupThreadIDs: Set<String> = []
+    var lastMirroredRunningCatchupAtByThread: [String: Date] = [:]
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]

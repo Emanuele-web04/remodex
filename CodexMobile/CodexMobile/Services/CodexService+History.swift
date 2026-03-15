@@ -387,6 +387,22 @@ extension CodexService {
                 continue
             }
 
+            // Forced resume snapshots can materialize a real assistant itemId after the
+            // live row was already created with a placeholder/stale identity. When the
+            // turn is still active, prefer merging into the streaming row instead of
+            // appending a second assistant bubble for the same response.
+            if message.role == .assistant,
+               let turnId = message.turnId, !turnId.isEmpty,
+               (activeThreadIDs.contains(message.threadId) || runningThreadIDs.contains(message.threadId)),
+               let index = merged.lastIndex(where: { candidate in
+                   candidate.role == .assistant
+                       && candidate.turnId == turnId
+                       && candidate.isStreaming
+               }) {
+                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                continue
+            }
+
             if message.role == .user,
                let turnId = message.turnId, !turnId.isEmpty,
                let index = merged.lastIndex(where: { candidate in
@@ -558,8 +574,17 @@ extension CodexService {
         if value.turnId == nil {
             value.turnId = serverMessage.turnId
         }
-        if value.itemId == nil {
-            value.itemId = serverMessage.itemId
+        let localItemId = normalizedHistoryIdentifier(value.itemId)
+        let serverItemId = normalizedHistoryIdentifier(serverMessage.itemId)
+        if localItemId == nil
+            || (
+                preservesRunningPresentation
+                    && value.role == .assistant
+                    && localMessage.isStreaming
+                    && serverItemId != nil
+                    && localItemId != serverItemId
+            ) {
+            value.itemId = serverItemId
         }
         if value.kind == .chat && serverMessage.kind != .chat {
             value.kind = serverMessage.kind

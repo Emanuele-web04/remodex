@@ -141,6 +141,9 @@ extension CodexService {
              "codex/event/agent_message_delta":
             appendAgentDelta(from: paramsObject)
 
+        case "codex/event/user_message":
+            appendMirroredUserMessage(from: paramsObject)
+
         case "item/plan/delta":
             appendPlanDelta(from: paramsObject)
 
