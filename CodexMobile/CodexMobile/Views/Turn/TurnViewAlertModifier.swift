@@ -10,10 +10,13 @@ private struct TurnViewAlertModifier: ViewModifier {
     @Binding var alertApprovalRequest: CodexApprovalRequest?
     @Binding var isShowingNothingToCommitAlert: Bool
     @Binding var gitSyncAlert: TurnGitSyncAlert?
+    @Binding var isShowingMacHandoffConfirm: Bool
+    @Binding var macHandoffErrorMessage: String?
 
     let onDeclineApproval: () -> Void
     let onApproveApproval: () -> Void
     let onConfirmGitSyncAction: (TurnGitSyncAlertAction) -> Void
+    let onConfirmMacHandoff: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -61,6 +64,24 @@ private struct TurnViewAlertModifier: ViewModifier {
             } message: { alert in
                 Text(alert.message)
             }
+            .alert("Hand off to Mac app", isPresented: $isShowingMacHandoffConfirm) {
+                Button("Cancel", role: .cancel) {}
+                Button("Force Close & Continue") {
+                    onConfirmMacHandoff()
+                }
+            } message: {
+                Text("Remodex will force close and reopen Codex.app on your Mac. Any desktop runs in progress will be stopped, and unsaved draft text there may be lost before this chat is opened.")
+            }
+            .alert(
+                "Couldn't hand off to Mac app",
+                isPresented: macHandoffErrorIsPresented
+            ) {
+                Button("OK", role: .cancel) {
+                    macHandoffErrorMessage = nil
+                }
+            } message: {
+                Text(macHandoffErrorMessage ?? "Could not continue this chat on your Mac.")
+            }
     }
 
     private var approvalAlertIsPresented: Binding<Bool> {
@@ -80,6 +101,17 @@ private struct TurnViewAlertModifier: ViewModifier {
             set: { isPresented in
                 if !isPresented {
                     gitSyncAlert = nil
+                }
+            }
+        )
+    }
+
+    private var macHandoffErrorIsPresented: Binding<Bool> {
+        Binding(
+            get: { macHandoffErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    macHandoffErrorMessage = nil
                 }
             }
         )
@@ -111,18 +143,24 @@ extension View {
         alertApprovalRequest: Binding<CodexApprovalRequest?>,
         isShowingNothingToCommitAlert: Binding<Bool>,
         gitSyncAlert: Binding<TurnGitSyncAlert?>,
+        isShowingMacHandoffConfirm: Binding<Bool>,
+        macHandoffErrorMessage: Binding<String?>,
         onDeclineApproval: @escaping () -> Void,
         onApproveApproval: @escaping () -> Void,
-        onConfirmGitSyncAction: @escaping (TurnGitSyncAlertAction) -> Void
+        onConfirmGitSyncAction: @escaping (TurnGitSyncAlertAction) -> Void,
+        onConfirmMacHandoff: @escaping () -> Void
     ) -> some View {
         modifier(
             TurnViewAlertModifier(
                 alertApprovalRequest: alertApprovalRequest,
                 isShowingNothingToCommitAlert: isShowingNothingToCommitAlert,
                 gitSyncAlert: gitSyncAlert,
+                isShowingMacHandoffConfirm: isShowingMacHandoffConfirm,
+                macHandoffErrorMessage: macHandoffErrorMessage,
                 onDeclineApproval: onDeclineApproval,
                 onApproveApproval: onApproveApproval,
-                onConfirmGitSyncAction: onConfirmGitSyncAction
+                onConfirmGitSyncAction: onConfirmGitSyncAction,
+                onConfirmMacHandoff: onConfirmMacHandoff
             )
         )
     }

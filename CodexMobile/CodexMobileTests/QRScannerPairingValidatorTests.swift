@@ -71,7 +71,10 @@ final class QRScannerPairingValidatorTests: XCTestCase {
         XCTAssertEqual(message, "This pairing QR code has expired. Generate a new one from the Mac bridge.")
     }
 
-    private func pairingQRCode(v: Int, expiresAt: Int64) -> String {
+    private func pairingQRCode(
+        v: Int,
+        expiresAt: Int64
+    ) -> String {
         """
         {"v":\(v),"relay":"wss://relay.example","sessionId":"session-123","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(expiresAt)}
         """

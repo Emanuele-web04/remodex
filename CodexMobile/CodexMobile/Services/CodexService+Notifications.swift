@@ -410,9 +410,9 @@ private extension CodexService {
         let body: String = {
             switch result {
             case .completed:
-                "Risposta pronta"
+                "Response ready"
             case .failed:
-                "Run non completata"
+                "Run failed"
             }
         }()
 

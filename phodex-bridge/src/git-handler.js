@@ -231,15 +231,19 @@ async function gitBranches(cwd) {
   const lines = output
     .trim()
     .split("\n")
-    .filter(Boolean)
-    .map((l) => l.trim());
+    .filter(Boolean);
 
   let current = "";
   const branchSet = new Set();
+  const branchesCheckedOutElsewhere = new Set();
 
   for (const line of lines) {
-    const isCurrent = line.startsWith("* ");
-    const name = line.replace(/^\*\s*/, "").trim();
+    const entry = normalizeBranchListEntry(line);
+    if (!entry) {
+      continue;
+    }
+
+    const { isCurrent, isCheckedOutElsewhere, name } = entry;
 
     if (name.includes("HEAD detached") || name === "(no branch)") {
       if (isCurrent) current = "HEAD";
@@ -253,6 +257,9 @@ async function gitBranches(cwd) {
       branchSet.add(name.replace("remotes/origin/", ""));
     } else {
       branchSet.add(name);
+      if (isCheckedOutElsewhere) {
+        branchesCheckedOutElsewhere.add(name);
+      }
     }
 
     if (isCurrent) current = name;
@@ -261,7 +268,12 @@ async function gitBranches(cwd) {
   const branches = [...branchSet].sort();
   const defaultBranch = await detectDefaultBranch(cwd, branches);
 
-  return { branches, current, default: defaultBranch };
+  return {
+    branches,
+    branchesCheckedOutElsewhere: [...branchesCheckedOutElsewhere].sort(),
+    current,
+    default: defaultBranch,
+  };
 }
 
 // ─── Git Checkout ─────────────────────────────────────────────
@@ -273,7 +285,7 @@ async function gitCheckout(cwd, params) {
   }
 
   try {
-    await git(cwd, "checkout", "--", branch);
+    await git(cwd, "checkout", branch);
   } catch (err) {
     if (err.message?.includes("would be overwritten")) {
       throw gitError(
@@ -281,11 +293,17 @@ async function gitCheckout(cwd, params) {
         "Cannot switch branches: you have uncommitted changes."
       );
     }
+    if (err.message?.includes("already used by worktree")) {
+      throw gitError(
+        "checkout_branch_in_other_worktree",
+        "Cannot switch branches: this branch is already open in another worktree."
+      );
+    }
     throw gitError("checkout_failed", err.message || "Checkout failed.");
   }
 
   const status = await gitStatus(cwd);
-  return { current: branch, tracking: status.tracking, status };
+  return { current: status.branch || branch, tracking: status.tracking, status };
 }
 
 // ─── Git Log ──────────────────────────────────────────────────
@@ -405,6 +423,24 @@ async function gitBranchesWithStatus(cwd) {
     gitStatus(cwd),
   ]);
   return { ...branchResult, status: statusResult };
+}
+
+// Normalizes `git branch` output so the UI never sees worktree markers like `+ main`.
+function normalizeBranchListEntry(rawLine) {
+  const trimmed = typeof rawLine === "string" ? rawLine.trim() : "";
+  if (!trimmed) {
+    return null;
+  }
+
+  const isCurrent = trimmed.startsWith("* ");
+  const isCheckedOutElsewhere = trimmed.startsWith("+ ");
+  const name = trimmed.replace(/^[*+]\s+/, "").trim();
+
+  if (!name) {
+    return null;
+  }
+
+  return { isCurrent, isCheckedOutElsewhere, name };
 }
 
 // Computes the local repo delta that still exists on this machine and is not on the remote.
@@ -669,4 +705,12 @@ async function resolveRepoRoot(cwd) {
   return repoRoot || null;
 }
 
-module.exports = { handleGitRequest, gitStatus };
+module.exports = {
+  handleGitRequest,
+  gitStatus,
+  __test: {
+    gitBranches,
+    gitCheckout,
+    normalizeBranchListEntry,
+  },
+};

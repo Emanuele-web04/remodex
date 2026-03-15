@@ -17,12 +17,15 @@ extension CodexService {
         stopSyncLoop()
         debugSyncLog("sync loop start")
 
-        let listIntervalForegroundNs: UInt64 = 20_000_000_000
+        // Foreground polling is intentionally more aggressive so desktop-authored changes
+        // feel closer to live on iPhone even when Codex.app itself doesn't push updates.
+        let listIntervalForegroundNs: UInt64 = 10_000_000_000
         let listIntervalBackgroundNs: UInt64 = 75_000_000_000
-        let historyIntervalForegroundNs: UInt64 = 15_000_000_000
+        let historyIntervalForegroundNs: UInt64 = 3_000_000_000
+        let historyIntervalForegroundMirroredNs: UInt64 = 1_000_000_000
         let historyIntervalBackgroundIdleNs: UInt64 = 90_000_000_000
         let historyIntervalBackgroundRunningNs: UInt64 = 12_000_000_000
-        let watchIntervalForegroundNs: UInt64 = 4_000_000_000
+        let watchIntervalForegroundNs: UInt64 = 2_000_000_000
         let watchIntervalBackgroundNs: UInt64 = 15_000_000_000
 
         threadListSyncTask = Task { [weak self] in
@@ -38,10 +41,13 @@ extension CodexService {
             while let self, !Task.isCancelled {
                 if let threadId = self.activeThreadId {
                     let hasActiveOrRunningTurn = self.threadHasActiveOrRunningTurn(threadId)
+                    let wantsMirroredRunningCatchup = self.shouldPrioritizeMirroredRunningCatchup(threadId)
                     await self.syncActiveThreadState(threadId: threadId)
                     let interval: UInt64
                     if self.isAppInForeground {
-                        interval = historyIntervalForegroundNs
+                        interval = wantsMirroredRunningCatchup
+                            ? historyIntervalForegroundMirroredNs
+                            : historyIntervalForegroundNs
                     } else if hasActiveOrRunningTurn {
                         interval = historyIntervalBackgroundRunningNs
                     } else {
@@ -485,18 +491,59 @@ extension CodexService {
         syncRealtimeEnabled && isConnected && isInitialized
     }
 
+    // Prioritizes only desktop-mirrored runs that still lack authoritative assistant deltas.
+    func shouldPrioritizeMirroredRunningCatchup(_ threadId: String) -> Bool {
+        mirroredRunningCatchupThreadIDs.contains(threadId) && threadHasActiveOrRunningTurn(threadId)
+    }
+
+    // Grants one bounded catch-up slot so mirrored desktop runs can refresh via
+    // thread/resume without hammering the server every loop tick.
+    func takeMirroredRunningCatchupPermit(
+        for threadId: String,
+        minInterval: TimeInterval = 1.0,
+        now: Date = Date()
+    ) -> Bool {
+        guard shouldPrioritizeMirroredRunningCatchup(threadId) else {
+            return false
+        }
+
+        if let lastSyncAt = lastMirroredRunningCatchupAtByThread[threadId],
+           now.timeIntervalSince(lastSyncAt) < minInterval {
+            return false
+        }
+
+        lastMirroredRunningCatchupAtByThread[threadId] = now
+        return true
+    }
+
     // Polls the currently displayed thread even while it is running so missed socket events can recover.
     // If the live snapshot fails, fall back to a history refresh instead of trusting stale running state.
     func syncActiveThreadState(threadId: String) async {
         let wasRunning = threadHasActiveOrRunningTurn(threadId)
+        let shouldRunMirroredCatchup = wasRunning && takeMirroredRunningCatchupPermit(for: threadId)
+        var didRunMirroredCatchup = false
+
         if wasRunning {
             let didRefresh = await refreshInFlightTurnState(threadId: threadId)
-            guard !didRefresh || !threadHasActiveOrRunningTurn(threadId) else {
+            let isStillRunning = threadHasActiveOrRunningTurn(threadId)
+
+            if shouldRunMirroredCatchup && isStillRunning {
+                do {
+                    _ = try await ensureThreadResumed(threadId: threadId, force: true)
+                } catch {
+                    await syncThreadHistory(threadId: threadId, force: true)
+                }
+                didRunMirroredCatchup = true
+            }
+
+            guard !didRefresh || !isStillRunning else {
                 return
             }
         }
 
-        await syncThreadHistory(threadId: threadId, force: true)
+        if !didRunMirroredCatchup {
+            await syncThreadHistory(threadId: threadId, force: true)
+        }
     }
 
     func refreshInactiveRunningBadgeThreads(limit: Int = 3) async {

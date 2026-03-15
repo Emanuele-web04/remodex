@@ -1,16 +1,32 @@
 #!/usr/bin/env node
 // FILE: remodex.js
-// Purpose: CLI surface for starting the local Remodex bridge, reopening the latest active thread, and tailing its rollout file.
+// Purpose: CLI surface for bridge start, pairing reset, thread resume, and rollout tailing.
 // Layer: CLI binary
 // Exports: none
 // Depends on: ../src
 
-const { startBridge, openLastActiveThread, watchThreadRollout } = require("../src");
+const {
+  startBridge,
+  resetBridgePairing,
+  openLastActiveThread,
+  watchThreadRollout,
+} = require("../src");
 
 const command = process.argv[2] || "up";
 
 if (command === "up") {
   startBridge();
+  return;
+}
+
+if (command === "reset-pairing") {
+  try {
+    resetBridgePairing();
+    console.log("[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.");
+  } catch (error) {
+    console.error(`[remodex] ${(error && error.message) || "Failed to clear the saved pairing state."}`);
+    process.exit(1);
+  }
   return;
 }
 
@@ -39,6 +55,6 @@ if (command === "watch") {
 
 if (command !== "up") {
   console.error(`Unknown command: ${command}`);
-  console.error("Usage: remodex up | remodex resume | remodex watch [threadId]");
+  console.error("Usage: remodex up | remodex reset-pairing | remodex resume | remodex watch [threadId]");
   process.exit(1);
 }

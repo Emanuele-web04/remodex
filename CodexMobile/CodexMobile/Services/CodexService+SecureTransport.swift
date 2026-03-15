@@ -260,6 +260,7 @@ extension CodexService {
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
+        trustedReconnectFailureCount = 0
         secureConnectionState = trustedMacRegistry.records[payload.macDeviceId] == nil ? .handshaking : .trustedMac
         secureMacFingerprint = codexSecureFingerprint(for: payload.macIdentityPublicKey)
     }

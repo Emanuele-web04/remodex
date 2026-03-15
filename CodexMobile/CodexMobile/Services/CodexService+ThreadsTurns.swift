@@ -602,6 +602,9 @@ extension CodexService {
         var params: RPCObject = [
             "threadId": .string(threadId),
         ]
+        if let workingDirectory = threads.first(where: { $0.id == threadId })?.gitWorkingDirectory {
+            params["cwd"] = .string(workingDirectory)
+        }
         if let modelIdentifier = runtimeModelIdentifierForTurn() {
             params["model"] = .string(modelIdentifier)
         }
@@ -628,8 +631,11 @@ extension CodexService {
                     let merged = await Task.detached {
                         Self.mergeHistoryMessages(existingMessages, historyMessages, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
                     }.value
-                    // If a turn started while merging, keep live streaming data.
-                    if !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty {
+                    // Forced resumes are used when reopening a running thread, so merge the
+                    // latest snapshot even mid-run and let mergeHistoryMessages preserve
+                    // existing streaming rows instead of waiting for the final block.
+                    if (force || !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty)
+                        && merged != existingMessages {
                         messagesByThread[threadId] = merged
                         persistMessages()
                         updateCurrentOutput(for: threadId)

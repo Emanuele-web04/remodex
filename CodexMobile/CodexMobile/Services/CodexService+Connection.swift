@@ -10,6 +10,9 @@ import UIKit
 
 extension CodexService {
     private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003]
+    private static let maxTrustedReconnectFailures = 3
+    private static let trustedReconnectFailureMessage =
+        "Secure reconnect could not be restored. Scan a new QR code to reconnect."
 
     // Models how one socket failure should affect reconnect state, pairing persistence, and UI copy.
     private struct ReceiveErrorDisposition {
@@ -65,6 +68,7 @@ extension CodexService {
         webSocketConnection = connection
         startReceiveLoop(with: connection)
         clearHydrationCaches()
+        let isTrustedReconnectAttempt = hasTrustedReconnectContext
 
         do {
             try await performSecureHandshake()
@@ -74,6 +78,10 @@ extension CodexService {
             connectionRecoveryState = .idle
             lastErrorMessage = nil
             try await initializeSession()
+            trustedReconnectFailureCount = 0
+            if secureSession != nil {
+                secureConnectionState = .encrypted
+            }
 
             startSyncLoop()
             // Push registration is best-effort and talks to the bridge, so it must not
@@ -85,8 +93,15 @@ extension CodexService {
                 schedulePostConnectSyncPass()
             }
         } catch {
+            let shouldFallbackToManualPairing = recordTrustedReconnectFailureIfNeeded(
+                isTrustedReconnectAttempt: isTrustedReconnectAttempt
+            )
             presentConnectionErrorIfNeeded(error)
             await disconnect()
+            if shouldFallbackToManualPairing {
+                secureConnectionState = .rePairRequired
+                lastErrorMessage = Self.trustedReconnectFailureMessage
+            }
             throw error
         }
     }
@@ -145,6 +160,7 @@ extension CodexService {
         relayMacIdentityPublicKey = nil
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
+        trustedReconnectFailureCount = 0
         secureConnectionState = .notPaired
         secureMacFingerprint = nil
         pendingNotificationOpenThreadID = nil
@@ -200,11 +216,27 @@ extension CodexService {
         cancelCurrentSocketConnection()
 
         let disposition = receiveErrorDisposition(for: error, relayCloseCode: relayCloseCode)
+        let wasTrustedReconnectAttempt = secureConnectionState == .reconnecting
         isConnected = false
         isInitialized = false
         shouldAutoReconnectOnForeground = disposition.shouldAutoReconnectOnForeground
         if disposition.shouldClearSavedRelaySession {
             clearSavedRelaySession()
+        } else {
+            // Reset volatile secure state so reconnect UI does not keep showing the last encrypted session.
+            resetSecureTransportState()
+        }
+        if wasTrustedReconnectAttempt && !disposition.shouldClearSavedRelaySession {
+            if recordTrustedReconnectFailureIfNeeded(isTrustedReconnectAttempt: true) {
+                shouldAutoReconnectOnForeground = false
+                connectionRecoveryState = .idle
+                secureConnectionState = .rePairRequired
+                lastErrorMessage = Self.trustedReconnectFailureMessage
+                failAllPendingRequests(with: error)
+                return
+            }
+        } else if disposition.shouldClearSavedRelaySession || !shouldAutoReconnectOnForeground {
+            trustedReconnectFailureCount = 0
         }
         connectionRecoveryState = disposition.connectionRecoveryState
         lastErrorMessage = disposition.lastErrorMessage
@@ -341,15 +373,47 @@ extension CodexService {
         await disconnect(preserveReconnectIntent: preserveReconnectIntent)
     }
 
+    // Identifies reconnects that should reuse a previously trusted Mac instead of going through QR bootstrap.
+    var hasTrustedReconnectContext: Bool {
+        guard hasSavedRelaySession,
+              let relayMacDeviceId = normalizedRelayMacDeviceId else {
+            return false
+        }
+
+        return trustedMacRegistry.records[relayMacDeviceId] != nil
+    }
+
+    // Counts reconnect handshake failures so the app can stop looping forever and fall back to manual QR.
+    @discardableResult
+    func recordTrustedReconnectFailureIfNeeded(isTrustedReconnectAttempt: Bool) -> Bool {
+        guard isTrustedReconnectAttempt else {
+            trustedReconnectFailureCount = 0
+            return false
+        }
+
+        trustedReconnectFailureCount += 1
+        guard trustedReconnectFailureCount >= Self.maxTrustedReconnectFailures else {
+            return false
+        }
+
+        shouldAutoReconnectOnForeground = false
+        connectionRecoveryState = .idle
+        return true
+    }
+
     // Centralizes the "should we retry, stay silent, or force a re-pair?" rules for socket failures.
     private func receiveErrorDisposition(
         for error: Error,
         relayCloseCode: NWProtocolWebSocket.CloseCode?
     ) -> ReceiveErrorDisposition {
-        let permanentRelayMessage = permanentRelayDisconnectMessage(for: relayCloseCode)
+        let shouldClearSavedRelaySession = shouldClearSavedRelaySession(for: relayCloseCode)
+        // `4002` only suppresses the re-pair copy for sessions we can actually recover.
+        let permanentRelayMessage = shouldClearSavedRelaySession
+            ? (permanentRelayDisconnectMessage(for: relayCloseCode)
+                ?? "This relay pairing is no longer valid. Scan a new QR code to reconnect.")
+            : nil
         let isBenignDisconnect = isBenignBackgroundDisconnect(error)
         let shouldSuppressMessage = isBenignDisconnect && !isActivelyForegroundedForConnectionUI()
-        let shouldClearSavedRelaySession = permanentRelayMessage != nil
         // Foreground relay drops should reconnect too, otherwise Stop disappears mid-run.
         let shouldAttemptAutoRecovery = !shouldClearSavedRelaySession
             && (isRecoverableTransientConnectionError(error) || isBenignDisconnect)
@@ -621,8 +685,6 @@ extension CodexService {
         }
 
         switch rawValue {
-        case 4002:
-            return "The Mac session closed. Scan a new QR code to reconnect."
         case 4001:
             return "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
         case 4003:
@@ -630,6 +692,14 @@ extension CodexService {
         default:
             return "This relay pairing is no longer valid. Scan a new QR code to reconnect."
         }
+    }
+
+    func shouldClearSavedRelaySession(for closeCode: NWProtocolWebSocket.CloseCode?) -> Bool {
+        guard let rawValue = relayCloseCodeRawValue(closeCode) else {
+            return false
+        }
+
+        return Self.permanentRelayCloseCodeRawValues.contains(rawValue)
     }
 
     var isRunningOnSimulator: Bool {

@@ -357,6 +357,7 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
       pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP
       || getTrustedPhonePublicKey(currentDeviceState, pendingHandshake.phoneDeviceId)
     ) {
+      // Lock the trusted phone identity so later reconnects can be verified cleanly.
       currentDeviceState = rememberTrustedPhone(
         currentDeviceState,
         pendingHandshake.phoneDeviceId,

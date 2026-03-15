@@ -107,9 +107,6 @@ function setupRelay(wss) {
 
     ws.on("message", (data) => {
       const msg = typeof data === "string" ? data : data.toString("utf-8");
-      console.log(
-        `[relay] forwarded ${role} -> session ${sessionId} (${Buffer.byteLength(msg, "utf8")} bytes)`
-      );
 
       if (role === "mac") {
         for (const client of session.clients) {

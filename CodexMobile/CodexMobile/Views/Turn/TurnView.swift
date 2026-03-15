@@ -20,6 +20,9 @@ struct TurnView: View {
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
     @State private var alertApprovalRequest: CodexApprovalRequest?
+    @State private var isShowingMacHandoffConfirm = false
+    @State private var macHandoffErrorMessage: String?
+    @State private var isHandingOffToMac = false
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -115,6 +118,8 @@ struct TurnView: View {
             TurnToolbarContent(
                 displayTitle: thread.displayTitle,
                 navigationContext: threadNavigationContext,
+                showsMacHandoff: codex.isConnected,
+                isHandingOffToMac: isHandingOffToMac,
                 repoDiffTotals: viewModel.gitRepoSync?.repoDiffTotals,
                 isLoadingRepoDiff: isLoadingRepositoryDiff,
                 showsGitActions: showsGitControls,
@@ -125,6 +130,9 @@ struct TurnView: View {
                 isRunningGitAction: viewModel.isRunningGitAction,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
+                onTapMacHandoff: codex.isConnected ? {
+                    isShowingMacHandoffConfirm = true
+                } : nil,
                 onTapRepoDiff: showsGitControls ? {
                     presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
                 } : nil,
@@ -242,6 +250,8 @@ struct TurnView: View {
             alertApprovalRequest: $alertApprovalRequest,
             isShowingNothingToCommitAlert: isShowingNothingToCommitAlertBinding,
             gitSyncAlert: gitSyncAlertBinding,
+            isShowingMacHandoffConfirm: $isShowingMacHandoffConfirm,
+            macHandoffErrorMessage: $macHandoffErrorMessage,
             onDeclineApproval: {
                 viewModel.decline(codex: codex)
             },
@@ -256,6 +266,9 @@ struct TurnView: View {
                     threadID: thread.id,
                     activeTurnID: codex.activeTurnID(for: thread.id)
                 )
+            },
+            onConfirmMacHandoff: {
+                continueOnMac()
             }
         )
     }
@@ -326,6 +339,22 @@ struct TurnView: View {
 
         Task {
             await codex.refreshRateLimits()
+        }
+    }
+
+    private func continueOnMac() {
+        guard !isHandingOffToMac else { return }
+        isHandingOffToMac = true
+
+        Task { @MainActor in
+            defer { isHandingOffToMac = false }
+
+            do {
+                let handoffService = DesktopHandoffService(codex: codex)
+                try await handoffService.continueOnMac(threadId: thread.id)
+            } catch {
+                macHandoffErrorMessage = error.localizedDescription
+            }
         }
     }
 

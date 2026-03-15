@@ -32,6 +32,8 @@ enum GitActionsError: LocalizedError {
         case "branch_behind_remote": return "Branch is behind remote. Pull first."
         case "dirty_and_behind": return "Uncommitted changes and branch is behind remote."
         case "checkout_conflict_dirty_tree": return "Cannot switch branches: you have uncommitted changes."
+        case "checkout_branch_in_other_worktree":
+            return "Cannot switch branches: this branch is already open in another worktree."
         case "pull_conflict": return "Pull failed due to conflicts."
         case "branch_exists": return fallback ?? "Branch already exists."
         case "missing_branch", "missing_branch_name": return "Branch name is required."

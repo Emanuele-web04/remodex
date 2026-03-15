@@ -115,6 +115,7 @@ final class TurnViewModel {
     var selectedGitBaseBranch = ""
     var currentGitBranch = ""
     var availableGitBranchTargets: [String] = []
+    var gitBranchesCheckedOutElsewhere: Set<String> = []
     var gitDefaultBranch = ""
     var gitRepoSync: GitRepoSyncResult? = nil
     var gitSyncState: String? { gitRepoSync?.state }
@@ -1816,6 +1817,7 @@ final class TurnViewModel {
             do {
                 let result = try await gitService.branchesWithStatus()
                 availableGitBranchTargets = result.branches
+                gitBranchesCheckedOutElsewhere = result.branchesCheckedOutElsewhere
                 if let current = result.currentBranch, !current.isEmpty {
                     currentGitBranch = current
                 }
@@ -1879,6 +1881,15 @@ final class TurnViewModel {
                   !codex.runningThreadIDs.contains(threadID),
                   !self.isRunningGitAction,
                   !self.isSwitchingGitBranch else { return }
+
+            if gitBranchesCheckedOutElsewhere.contains(branch) {
+                gitSyncAlert = TurnGitSyncAlert(
+                    title: "Branch Switch Failed",
+                    message: "Cannot switch branches: this branch is already open in another worktree.",
+                    action: .dismissOnly
+                )
+                return
+            }
 
             self.isSwitchingGitBranch = true
             defer { self.isSwitchingGitBranch = false }

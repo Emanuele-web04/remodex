@@ -82,6 +82,7 @@ struct TurnComposerHostView: View {
             showsGitBranchSelector: showsGitControls,
             isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
             availableGitBranchTargets: viewModel.availableGitBranchTargets,
+            gitBranchesCheckedOutElsewhere: viewModel.gitBranchesCheckedOutElsewhere,
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
             currentGitBranch: viewModel.currentGitBranch,
             gitDefaultBranch: viewModel.gitDefaultBranch,
