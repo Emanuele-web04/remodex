@@ -640,6 +640,39 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(assistantMessages[1].isStreaming)
     }
 
+    func testAssistantStreamingUpdatesExistingRenderSnapshotText() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        _ = service.timelineState(for: threadID)
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        let firstSnapshot = service.timelineState(for: threadID).renderSnapshot
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+        let secondSnapshot = service.timelineState(for: threadID).renderSnapshot
+
+        XCTAssertEqual(firstSnapshot.messages.count, 1)
+        XCTAssertEqual(firstSnapshot.messages[0].text, "First")
+        XCTAssertEqual(secondSnapshot.messages.count, 1)
+        XCTAssertEqual(secondSnapshot.messages[0].text, "First chunk")
+        XCTAssertGreaterThan(secondSnapshot.timelineChangeToken, firstSnapshot.timelineChangeToken)
+    }
+
+    func testAssistantStreamingFastPathKeepsCurrentOutputInSync() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        _ = service.timelineState(for: threadID)
+        service.activeThreadId = threadID
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+
+        XCTAssertEqual(service.currentOutput, "First chunk")
+    }
+
     func testMarkTurnCompletedFinalizesAllAssistantItemsForTurn() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

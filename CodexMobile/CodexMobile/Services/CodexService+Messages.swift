@@ -53,11 +53,7 @@ extension CodexService {
     func updateCurrentOutput(for threadId: String) {
         noteMessagesChanged(for: threadId)
 
-        let latestAssistantText = messagesByThread[threadId]?
-            .reversed()
-            .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
-            .text ?? ""
-        latestAssistantOutputByThread[threadId] = latestAssistantText
+        let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
         refreshThreadTimelineState(for: threadId)
 
         guard activeThreadId == threadId else {
@@ -65,6 +61,43 @@ extension CodexService {
         }
 
         currentOutput = latestAssistantText
+    }
+
+    // Fast-paths plain assistant text streaming so one delta does not rebuild every derived row cache.
+    // Falls back to the full projection path whenever the visible snapshot shape changed underneath us.
+    func updateStreamingAssistantOutput(for threadId: String, messageId: String) {
+        noteMessagesChanged(for: threadId)
+
+        let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
+        if activeThreadId == threadId {
+            currentOutput = latestAssistantText
+        }
+
+        guard let state = threadTimelineStateByThread[threadId],
+              let rawMessages = messagesByThread[threadId],
+              let updatedMessage = rawMessages.first(where: { $0.id == messageId }),
+              let projectedIndex = state.renderSnapshot.messages.firstIndex(where: { $0.id == messageId }) else {
+            refreshThreadTimelineState(for: threadId)
+            return
+        }
+
+        let revision = messageRevisionByThread[threadId] ?? 0
+        var projectedMessages = state.renderSnapshot.messages
+        projectedMessages[projectedIndex] = updatedMessage
+
+        state.messages = rawMessages
+        state.messageRevision = revision
+        state.renderSnapshot = TurnTimelineRenderSnapshot(
+            threadID: threadId,
+            messages: projectedMessages,
+            timelineChangeToken: revision,
+            activeTurnID: state.renderSnapshot.activeTurnID,
+            isThreadRunning: state.renderSnapshot.isThreadRunning,
+            latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
+            stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
+            assistantRevertStatesByMessageID: state.renderSnapshot.assistantRevertStatesByMessageID,
+            repoRefreshSignal: state.renderSnapshot.repoRefreshSignal
+        )
     }
 
     // Returns the currently running turn id for a specific thread, if any.
@@ -1394,17 +1427,26 @@ extension CodexService {
         }
 
         let currentText = messagesByThread[threadId]?[messageIndex].text ?? ""
-        messagesByThread[threadId]?[messageIndex].text = mergeAssistantDelta(
+        let nextText = mergeAssistantDelta(
             existingText: currentText,
             incomingDelta: delta
         )
+        let didResolveItemId = messagesByThread[threadId]?[messageIndex].itemId == nil && itemId != nil
+
+        guard nextText != currentText
+                || !(messagesByThread[threadId]?[messageIndex].isStreaming ?? false)
+                || didResolveItemId else {
+            return
+        }
+
+        messagesByThread[threadId]?[messageIndex].text = nextText
         messagesByThread[threadId]?[messageIndex].isStreaming = true
         if messagesByThread[threadId]?[messageIndex].itemId == nil, let itemId {
             messagesByThread[threadId]?[messageIndex].itemId = itemId
         }
 
         persistMessages()
-        updateCurrentOutput(for: threadId)
+        updateStreamingAssistantOutput(for: threadId, messageId: messageID)
     }
 
     // Finalizes assistant text when item/completed carries the canonical message body.
@@ -1753,6 +1795,16 @@ extension CodexService {
     // Bumps a thread-local revision whenever its message timeline changes.
     func noteMessagesChanged(for threadId: String) {
         messageRevisionByThread[threadId, default: 0] &+= 1
+    }
+
+    // Keeps the "latest output" cache in sync for both full refreshes and lightweight streaming updates.
+    func syncLatestAssistantOutputCache(for threadId: String) -> String {
+        let latestAssistantText = messagesByThread[threadId]?
+            .reversed()
+            .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+            .text ?? ""
+        latestAssistantOutputByThread[threadId] = latestAssistantText
+        return latestAssistantText
     }
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.

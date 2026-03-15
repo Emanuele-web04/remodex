@@ -22,7 +22,8 @@ Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a 
 - Reasoning controls to tune how much thinking Codex uses
 - Access controls with On-Request or Full access
 - Photo attachments from camera or library
-- QR pairing with automatic reconnect
+- QR pairing for a live bridge session
+- Live streaming on your phone while Codex runs on your Mac
 - Shared thread history with Codex on your Mac
 
 The repo stays local-first and self-host friendly: the iOS app source does not embed a public hosted endpoint, and the transport layer remains inspectable for anyone who wants to run their own setup.
@@ -58,7 +59,8 @@ If you scan the pairing QR with a generic camera or QR reader before installing 
 1. Run `remodex up` on your Mac — a QR code appears in the terminal
 2. Scan it with the Remodex iOS app to pair
 3. Your phone sends instructions to Codex through the bridge and receives responses in real-time
-4. The bridge handles git operations, desktop refresh, and session persistence locally
+4. The bridge handles git operations and local session persistence on your Mac
+5. `Codex.app` can read the same thread history from disk, but it is not a true live mirror unless you enable the optional refresh workaround
 
 ## Repository Structure
 
@@ -249,6 +251,7 @@ On the relay/VPS side, keep push disabled until you actually want it. The HTTP p
 
 - Remodex is local-first: Codex, git operations, and workspace actions run on your Mac, while the iPhone acts as a paired remote control.
 - The pairing QR carries the connection URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and the bridge persists its trusted device identity locally on the Mac.
+- The iPhone stores pairing metadata in Keychain, but you should not rely on hands-free reconnect across bridge restarts or fresh runs. In practice, expect to scan a fresh QR code when you start a new bridge session.
 - The bridge state lives canonically in `~/.remodex/device-state.json` with local-only permissions. On macOS the bridge also mirrors that state to Keychain as best-effort backup/migration data.
 - The CLI no longer prints the connection URL in plain text below the QR.
 - Set `REMODEX_RELAY` only when you want to self-host or test locally against your own setup.
@@ -308,6 +311,19 @@ The bridge also handles local workspace-scoped revert operations for the assista
 
 Remodex works with both the Codex CLI and the Codex desktop app (`Codex.app`). Under the hood, the bridge spawns a `codex app-server` process — the same JSON-RPC interface that powers the desktop app and IDE extensions. Conversations are persisted as JSONL rollout files under `~/.codex/sessions`, so threads started from your phone show up in the desktop app too.
 
+What is live today:
+
+- The iPhone conversation is live while the bridge session is connected.
+- The Mac-side Codex runtime is the real runtime doing the work.
+
+What is not fully live today:
+
+- `Codex.app` does not act like a second live subscriber to the active run by default.
+- The desktop app catches up from the persisted session files and can be nudged with the optional refresh workaround below.
+- True phone-to-desktop live sync in the `Codex.app` GUI is not supported today.
+
+To make that limitation more practical, Remodex also includes a hand-off button in the iPhone app. It lets you explicitly continue the current chat on your Mac by opening the matching thread in `Codex.app` when you are ready to switch devices.
+
 **Known limitation**: The Codex desktop app does not live-reload when an external `app-server` process writes new data to disk. Threads created or updated from your phone won't appear in the desktop app until it remounts that route. Remodex keeps desktop refresh off by default for now because the current deep-link bounce is still disruptive. You can still enable it manually if you want the old remount workaround.
 
 ```sh
@@ -321,7 +337,7 @@ This triggers a debounced deep-link bounce (`codex://settings` → `codex://thre
 
 - **Auto-reconnect**: If the session connection drops, the bridge reconnects with exponential backoff (1 s → 5 s max)
 - **Secure catch-up**: The bridge keeps a bounded local outbound buffer and re-sends missed encrypted messages after a secure reconnect
-- **Codex persistence**: The Codex process stays alive across session reconnects
+- **Codex persistence**: The Codex process stays alive across transient session reconnects during the current bridge run
 - **Graceful shutdown**: SIGINT/SIGTERM cleanly close all connections
 
 ## Building the iOS App
@@ -355,7 +371,10 @@ Run `remodex reset-pairing`, then start the bridge again with `remodex up`.
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.
 
 **Why don't my phone threads show up in the Codex desktop app immediately?**
-The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. Remodex keeps desktop refresh off by default for now because the current workaround bounces the Codex app route and can feel disruptive. If you still want that workaround, enable it explicitly with `REMODEX_REFRESH_ENABLED=true`.
+The desktop app reads session data from disk (`~/.codex/sessions`) but doesn't live-reload when an external process writes new data. Your phone still gets the live stream; it is the desktop GUI that lags unless you explicitly enable the refresh workaround with `REMODEX_REFRESH_ENABLED=true`.
+
+**Does Remodex support true live sync between phone and `Codex.app`?**
+No. The phone session is live, but the `Codex.app` GUI is not a true live mirror of the active run. To help with that, the iPhone app includes a `Hand off to Mac app` button so you can explicitly continue the same thread on your Mac.
 
 **Can I self-host the pairing server?**
 Yes. That is the intended forking path. The transport and push-service code are in [`relay/`](relay/); point `REMODEX_RELAY` at the instance you run.
