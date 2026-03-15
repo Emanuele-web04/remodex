@@ -117,7 +117,8 @@ function listReachableRelayUrls({ host, port }) {
     }
     candidates.add(`ws://127.0.0.1:${normalizedPort}${DEFAULT_RELAY_PATH}`);
   } else {
-    candidates.add(`ws://${normalizedHost}:${normalizedPort}${DEFAULT_RELAY_PATH}`);
+    const wsHost = formatUrlHost(normalizedHost);
+    candidates.add(`ws://${wsHost}:${normalizedPort}${DEFAULT_RELAY_PATH}`);
   }
 
   return Array.from(candidates);
@@ -162,6 +163,13 @@ function normalizeHost(value) {
   }
   const trimmed = value.trim();
   return trimmed || DEFAULT_RELAY_HOST;
+}
+
+function formatUrlHost(host) {
+  if (host.includes(":") && !(host.startsWith("[") && host.endsWith("]"))) {
+    return `[${host}]`;
+  }
+  return host;
 }
 
 function normalizePort(value, fallback, { allowZero = false } = {}) {

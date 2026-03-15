@@ -90,3 +90,8 @@ test("listReachableRelayUrls includes localhost for wildcard listeners", () => {
   const urls = listReachableRelayUrls({ host: "0.0.0.0", port: 9000 });
   assert.ok(urls.includes("ws://127.0.0.1:9000/relay"));
 });
+
+test("listReachableRelayUrls brackets IPv6 hosts", () => {
+  const urls = listReachableRelayUrls({ host: "::1", port: 9000 });
+  assert.deepEqual(urls, ["ws://[::1]:9000/relay"]);
+});
