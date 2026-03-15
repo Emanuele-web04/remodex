@@ -5,7 +5,7 @@
 // Depends on: ws, crypto, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch
 
 const WebSocket = require("ws");
-const { randomUUID, randomBytes } = require("crypto");
+const { randomBytes } = require("crypto");
 const {
   CodexDesktopRefresher,
   readBridgeConfig,
@@ -20,7 +20,10 @@ const { handleWorkspaceRequest } = require("./workspace-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
 const { createPushNotificationServiceClient } = require("./push-notification-service-client");
 const { createPushNotificationTracker } = require("./push-notification-tracker");
-const { loadOrCreateBridgeDeviceState } = require("./secure-device-state");
+const {
+  loadOrCreateBridgeDeviceState,
+  resolveBridgeRelaySession,
+} = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 
 function startBridge() {
@@ -32,10 +35,13 @@ function startBridge() {
     process.exit(1);
   }
 
-  const sessionId = randomUUID();
+  let deviceState = loadOrCreateBridgeDeviceState();
+  // Reuse the trusted relay room across bridge restarts so the saved iPhone pairing stays valid.
+  const relaySession = resolveBridgeRelaySession(deviceState);
+  deviceState = relaySession.deviceState;
+  const sessionId = relaySession.sessionId;
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
   const notificationSecret = randomBytes(24).toString("hex");
-  const deviceState = loadOrCreateBridgeDeviceState();
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
     debounceMs: config.refreshDebounceMs,

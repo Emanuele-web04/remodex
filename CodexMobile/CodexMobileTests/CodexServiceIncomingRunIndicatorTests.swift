@@ -464,12 +464,81 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         )
     }
 
-    func testPermanentRelayCloseClearsSavedPairingAndDisablesReconnect() {
+    func testRelaySessionReplacementClearsSavedPairingAndDisablesReconnect() {
         let service = makeService()
 
         withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
             service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
             service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            service.isConnected = true
+            service.isInitialized = true
+
+            service.handleReceiveError(
+                CodexServiceError.disconnected,
+                relayCloseCode: .privateCode(4001)
+            )
+
+            XCTAssertFalse(service.isConnected)
+            XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+            XCTAssertNil(service.relaySessionId)
+            XCTAssertNil(service.relayUrl)
+            XCTAssertEqual(
+                service.lastErrorMessage,
+                "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
+            )
+        }
+    }
+
+    func testMacUnavailableCloseKeepsSavedPairingAndArmsReconnectForRestartPersistentPairing() {
+        let service = makeService()
+
+        withSavedRelayPairing(
+            sessionId: "session-\(UUID().uuidString)",
+            relayURL: "wss://relay.test/relay",
+            supportsPersistentSessionReconnect: true,
+            sessionPersistsAcrossBridgeRestarts: true
+        ) {
+            service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
+            service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            service.relaySupportsPersistentSessionReconnect =
+                SecureStore.readString(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect) == "1"
+            service.relaySessionPersistsAcrossBridgeRestarts =
+                SecureStore.readString(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts) == "1"
+            service.isConnected = true
+            service.isInitialized = true
+
+            service.handleReceiveError(
+                CodexServiceError.disconnected,
+                relayCloseCode: .privateCode(4002)
+            )
+
+            XCTAssertFalse(service.isConnected)
+            XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+            XCTAssertNotNil(service.relaySessionId)
+            XCTAssertNotNil(service.relayUrl)
+            XCTAssertNil(service.lastErrorMessage)
+            XCTAssertEqual(
+                service.connectionRecoveryState,
+                .retrying(attempt: 0, message: "Reconnecting...")
+            )
+        }
+    }
+
+    func testMacUnavailableCloseClearsSavedPairingWhenRestartPersistenceWasNeverEstablished() {
+        let service = makeService()
+
+        withSavedRelayPairing(
+            sessionId: "session-\(UUID().uuidString)",
+            relayURL: "wss://relay.test/relay",
+            supportsPersistentSessionReconnect: true,
+            sessionPersistsAcrossBridgeRestarts: false
+        ) {
+            service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
+            service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            service.relaySupportsPersistentSessionReconnect =
+                SecureStore.readString(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect) == "1"
+            service.relaySessionPersistsAcrossBridgeRestarts =
+                SecureStore.readString(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts) == "1"
             service.isConnected = true
             service.isInitialized = true
 
@@ -482,9 +551,11 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             XCTAssertFalse(service.shouldAutoReconnectOnForeground)
             XCTAssertNil(service.relaySessionId)
             XCTAssertNil(service.relayUrl)
+            XCTAssertFalse(service.relaySupportsPersistentSessionReconnect)
+            XCTAssertFalse(service.relaySessionPersistsAcrossBridgeRestarts)
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "The Mac session closed. Scan a new QR code to reconnect."
+                "This relay pairing is no longer valid. Scan a new QR code to reconnect."
             )
         }
     }
@@ -715,13 +786,25 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
     private func withSavedRelayPairing(
         sessionId: String,
         relayURL: String,
+        supportsPersistentSessionReconnect: Bool = false,
+        sessionPersistsAcrossBridgeRestarts: Bool = false,
         perform body: () -> Void
     ) {
         SecureStore.writeString(sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(relayURL, for: CodexSecureKeys.relayUrl)
+        SecureStore.writeString(
+            supportsPersistentSessionReconnect ? "1" : "0",
+            for: CodexSecureKeys.relaySupportsPersistentSessionReconnect
+        )
+        SecureStore.writeString(
+            sessionPersistsAcrossBridgeRestarts ? "1" : "0",
+            for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts
+        )
         defer {
             SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
             SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+            SecureStore.deleteValue(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect)
+            SecureStore.deleteValue(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts)
         }
 
         body()

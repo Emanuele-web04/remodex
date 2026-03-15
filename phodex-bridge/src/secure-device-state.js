@@ -1,7 +1,7 @@
 // FILE: secure-device-state.js
 // Purpose: Persists the bridge device identity and trusted phone registry for E2EE pairing.
 // Layer: CLI helper
-// Exports: loadOrCreateBridgeDeviceState, rememberTrustedPhone, getTrustedPhonePublicKey
+// Exports: loadOrCreateBridgeDeviceState, rememberTrustedPhone, getTrustedPhonePublicKey, resolveBridgeRelaySession
 // Depends on: fs, os, path, crypto, child_process
 
 const fs = require("fs");
@@ -26,7 +26,56 @@ function loadOrCreateBridgeDeviceState() {
   return nextState;
 }
 
-function rememberTrustedPhone(state, phoneDeviceId, phoneIdentityPublicKey) {
+// Reuses one relay session id after trust is established so bridge restarts do not force a re-pair.
+function resolveBridgeRelaySession(state, { persist = true } = {}) {
+  const normalizedRelaySessionId = normalizeNonEmptyString(state?.relaySessionId);
+  const hasTrustedPhone = hasTrustedPhones(state);
+
+  if (hasTrustedPhone && normalizedRelaySessionId) {
+    return {
+      deviceState: state,
+      isPersistent: true,
+      sessionId: normalizedRelaySessionId,
+    };
+  }
+
+  if (hasTrustedPhone) {
+    const nextState = normalizeBridgeDeviceState({
+      ...state,
+      relaySessionId: randomUUID(),
+    });
+    if (persist) {
+      writeBridgeDeviceState(nextState);
+    }
+    return {
+      deviceState: nextState,
+      isPersistent: true,
+      sessionId: nextState.relaySessionId,
+    };
+  }
+
+  if (!normalizedRelaySessionId) {
+    return {
+      deviceState: state,
+      isPersistent: false,
+      sessionId: randomUUID(),
+    };
+  }
+
+  const { relaySessionId: _, ...stateWithoutRelaySessionId } = state;
+  const nextState = normalizeBridgeDeviceState(stateWithoutRelaySessionId);
+  if (persist) {
+    writeBridgeDeviceState(nextState);
+  }
+  return {
+    deviceState: nextState,
+    isPersistent: false,
+    sessionId: randomUUID(),
+  };
+}
+
+// Persists the trusted iPhone identity and the relay session id that future reconnects should reuse.
+function rememberTrustedPhone(state, phoneDeviceId, phoneIdentityPublicKey, relaySessionId, { persist = true } = {}) {
   const normalizedDeviceId = normalizeNonEmptyString(phoneDeviceId);
   const normalizedPublicKey = normalizeNonEmptyString(phoneIdentityPublicKey);
   if (!normalizedDeviceId || !normalizedPublicKey) {
@@ -34,13 +83,16 @@ function rememberTrustedPhone(state, phoneDeviceId, phoneIdentityPublicKey) {
   }
 
   // Remodex supports one trusted iPhone per Mac, so a new trust record replaces old ones.
-  const nextState = {
+  const nextState = normalizeBridgeDeviceState({
     ...state,
+    relaySessionId: normalizeNonEmptyString(relaySessionId),
     trustedPhones: {
       [normalizedDeviceId]: normalizedPublicKey,
     },
-  };
-  writeBridgeDeviceState(nextState);
+  });
+  if (persist) {
+    writeBridgeDeviceState(nextState);
+  }
   return nextState;
 }
 
@@ -50,6 +102,10 @@ function getTrustedPhonePublicKey(state, phoneDeviceId) {
     return null;
   }
   return state.trustedPhones?.[normalizedDeviceId] || null;
+}
+
+function hasTrustedPhones(state) {
+  return Object.keys(state?.trustedPhones || {}).length > 0;
 }
 
 function createBridgeDeviceState() {
@@ -62,6 +118,7 @@ function createBridgeDeviceState() {
     macDeviceId: randomUUID(),
     macIdentityPublicKey: base64UrlToBase64(publicJwk.x),
     macIdentityPrivateKey: base64UrlToBase64(privateJwk.d),
+    relaySessionId: undefined,
     trustedPhones: {},
   };
 }
@@ -158,6 +215,7 @@ function normalizeBridgeDeviceState(rawState) {
   const macDeviceId = normalizeNonEmptyString(rawState?.macDeviceId);
   const macIdentityPublicKey = normalizeNonEmptyString(rawState?.macIdentityPublicKey);
   const macIdentityPrivateKey = normalizeNonEmptyString(rawState?.macIdentityPrivateKey);
+  const relaySessionId = normalizeNonEmptyString(rawState?.relaySessionId);
 
   if (!macDeviceId || !macIdentityPublicKey || !macIdentityPrivateKey) {
     throw new Error("Bridge device state is incomplete");
@@ -180,6 +238,7 @@ function normalizeBridgeDeviceState(rawState) {
     macDeviceId,
     macIdentityPublicKey,
     macIdentityPrivateKey,
+    relaySessionId: relaySessionId || undefined,
     trustedPhones,
   };
 }
@@ -204,4 +263,5 @@ module.exports = {
   getTrustedPhonePublicKey,
   loadOrCreateBridgeDeviceState,
   rememberTrustedPhone,
+  resolveBridgeRelaySession,
 };

@@ -42,7 +42,8 @@ final class QRScannerPairingValidatorTests: XCTestCase {
         let result = validatePairingQRCode(
             pairingQRCode(
                 v: codexPairingQRVersion,
-                expiresAt: 1_900_000_000_000
+                expiresAt: 1_900_000_000_000,
+                supportsPersistentSessionReconnect: true
             ),
             now: Date(timeIntervalSince1970: 1_800_000_000)
         )
@@ -53,6 +54,7 @@ final class QRScannerPairingValidatorTests: XCTestCase {
 
         XCTAssertEqual(payload.sessionId, "session-123")
         XCTAssertEqual(payload.relay, "wss://relay.example")
+        XCTAssertEqual(payload.supportsPersistentSessionReconnect, true)
     }
 
     func testExpiredPayloadReturnsScanError() {
@@ -71,9 +73,16 @@ final class QRScannerPairingValidatorTests: XCTestCase {
         XCTAssertEqual(message, "This pairing QR code has expired. Generate a new one from the Mac bridge.")
     }
 
-    private func pairingQRCode(v: Int, expiresAt: Int64) -> String {
+    private func pairingQRCode(
+        v: Int,
+        expiresAt: Int64,
+        supportsPersistentSessionReconnect: Bool? = nil
+    ) -> String {
+        let reconnectField = supportsPersistentSessionReconnect.map {
+            ",\"supportsPersistentSessionReconnect\":\($0 ? "true" : "false")"
+        } ?? ""
         """
-        {"v":\(v),"relay":"wss://relay.example","sessionId":"session-123","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(expiresAt)}
+        {"v":\(v),"relay":"wss://relay.example","sessionId":"session-123"\(reconnectField),"macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(expiresAt)}
         """
     }
 }

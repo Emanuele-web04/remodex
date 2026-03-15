@@ -10,6 +10,8 @@ import Security
 enum CodexSecureKeys {
     static let relaySessionId = "codex.relay.sessionId"
     static let relayUrl = "codex.relay.url"
+    static let relaySupportsPersistentSessionReconnect = "codex.relay.supportsPersistentSessionReconnect"
+    static let relaySessionPersistsAcrossBridgeRestarts = "codex.relay.sessionPersistsAcrossBridgeRestarts"
     static let relayMacDeviceId = "codex.relay.macDeviceId"
     static let relayMacIdentityPublicKey = "codex.relay.macIdentityPublicKey"
     static let relayProtocolVersion = "codex.relay.protocolVersion"

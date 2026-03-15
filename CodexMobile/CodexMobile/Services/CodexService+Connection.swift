@@ -9,7 +9,8 @@ import Network
 import UIKit
 
 extension CodexService {
-    private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003]
+    // `4002` only stays recoverable for pairings that completed the new restart-persistent handshake flow.
+    private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4003]
 
     // Models how one socket failure should affect reconnect state, pairing persistence, and UI copy.
     private struct ReceiveErrorDisposition {
@@ -135,12 +136,16 @@ extension CodexService {
     func clearSavedRelaySession() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect)
+        SecureStore.deleteValue(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = nil
         relayUrl = nil
+        relaySupportsPersistentSessionReconnect = false
+        relaySessionPersistsAcrossBridgeRestarts = false
         relayMacDeviceId = nil
         relayMacIdentityPublicKey = nil
         relayProtocolVersion = codexSecureProtocolVersion
@@ -346,10 +351,14 @@ extension CodexService {
         for error: Error,
         relayCloseCode: NWProtocolWebSocket.CloseCode?
     ) -> ReceiveErrorDisposition {
-        let permanentRelayMessage = permanentRelayDisconnectMessage(for: relayCloseCode)
+        let shouldClearSavedRelaySession = shouldClearSavedRelaySession(for: relayCloseCode)
+        // `4002` only suppresses the re-pair copy for sessions we can actually recover.
+        let permanentRelayMessage = shouldClearSavedRelaySession
+            ? (permanentRelayDisconnectMessage(for: relayCloseCode)
+                ?? "This relay pairing is no longer valid. Scan a new QR code to reconnect.")
+            : nil
         let isBenignDisconnect = isBenignBackgroundDisconnect(error)
         let shouldSuppressMessage = isBenignDisconnect && !isActivelyForegroundedForConnectionUI()
-        let shouldClearSavedRelaySession = permanentRelayMessage != nil
         // Foreground relay drops should reconnect too, otherwise Stop disappears mid-run.
         let shouldAttemptAutoRecovery = !shouldClearSavedRelaySession
             && (isRecoverableTransientConnectionError(error) || isBenignDisconnect)
@@ -621,8 +630,6 @@ extension CodexService {
         }
 
         switch rawValue {
-        case 4002:
-            return "The Mac session closed. Scan a new QR code to reconnect."
         case 4001:
             return "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
         case 4003:
@@ -630,6 +637,19 @@ extension CodexService {
         default:
             return "This relay pairing is no longer valid. Scan a new QR code to reconnect."
         }
+    }
+
+    // Old or never-completed pairings still need a rescan when the bridge room disappears.
+    func shouldClearSavedRelaySession(for closeCode: NWProtocolWebSocket.CloseCode?) -> Bool {
+        guard let rawValue = relayCloseCodeRawValue(closeCode) else {
+            return false
+        }
+
+        if rawValue == 4002 {
+            return !hasRestartPersistentRelaySession
+        }
+
+        return Self.permanentRelayCloseCodeRawValues.contains(rawValue)
     }
 
     var isRunningOnSimulator: Bool {
