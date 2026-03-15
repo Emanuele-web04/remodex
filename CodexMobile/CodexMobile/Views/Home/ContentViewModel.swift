@@ -90,6 +90,12 @@ final class ContentViewModel {
         codex.connectionRecoveryState = .idle
         codex.lastErrorMessage = nil
 
+        // Cancel any in-flight reconnect so the scanner can appear immediately instead of waiting
+        // for a stalled handshake to time out on its own.
+        if codex.isConnecting || codex.isConnected {
+            await codex.disconnect()
+        }
+
         while isRunningAutoReconnect || codex.isConnecting {
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
@@ -170,6 +176,15 @@ final class ContentViewModel {
                 codex.shouldAutoReconnectOnForeground = false
                 return
             } catch {
+                if codex.secureConnectionState == .rePairRequired {
+                    codex.connectionRecoveryState = .idle
+                    codex.shouldAutoReconnectOnForeground = false
+                    if codex.lastErrorMessage?.isEmpty ?? true {
+                        codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
+                    }
+                    return
+                }
+
                 let isRetryable = codex.isRecoverableTransientConnectionError(error)
                     || codex.isBenignBackgroundDisconnect(error)
 
@@ -242,6 +257,15 @@ extension ContentViewModel {
                 return
             } catch {
                 lastError = error
+                if codex.secureConnectionState == .rePairRequired {
+                    codex.connectionRecoveryState = .idle
+                    codex.shouldAutoReconnectOnForeground = false
+                    if codex.lastErrorMessage?.isEmpty ?? true {
+                        codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
+                    }
+                    throw error
+                }
+
                 let isRetryable = codex.isRecoverableTransientConnectionError(error)
                     || codex.isBenignBackgroundDisconnect(error)
 

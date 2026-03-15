@@ -173,10 +173,19 @@ Starts the bridge:
 
 - Spawns `codex app-server` (or connects to an existing endpoint)
 - Connects the Mac bridge to the paired session endpoint
-- Displays a QR code for phone pairing
+- Displays a fresh QR code for the current bridge launch
 - Forwards JSON-RPC messages bidirectionally
 - Handles git commands from the phone
 - Persists the active thread for later resumption
+
+### `remodex reset-pairing`
+
+Clears the saved bridge pairing state so the next `remodex up` starts a fresh QR pairing flow.
+
+```sh
+remodex reset-pairing
+# => [remodex] Cleared the saved pairing state. Run `remodex up` to pair again.
+```
 
 ### `remodex resume`
 
@@ -239,7 +248,8 @@ On the relay/VPS side, keep push disabled until you actually want it. The HTTP p
 ## Pairing and Safety
 
 - Remodex is local-first: Codex, git operations, and workspace actions run on your Mac, while the iPhone acts as a paired remote control.
-- The pairing QR carries the connection URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and tries to reconnect automatically on relaunch or when the app returns to the foreground.
+- The pairing QR carries the connection URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and the bridge persists its trusted device identity locally on the Mac.
+- The bridge state lives canonically in `~/.remodex/device-state.json` with local-only permissions. On macOS the bridge also mirrors that state to Keychain as best-effort backup/migration data.
 - The CLI no longer prints the connection URL in plain text below the QR.
 - Set `REMODEX_RELAY` only when you want to self-host or test locally against your own setup.
 - Leave `REMODEX_TRUST_PROXY` unset for direct/self-hosted installs. Turn it on only when a trusted reverse proxy such as Traefik, Nginx, or Caddy is forwarding the relay traffic.
@@ -263,7 +273,7 @@ Privacy notes:
 
 - The transport layer can still see connection metadata and the plaintext secure control messages used to set up the encrypted session, including session IDs, device IDs, public keys, nonces, and handshake result codes.
 - The transport layer does not see decrypted application payloads after the secure handshake succeeds.
-- The iPhone currently trusts a single paired phone identity per Mac bridge state. Pairing a different iPhone requires resetting pairing on the Mac first.
+- The iPhone currently trusts a single paired phone identity per Mac bridge state. Pairing a different iPhone requires `remodex reset-pairing` on the Mac first.
 - On-device message history is also encrypted at rest on iPhone using a Keychain-backed AES key.
 
 ## Git Integration
@@ -336,7 +346,10 @@ Not for Remodex itself. You need Codex CLI set up and working independently.
 The core bridge client (Codex forwarding + git) works on any OS. Desktop refresh (AppleScript) is macOS-only.
 
 **What happens if I close the terminal?**
-The bridge stops. Run `remodex up` again — your phone will reconnect when it detects the saved pairing session.
+The bridge stops. Run `remodex up` again to start a fresh QR pairing flow for that bridge session.
+
+**How do I force a fresh QR pairing?**
+Run `remodex reset-pairing`, then start the bridge again with `remodex up`.
 
 **Can I connect to a remote Codex instance?**
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.

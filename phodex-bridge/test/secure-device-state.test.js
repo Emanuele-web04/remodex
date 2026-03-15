@@ -1,21 +1,25 @@
 // FILE: secure-device-state.test.js
-// Purpose: Verifies trusted bridge pairings keep a stable relay session id across restarts.
+// Purpose: Verifies canonical bridge-state persistence, migration, and reset behavior.
 // Layer: Unit test
 // Exports: node:test suite
-// Depends on: node:test, node:assert/strict, ../src/secure-device-state
+// Depends on: node:test, node:assert/strict, fs, os, path, ../src/secure-device-state
 
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  loadOrCreateBridgeDeviceState,
   rememberTrustedPhone,
+  resetBridgeDeviceState,
   resolveBridgeRelaySession,
 } = require("../src/secure-device-state");
 
-// ─── Relay Session Persistence ───────────────────────────────
+// ─── Relay Session Resolution ───────────────────────────────
 
-test("resolveBridgeRelaySession reuses the stored relay session for a trusted phone", () => {
+test("resolveBridgeRelaySession always creates a fresh relay session", () => {
   const state = makeDeviceState({
-    relaySessionId: "session-trusted",
     trustedPhones: {
       "phone-1": "phone-public-key-1",
     },
@@ -23,54 +27,102 @@ test("resolveBridgeRelaySession reuses the stored relay session for a trusted ph
 
   const resolved = resolveBridgeRelaySession(state, { persist: false });
 
-  assert.equal(resolved.isPersistent, true);
-  assert.equal(resolved.sessionId, "session-trusted");
-  assert.equal(resolved.deviceState.relaySessionId, "session-trusted");
-});
-
-test("resolveBridgeRelaySession provisions a stable relay session once trust exists", () => {
-  const state = makeDeviceState({
-    trustedPhones: {
-      "phone-2": "phone-public-key-2",
-    },
-  });
-
-  const resolved = resolveBridgeRelaySession(state, { persist: false });
-
-  assert.equal(resolved.isPersistent, true);
-  assert.ok(resolved.sessionId);
-  assert.equal(resolved.deviceState.relaySessionId, resolved.sessionId);
-});
-
-test("resolveBridgeRelaySession keeps untrusted QR sessions ephemeral", () => {
-  const state = makeDeviceState({
-    relaySessionId: "stale-session",
-    trustedPhones: {},
-  });
-
-  const resolved = resolveBridgeRelaySession(state, { persist: false });
-
   assert.equal(resolved.isPersistent, false);
   assert.ok(resolved.sessionId);
-  assert.notEqual(resolved.sessionId, "stale-session");
-  assert.equal(resolved.deviceState.relaySessionId, undefined);
+  assert.deepEqual(resolved.deviceState, state);
 });
 
-test("rememberTrustedPhone stores the relay session id alongside the trust record", () => {
+test("rememberTrustedPhone stores the trusted phone identity", () => {
   const state = makeDeviceState();
 
   const nextState = rememberTrustedPhone(
     state,
     "phone-3",
     "phone-public-key-3",
-    "session-persisted",
     { persist: false }
   );
 
   assert.deepEqual(nextState.trustedPhones, {
     "phone-3": "phone-public-key-3",
   });
-  assert.equal(nextState.relaySessionId, "session-persisted");
+});
+
+test("loadOrCreateBridgeDeviceState writes and reloads the canonical file state", () => {
+  withTempDeviceStateEnv(() => {
+    const firstState = loadOrCreateBridgeDeviceState();
+    const secondState = loadOrCreateBridgeDeviceState();
+
+    assert.deepEqual(secondState, firstState);
+    assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(firstState));
+  });
+});
+
+test("loadOrCreateBridgeDeviceState migrates a valid Keychain mirror into the canonical file", () => {
+  withTempDeviceStateEnv(({ keychainMirrorFile, canonicalStateFile }) => {
+    const migratedState = makeDeviceState({
+      trustedPhones: {
+        "phone-4": "phone-public-key-4",
+      },
+    });
+    fs.writeFileSync(keychainMirrorFile, JSON.stringify(migratedState, null, 2));
+
+    const loadedState = loadOrCreateBridgeDeviceState();
+
+    assert.deepEqual(loadedState, migratedState);
+    assert.deepEqual(readCanonicalStateFromDisk(), migratedState);
+    assert.equal(fs.existsSync(canonicalStateFile), true);
+  });
+});
+
+test("loadOrCreateBridgeDeviceState rejects a corrupted canonical file instead of silently rotating identity", () => {
+  withTempDeviceStateEnv(({ canonicalStateFile }) => {
+    fs.mkdirSync(path.dirname(canonicalStateFile), { recursive: true });
+    fs.writeFileSync(canonicalStateFile, "{ definitely-not-json", "utf8");
+
+    assert.throws(
+      () => loadOrCreateBridgeDeviceState(),
+      /reset-pairing/
+    );
+  });
+});
+
+test("resolveBridgeRelaySession does not persist the fresh launch session id", () => {
+  withTempDeviceStateEnv(() => {
+    const trustedState = rememberTrustedPhone(
+      makeDeviceState(),
+      "phone-5",
+      "phone-public-key-5",
+      { persist: true }
+    );
+
+    const resolved = resolveBridgeRelaySession(trustedState);
+    const reloaded = loadOrCreateBridgeDeviceState();
+
+    assert.equal(resolved.isPersistent, false);
+    assert.equal(reloaded.macDeviceId, trustedState.macDeviceId);
+    assert.deepEqual(reloaded.trustedPhones, {
+      "phone-5": "phone-public-key-5",
+    });
+  });
+});
+
+test("resetBridgeDeviceState removes both canonical and mirrored pairing state", () => {
+  withTempDeviceStateEnv(({ keychainMirrorFile, canonicalStateFile }) => {
+    const state = makeDeviceState({
+      trustedPhones: {
+        "phone-6": "phone-public-key-6",
+      },
+    });
+    fs.mkdirSync(path.dirname(canonicalStateFile), { recursive: true });
+    fs.writeFileSync(canonicalStateFile, JSON.stringify(state, null, 2));
+    fs.writeFileSync(keychainMirrorFile, JSON.stringify(state, null, 2));
+
+    const result = resetBridgeDeviceState();
+
+    assert.equal(result.hadState, true);
+    assert.equal(fs.existsSync(canonicalStateFile), false);
+    assert.equal(fs.existsSync(keychainMirrorFile), false);
+  });
 });
 
 function makeDeviceState(overrides = {}) {
@@ -79,8 +131,45 @@ function makeDeviceState(overrides = {}) {
     macDeviceId: "mac-device-id",
     macIdentityPublicKey: "mac-public-key",
     macIdentityPrivateKey: "mac-private-key",
-    relaySessionId: undefined,
     trustedPhones: {},
     ...overrides,
   };
+}
+
+function withTempDeviceStateEnv(run) {
+  const previousDir = process.env.REMODEX_DEVICE_STATE_DIR;
+  const previousMirror = process.env.REMODEX_DEVICE_STATE_KEYCHAIN_MOCK_FILE;
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-device-state-"));
+  const canonicalStateFile = path.join(tempRoot, "device-state.json");
+  const keychainMirrorFile = path.join(tempRoot, "keychain-device-state.json");
+
+  process.env.REMODEX_DEVICE_STATE_DIR = tempRoot;
+  process.env.REMODEX_DEVICE_STATE_KEYCHAIN_MOCK_FILE = keychainMirrorFile;
+
+  try {
+    return run({ canonicalStateFile, keychainMirrorFile });
+  } finally {
+    if (previousDir === undefined) {
+      delete process.env.REMODEX_DEVICE_STATE_DIR;
+    } else {
+      process.env.REMODEX_DEVICE_STATE_DIR = previousDir;
+    }
+
+    if (previousMirror === undefined) {
+      delete process.env.REMODEX_DEVICE_STATE_KEYCHAIN_MOCK_FILE;
+    } else {
+      process.env.REMODEX_DEVICE_STATE_KEYCHAIN_MOCK_FILE = previousMirror;
+    }
+
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function readCanonicalStateFromDisk() {
+  const canonicalStateFile = path.join(process.env.REMODEX_DEVICE_STATE_DIR, "device-state.json");
+  return JSON.parse(fs.readFileSync(canonicalStateFile, "utf8"));
+}
+
+function stripUndefined(value) {
+  return JSON.parse(JSON.stringify(value));
 }

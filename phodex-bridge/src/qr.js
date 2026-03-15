@@ -1,5 +1,5 @@
 // FILE: qr.js
-// Purpose: Prints the pairing QR payload that the iPhone scanner expects.
+// Purpose: Prints the bridge QR payload for explicit iPhone pairing.
 // Layer: CLI helper
 // Exports: printQR
 // Depends on: qrcode-terminal

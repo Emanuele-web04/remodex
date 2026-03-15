@@ -17,12 +17,14 @@ extension CodexService {
         stopSyncLoop()
         debugSyncLog("sync loop start")
 
-        let listIntervalForegroundNs: UInt64 = 20_000_000_000
+        // Foreground polling is intentionally more aggressive so desktop-authored changes
+        // feel closer to live on iPhone even when Codex.app itself doesn't push updates.
+        let listIntervalForegroundNs: UInt64 = 10_000_000_000
         let listIntervalBackgroundNs: UInt64 = 75_000_000_000
-        let historyIntervalForegroundNs: UInt64 = 15_000_000_000
+        let historyIntervalForegroundNs: UInt64 = 3_000_000_000
         let historyIntervalBackgroundIdleNs: UInt64 = 90_000_000_000
         let historyIntervalBackgroundRunningNs: UInt64 = 12_000_000_000
-        let watchIntervalForegroundNs: UInt64 = 4_000_000_000
+        let watchIntervalForegroundNs: UInt64 = 2_000_000_000
         let watchIntervalBackgroundNs: UInt64 = 15_000_000_000
 
         threadListSyncTask = Task { [weak self] in

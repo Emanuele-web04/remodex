@@ -32,7 +32,6 @@ struct CodexPairingQRPayload: Codable, Sendable {
     let v: Int
     let relay: String
     let sessionId: String
-    let supportsPersistentSessionReconnect: Bool?
     let macDeviceId: String
     let macIdentityPublicKey: String
     let expiresAt: Int64

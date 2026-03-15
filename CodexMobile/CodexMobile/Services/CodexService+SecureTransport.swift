@@ -180,8 +180,6 @@ extension CodexService {
         secureMacFingerprint = codexSecureFingerprint(for: serverHello.macIdentityPublicKey)
         bridgeUpdatePrompt = nil
 
-        markSavedRelaySessionRestartPersistentIfEligible(sessionId: sessionId)
-
         if handshakeMode == .qrBootstrap {
             trustMac(deviceId: macDeviceId, publicKey: serverHello.macIdentityPublicKey)
         }
@@ -252,23 +250,17 @@ extension CodexService {
     func rememberRelayPairing(_ payload: CodexPairingQRPayload) {
         SecureStore.writeString(payload.sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(payload.relay, for: CodexSecureKeys.relayUrl)
-        SecureStore.writeString(
-            payload.supportsPersistentSessionReconnect == true ? "1" : "0",
-            for: CodexSecureKeys.relaySupportsPersistentSessionReconnect
-        )
-        SecureStore.writeString("0", for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts)
         SecureStore.writeString(payload.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = payload.sessionId
         relayUrl = payload.relay
-        relaySupportsPersistentSessionReconnect = payload.supportsPersistentSessionReconnect == true
-        relaySessionPersistsAcrossBridgeRestarts = false
         relayMacDeviceId = payload.macDeviceId
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
+        trustedReconnectFailureCount = 0
         secureConnectionState = trustedMacRegistry.records[payload.macDeviceId] == nil ? .handshaking : .trustedMac
         secureMacFingerprint = codexSecureFingerprint(for: payload.macIdentityPublicKey)
     }
@@ -302,17 +294,6 @@ extension CodexService {
 }
 
 private extension CodexService {
-    // Marks only capability-advertised sessions as restart-stable after a real secure handshake succeeds.
-    func markSavedRelaySessionRestartPersistentIfEligible(sessionId: String) {
-        guard relaySupportsPersistentSessionReconnect,
-              normalizedRelaySessionId == sessionId else {
-            return
-        }
-
-        relaySessionPersistsAcrossBridgeRestarts = true
-        SecureStore.writeString("1", for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts)
-    }
-
     // Centralizes the bridge-update guidance so every mismatch shows the same Mac command.
     func presentBridgeUpdatePrompt(message: String) {
         bridgeUpdatePrompt = CodexBridgeUpdatePrompt(

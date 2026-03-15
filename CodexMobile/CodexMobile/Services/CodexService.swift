@@ -240,14 +240,12 @@ final class CodexService {
     // Relay session persistence
     var relaySessionId: String?
     var relayUrl: String?
-    // Set from the scanned QR so the app knows whether this pairing can ever survive bridge restarts.
-    var relaySupportsPersistentSessionReconnect = false
-    // Flips true only after a successful secure handshake proves this saved session is restart-stable.
-    var relaySessionPersistsAcrossBridgeRestarts = false
     var relayMacDeviceId: String?
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    // Stops infinite trusted-reconnect loops by escalating back to QR after repeated handshake failures.
+    var trustedReconnectFailureCount = 0
     var secureConnectionState: CodexSecureConnectionState = .notPaired
     var secureMacFingerprint: String?
     // Keeps the bridge-update UX visible even if connection cleanup resets secure transport state.
@@ -417,10 +415,6 @@ final class CodexService {
         // Restore relay session from Keychain
         self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
         self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
-        self.relaySupportsPersistentSessionReconnect =
-            SecureStore.readString(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect) == "1"
-        self.relaySessionPersistsAcrossBridgeRestarts =
-            SecureStore.readString(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts) == "1"
         self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
         self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
         if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
@@ -444,11 +438,6 @@ final class CodexService {
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.
     var hasSavedRelaySession: Bool {
         normalizedRelaySessionId != nil && normalizedRelayURL != nil
-    }
-
-    // Only sessions proven by the new QR flow should survive a bridge-side 4002 close without forcing re-pair.
-    var hasRestartPersistentRelaySession: Bool {
-        relaySupportsPersistentSessionReconnect && relaySessionPersistsAcrossBridgeRestarts
     }
 
     // Normalizes the persisted relay session id before reuse in reconnect flows.

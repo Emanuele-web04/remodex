@@ -14,6 +14,7 @@ const { createCodexTransport } = require("./codex-transport");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
+const { handleDesktopRequest } = require("./desktop-handler");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
@@ -35,8 +36,13 @@ function startBridge() {
     process.exit(1);
   }
 
-  let deviceState = loadOrCreateBridgeDeviceState();
-  // Reuse the trusted relay room across bridge restarts so the saved iPhone pairing stays valid.
+  let deviceState;
+  try {
+    deviceState = loadOrCreateBridgeDeviceState();
+  } catch (error) {
+    console.error(`[remodex] ${(error && error.message) || "Failed to load the saved bridge pairing state."}`);
+    process.exit(1);
+  }
   const relaySession = resolveBridgeRelaySession(deviceState);
   deviceState = relaySession.deviceState;
   const sessionId = relaySession.sessionId;
@@ -249,6 +255,12 @@ function startBridge() {
       return;
     }
     if (notificationsHandler.handleNotificationsRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
+    if (handleDesktopRequest(rawMessage, sendApplicationResponse, {
+      bundleId: config.codexBundleId,
+      appPath: config.codexAppPath,
+    })) {
       return;
     }
     if (handleGitRequest(rawMessage, sendApplicationResponse)) {

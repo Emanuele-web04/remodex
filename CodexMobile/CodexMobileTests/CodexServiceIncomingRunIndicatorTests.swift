@@ -489,56 +489,12 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         }
     }
 
-    func testMacUnavailableCloseKeepsSavedPairingAndArmsReconnectForRestartPersistentPairing() {
+    func testMacUnavailableCloseClearsSavedPairingAndDisablesReconnect() {
         let service = makeService()
 
-        withSavedRelayPairing(
-            sessionId: "session-\(UUID().uuidString)",
-            relayURL: "wss://relay.test/relay",
-            supportsPersistentSessionReconnect: true,
-            sessionPersistsAcrossBridgeRestarts: true
-        ) {
+        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
             service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
             service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
-            service.relaySupportsPersistentSessionReconnect =
-                SecureStore.readString(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect) == "1"
-            service.relaySessionPersistsAcrossBridgeRestarts =
-                SecureStore.readString(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts) == "1"
-            service.isConnected = true
-            service.isInitialized = true
-
-            service.handleReceiveError(
-                CodexServiceError.disconnected,
-                relayCloseCode: .privateCode(4002)
-            )
-
-            XCTAssertFalse(service.isConnected)
-            XCTAssertTrue(service.shouldAutoReconnectOnForeground)
-            XCTAssertNotNil(service.relaySessionId)
-            XCTAssertNotNil(service.relayUrl)
-            XCTAssertNil(service.lastErrorMessage)
-            XCTAssertEqual(
-                service.connectionRecoveryState,
-                .retrying(attempt: 0, message: "Reconnecting...")
-            )
-        }
-    }
-
-    func testMacUnavailableCloseClearsSavedPairingWhenRestartPersistenceWasNeverEstablished() {
-        let service = makeService()
-
-        withSavedRelayPairing(
-            sessionId: "session-\(UUID().uuidString)",
-            relayURL: "wss://relay.test/relay",
-            supportsPersistentSessionReconnect: true,
-            sessionPersistsAcrossBridgeRestarts: false
-        ) {
-            service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
-            service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
-            service.relaySupportsPersistentSessionReconnect =
-                SecureStore.readString(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect) == "1"
-            service.relaySessionPersistsAcrossBridgeRestarts =
-                SecureStore.readString(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts) == "1"
             service.isConnected = true
             service.isInitialized = true
 
@@ -551,13 +507,95 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             XCTAssertFalse(service.shouldAutoReconnectOnForeground)
             XCTAssertNil(service.relaySessionId)
             XCTAssertNil(service.relayUrl)
-            XCTAssertFalse(service.relaySupportsPersistentSessionReconnect)
-            XCTAssertFalse(service.relaySessionPersistsAcrossBridgeRestarts)
             XCTAssertEqual(
                 service.lastErrorMessage,
                 "This relay pairing is no longer valid. Scan a new QR code to reconnect."
             )
         }
+    }
+
+    func testRetryableDisconnectResetsEncryptedSecurityStateBackToTrustedMac() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let macPublicKey = "public-key-\(UUID().uuidString)"
+
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "wss://relay.test/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: macPublicKey,
+            lastPairedAt: Date()
+        )
+        service.secureConnectionState = .encrypted
+        service.secureMacFingerprint = codexSecureFingerprint(for: macPublicKey)
+        service.isConnected = true
+        service.isInitialized = true
+
+        service.handleReceiveError(NWError.posix(.ECONNABORTED))
+
+        XCTAssertEqual(service.secureConnectionState, .trustedMac)
+        XCTAssertEqual(service.secureMacFingerprint, codexSecureFingerprint(for: macPublicKey))
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+    }
+
+    func testRepeatedTrustedReconnectDisconnectsEscalateToManualRePair() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let macPublicKey = "public-key-\(UUID().uuidString)"
+
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "wss://relay.test/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: macPublicKey,
+            lastPairedAt: Date()
+        )
+
+        for _ in 0..<3 {
+            service.secureConnectionState = .reconnecting
+            service.handleReceiveError(NWError.posix(.ECONNABORTED))
+        }
+
+        XCTAssertEqual(service.trustedReconnectFailureCount, 3)
+        XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .idle)
+        XCTAssertEqual(service.secureConnectionState, .rePairRequired)
+        XCTAssertEqual(
+            service.lastErrorMessage,
+            "Secure reconnect could not be restored. Scan a new QR code to reconnect."
+        )
+    }
+
+    func testTrustedReconnectHandshakeFailureCounterResetsForFreshPairing() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "wss://relay.test/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: "public-key-\(UUID().uuidString)",
+            lastPairedAt: Date()
+        )
+
+        XCTAssertFalse(service.recordTrustedReconnectFailureIfNeeded(isTrustedReconnectAttempt: true))
+        XCTAssertEqual(service.trustedReconnectFailureCount, 1)
+
+        service.rememberRelayPairing(
+            CodexPairingQRPayload(
+                v: codexPairingQRVersion,
+                relay: "wss://relay.test/relay",
+                sessionId: "fresh-session-\(UUID().uuidString)",
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: "fresh-public-key-\(UUID().uuidString)",
+                expiresAt: Int64(Date().timeIntervalSince1970) + 60
+            )
+        )
+
+        XCTAssertEqual(service.trustedReconnectFailureCount, 0)
     }
 
     func testSavedRelaySessionRequiresBothSessionIdAndRelayURL() {
@@ -786,25 +824,13 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
     private func withSavedRelayPairing(
         sessionId: String,
         relayURL: String,
-        supportsPersistentSessionReconnect: Bool = false,
-        sessionPersistsAcrossBridgeRestarts: Bool = false,
         perform body: () -> Void
     ) {
         SecureStore.writeString(sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(relayURL, for: CodexSecureKeys.relayUrl)
-        SecureStore.writeString(
-            supportsPersistentSessionReconnect ? "1" : "0",
-            for: CodexSecureKeys.relaySupportsPersistentSessionReconnect
-        )
-        SecureStore.writeString(
-            sessionPersistsAcrossBridgeRestarts ? "1" : "0",
-            for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts
-        )
         defer {
             SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
             SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
-            SecureStore.deleteValue(for: CodexSecureKeys.relaySupportsPersistentSessionReconnect)
-            SecureStore.deleteValue(for: CodexSecureKeys.relaySessionPersistsAcrossBridgeRestarts)
         }
 
         body()

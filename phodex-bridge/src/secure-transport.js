@@ -50,8 +50,6 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
       v: PAIRING_QR_VERSION,
       relay: relayUrl,
       sessionId,
-      // The iPhone only treats 4002 as restart-recoverable after a successful handshake on this QR session.
-      supportsPersistentSessionReconnect: true,
       macDeviceId: currentDeviceState.macDeviceId,
       macIdentityPublicKey: currentDeviceState.macIdentityPublicKey,
       expiresAt: currentPairingExpiresAt,
@@ -359,12 +357,11 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
       pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP
       || getTrustedPhonePublicKey(currentDeviceState, pendingHandshake.phoneDeviceId)
     ) {
-      // Lock the trusted phone to the relay session id that future bridge launches should reuse.
+      // Lock the trusted phone identity so later reconnects can be verified cleanly.
       currentDeviceState = rememberTrustedPhone(
         currentDeviceState,
         pendingHandshake.phoneDeviceId,
-        pendingHandshake.phoneIdentityPublicKey,
-        pendingHandshake.sessionId
+        pendingHandshake.phoneIdentityPublicKey
       );
     }
     if (pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {
