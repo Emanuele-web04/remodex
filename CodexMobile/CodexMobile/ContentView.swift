@@ -109,6 +109,23 @@ struct ContentView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
             }
+            .alert(
+                "Chat Deleted",
+                isPresented: missingNotificationThreadAlertIsPresented,
+                presenting: codex.missingNotificationThreadPrompt
+            ) { _ in
+                Button("Not Now", role: .cancel) {
+                    codex.missingNotificationThreadPrompt = nil
+                }
+                Button("Start New Chat") {
+                    codex.missingNotificationThreadPrompt = nil
+                    Task {
+                        await startNewThreadFromMissingNotificationAlert()
+                    }
+                }
+            } message: { _ in
+                Text("This chat is no longer available. Start a new chat instead?")
+            }
             .overlay(alignment: .top) {
                 if let banner = codex.threadCompletionBanner {
                     ThreadCompletionBannerView(
@@ -359,6 +376,17 @@ struct ContentView: View {
         )
     }
 
+    private var missingNotificationThreadAlertIsPresented: Binding<Bool> {
+        Binding(
+            get: { codex.missingNotificationThreadPrompt != nil },
+            set: { isPresented in
+                if !isPresented {
+                    codex.missingNotificationThreadPrompt = nil
+                }
+            }
+        )
+    }
+
     // Re-tries the saved relay session after the user updates the Mac package.
     private func retryBridgeConnectionAfterUpdate() {
         guard !isRetryingBridgeUpdate else {
@@ -385,6 +413,15 @@ struct ContentView: View {
             await MainActor.run {
                 isShowingManualScanner = true
             }
+        }
+    }
+
+    private func startNewThreadFromMissingNotificationAlert() async {
+        do {
+            let thread = try await codex.startThread()
+            selectedThread = thread
+        } catch {
+            codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
         }
     }
 

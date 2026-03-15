@@ -2,10 +2,10 @@
 // Purpose: Runs Codex locally, bridges relay traffic, and coordinates desktop refreshes for Codex.app.
 // Layer: CLI service
 // Exports: startBridge
-// Depends on: ws, uuid, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch
+// Depends on: ws, crypto, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch
 
 const WebSocket = require("ws");
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID, randomBytes } = require("crypto");
 const {
   CodexDesktopRefresher,
   readBridgeConfig,
@@ -17,14 +17,24 @@ const { rememberActiveThread } = require("./session-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
+const { createNotificationsHandler } = require("./notifications-handler");
+const { createPushNotificationServiceClient } = require("./push-notification-service-client");
+const { createPushNotificationTracker } = require("./push-notification-tracker");
 const { loadOrCreateBridgeDeviceState } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 
 function startBridge() {
   const config = readBridgeConfig();
-  const sessionId = uuidv4();
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
+  if (!relayBaseUrl) {
+    console.error("[remodex] No relay URL configured.");
+    console.error("[remodex] In a source checkout, run ./run-local-remodex.sh or set REMODEX_RELAY.");
+    process.exit(1);
+  }
+
+  const sessionId = randomUUID();
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
+  const notificationSecret = randomBytes(24).toString("hex");
   const deviceState = loadOrCreateBridgeDeviceState();
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
@@ -32,6 +42,19 @@ function startBridge() {
     refreshCommand: config.refreshCommand,
     bundleId: config.codexBundleId,
     appPath: config.codexAppPath,
+  });
+  const pushServiceClient = createPushNotificationServiceClient({
+    baseUrl: config.pushServiceUrl,
+    sessionId,
+    notificationSecret,
+  });
+  const notificationsHandler = createNotificationsHandler({
+    pushServiceClient,
+  });
+  const pushNotificationTracker = createPushNotificationTracker({
+    sessionId,
+    pushServiceClient,
+    previewMaxChars: config.pushPreviewMaxChars,
   });
 
   // Keep the local Codex runtime alive across transient relay disconnects.
@@ -122,7 +145,11 @@ function startBridge() {
 
     logConnectionStatus("connecting");
     const nextSocket = new WebSocket(relaySessionUrl, {
-      headers: { "x-role": "mac" },
+      // The relay uses this per-session secret to authenticate the first push registration.
+      headers: {
+        "x-role": "mac",
+        "x-notification-secret": notificationSecret,
+      },
     });
     socket = nextSocket;
 
@@ -169,11 +196,13 @@ function startBridge() {
   }
 
   printQR(secureTransport.createPairingPayload());
+  pushServiceClient.logUnavailable();
   connectRelay();
 
   codex.onMessage((message) => {
     trackCodexHandshakeState(message);
     desktopRefresher.handleOutbound(message);
+    pushNotificationTracker.handleOutbound(message);
     rememberThreadFromMessage("codex", message);
     secureTransport.queueOutboundApplicationMessage(message, (wireMessage) => {
       if (socket?.readyState === WebSocket.OPEN) {
@@ -211,6 +240,9 @@ function startBridge() {
       return;
     }
     if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
+    if (notificationsHandler.handleNotificationsRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
     if (handleGitRequest(rawMessage, sendApplicationResponse)) {

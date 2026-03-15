@@ -11,6 +11,7 @@ enum AppFont {
     enum Style: String, CaseIterable, Identifiable {
         case system
         case geist
+        case jetBrainsMono
 
         var id: String { rawValue }
 
@@ -18,6 +19,7 @@ enum AppFont {
             switch self {
             case .system: return "System"
             case .geist: return "Geist"
+            case .jetBrainsMono: return "JetBrains Mono"
             }
         }
 
@@ -27,6 +29,8 @@ enum AppFont {
                 return "Use the native iOS font for regular text. Code stays monospaced."
             case .geist:
                 return "Use Geist for regular text. Code stays monospaced."
+            case .jetBrainsMono:
+                return "Use JetBrains Mono for regular text and code."
             }
         }
     }
@@ -42,7 +46,7 @@ enum AppFont {
 
     // MARK: - Private helpers
 
-    // Resolves the current style and preserves the old JetBrains toggle for existing installs.
+    // Resolves the current style and preserves the old JetBrains preference for existing installs.
     private static var resolvedStoredStyle: Style {
         if let rawStyle = UserDefaults.standard.string(forKey: storageKey),
            let style = Style(rawValue: rawStyle) {
@@ -51,11 +55,11 @@ enum AppFont {
 
         // Older builds may have stored "jetBrainsMono" in the new key during the transition.
         if UserDefaults.standard.string(forKey: storageKey) == "jetBrainsMono" {
-            return .system
+            return .jetBrainsMono
         }
 
         if UserDefaults.standard.object(forKey: legacyStorageKey) != nil {
-            return .system
+            return .jetBrainsMono
         }
 
         return defaultStyle
@@ -76,12 +80,21 @@ enum AppFont {
             default:
                 return ["Geist-Regular", "Geist-Medium", "Geist"]
             }
+        case .jetBrainsMono:
+            switch weight {
+            case .bold, .heavy, .black, .semibold:
+                return ["JetBrainsMono-Bold", "JetBrainsMono-Medium", "JetBrainsMono-Regular"]
+            case .medium:
+                return ["JetBrainsMono-Medium", "JetBrainsMono-Regular"]
+            default:
+                return ["JetBrainsMono-Regular", "JetBrainsMono-Medium"]
+            }
         }
     }
 
     private static func fontSizeAdjustment(for style: Style) -> CGFloat {
         switch style {
-        case .system, .geist:
+        case .system, .geist, .jetBrainsMono:
             return 0
         }
     }

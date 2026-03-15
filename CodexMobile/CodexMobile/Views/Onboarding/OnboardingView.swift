@@ -21,7 +21,7 @@ struct OnboardingView: View {
                             Image("three")
                                 .resizable()
                                 .scaledToFill()
-                                .frame(width: geo.size.width, height: geo.size.height * 0.45)
+                                .frame(width: geo.size.width, height: geo.size.height * 0.44)
                                 .clipped()
 
                             LinearGradient(
@@ -29,18 +29,20 @@ struct OnboardingView: View {
                                 startPoint: .top,
                                 endPoint: .bottom
                             )
-                            .frame(height: 120)
+                            .frame(height: 118)
                         }
-                        .frame(height: geo.size.height * 0.45)
+                        
+                        .frame(height: geo.size.height * 0.32)
+                        .padding(.top, 20)
 
                         // Content
-                        VStack(spacing: 24) {
+                        VStack(spacing: 22) {
                             // Logo + name
-                            VStack(spacing: 10) {
+                            VStack(spacing: 8) {
                                 Image("AppLogo")
                                     .resizable()
                                     .scaledToFit()
-                                    .frame(width: 56, height: 56)
+                                    .frame(width: 52, height: 52)
                                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                                 Text("Remodex")
@@ -52,25 +54,36 @@ struct OnboardingView: View {
                             }
                             .padding(.top, 4)
 
-                            // Steps
                             VStack(spacing: 14) {
-                                OnboardingStepRow(
-                                    number: "1",
-                                    title: "Install the package",
-                                    command: "npm install -g remodex@latest"
-                                )
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Before you scan")
+                                        .font(AppFont.caption(weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                        .textCase(.uppercase)
 
-                                OnboardingStepRow(
-                                    number: "2",
-                                    title: "Start the relay",
-                                    command: "remodex up"
-                                )
+                                    Text("Pair your phone in a few quick steps.")
+                                        .font(AppFont.title3(weight: .semibold))
+                                }
 
-                                OnboardingStepRow(
-                                    number: "3",
-                                    title: "Scan the QR code",
-                                   
-                                )
+                                VStack(spacing: 14) {
+                                    OnboardingStepRow(
+                                        number: "1",
+                                        title: "Install the Codex CLI",
+                                        command: "npm install -g @openai/codex@latest"
+                                    )
+
+                                    OnboardingStepRow(
+                                        number: "2",
+                                        title: "Install the latest Remodex bridge",
+                                        command: "npm install -g remodex@latest"
+                                    )
+
+                                    OnboardingStepRow(
+                                        number: "3",
+                                        title: "Start pairing",
+                                        command: "remodex up"
+                                    )
+                                }
                             }
 
                             // Primary CTA
@@ -89,7 +102,7 @@ struct OnboardingView: View {
                             .buttonStyle(.plain)
                             .padding(.top, 4)
 
-                            // Calls out the new privacy posture without adding another action to onboarding.
+                            // Calls out the privacy posture without adding another action to onboarding.
                             HStack(spacing: 6) {
                                 Image(systemName: "lock.shield")
                                     .font(.system(size: 13, weight: .semibold))
@@ -132,7 +145,7 @@ private struct OnboardingStepRow: View {
                     .font(AppFont.subheadline(weight: .medium))
 
                 if let command {
-                    OnboardingCommandRow(command: command)
+                    OnboardingSetupCommandCard(command: command)
                 }
 
                 if let subtitle {
@@ -149,20 +162,13 @@ private struct OnboardingStepRow: View {
 
 // MARK: - Inline copy-able command
 
-private struct OnboardingCommandRow: View {
+private struct OnboardingSetupCommandCard: View {
     let command: String
     @State private var copied = false
 
     var body: some View {
-        HStack(spacing: 0) {
-            Text(command)
-                .font(AppFont.mono(.caption))
-                .foregroundStyle(.primary.opacity(0.9))
-                .lineLimit(1)
-                .padding(.leading, 10)
-                .padding(.vertical, 8)
-
-            Spacer(minLength: 4)
+        HStack(alignment: .center, spacing: 8) {
+            commandLabel
 
             Button {
                 UIPasteboard.general.string = command
@@ -181,19 +187,40 @@ private struct OnboardingCommandRow: View {
                         Image("copy")
                             .resizable()
                             .scaledToFit()
-                            .frame(width: 14, height: 14)
+                            .frame(width: 15, height: 15)
                             .foregroundStyle(.secondary)
                     }
                 }
-                .frame(width: 32, height: 32)
+                .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(.regularMaterial)
         )
+    }
+
+    @ViewBuilder
+    private var commandLabel: some View {
+        ViewThatFits(in: .horizontal) {
+            Text(command)
+                .font(AppFont.mono(.caption2))
+                .foregroundStyle(.primary.opacity(0.9))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(command)
+                .font(AppFont.mono(.caption2))
+                .foregroundStyle(.primary.opacity(0.9))
+                .lineSpacing(2)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 

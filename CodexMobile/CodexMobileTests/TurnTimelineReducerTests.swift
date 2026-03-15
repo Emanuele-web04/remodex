@@ -620,6 +620,131 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(codeLanguages, ["objective-c"])
     }
 
+    func testMermaidMarkdownContentParsesMermaidBlocks() {
+        let source = """
+        Intro
+
+        ```mermaid
+        flowchart TD
+            A[Start] --> B[End]
+        ```
+
+        Outro
+        """
+
+        let content = MermaidMarkdownContentCache.content(messageID: "mermaid-basic", text: source)
+
+        XCTAssertEqual(mermaidSegmentKinds(in: content), [.markdown, .mermaid, .markdown])
+    }
+
+    func testMermaidMarkdownContentSupportsMultipleBlocks() {
+        let source = """
+        ```mermaid
+        flowchart TD
+            A --> B
+        ```
+
+        Middle
+
+        ```mermaid
+        sequenceDiagram
+            Alice->>Bob: hi
+        ```
+        """
+
+        let content = MermaidMarkdownContentCache.content(messageID: "mermaid-multi", text: source)
+
+        XCTAssertEqual(mermaidSegmentKinds(in: content), [.mermaid, .markdown, .mermaid])
+    }
+
+    func testMermaidMarkdownContentIgnoresPlainCodeBlocks() {
+        let source = """
+        ```swift
+        let text = \"```mermaid\"
+        ```
+        """
+
+        let content = MermaidMarkdownContentCache.content(messageID: "mermaid-ignore", text: source)
+
+        XCTAssertNil(content)
+    }
+
+    func testMermaidSourceNormalizerConvertsLooseArrowLabels() {
+        let source = """
+        W -- Yes --> X[Relay replaces old Mac socket<br/>4001 to old connection]
+        """
+
+        let normalized = MermaidSourceNormalizer.normalized(source)
+
+        XCTAssertEqual(
+            normalized,
+            "W -->|Yes| X[Relay replaces old Mac socket<br/>4001 to old connection]"
+        )
+    }
+
+    func testMermaidSourceNormalizerLeavesValidArrowLabelsUntouched() {
+        let source = """
+        W -->|Yes| X[Relay replaces old Mac socket<br/>4001 to old connection]
+        """
+
+        let normalized = MermaidSourceNormalizer.normalized(source)
+
+        XCTAssertEqual(normalized, source)
+    }
+
+    func testMermaidSourceNormalizerQuotesSquareNodeLabels() {
+        let source = """
+        X[Relay replaces old Mac socket<br/>4001 to old connection]
+        """
+
+        let normalized = MermaidSourceNormalizer.normalized(source)
+
+        XCTAssertEqual(
+            normalized,
+            #"X["Relay replaces old Mac socket<br/>4001 to old connection"]"#
+        )
+    }
+
+    func testMermaidSourceNormalizerQuotesDecisionNodeLabels() {
+        let source = """
+        W{Mac reconnects?}
+        """
+
+        let normalized = MermaidSourceNormalizer.normalized(source)
+
+        XCTAssertEqual(normalized, #"W{"Mac reconnects?"}"#)
+    }
+
+    func testAssistantRenderModelDefersMermaidUntilStreamingCompletes() {
+        MessageRowRenderModelCache.reset()
+        MermaidMarkdownContentCache.reset()
+
+        let source = """
+        Intro
+
+        ```mermaid
+        flowchart TD
+            A[Start] --> B[End]
+        ```
+        """
+        let displayText = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        var message = makeMessage(
+            id: "assistant-mermaid-streaming",
+            threadID: "thread",
+            role: .assistant,
+            text: source,
+            isStreaming: true
+        )
+
+        let streamingModel = MessageRowRenderModelCache.model(for: message, displayText: displayText)
+        XCTAssertNil(streamingModel.mermaidContent)
+
+        message.isStreaming = false
+
+        let finalizedModel = MessageRowRenderModelCache.model(for: message, displayText: displayText)
+        XCTAssertEqual(mermaidSegmentKinds(in: finalizedModel.mermaidContent), [.markdown, .mermaid])
+    }
+
     func testAssistantBlockInfoShowsCopyWhenLatestRunCompleted() {
         let now = Date()
         let messages = [
@@ -744,6 +869,11 @@ private enum MarkdownSegment {
     case codeBlock(language: String?, code: String)
 }
 
+private enum MermaidSegmentKind: Equatable {
+    case markdown
+    case mermaid
+}
+
 private func parseMarkdownSegments(_ source: String) -> [MarkdownSegment] {
     let lines = source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
     var segments: [MarkdownSegment] = []
@@ -792,4 +922,19 @@ private func parseMarkdownSegments(_ source: String) -> [MarkdownSegment] {
     }
 
     return segments
+}
+
+private func mermaidSegmentKinds(in content: MermaidMarkdownContent?) -> [MermaidSegmentKind] {
+    guard let content else {
+        return []
+    }
+
+    return content.segments.map { segment in
+        switch segment.kind {
+        case .markdown:
+            return .markdown
+        case .mermaid:
+            return .mermaid
+        }
+    }
 }

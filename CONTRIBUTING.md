@@ -48,18 +48,29 @@ Opening a PR does not create an obligation on my side. I may close it. I may ign
 ```sh
 # Clone the repo
 git clone https://github.com/Emanuele-web04/remodex.git
-cd remodex/phodex-bridge
+cd remodex
 
-# Install dependencies
-npm install
-
-# Start the bridge
-npm start
+# Start a local relay + bridge together
+./run-local-remodex.sh
 ```
 
-This runs `remodex up`, which:
+This launcher:
 1. Spawns a Codex `app-server` process
-2. Connects to the default relay (`wss://api.phodex.app/relay`) unless you override it
+2. Starts a local relay on `/relay/{sessionId}`
+3. Points the bridge at that relay
+4. Prints a QR code in your terminal
+
+If you only want the bridge process:
+
+```sh
+cd phodex-bridge
+npm install
+REMODEX_RELAY="ws://localhost:9000/relay" npm start
+```
+
+That runs `remodex up`, which:
+1. Spawns a Codex `app-server` process
+2. Connects to the configured relay
 3. Prints a QR code in your terminal
 
 Scan the QR code with the Remodex iOS app to pair.
@@ -79,7 +90,7 @@ The app uses SwiftUI and the current project target is iOS 18.6. No CocoaPods or
 
 ### Testing a full local session
 
-1. Start the bridge: `cd phodex-bridge && npm start`
+1. Start the local launcher: `./run-local-remodex.sh`
 2. Open the iOS app and scan the QR code
 3. Create a new thread from the app
 4. Send a message — you should see Codex respond in real-time
@@ -87,17 +98,14 @@ The app uses SwiftUI and the current project target is iOS 18.6. No CocoaPods or
 
 ### Environment variables
 
-All optional. Override defaults as needed:
+For OSS/local development, prefer the launcher above. If you want to point the bridge at your own relay manually, export `REMODEX_RELAY` in your shell:
 
 ```sh
-# Default relay (used when you do not override anything)
-# REMODEX_RELAY=wss://api.phodex.app/relay
-
 # Connect to an existing Codex instance instead of spawning one
 REMODEX_CODEX_ENDPOINT=ws://localhost:8080 npm start
 
-# Use your own bridge session endpoint (`ws://` is unencrypted)
-REMODEX_RELAY=ws://localhost:9000/relay npm start
+# Use your own self-hosted relay endpoint (`ws://` is unencrypted)
+REMODEX_RELAY="ws://localhost:9000/relay" npm start
 
 # Enable auto-refresh of Codex.app on Mac
 REMODEX_REFRESH_ENABLED=true npm start
@@ -149,5 +157,5 @@ remodex/
 ### Trust model
 
 - The QR pairing is possession-based: it contains the relay URL and a live session ID.
-- The default relay uses `wss://api.phodex.app/relay`, so traffic is TLS-protected in transit.
-- There is no end-to-end encryption layer above the relay. If you need a stricter trust boundary, use a relay you control.
+- Set `REMODEX_RELAY` to a relay you control when you are not using the local launcher. Use `wss://` when you want TLS in transit.
+- Remodex uses an authenticated end-to-end encrypted transport after pairing completes. The relay code is public for inspection, but deployed relay details should stay in private config.

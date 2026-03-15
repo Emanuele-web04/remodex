@@ -1,7 +1,7 @@
 // FILE: relay-core.js
 // Purpose: Shared Remodex WebSocket relay logic for hosted and self-hosted servers.
 // Layer: Transport helper
-// Exports: getRelayStats, setupRelay
+// Exports: getRelayStats, hasActiveMacSession, hasAuthenticatedMacSession, setupRelay
 // Depends on: ws
 
 const { WebSocket } = require("ws");
@@ -24,6 +24,7 @@ function setupRelay(wss) {
       ws.ping();
     }
   }, HEARTBEAT_INTERVAL_MS);
+  heartbeat.unref?.();
 
   wss.on("close", () => clearInterval(heartbeat));
 
@@ -53,6 +54,7 @@ function setupRelay(wss) {
         mac: null,
         clients: new Set(),
         cleanupTimer: null,
+        notificationSecret: null,
       });
     }
 
@@ -69,6 +71,8 @@ function setupRelay(wss) {
     }
 
     if (role === "mac") {
+      // Bind push registration to a live bridge socket, not just a public session id.
+      session.notificationSecret = readHeaderString(req.headers["x-notification-secret"]);
       if (session.mac && session.mac.readyState === WebSocket.OPEN) {
         session.mac.close(4001, "Replaced by new Mac connection");
       }
@@ -118,6 +122,7 @@ function setupRelay(wss) {
       if (role === "mac") {
         if (session.mac === ws) {
           session.mac = null;
+          session.notificationSecret = null;
           console.log(`[relay] Mac disconnected -> session ${sessionId}`);
           for (const client of session.clients) {
             if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
@@ -180,7 +185,32 @@ function getRelayStats() {
   };
 }
 
+function hasActiveMacSession(sessionId) {
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    return false;
+  }
+
+  const session = sessions.get(sessionId.trim());
+  return Boolean(session?.mac && session.mac.readyState === WebSocket.OPEN);
+}
+
+function hasAuthenticatedMacSession(sessionId, notificationSecret) {
+  if (!hasActiveMacSession(sessionId)) {
+    return false;
+  }
+
+  const session = sessions.get(sessionId.trim());
+  return session?.notificationSecret === readHeaderString(notificationSecret);
+}
+
+function readHeaderString(value) {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
+}
+
 module.exports = {
   getRelayStats,
+  hasActiveMacSession,
+  hasAuthenticatedMacSession,
   setupRelay,
 };

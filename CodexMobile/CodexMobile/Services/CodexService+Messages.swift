@@ -222,13 +222,14 @@ extension CodexService {
     }
 
     // Sets the active thread and lazily hydrates old messages from server history.
-    func prepareThreadForDisplay(threadId: String) async {
+    @discardableResult
+    func prepareThreadForDisplay(threadId: String) async -> Bool {
         activeThreadId = threadId
         markThreadAsViewed(threadId)
         updateCurrentOutput(for: threadId)
 
         guard isConnected else {
-            return
+            return true
         }
 
         do {
@@ -236,24 +237,31 @@ extension CodexService {
         } catch {
             if shouldTreatAsThreadNotFound(error) {
                 handleMissingThread(threadId)
-                return
             }
+            return false
         }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            return false
+        }
 
         // Rehydrate in-flight turn metadata after reconnect/background transitions.
         // Without this refresh, stop-state can disappear until a new live event arrives.
         await refreshInFlightTurnState(threadId: threadId)
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            return false
+        }
 
         if threadHasActiveOrRunningTurn(threadId) {
             // When reopening a running thread, force a fresh resume snapshot so the
             // timeline catches up with output produced while the thread was off-screen.
             _ = try? await ensureThreadResumed(threadId: threadId, force: true)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else {
+                return false
+            }
             updateCurrentOutput(for: threadId)
         }
         requestImmediateSync(threadId: threadId)
+        return true
     }
 
     // Starts a short-lived watch for a running thread that just went off-screen.

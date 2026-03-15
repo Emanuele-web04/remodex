@@ -54,7 +54,6 @@ struct TurnView: View {
                     orderedModelOptions: orderedModelOptions,
                     selectedModelTitle: selectedModelTitle,
                     reasoningDisplayOptions: reasoningDisplayOptions,
-                    selectedReasoningTitle: selectedReasoningTitle,
                     showsGitControls: showsGitControls,
                     isGitBranchSelectorEnabled: canRunGitAction(
                         isThreadRunning: isThreadRunning,
@@ -562,14 +561,6 @@ struct TurnView: View {
         TurnComposerMetaMapper.reasoningDisplayOptions(
             from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
         )
-    }
-
-    private var selectedReasoningTitle: String {
-        guard let selectedReasoningEffort = codex.selectedReasoningEffortForSelectedModel() else {
-            return "Select reasoning"
-        }
-
-        return TurnComposerMetaMapper.reasoningTitle(for: selectedReasoningEffort)
     }
 
     private var selectedModelTitle: String {

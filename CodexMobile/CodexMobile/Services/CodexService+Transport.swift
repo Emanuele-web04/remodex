@@ -160,14 +160,14 @@ extension CodexService {
         let webSocketOptions = NWProtocolWebSocket.Options()
         webSocketOptions.autoReplyPing = true
 
+        var additionalHeaders: [(name: String, value: String)] = []
         if let role, !role.isEmpty {
-            webSocketOptions.setAdditionalHeaders([
-                (name: "x-role", value: role)
-            ])
+            additionalHeaders.append((name: "x-role", value: role))
         } else if !token.isEmpty {
-            webSocketOptions.setAdditionalHeaders([
-                (name: "Authorization", value: "Bearer \(token)")
-            ])
+            additionalHeaders.append((name: "Authorization", value: "Bearer \(token)"))
+        }
+        if !additionalHeaders.isEmpty {
+            webSocketOptions.setAdditionalHeaders(additionalHeaders)
         }
 
         let tlsOptions: NWProtocolTLS.Options? = (scheme == "wss") ? NWProtocolTLS.Options() : nil

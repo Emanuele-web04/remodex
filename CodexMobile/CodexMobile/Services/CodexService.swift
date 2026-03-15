@@ -43,10 +43,33 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
     let command: String
 }
 
+struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
+    var reasoningEffort: String?
+    var serviceTierRawValue: String?
+    var overridesReasoning: Bool
+    var overridesServiceTier: Bool
+
+    var serviceTier: CodexServiceTier? {
+        guard let serviceTierRawValue else {
+            return nil
+        }
+        return CodexServiceTier(rawValue: serviceTierRawValue)
+    }
+
+    var isEmpty: Bool {
+        !overridesReasoning && !overridesServiceTier
+    }
+}
+
 struct CodexThreadCompletionBanner: Identifiable, Equatable, Sendable {
     let id = UUID()
     let threadId: String
     let title: String
+}
+
+struct CodexMissingNotificationThreadPrompt: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let threadId: String
 }
 
 enum CodexThreadRunBadgeState: Equatable, Sendable {
@@ -199,6 +222,8 @@ final class CodexService {
     var selectedModelId: String?
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
+    // Per-chat runtime overrides let the composer diverge from app-wide defaults.
+    var threadRuntimeOverridesByThreadID: [String: CodexThreadRuntimeOverride] = [:]
     var selectedAccessMode: CodexAccessMode = .onRequest
     var isLoadingModels = false
     var modelsErrorMessage: String?
@@ -226,6 +251,8 @@ final class CodexService {
     var hasPresentedServiceTierBridgeUpdatePrompt = false
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
+    // Explains why a push-opened chat could not be restored and offers a recovery path.
+    var missingNotificationThreadPrompt: CodexMissingNotificationThreadPrompt?
 
     // --- Internal wiring ------------------------------------------------------
 
@@ -264,7 +291,12 @@ final class CodexService {
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]
     var notificationCenterDelegateProxy: CodexNotificationCenterDelegateProxy?
+    var notificationObserverTokens: [NSObjectProtocol] = []
+    var remoteNotificationDeviceToken: String?
+    var lastPushRegistrationSignature: String?
     var shouldAutoReconnectOnForeground = false
+    // Test hook so connection handling can model `.inactive` without waiting for real app lifecycle changes.
+    @ObservationIgnored var applicationStateProvider: () -> UIApplication.State = { UIApplication.shared.applicationState }
     var secureSession: CodexSecureSession?
     var pendingHandshake: CodexPendingHandshake?
     var phoneIdentityState: CodexPhoneIdentityState
@@ -294,10 +326,12 @@ final class CodexService {
     let aiChangeSetPersistence = AIChangeSetPersistence()
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering
+    let remoteNotificationRegistrar: CodexRemoteNotificationRegistering
 
     static let selectedModelIdDefaultsKey = "codex.selectedModelId"
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
+    static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
@@ -306,12 +340,14 @@ final class CodexService {
         encoder: JSONEncoder = JSONEncoder(),
         decoder: JSONDecoder = JSONDecoder(),
         defaults: UserDefaults = .standard,
-        userNotificationCenter: CodexUserNotificationCentering = UNUserNotificationCenter.current()
+        userNotificationCenter: CodexUserNotificationCentering = UNUserNotificationCenter.current(),
+        remoteNotificationRegistrar: CodexRemoteNotificationRegistering = CodexApplicationRemoteNotificationRegistrar()
     ) {
         self.encoder = encoder
         self.decoder = decoder
         self.defaults = defaults
         self.userNotificationCenter = userNotificationCenter
+        self.remoteNotificationRegistrar = remoteNotificationRegistrar
         self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
         self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
         let loadedMessages = messagePersistence.load().mapValues { messages in
@@ -346,6 +382,16 @@ final class CodexService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedReasoningEffort = (savedReasoning?.isEmpty == false) ? savedReasoning : nil
 
+        if let savedThreadRuntimeOverrides = defaults.data(forKey: Self.threadRuntimeOverridesDefaultsKey),
+           let decodedThreadRuntimeOverrides = try? decoder.decode(
+               [String: CodexThreadRuntimeOverride].self,
+               from: savedThreadRuntimeOverrides
+           ) {
+            self.threadRuntimeOverridesByThreadID = decodedThreadRuntimeOverrides
+        } else {
+            self.threadRuntimeOverridesByThreadID = [:]
+        }
+
         let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if savedServiceTier == "flex" {
@@ -379,6 +425,7 @@ final class CodexService {
            let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
             self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
         }
+        self.remoteNotificationDeviceToken = SecureStore.readString(for: CodexSecureKeys.pushDeviceToken)
         if let relayMacDeviceId,
            let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
             self.secureConnectionState = .trustedMac

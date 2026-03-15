@@ -10,9 +10,9 @@ import SwiftUI
 import Textual
 import UIKit
 
-// Keep Textual selection out of the scrolling timeline. We expose selection from
-// a dedicated sheet instead, which avoids repeated layout churn while cells scroll.
-private let enablesInlineMarkdownSelectionInTimeline = false
+// Keep Textual selection out of the scrolling timeline. This is shared by both
+// plain markdown rows and Mermaid-interleaved markdown segments.
+let enablesInlineMarkdownSelectionInTimeline = false
 
 // ─── Message content views ──────────────────────────────────────────
 
@@ -619,7 +619,7 @@ struct MessageRow: View, Equatable {
     // Disables timer-driven adornments while the user reads older content.
     var showsStreamingAnimations: Bool = true
     @Environment(\.assistantRevertAction) private var assistantRevertAction
-    @State private var previewAttachment: CodexImageAttachment?
+    @State private var previewImage: PreviewImagePayload?
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
@@ -674,7 +674,9 @@ struct MessageRow: View, Equatable {
             VStack(alignment: .trailing, spacing: 4) {
                 if !message.attachments.isEmpty {
                     UserAttachmentStrip(attachments: message.attachments) { tappedAttachment in
-                        previewAttachment = tappedAttachment
+                        if let image = AttachmentPreviewImageResolver.resolve(tappedAttachment) {
+                            previewImage = PreviewImagePayload(image: image)
+                        }
                     }
                 }
 
@@ -715,10 +717,10 @@ struct MessageRow: View, Equatable {
                 }
             }
         }
-        .fullScreenCover(item: $previewAttachment) { attachment in
-            AttachmentPreviewScreen(
-                image: AttachmentPreviewImageResolver.resolve(attachment),
-                onDismiss: { previewAttachment = nil }
+        .fullScreenCover(item: $previewImage) { payload in
+            ZoomableImagePreviewScreen(
+                payload: payload,
+                onDismiss: { previewImage = nil }
             )
         }
     }
@@ -815,6 +817,7 @@ struct MessageRow: View, Equatable {
     private func assistantView(text: String, renderModel: MessageRowRenderModel) -> some View {
         let commentContent = renderModel.codeCommentContent
         let bodyText = commentContent?.fallbackText ?? text
+        let mermaidContent = renderModel.mermaidContent
 
         return VStack(alignment: .leading, spacing: 8) {
             if let commentContent, commentContent.hasFindings {
@@ -826,11 +829,15 @@ struct MessageRow: View, Equatable {
             }
 
             if !bodyText.isEmpty {
-                MarkdownTextView(
-                    text: bodyText,
-                    profile: .assistantProse,
-                    enablesSelection: enablesInlineMarkdownSelectionInTimeline
-                )
+                if let mermaidContent {
+                    MermaidMarkdownContentView(content: mermaidContent)
+                } else {
+                    MarkdownTextView(
+                        text: bodyText,
+                        profile: .assistantProse,
+                        enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                    )
+                }
             }
 
             if message.isStreaming && showsStreamingAnimations {
@@ -1218,44 +1225,6 @@ private struct CommandExecutionStatusCard: View {
     private var detailModel: CommandExecutionDetails? {
         guard let itemId else { return nil }
         return codex.commandExecutionDetailsByItemID[itemId]
-    }
-}
-
-// ─── Attachment Preview ─────────────────────────────────────────────
-
-private struct AttachmentPreviewScreen: View {
-    let image: UIImage?
-    let onDismiss: () -> Void
-
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.black.opacity(0.95)
-                .ignoresSafeArea()
-                .onTapGesture(perform: onDismiss)
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding(20)
-            } else {
-                Image(systemName: "photo")
-                    .font(AppFont.system(size: 42, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.85))
-            }
-
-            Button(action: {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onDismiss()
-            }) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(AppFont.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.white, .black.opacity(0.6))
-                    .padding(18)
-            }
-            .buttonStyle(.plain)
-        }
     }
 }
 
