@@ -113,9 +113,10 @@ test("desktop/continueOnMac boots Codex before deep-linking unknown threads", as
   assert.equal(responses[0].result?.relaunched, false);
 });
 
-test("desktop/continueOnMac skips relaunch for desktop-originated threads", async () => {
+test("desktop/continueOnMac still relaunches when a desktop-known thread is handed off", async () => {
   const executorCalls = [];
   const responses = [];
+  let running = true;
   const fakeFS = {
     existsSync(targetPath) {
       return targetPath.endsWith("/sessions");
@@ -153,23 +154,29 @@ test("desktop/continueOnMac skips relaunch for desktop-originated threads", asyn
     fsModule: fakeFS,
     executor: async (...args) => {
       executorCalls.push(args);
+      if (args[0] === "pkill") {
+        running = false;
+      }
       return { stdout: "", stderr: "" };
     },
-    isAppRunning: async () => true,
+    isAppRunning: async () => running,
     sleepFn: async () => {},
   });
 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(executorCalls.length, 1);
-  assert.equal(executorCalls[0][0], "open");
-  assert.equal(responses[0].result?.relaunched, false);
+  assert.equal(executorCalls.length, 3);
+  assert.equal(executorCalls[0][0], "pkill");
+  assert.equal(executorCalls[1][0], "open");
+  assert.equal(executorCalls[2][0], "open");
+  assert.equal(responses[0].result?.relaunched, true);
   assert.equal(responses[0].result?.desktopKnown, true);
 });
 
-test("desktop/continueOnMac skips relaunch when the thread already exists locally", async () => {
+test("desktop/continueOnMac still relaunches when the thread already exists locally", async () => {
   const executorCalls = [];
   const responses = [];
+  let running = true;
   const fakeFS = {
     existsSync(targetPath) {
       return targetPath.endsWith("/sessions");
@@ -199,17 +206,22 @@ test("desktop/continueOnMac skips relaunch when the thread already exists locall
     fsModule: fakeFS,
     executor: async (...args) => {
       executorCalls.push(args);
+      if (args[0] === "pkill") {
+        running = false;
+      }
       return { stdout: "", stderr: "" };
     },
-    isAppRunning: async () => true,
+    isAppRunning: async () => running,
     sleepFn: async () => {},
   });
 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(executorCalls.length, 1);
-  assert.equal(executorCalls[0][0], "open");
-  assert.equal(responses[0].result?.relaunched, false);
+  assert.equal(executorCalls.length, 3);
+  assert.equal(executorCalls[0][0], "pkill");
+  assert.equal(executorCalls[1][0], "open");
+  assert.equal(executorCalls[2][0], "open");
+  assert.equal(responses[0].result?.relaunched, true);
   assert.equal(responses[0].result?.desktopKnown, true);
 });
 
