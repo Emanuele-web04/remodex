@@ -102,11 +102,15 @@ struct GitPushResult: Sendable {
 
 struct GitBranchesResult: Sendable {
     let branches: [String]
+    let branchesCheckedOutElsewhere: Set<String>
     let currentBranch: String?
     let defaultBranch: String?
 
     init(from json: [String: JSONValue]) {
         self.branches = json["branches"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        self.branchesCheckedOutElsewhere = Set(
+            json["branchesCheckedOutElsewhere"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        )
         self.currentBranch = json["current"]?.stringValue
         self.defaultBranch = json["default"]?.stringValue
     }
@@ -168,12 +172,16 @@ struct GitRemoteUrlResult: Sendable {
 
 struct GitBranchesWithStatusResult: Sendable {
     let branches: [String]
+    let branchesCheckedOutElsewhere: Set<String>
     let currentBranch: String?
     let defaultBranch: String?
     let status: GitRepoSyncResult?
 
     init(from json: [String: JSONValue]) {
         self.branches = json["branches"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        self.branchesCheckedOutElsewhere = Set(
+            json["branchesCheckedOutElsewhere"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        )
         self.currentBranch = json["current"]?.stringValue
         self.defaultBranch = json["default"]?.stringValue
         if let statusObj = json["status"]?.objectValue {

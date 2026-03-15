@@ -36,6 +36,7 @@ struct TurnComposerView: View {
     let showsGitBranchSelector: Bool
     let isGitBranchSelectorEnabled: Bool
     let availableGitBranchTargets: [String]
+    let gitBranchesCheckedOutElsewhere: Set<String>
     let selectedGitBaseBranch: String
     let currentGitBranch: String
     let gitDefaultBranch: String
@@ -172,6 +173,7 @@ struct TurnComposerView: View {
                             TurnGitBranchSelector(
                                 isEnabled: isGitBranchSelectorEnabled,
                                 availableGitBranchTargets: availableGitBranchTargets,
+                                gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
                                 selectedGitBaseBranch: selectedGitBaseBranch,
                                 currentGitBranch: currentGitBranch,
                                 defaultBranch: gitDefaultBranch,
@@ -504,6 +506,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 showsGitBranchSelector: false,
                 isGitBranchSelectorEnabled: false,
                 availableGitBranchTargets: [],
+                gitBranchesCheckedOutElsewhere: [],
                 selectedGitBaseBranch: "",
                 currentGitBranch: "main",
                 gitDefaultBranch: "main",

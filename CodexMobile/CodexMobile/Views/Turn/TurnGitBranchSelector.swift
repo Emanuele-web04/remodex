@@ -13,12 +13,7 @@ private enum TurnGitBranchPickerMode: String, Identifiable {
     var id: String { rawValue }
 
     var sectionTitle: String {
-        switch self {
-        case .currentBranch:
-            return "Current branch"
-        case .pullRequestTarget:
-            return "PR target"
-        }
+        "Branches"
     }
 
     var navigationTitle: String {
@@ -34,6 +29,7 @@ private enum TurnGitBranchPickerMode: String, Identifiable {
 struct TurnGitBranchSelector: View {
     let isEnabled: Bool
     let availableGitBranchTargets: [String]
+    let gitBranchesCheckedOutElsewhere: Set<String>
     let selectedGitBaseBranch: String
     let currentGitBranch: String
     let defaultBranch: String
@@ -48,7 +44,6 @@ struct TurnGitBranchSelector: View {
     private let branchLabelColor = Color(.secondaryLabel)
     private var branchSymbolSize: CGFloat { 12 }
     private var branchChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
-    private let inlineBranchLimit = 12
     private var branchControlsDisabled: Bool { !isEnabled || isLoadingGitBranchTargets || isSwitchingGitBranch }
     private var normalizedDefaultBranch: String? {
         let value = defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -81,40 +76,26 @@ struct TurnGitBranchSelector: View {
         }
     }
 
-    private func prioritizedNonDefaultGitBranches(selectedBranch: String) -> [String] {
-        var prioritizedBranches = nonDefaultGitBranches
-        if selectedBranch != normalizedDefaultBranch,
-           let selectedIndex = prioritizedBranches.firstIndex(of: selectedBranch) {
-            let selected = prioritizedBranches.remove(at: selectedIndex)
-            prioritizedBranches.insert(selected, at: 0)
-        }
-        return prioritizedBranches
-    }
-
-    private func inlineGitBranches(selectedBranch: String) -> [String] {
-        Array(prioritizedNonDefaultGitBranches(selectedBranch: selectedBranch).prefix(inlineBranchLimit))
-    }
-
-    private var hasOverflowBranches: Bool {
-        nonDefaultGitBranches.count > inlineBranchLimit
-    }
-
     var body: some View {
         Menu {
             Section("Current branch") {
-                branchOptions(
-                    selectedBranch: normalizedCurrentBranch,
-                    browseMode: .currentBranch,
-                    onSelect: onSelectGitBranch
-                )
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    activePickerMode = .currentBranch
+                } label: {
+                    Text(menuSelectionTitle(for: .currentBranch))
+                }
+                .disabled(branchControlsDisabled)
             }
 
             Section("PR target") {
-                branchOptions(
-                    selectedBranch: effectiveGitBaseBranch,
-                    browseMode: .pullRequestTarget,
-                    onSelect: onSelectGitBaseBranch
-                )
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    activePickerMode = .pullRequestTarget
+                } label: {
+                    Text(menuSelectionTitle(for: .pullRequestTarget))
+                }
+                .disabled(branchControlsDisabled)
             }
 
             Section {
@@ -156,6 +137,7 @@ struct TurnGitBranchSelector: View {
         .sheet(item: $activePickerMode) { pickerMode in
             TurnGitBranchPickerSheet(
                 branches: nonDefaultGitBranches,
+                gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
                 selectedBranch: pickerMode == .currentBranch ? normalizedCurrentBranch : effectiveGitBaseBranch,
                 defaultBranch: normalizedDefaultBranch,
                 currentBranch: normalizedCurrentBranch,
@@ -178,50 +160,13 @@ struct TurnGitBranchSelector: View {
         }
     }
 
-    @ViewBuilder
-    private func branchOptions(
-        selectedBranch: String,
-        browseMode: TurnGitBranchPickerMode,
-        onSelect: @escaping (String) -> Void
-    ) -> some View {
-        if let normalizedDefaultBranch {
-            let isCurrentBranchTarget = browseMode == .pullRequestTarget && normalizedDefaultBranch == normalizedCurrentBranch
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onSelect(normalizedDefaultBranch)
-            } label: {
-                if selectedBranch == normalizedDefaultBranch {
-                    Label("\(normalizedDefaultBranch) (default)", systemImage: "checkmark")
-                } else {
-                    Text("\(normalizedDefaultBranch) (default)")
-                }
-            }
-            .disabled(branchControlsDisabled || isCurrentBranchTarget)
-        }
-
-        ForEach(inlineGitBranches(selectedBranch: selectedBranch), id: \.self) { branch in
-            let isCurrentBranchTarget = browseMode == .pullRequestTarget && branch == normalizedCurrentBranch
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onSelect(branch)
-            } label: {
-                if selectedBranch == branch {
-                    Label(branch, systemImage: "checkmark")
-                } else {
-                    Text(branch)
-                }
-            }
-            .disabled(branchControlsDisabled || isCurrentBranchTarget)
-        }
-
-        if hasOverflowBranches {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                activePickerMode = browseMode
-            } label: {
-                Text("Browse all branches (\(nonDefaultGitBranches.count))...")
-            }
-            .disabled(branchControlsDisabled)
+    // Keeps the compact menu readable while routing real selection work into the searchable sheet.
+    private func menuSelectionTitle(for pickerMode: TurnGitBranchPickerMode) -> String {
+        switch pickerMode {
+        case .currentBranch:
+            return visibleBranchLabel
+        case .pullRequestTarget:
+            return effectiveGitBaseBranch.isEmpty ? "Choose base branch" : effectiveGitBaseBranch
         }
     }
 }
@@ -230,6 +175,7 @@ private struct TurnGitBranchPickerSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let branches: [String]
+    let gitBranchesCheckedOutElsewhere: Set<String>
     let selectedBranch: String
     let defaultBranch: String?
     let currentBranch: String
@@ -243,6 +189,21 @@ private struct TurnGitBranchPickerSheet: View {
 
     @State private var searchText = ""
 
+    // Surfaces the active selection near the top until the user starts filtering.
+    private var orderedBranches: [String] {
+        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return filteredBranches
+        }
+
+        var prioritizedBranches = branches
+        if selectedBranch != defaultBranch,
+           let selectedIndex = prioritizedBranches.firstIndex(of: selectedBranch) {
+            let selected = prioritizedBranches.remove(at: selectedIndex)
+            prioritizedBranches.insert(selected, at: 0)
+        }
+        return prioritizedBranches
+    }
+
     private var filteredBranches: [String] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return branches }
@@ -255,37 +216,52 @@ private struct TurnGitBranchPickerSheet: View {
                 Section(sectionTitle) {
                     if let defaultBranch {
                         let isCurrentBranchTarget = !allowsSelectingCurrentBranch && defaultBranch == currentBranch
+                        let isCheckedOutElsewhere = gitBranchesCheckedOutElsewhere.contains(defaultBranch)
+                        let isDisabled = isCurrentBranchTarget || (allowsSelectingCurrentBranch && isCheckedOutElsewhere)
                         Button {
                             onSelect(defaultBranch)
                             dismiss()
                         } label: {
-                            if selectedBranch == defaultBranch {
-                                Label("\(defaultBranch) (default)", systemImage: "checkmark")
-                            } else {
-                                Text("\(defaultBranch) (default)")
-                            }
+                            TurnGitBranchOptionRow(
+                                branch: defaultBranch,
+                                isSelected: selectedBranch == defaultBranch,
+                                isDefault: true,
+                                isCurrent: defaultBranch == currentBranch,
+                                isCheckedOutElsewhere: isCheckedOutElsewhere,
+                                isDisabled: isDisabled
+                            )
                         }
-                        .disabled(isLoading || isSwitching || isCurrentBranchTarget)
+                        .disabled(isLoading || isSwitching || isDisabled)
                     }
 
-                    ForEach(filteredBranches, id: \.self) { branch in
+                    ForEach(orderedBranches, id: \.self) { branch in
                         let isCurrentBranchTarget = !allowsSelectingCurrentBranch && branch == currentBranch
+                        let isCheckedOutElsewhere = gitBranchesCheckedOutElsewhere.contains(branch)
+                        let isDisabled = isCurrentBranchTarget || (allowsSelectingCurrentBranch && isCheckedOutElsewhere)
                         Button {
                             onSelect(branch)
                             dismiss()
                         } label: {
-                            if selectedBranch == branch {
-                                Label(branch, systemImage: "checkmark")
-                            } else {
-                                Text(branch)
-                            }
+                            TurnGitBranchOptionRow(
+                                branch: branch,
+                                isSelected: selectedBranch == branch,
+                                isDefault: false,
+                                isCurrent: branch == currentBranch,
+                                isCheckedOutElsewhere: isCheckedOutElsewhere,
+                                isDisabled: isDisabled
+                            )
                         }
-                        .disabled(isLoading || isSwitching || isCurrentBranchTarget)
+                        .disabled(isLoading || isSwitching || isDisabled)
                     }
 
-                    if filteredBranches.isEmpty {
-                        Text("No branches found")
-                            .foregroundStyle(.secondary)
+                    if orderedBranches.isEmpty {
+                        ContentUnavailableView(
+                            "No branches found",
+                            systemImage: "arrow.triangle.branch",
+                            description: Text("Try a different search or refresh the branch list.")
+                        )
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .listRowBackground(Color.clear)
                     }
                 }
             }
@@ -313,5 +289,61 @@ private struct TurnGitBranchPickerSheet: View {
                 }
             }
         }
+    }
+}
+
+// Reuses the same row styling for both branch-switching and PR target selection.
+private struct TurnGitBranchOptionRow: View {
+    let branch: String
+    let isSelected: Bool
+    let isDefault: Bool
+    let isCurrent: Bool
+    let isCheckedOutElsewhere: Bool
+    let isDisabled: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(branch)
+                    .font(AppFont.mono(.body))
+                    .foregroundStyle(isDisabled ? .secondary : .primary)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    if isCurrent {
+                        TurnGitBranchBadge(title: "Current")
+                    }
+                    if isDefault {
+                        TurnGitBranchBadge(title: "Default")
+                    }
+                    if isCheckedOutElsewhere {
+                        TurnGitBranchBadge(title: "Open elsewhere")
+                    }
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(isDisabled ? .secondary : .primary)
+            }
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct TurnGitBranchBadge: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(AppFont.mono(.caption2))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color(.secondarySystemFill), in: Capsule())
     }
 }
