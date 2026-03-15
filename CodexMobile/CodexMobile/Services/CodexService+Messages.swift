@@ -53,11 +53,7 @@ extension CodexService {
     func updateCurrentOutput(for threadId: String) {
         noteMessagesChanged(for: threadId)
 
-        let latestAssistantText = messagesByThread[threadId]?
-            .reversed()
-            .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
-            .text ?? ""
-        latestAssistantOutputByThread[threadId] = latestAssistantText
+        let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
         refreshThreadTimelineState(for: threadId)
 
         guard activeThreadId == threadId else {
@@ -65,6 +61,43 @@ extension CodexService {
         }
 
         currentOutput = latestAssistantText
+    }
+
+    // Fast-paths plain assistant text streaming so one delta does not rebuild every derived row cache.
+    // Falls back to the full projection path whenever the visible snapshot shape changed underneath us.
+    func updateStreamingAssistantOutput(for threadId: String, messageId: String) {
+        noteMessagesChanged(for: threadId)
+
+        let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
+        if activeThreadId == threadId {
+            currentOutput = latestAssistantText
+        }
+
+        guard let state = threadTimelineStateByThread[threadId],
+              let rawMessages = messagesByThread[threadId],
+              let updatedMessage = rawMessages.first(where: { $0.id == messageId }),
+              let projectedIndex = state.renderSnapshot.messages.firstIndex(where: { $0.id == messageId }) else {
+            refreshThreadTimelineState(for: threadId)
+            return
+        }
+
+        let revision = messageRevisionByThread[threadId] ?? 0
+        var projectedMessages = state.renderSnapshot.messages
+        projectedMessages[projectedIndex] = updatedMessage
+
+        state.messages = rawMessages
+        state.messageRevision = revision
+        state.renderSnapshot = TurnTimelineRenderSnapshot(
+            threadID: threadId,
+            messages: projectedMessages,
+            timelineChangeToken: revision,
+            activeTurnID: state.renderSnapshot.activeTurnID,
+            isThreadRunning: state.renderSnapshot.isThreadRunning,
+            latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
+            stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
+            assistantRevertStatesByMessageID: state.renderSnapshot.assistantRevertStatesByMessageID,
+            repoRefreshSignal: state.renderSnapshot.repoRefreshSignal
+        )
     }
 
     // Returns the currently running turn id for a specific thread, if any.
@@ -94,10 +127,24 @@ extension CodexService {
         refreshThreadTimelineState(for: threadId)
     }
 
+    // Marks a rollout-mirrored run for extra thread/resume catch-up until a real
+    // assistant delta arrives or the turn completes.
+    func markMirroredRunningCatchupNeeded(for threadId: String) {
+        mirroredRunningCatchupThreadIDs.insert(threadId)
+        lastMirroredRunningCatchupAtByThread.removeValue(forKey: threadId)
+    }
+
+    // Stops extra catch-up polling once a live assistant stream exists or the run ends.
+    func clearMirroredRunningCatchupNeeded(for threadId: String) {
+        mirroredRunningCatchupThreadIDs.remove(threadId)
+        lastMirroredRunningCatchupAtByThread.removeValue(forKey: threadId)
+    }
+
     // Clears running/fallback flags together when a thread finishes or disappears.
     func clearRunningState(for threadId: String) {
         runningThreadIDs.remove(threadId)
         protectedRunningFallbackThreadIDs.remove(threadId)
+        clearMirroredRunningCatchupNeeded(for: threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
         refreshThreadTimelineState(for: threadId)
     }
@@ -106,6 +153,8 @@ extension CodexService {
     func clearAllRunningState() {
         runningThreadIDs.removeAll()
         protectedRunningFallbackThreadIDs.removeAll()
+        mirroredRunningCatchupThreadIDs.removeAll()
+        lastMirroredRunningCatchupAtByThread.removeAll()
         refreshBusyRepoRootsAndDependentTimelineStates()
         refreshAllThreadTimelineStates()
     }
@@ -338,11 +387,10 @@ extension CodexService {
 
         extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
 
-        // A turn may have started while the thread/read request was in flight.
-        // Merging stale history would overwrite live streaming text and clear
-        // isStreaming flags, causing messages to flicker (disappear then reappear).
-        // Skip the merge and let the active turn's streaming deltas be authoritative.
-        if threadHasActiveOrRunningTurn(threadId) {
+        // A turn may have started while thread/read was in flight. Normal background
+        // history loads should still stay out of the way, but forced refreshes are
+        // used when reopening a running thread and need to merge the latest snapshot.
+        if threadHasActiveOrRunningTurn(threadId) && !forceRefresh {
             hydratedThreadIDs.insert(threadId)
             return
         }
@@ -355,16 +403,18 @@ extension CodexService {
             let merged = await Task.detached {
                 Self.mergeHistoryMessages(existingMessages, historyMessages, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
             }.value
-            guard !threadHasActiveOrRunningTurn(threadId) else {
+            guard forceRefresh || !threadHasActiveOrRunningTurn(threadId) else {
                 hydratedThreadIDs.insert(threadId)
                 return
             }
-            messagesByThread[threadId] = merged
-            persistMessages()
+            if merged != existingMessages {
+                messagesByThread[threadId] = merged
+                persistMessages()
+                updateCurrentOutput(for: threadId)
+            }
         }
 
         hydratedThreadIDs.insert(threadId)
-        updateCurrentOutput(for: threadId)
     }
 
     // Extracts context window usage from thread/read response if the runtime includes it.
@@ -397,6 +447,56 @@ extension CodexService {
         )
         appendMessage(message)
         return message.id
+    }
+
+    // Upserts a confirmed user row mirrored from a desktop-origin rollout so
+    // reopened threads can display the remote prompt immediately without
+    // disturbing the phone-native pending-send path.
+    func appendConfirmedMirroredUserMessage(
+        threadId: String,
+        turnId: String?,
+        text: String
+    ) {
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedIncomingText = Self.normalizedMessageText(trimmedText)
+        guard !trimmedText.isEmpty else {
+            return
+        }
+
+        if let existingIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
+            candidate.role == .user
+                && Self.normalizedMessageText(candidate.text) == normalizedIncomingText
+                && (
+                    (turnId != nil && (candidate.turnId == nil || candidate.turnId == turnId))
+                        || (turnId == nil && candidate.turnId == nil)
+                )
+        }) {
+            var didMutate = false
+            if messagesByThread[threadId]?[existingIndex].deliveryState != .confirmed {
+                messagesByThread[threadId]?[existingIndex].deliveryState = .confirmed
+                didMutate = true
+            }
+            if messagesByThread[threadId]?[existingIndex].turnId == nil {
+                messagesByThread[threadId]?[existingIndex].turnId = turnId
+                didMutate = true
+            }
+            guard didMutate else {
+                return
+            }
+            persistMessages()
+            updateCurrentOutput(for: threadId)
+            return
+        }
+
+        appendMessage(
+            CodexMessage(
+                threadId: threadId,
+                role: .user,
+                text: trimmedText,
+                turnId: turnId,
+                deliveryState: .confirmed
+            )
+        )
     }
 
     // Appends a system message in the current thread timeline.
@@ -1394,17 +1494,26 @@ extension CodexService {
         }
 
         let currentText = messagesByThread[threadId]?[messageIndex].text ?? ""
-        messagesByThread[threadId]?[messageIndex].text = mergeAssistantDelta(
+        let nextText = mergeAssistantDelta(
             existingText: currentText,
             incomingDelta: delta
         )
+        let didResolveItemId = messagesByThread[threadId]?[messageIndex].itemId == nil && itemId != nil
+
+        guard nextText != currentText
+                || !(messagesByThread[threadId]?[messageIndex].isStreaming ?? false)
+                || didResolveItemId else {
+            return
+        }
+
+        messagesByThread[threadId]?[messageIndex].text = nextText
         messagesByThread[threadId]?[messageIndex].isStreaming = true
         if messagesByThread[threadId]?[messageIndex].itemId == nil, let itemId {
             messagesByThread[threadId]?[messageIndex].itemId = itemId
         }
 
         persistMessages()
-        updateCurrentOutput(for: threadId)
+        updateStreamingAssistantOutput(for: threadId, messageId: messageID)
     }
 
     // Finalizes assistant text when item/completed carries the canonical message body.
@@ -1753,6 +1862,16 @@ extension CodexService {
     // Bumps a thread-local revision whenever its message timeline changes.
     func noteMessagesChanged(for threadId: String) {
         messageRevisionByThread[threadId, default: 0] &+= 1
+    }
+
+    // Keeps the "latest output" cache in sync for both full refreshes and lightweight streaming updates.
+    func syncLatestAssistantOutputCache(for threadId: String) -> String {
+        let latestAssistantText = messagesByThread[threadId]?
+            .reversed()
+            .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+            .text ?? ""
+        latestAssistantOutputByThread[threadId] = latestAssistantText
+        return latestAssistantText
     }
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.

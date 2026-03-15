@@ -43,6 +43,19 @@ function createSpawnTransport({ env }) {
 
     listeners.emitClose(code, signal);
   });
+  // Ignore broken-pipe shutdown noise once the child is already going away.
+  codex.stdin.on("error", (error) => {
+    if (didRequestShutdown && isIgnorableStdinShutdownError(error)) {
+      return;
+    }
+
+    if (isIgnorableStdinShutdownError(error)) {
+      return;
+    }
+
+    didReportError = true;
+    listeners.emitError(error);
+  });
   // Keep stderr muted during normal operation, but preserve enough output to
   // explain launch failures when the child exits before the bridge can use it.
   codex.stderr.on("data", (chunk) => {
@@ -68,7 +81,7 @@ function createSpawnTransport({ env }) {
       return launch.description;
     },
     send(message) {
-      if (!codex.stdin.writable) {
+      if (!codex.stdin.writable || codex.stdin.destroyed || codex.stdin.writableEnded) {
         return;
       }
 
@@ -148,6 +161,10 @@ function createCodexCloseError({ code, signal, stderrBuffer, launchDescription }
 function appendOutputBuffer(buffer, chunk) {
   const next = `${buffer}${chunk}`;
   return next.slice(-4_096);
+}
+
+function isIgnorableStdinShutdownError(error) {
+  return error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED";
 }
 
 function createWebSocketTransport({ endpoint }) {

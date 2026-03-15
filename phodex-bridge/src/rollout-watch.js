@@ -763,4 +763,5 @@ module.exports = {
   readLatestContextWindowUsage,
   resolveSessionsRoot,
   findRolloutFileForThread,
+  findRecentRolloutFileForContextRead,
 };

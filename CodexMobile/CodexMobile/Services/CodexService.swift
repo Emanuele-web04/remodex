@@ -244,6 +244,8 @@ final class CodexService {
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    // Stops infinite trusted-reconnect loops by escalating back to QR after repeated handshake failures.
+    var trustedReconnectFailureCount = 0
     var secureConnectionState: CodexSecureConnectionState = .notPaired
     var secureMacFingerprint: String?
     // Keeps the bridge-update UX visible even if connection cleanup resets secure transport state.
@@ -287,6 +289,10 @@ final class CodexService {
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
+    // Desktop-mirrored runs can miss assistant deltas, so we temporarily allow
+    // forced thread/resume catch-up while the turn is still active.
+    var mirroredRunningCatchupThreadIDs: Set<String> = []
+    var lastMirroredRunningCatchupAtByThread: [String: Date] = [:]
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]
