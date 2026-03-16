@@ -74,15 +74,33 @@ test("loadOrCreateBridgeDeviceState migrates a valid Keychain mirror into the ca
   });
 });
 
-test("loadOrCreateBridgeDeviceState rejects a corrupted canonical file instead of silently rotating identity", () => {
+test("loadOrCreateBridgeDeviceState ignores a corrupted legacy Keychain mirror and creates a fresh canonical state", () => {
+  withTempDeviceStateEnv(({ keychainMirrorFile, canonicalStateFile }) => {
+    fs.writeFileSync(keychainMirrorFile, "{ definitely-not-json", "utf8");
+
+    const loadedState = loadOrCreateBridgeDeviceState();
+
+    assert.equal(loadedState.macDeviceId.length > 0, true);
+    assert.equal(loadedState.macIdentityPublicKey.length > 0, true);
+    assert.equal(loadedState.macIdentityPrivateKey.length > 0, true);
+    assert.deepEqual(loadedState.trustedPhones, {});
+    assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(loadedState));
+    assert.equal(fs.existsSync(canonicalStateFile), true);
+  });
+});
+
+test("loadOrCreateBridgeDeviceState replaces a corrupted canonical file automatically", () => {
   withTempDeviceStateEnv(({ canonicalStateFile }) => {
     fs.mkdirSync(path.dirname(canonicalStateFile), { recursive: true });
     fs.writeFileSync(canonicalStateFile, "{ definitely-not-json", "utf8");
 
-    assert.throws(
-      () => loadOrCreateBridgeDeviceState(),
-      /reset-pairing/
-    );
+    const loadedState = loadOrCreateBridgeDeviceState();
+
+    assert.equal(loadedState.macDeviceId.length > 0, true);
+    assert.equal(loadedState.macIdentityPublicKey.length > 0, true);
+    assert.equal(loadedState.macIdentityPrivateKey.length > 0, true);
+    assert.deepEqual(loadedState.trustedPhones, {});
+    assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(loadedState));
   });
 });
 

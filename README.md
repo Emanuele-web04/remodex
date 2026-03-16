@@ -187,6 +187,7 @@ Starts the bridge:
 ### `remodex reset-pairing`
 
 Clears the saved bridge pairing state so the next `remodex up` starts a fresh QR pairing flow.
+You normally do not need this for corrupted local state anymore: recent Remodex builds auto-repair unreadable pairing files/mirrors on startup.
 
 ```sh
 remodex reset-pairing
@@ -257,7 +258,7 @@ On the relay/VPS side, keep push disabled until you actually want it. The HTTP p
 - On iPhone, the most reliable self-host setup is a Tailscale-reachable relay. Plain LAN pairing over `ws://` on the same Wi-Fi can fail on some iOS devices because local-network routing from the app is not always reliable.
 - The pairing QR carries the connection URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and the bridge persists its trusted device identity locally on the Mac.
 - The iPhone stores pairing metadata in Keychain, but you should not rely on hands-free reconnect across bridge restarts or fresh runs. In practice, expect to scan a fresh QR code when you start a new bridge session.
-- The bridge state lives canonically in `~/.remodex/device-state.json` with local-only permissions. On macOS the bridge also mirrors that state to Keychain as best-effort backup/migration data.
+- The bridge state lives canonically in `~/.remodex/device-state.json` with local-only permissions. On macOS the bridge also mirrors that state to Keychain as best-effort backup/migration data, and recent builds auto-repair unreadable local state on startup instead of requiring manual cleanup.
 - The CLI no longer prints the connection URL in plain text below the QR.
 - Set `REMODEX_RELAY` only when you want to self-host or test locally against your own setup.
 - Leave `REMODEX_TRUST_PROXY` unset for direct/self-hosted installs. Turn it on only when a trusted reverse proxy such as Traefik, Nginx, or Caddy is forwarding the relay traffic.
@@ -281,7 +282,7 @@ Privacy notes:
 
 - The transport layer can still see connection metadata and the plaintext secure control messages used to set up the encrypted session, including session IDs, device IDs, public keys, nonces, and handshake result codes.
 - The transport layer does not see decrypted application payloads after the secure handshake succeeds.
-- The iPhone currently trusts a single paired phone identity per Mac bridge state. Pairing a different iPhone requires `remodex reset-pairing` on the Mac first.
+- A fresh QR scan can replace the previously trusted iPhone automatically. Use `remodex reset-pairing` only when you intentionally want to wipe the remembered pairing state yourself.
 - On-device message history is also encrypted at rest on iPhone using a Keychain-backed AES key.
 
 ## Git Integration
@@ -370,7 +371,7 @@ The core bridge client (Codex forwarding + git) works on any OS. Desktop refresh
 The bridge stops. Run `remodex up` again to start a fresh QR pairing flow for that bridge session.
 
 **How do I force a fresh QR pairing?**
-Run `remodex reset-pairing`, then start the bridge again with `remodex up`.
+Run `remodex reset-pairing`, then start the bridge again with `remodex up`. You should only need this when you intentionally want to replace the paired iPhone or wipe the remembered pairing.
 
 **Can I connect to a remote Codex instance?**
 Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `codex app-server`.

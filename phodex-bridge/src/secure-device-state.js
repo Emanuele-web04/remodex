@@ -20,7 +20,14 @@ let hasLoggedKeychainMismatch = false;
 function loadOrCreateBridgeDeviceState() {
   const fileRecord = readCanonicalFileStateRecord();
   if (fileRecord.error) {
-    throw corruptedStateError("device-state.json", fileRecord.error);
+    warnOnce(
+      "[remodex] Ignoring unreadable canonical device-state.json; creating a fresh bridge state automatically."
+    );
+    deleteCanonicalFileState();
+    deleteKeychainStateString();
+    const nextState = createBridgeDeviceState();
+    writeBridgeDeviceState(nextState);
+    return nextState;
   }
 
   const keychainRecord = readKeychainStateRecord();
@@ -31,7 +38,12 @@ function loadOrCreateBridgeDeviceState() {
   }
 
   if (keychainRecord.error) {
-    throw corruptedStateError("legacy Keychain bridge state", keychainRecord.error);
+    warnOnce(
+      "[remodex] Ignoring unreadable legacy Keychain pairing mirror; creating a fresh canonical bridge state."
+    );
+    const nextState = createBridgeDeviceState();
+    writeBridgeDeviceState(nextState);
+    return nextState;
   }
 
   if (keychainRecord.state) {
@@ -351,16 +363,6 @@ function normalizeNonEmptyString(value) {
   }
   return value.trim();
 }
-
-function corruptedStateError(source, error) {
-  const detail = normalizeNonEmptyString(error?.message);
-  return new Error(
-    `The saved Remodex pairing state in ${source} is unreadable. `
-      + "Run `remodex reset-pairing` to start fresh."
-      + (detail ? ` (${detail})` : "")
-  );
-}
-
 function warnOnce(message) {
   if (hasLoggedKeychainMismatch) {
     return;

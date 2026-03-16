@@ -249,7 +249,7 @@ test("secure transport round-trips encrypted payloads after a trusted reconnect 
   ]);
 });
 
-test("qr bootstrap rejects pairing a different iPhone after one phone is trusted", () => {
+test("qr bootstrap allows a fresh QR scan to replace the trusted iPhone", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const firstPhoneIdentity = createOkpKeyPair("ed25519");
   const firstPhoneEphemeral = createOkpKeyPair("x25519");
@@ -278,30 +278,17 @@ test("qr bootstrap rejects pairing a different iPhone after one phone is trusted
     lastAppliedBridgeOutboundSeq: 0,
   });
 
-  const controlMessages = [];
-  secureTransport.handleIncomingWireMessage(
-    JSON.stringify({
-      kind: "clientHello",
-      protocolVersion: 1,
-      sessionId: "session-3",
-      handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
-      phoneDeviceId: "phone-3b",
-      phoneIdentityPublicKey: secondPhoneIdentity.publicKey,
-      phoneEphemeralPublicKey: secondPhoneEphemeral.publicKey,
-      clientNonce: Buffer.alloc(32, 9).toString("base64"),
-    }),
-    {
-      sendControlMessage(message) {
-        controlMessages.push(message);
-      },
-      onApplicationMessage() {
-        throw new Error("second phone bootstrap should be rejected before app traffic");
-      },
-    }
-  );
-
-  assert.equal(controlMessages[0]?.kind, "secureError");
-  assert.equal(controlMessages[0]?.code, "phone_replacement_required");
+  finishHandshake({
+    secureTransport,
+    sessionId: "session-3",
+    macDeviceId: "mac-3",
+    phoneDeviceId: "phone-3b",
+    macIdentity,
+    phoneIdentity: secondPhoneIdentity,
+    phoneEphemeral: secondPhoneEphemeral,
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
+    lastAppliedBridgeOutboundSeq: 0,
+  });
 });
 
 test("qr bootstrap starts a fresh replay window instead of leaking buffered messages", () => {

@@ -125,26 +125,22 @@ async function continueOnMac(
     ? await isAppRunning(appPath)
     : await detectRunningCodexApp(appPath, executor);
 
-  // Keep the c9b51e1 fast-path: if the thread already exists locally, deep-link
-  // directly instead of forcing a relaunch that can fail before Codex opens.
-  if (desktopKnown || !appRunning) {
+  // Match the restored hard-handoff behavior from 2aea434: when Codex is already
+  // open, relaunch it before opening the requested thread so the UI actually switches.
+  if (!appRunning) {
     try {
-      if (desktopKnown) {
-        await openCodexTarget(targetUrl, { bundleId, appPath, executor });
-      } else {
-        await openCodexApp({ bundleId, appPath, executor });
-        await sleepFn(appBootWaitMs);
-        await openWhenThreadReady(threadId, targetUrl, {
-          bundleId,
-          appPath,
-          executor,
-          env,
-          fsModule,
-          sleepFn,
-          waitMs: threadMaterializeWaitMs,
-          pollMs: threadMaterializePollMs,
-        });
-      }
+      await openCodexApp({ bundleId, appPath, executor });
+      await sleepFn(appBootWaitMs);
+      await openWhenThreadReady(threadId, targetUrl, {
+        bundleId,
+        appPath,
+        executor,
+        env,
+        fsModule,
+        sleepFn,
+        waitMs: threadMaterializeWaitMs,
+        pollMs: threadMaterializePollMs,
+      });
     } catch (error) {
       throw desktopError(
         "handoff_failed",
