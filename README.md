@@ -92,7 +92,7 @@ This repo contains the local bridge, the iOS app target, and their tests:
 
 ## Install the Bridge
 
-<sub>Install from npm with `@latest` so you always get the newest bridge fixes.</sub>
+<sub>Install from npm with `@latest` so you get the newest bridge fixes, including the `1.2.5` pairing-state recovery updates.</sub>
 
 ```sh
 npm install -g remodex@latest
