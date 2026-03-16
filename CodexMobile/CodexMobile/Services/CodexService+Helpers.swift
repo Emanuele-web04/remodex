@@ -7,6 +7,32 @@
 import Foundation
 
 extension CodexService {
+    // Rebuilds service-owned thread lookup caches whenever the sorted thread list changes.
+    func rebuildThreadLookupCaches() {
+        threadByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
+        threadIndexByID = Dictionary(
+            uniqueKeysWithValues: threads.enumerated().map { index, thread in
+                (thread.id, index)
+            }
+        )
+        firstLiveThreadIDCache = threads.first(where: { $0.syncState == .live })?.id
+    }
+
+    // Shared O(1) thread lookup for hot paths that only need thread metadata.
+    func thread(for threadId: String) -> CodexThread? {
+        threadByID[threadId]
+    }
+
+    // Shared O(1) index lookup for thread mutations that stay inside the main array.
+    func threadIndex(for threadId: String) -> Int? {
+        threadIndexByID[threadId]
+    }
+
+    // Keeps the default "open the latest live conversation" lookup out of repeated array scans.
+    func firstLiveThreadID() -> String? {
+        firstLiveThreadIDCache
+    }
+
     func resolveThreadID(_ preferredThreadID: String?) async throws -> String {
         if let preferredThreadID, !preferredThreadID.isEmpty {
             return preferredThreadID
@@ -21,7 +47,7 @@ extension CodexService {
     }
 
     func upsertThread(_ thread: CodexThread) {
-        if let existingIndex = threads.firstIndex(where: { $0.id == thread.id }) {
+        if let existingIndex = threadIndex(for: thread.id) {
             threads[existingIndex] = thread
         } else {
             threads.append(thread)

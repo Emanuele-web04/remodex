@@ -28,7 +28,7 @@ extension CodexService {
         reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
 
         if activeThreadId == nil {
-            activeThreadId = threads.first(where: { $0.syncState == .live })?.id
+            activeThreadId = firstLiveThreadID()
         }
     }
 
@@ -596,13 +596,13 @@ extension CodexService {
         }
 
         if !force, resumedThreadIDs.contains(threadId) {
-            return threads.first(where: { $0.id == threadId })
+            return thread(for: threadId)
         }
 
         var params: RPCObject = [
             "threadId": .string(threadId),
         ]
-        if let workingDirectory = threads.first(where: { $0.id == threadId })?.gitWorkingDirectory {
+        if let workingDirectory = thread(for: threadId)?.gitWorkingDirectory {
             params["cwd"] = .string(workingDirectory)
         }
         if let modelIdentifier = runtimeModelIdentifierForTurn() {
@@ -642,7 +642,7 @@ extension CodexService {
                     }
                 }
             }
-        } else if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        } else if let index = threadIndex(for: threadId) {
             threads[index].syncState = .live
         }
 
@@ -1114,7 +1114,7 @@ extension CodexService {
             beginAssistantMessage(threadId: threadId, turnId: turnID)
         }
 
-        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        if let index = threadIndex(for: threadId) {
             threads[index].updatedAt = Date()
             threads[index].syncState = .live
             threads = sortThreads(threads)

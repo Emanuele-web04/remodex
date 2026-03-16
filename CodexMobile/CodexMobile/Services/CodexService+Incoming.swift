@@ -421,7 +421,7 @@ extension CodexService {
         let normalizedThreadName = normalizedIdentifier(threadName)
 
         if let normalizedThreadName, !normalizedThreadName.isEmpty {
-            if let existingIndex = threads.firstIndex(where: { $0.id == threadId }) {
+            if let existingIndex = threadIndex(for: threadId) {
                 threads[existingIndex].title = normalizedThreadName
                 threads[existingIndex].name = normalizedThreadName
             } else {
@@ -440,7 +440,7 @@ extension CodexService {
 
         // If server explicitly sends an empty/null name, clear local custom title.
         guard hasExplicitRenameField,
-              let existingIndex = threads.firstIndex(where: { $0.id == threadId }) else {
+              let existingIndex = threadIndex(for: threadId) else {
             return
         }
 

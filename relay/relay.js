@@ -10,12 +10,21 @@ const CLEANUP_DELAY_MS = 60_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const CLOSE_CODE_SESSION_UNAVAILABLE = 4002;
 const CLOSE_CODE_IPHONE_REPLACED = 4003;
+const CLOSE_CODE_MAC_ABSENCE_BUFFER_FULL = 4004;
+const MAC_ABSENCE_GRACE_MS = 15_000;
 
 // In-memory session registry for one Mac host and one live iPhone client per session.
 const sessions = new Map();
 
 // Attaches relay behavior to a ws WebSocketServer instance.
-function setupRelay(wss) {
+function setupRelay(
+  wss,
+  {
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+    macAbsenceGraceMs = MAC_ABSENCE_GRACE_MS,
+  } = {}
+) {
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
       if (ws._relayAlive === false) {
@@ -57,23 +66,25 @@ function setupRelay(wss) {
         mac: null,
         clients: new Set(),
         cleanupTimer: null,
+        macAbsenceTimer: null,
         notificationSecret: null,
       });
     }
 
     const session = sessions.get(sessionId);
 
-    if (role === "iphone" && session.mac?.readyState !== WebSocket.OPEN) {
+    if (role === "iphone" && !canAcceptIphoneConnection(session)) {
       ws.close(CLOSE_CODE_SESSION_UNAVAILABLE, "Mac session not available");
       return;
     }
 
     if (session.cleanupTimer) {
-      clearTimeout(session.cleanupTimer);
+      clearTimeoutFn(session.cleanupTimer);
       session.cleanupTimer = null;
     }
 
     if (role === "mac") {
+      clearMacAbsenceTimer(session, { clearTimeoutFn });
       // The relay keeps a per-session push secret so first-time device registration
       // cannot be claimed by someone who only knows the session id.
       session.notificationSecret = readHeaderString(req.headers["x-notification-secret"]);
@@ -118,6 +129,11 @@ function setupRelay(wss) {
         }
       } else if (session.mac?.readyState === WebSocket.OPEN) {
         session.mac.send(msg);
+      } else {
+        // The relay cannot prove a buffered request really reached the bridge after
+        // a reconnect, so fail fast with an explicit retry-required close instead
+        // of silently dropping queued client work during a later flush.
+        ws.close(CLOSE_CODE_MAC_ABSENCE_BUFFER_FULL, "Mac temporarily unavailable");
       }
     });
 
@@ -125,12 +141,15 @@ function setupRelay(wss) {
       if (role === "mac") {
         if (session.mac === ws) {
           session.mac = null;
-          session.notificationSecret = null;
           console.log(`[relay] Mac disconnected -> ${relaySessionLogLabel(sessionId)}`);
-          for (const client of session.clients) {
-            if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
-              client.close(CLOSE_CODE_SESSION_UNAVAILABLE, "Mac disconnected");
-            }
+          if (session.clients.size > 0) {
+            scheduleMacAbsenceTimeout(sessionId, {
+              macAbsenceGraceMs,
+              setTimeoutFn,
+              clearTimeoutFn,
+            });
+          } else {
+            scheduleCleanup(sessionId, { setTimeoutFn });
           }
         }
       } else {
@@ -140,7 +159,7 @@ function setupRelay(wss) {
           + `(${session.clients.size} remaining)`
         );
       }
-      scheduleCleanup(sessionId);
+      scheduleCleanup(sessionId, { setTimeoutFn });
     });
 
     ws.on("error", (err) => {
@@ -152,23 +171,91 @@ function setupRelay(wss) {
   });
 }
 
-function scheduleCleanup(sessionId) {
+function scheduleCleanup(sessionId, { setTimeoutFn = setTimeout } = {}) {
   const session = sessions.get(sessionId);
   if (!session) {
     return;
   }
-  if (session.mac || session.clients.size > 0 || session.cleanupTimer) {
+  if (session.mac || session.clients.size > 0 || session.cleanupTimer || session.macAbsenceTimer) {
     return;
   }
 
-  session.cleanupTimer = setTimeout(() => {
+  session.cleanupTimer = setTimeoutFn(() => {
     const activeSession = sessions.get(sessionId);
-    if (activeSession && !activeSession.mac && activeSession.clients.size === 0) {
+    if (
+      activeSession
+      && !activeSession.mac
+      && activeSession.clients.size === 0
+      && !activeSession.macAbsenceTimer
+    ) {
       sessions.delete(sessionId);
       console.log(`[relay] ${relaySessionLogLabel(sessionId)} cleaned up`);
     }
   }, CLEANUP_DELAY_MS);
   session.cleanupTimer.unref?.();
+}
+
+function scheduleMacAbsenceTimeout(
+  sessionId,
+  {
+    macAbsenceGraceMs,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+  } = {}
+) {
+  const session = sessions.get(sessionId);
+  if (!session || session.mac || session.macAbsenceTimer) {
+    return;
+  }
+
+  session.macAbsenceTimer = setTimeoutFn(() => {
+    const activeSession = sessions.get(sessionId);
+    if (!activeSession) {
+      return;
+    }
+
+    activeSession.macAbsenceTimer = null;
+    activeSession.notificationSecret = null;
+    closeSessionClients(activeSession, CLOSE_CODE_SESSION_UNAVAILABLE, "Mac disconnected");
+    scheduleCleanup(sessionId, { setTimeoutFn });
+  }, macAbsenceGraceMs);
+  session.macAbsenceTimer.unref?.();
+
+  if (session.cleanupTimer) {
+    clearTimeoutFn(session.cleanupTimer);
+    session.cleanupTimer = null;
+  }
+}
+
+function clearMacAbsenceTimer(session, { clearTimeoutFn = clearTimeout } = {}) {
+  if (!session?.macAbsenceTimer) {
+    return;
+  }
+
+  clearTimeoutFn(session.macAbsenceTimer);
+  session.macAbsenceTimer = null;
+}
+
+function canAcceptIphoneConnection(session) {
+  if (!session) {
+    return false;
+  }
+
+  if (session.mac?.readyState === WebSocket.OPEN) {
+    return true;
+  }
+
+  // Lets the phone rejoin the same relay session while the Mac is still inside
+  // the temporary-absence grace window instead of forcing a full disconnect flow.
+  return Boolean(session.macAbsenceTimer);
+}
+
+function closeSessionClients(session, code, reason) {
+  for (const client of session.clients) {
+    if (client.readyState === WebSocket.OPEN || client.readyState === WebSocket.CONNECTING) {
+      client.close(code, reason);
+    }
+  }
 }
 
 function relaySessionLogLabel(sessionId) {

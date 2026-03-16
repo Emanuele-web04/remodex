@@ -9,7 +9,11 @@ import Network
 import UIKit
 
 extension CodexService {
+    // Only close codes that prove the saved pairing/session can no longer be reused
+    // should force a QR reset. Temporary delivery loss uses the dedicated `4004`
+    // close so `4002` can stay reserved for dead/unrecoverable relay sessions.
     private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4002, 4003]
+    private static let explicitRelayDropCloseCodeRawValues: Set<UInt16> = [4004]
     private static let maxTrustedReconnectFailures = 3
     private static let trustedReconnectFailureMessage =
         "Secure reconnect could not be restored. Scan a new QR code to reconnect."
@@ -259,6 +263,9 @@ extension CodexService {
         finalizeAllStreamingState()
         endBackgroundRunGraceTask(reason: "receive-error")
         clearConnectionSyncState()
+        // Thread resumes are transport-scoped; a fresh socket must be allowed to
+        // issue `thread/resume` again for desktop-origin threads after recovery.
+        resumedThreadIDs.removeAll()
         failAllPendingRequests(with: error)
     }
 }
@@ -297,7 +304,7 @@ extension CodexService {
         }
         if let threadId = activeThreadId
             ?? resolvedPreferredThreadId
-            ?? threads.first(where: { $0.syncState == .live })?.id {
+            ?? firstLiveThreadID() {
             await refreshInFlightTurnState(threadId: threadId)
             if threadHasActiveOrRunningTurn(threadId) {
                 _ = try? await ensureThreadResumed(threadId: threadId, force: true)
@@ -437,15 +444,18 @@ extension CodexService {
         relayCloseCode: NWProtocolWebSocket.CloseCode?
     ) -> ReceiveErrorDisposition {
         let shouldClearSavedRelaySession = shouldClearSavedRelaySession(for: relayCloseCode)
-        // `4002` only suppresses the re-pair copy for sessions we can actually recover.
+        // Only relay closes that preserve the saved session should stay on the
+        // auto-reconnect path; dead sessions must fall back to QR recovery.
         let permanentRelayMessage = shouldClearSavedRelaySession
             ? (permanentRelayDisconnectMessage(for: relayCloseCode)
                 ?? "This relay pairing is no longer valid. Scan a new QR code to reconnect.")
             : nil
+        let explicitRelayDropMessage = explicitRelayDropMessage(for: relayCloseCode)
         let isBenignDisconnect = isBenignBackgroundDisconnect(error)
         let shouldSuppressMessage = isBenignDisconnect && !isActivelyForegroundedForConnectionUI()
         // Foreground relay drops should reconnect too, otherwise Stop disappears mid-run.
         let shouldAttemptAutoRecovery = !shouldClearSavedRelaySession
+            && explicitRelayDropMessage == nil
             && (isRecoverableTransientConnectionError(error) || isBenignDisconnect)
 
         let connectionRecoveryState: CodexConnectionRecoveryState = shouldAttemptAutoRecovery
@@ -455,6 +465,8 @@ extension CodexService {
         let lastErrorMessage: String?
         if let permanentRelayMessage {
             lastErrorMessage = permanentRelayMessage
+        } else if let explicitRelayDropMessage {
+            lastErrorMessage = explicitRelayDropMessage
         } else if !shouldSuppressMessage && !shouldAttemptAutoRecovery {
             lastErrorMessage = error.localizedDescription
         } else {
@@ -464,7 +476,7 @@ extension CodexService {
         return ReceiveErrorDisposition(
             shouldClearSavedRelaySession: shouldClearSavedRelaySession,
             shouldAutoReconnectOnForeground: !shouldClearSavedRelaySession
-                && (shouldSuppressMessage || shouldAttemptAutoRecovery),
+                && (shouldSuppressMessage || shouldAttemptAutoRecovery || explicitRelayDropMessage != nil),
             connectionRecoveryState: connectionRecoveryState,
             lastErrorMessage: lastErrorMessage
         )
@@ -731,6 +743,16 @@ extension CodexService {
         default:
             return "This relay pairing is no longer valid. Scan a new QR code to reconnect."
         }
+    }
+
+    // Surfaces relay-enforced drops that keep the pairing valid but lost the current send.
+    func explicitRelayDropMessage(for closeCode: NWProtocolWebSocket.CloseCode?) -> String? {
+        guard let rawValue = relayCloseCodeRawValue(closeCode),
+              Self.explicitRelayDropCloseCodeRawValues.contains(rawValue) else {
+            return nil
+        }
+
+        return "The Mac was temporarily unavailable and this message could not be delivered. Wait a moment, then try again."
     }
 
     func shouldClearSavedRelaySession(for closeCode: NWProtocolWebSocket.CloseCode?) -> Bool {

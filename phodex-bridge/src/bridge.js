@@ -83,6 +83,16 @@ function startBridge() {
     relayUrl: relayBaseUrl,
     deviceState,
   });
+  // Keeps one stable sender identity across reconnects so buffered replay state
+  // reflects what actually made it onto the current relay socket.
+  function sendRelayWireMessage(wireMessage) {
+    if (socket?.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+
+    socket.send(wireMessage);
+    return true;
+  }
   // Only the spawned local runtime needs rollout mirroring; a real endpoint
   // already provides the authoritative live stream for resumed threads.
   const rolloutLiveMirror = !config.codexEndpoint
@@ -177,11 +187,7 @@ function startBridge() {
       clearReconnectTimer();
       reconnectAttempt = 0;
       logConnectionStatus("connected");
-      secureTransport.bindLiveSendWireMessage((wireMessage) => {
-        if (nextSocket.readyState === WebSocket.OPEN) {
-          nextSocket.send(wireMessage);
-        }
-      });
+      secureTransport.bindLiveSendWireMessage(sendRelayWireMessage);
     });
 
     nextSocket.on("message", (data) => {
@@ -225,11 +231,7 @@ function startBridge() {
     desktopRefresher.handleOutbound(message);
     pushNotificationTracker.handleOutbound(message);
     rememberThreadFromMessage("codex", message);
-    secureTransport.queueOutboundApplicationMessage(message, (wireMessage) => {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(wireMessage);
-      }
-    });
+    secureTransport.queueOutboundApplicationMessage(message, sendRelayWireMessage);
   });
 
   codex.onClose(() => {
@@ -284,11 +286,7 @@ function startBridge() {
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
-    secureTransport.queueOutboundApplicationMessage(rawMessage, (wireMessage) => {
-      if (socket?.readyState === WebSocket.OPEN) {
-        socket.send(wireMessage);
-      }
-    });
+    secureTransport.queueOutboundApplicationMessage(rawMessage, sendRelayWireMessage);
   }
 
   function rememberThreadFromMessage(source, rawMessage) {

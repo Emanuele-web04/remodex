@@ -1232,25 +1232,37 @@ private struct CommandExecutionStatusCard: View {
 
 private struct TypingIndicator: View {
     private let dotCount = 3
-    private let dotSize: CGFloat = 6
-    private let spacing: CGFloat = 4
-    private let amplitude: CGFloat = 3
-    private let period: TimeInterval = 0.9
+    private let dotWidth: CGFloat = 4
+    private let dotHeight: CGFloat = 4
+    private let spacing: CGFloat = 5
+    private let duration: TimeInterval = 0.85
+    @State private var isAnimating = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 8.0, paused: false)) { context in
-            let t = context.date.timeIntervalSinceReferenceDate
-            HStack(spacing: spacing) {
-                ForEach(0..<dotCount, id: \.self) { index in
-                    let phase = (t / period) * (.pi * 2) + Double(index) * 0.6
-                    Circle()
-                        .fill(Color.secondary.opacity(0.5))
-                        .frame(width: dotSize, height: dotSize)
-                        .offset(y: CGFloat(sin(phase)) * amplitude)
-                }
+        HStack(spacing: spacing) {
+            ForEach(0..<dotCount, id: \.self) { index in
+                indicatorDot(delay: Double(index) * 0.14)
             }
         }
+        .onAppear {
+            guard !isAnimating else { return }
+            isAnimating = true
+        }
         .accessibilityHidden(true)
+    }
+
+    // Uses lightweight implicit animation instead of a continuously ticking timeline.
+    private func indicatorDot(delay: Double) -> some View {
+        Capsule(style: .continuous)
+            .fill(Color.secondary.opacity(isAnimating ? 0.55 : 0.2))
+            .frame(width: dotWidth, height: dotHeight)
+            .scaleEffect(isAnimating ? 1 : 0.72)
+            .animation(
+                .easeInOut(duration: duration)
+                    .repeatForever(autoreverses: true)
+                    .delay(delay),
+                value: isAnimating
+            )
     }
 }
 

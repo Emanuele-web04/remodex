@@ -196,7 +196,7 @@ extension CodexService {
             setProtectedRunningFallback(false, for: threadId)
         }
 
-        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        if let index = threadIndex(for: threadId) {
             threads[index].updatedAt = Date()
             threads[index].syncState = .live
             threads = sortThreads(threads)

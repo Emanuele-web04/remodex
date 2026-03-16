@@ -1850,7 +1850,7 @@ extension CodexService {
 extension CodexService {
     // Reuses the sidebar "ready" signal to surface a lightweight in-app banner for off-screen chats.
     func presentThreadCompletionBannerIfNeeded(threadId: String) {
-        guard let thread = threads.first(where: { $0.id == threadId }) else {
+        guard let thread = thread(for: threadId) else {
             return
         }
 

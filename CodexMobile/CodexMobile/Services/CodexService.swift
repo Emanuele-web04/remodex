@@ -258,7 +258,11 @@ struct AssistantRevertStateCacheEntry {
 final class CodexService {
     // --- Public state ---------------------------------------------------------
 
-    var threads: [CodexThread] = []
+    var threads: [CodexThread] = [] {
+        didSet {
+            rebuildThreadLookupCaches()
+        }
+    }
     var isConnected = false
     var isConnecting = false
     var isInitialized = false
@@ -397,6 +401,10 @@ final class CodexService {
     var aiChangeSetsByID: [String: AIChangeSet] = [:]
     var aiChangeSetIDByTurnID: [String: String] = [:]
     var aiChangeSetIDByAssistantMessageID: [String: String] = [:]
+    // Keeps hot-path thread lookups O(1) instead of rescanning the full sidebar list.
+    @ObservationIgnored var threadByID: [String: CodexThread] = [:]
+    @ObservationIgnored var threadIndexByID: [String: Int] = [:]
+    @ObservationIgnored var firstLiveThreadIDCache: String?
     // Canonical repo roots keyed by observed working directories from bridge git/status responses.
     var repoRootByWorkingDirectory: [String: String] = [:]
     var knownRepoRoots: Set<String> = []
@@ -521,6 +529,7 @@ final class CodexService {
             self.secureConnectionState = .trustedMac
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
+        rebuildThreadLookupCaches()
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.

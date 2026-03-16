@@ -315,7 +315,7 @@ extension CodexService {
 private extension CodexService {
     // Only live threads can satisfy a notification open; archived placeholders mean the server rejected it.
     func hasNotificationRoutingCandidate(threadId: String) -> Bool {
-        guard let thread = threads.first(where: { $0.id == threadId }) else {
+        guard let thread = thread(for: threadId) else {
             return false
         }
 
@@ -324,7 +324,7 @@ private extension CodexService {
 
     // `thread/list` can omit still-live threads, so only an explicit archived placeholder is authoritative.
     func isNotificationRouteKnownMissing(threadId: String) -> Bool {
-        threads.first(where: { $0.id == threadId })?.syncState == .archivedLocal
+        thread(for: threadId)?.syncState == .archivedLocal
     }
 
     // Consumes the pending deep-link only after a fresh thread refresh confirms the target is gone.
@@ -340,7 +340,7 @@ private extension CodexService {
             pendingNotificationOpenThreadID = nil
         }
         if activeThreadId == nil || activeThreadId == threadId {
-            activeThreadId = threads.first(where: { $0.syncState == .live })?.id
+            activeThreadId = firstLiveThreadID()
         }
         missingNotificationThreadPrompt = CodexMissingNotificationThreadPrompt(threadId: threadId)
         return false
@@ -406,7 +406,7 @@ private extension CodexService {
 
         runCompletionNotificationDedupedAt[dedupeKey] = now
 
-        let title = threads.first(where: { $0.id == threadId })?.displayTitle ?? "Conversation"
+        let title = thread(for: threadId)?.displayTitle ?? "Conversation"
         let body: String = {
             switch result {
             case .completed:

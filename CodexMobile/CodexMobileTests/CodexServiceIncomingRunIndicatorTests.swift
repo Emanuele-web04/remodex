@@ -497,6 +497,8 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
             service.isConnected = true
             service.isInitialized = true
+            service.lastErrorMessage = nil
+            service.setForegroundState(true)
 
             service.handleReceiveError(
                 CodexServiceError.disconnected,
@@ -504,12 +506,59 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             )
 
             XCTAssertFalse(service.isConnected)
+            XCTAssertFalse(service.isInitialized)
             XCTAssertFalse(service.shouldAutoReconnectOnForeground)
             XCTAssertNil(service.relaySessionId)
             XCTAssertNil(service.relayUrl)
             XCTAssertEqual(
                 service.lastErrorMessage,
                 "This relay pairing is no longer valid. Scan a new QR code to reconnect."
+            )
+            XCTAssertEqual(service.connectionRecoveryState, .idle)
+        }
+    }
+
+    func testReceiveErrorClearsResumedThreadCacheForReconnect() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.resumedThreadIDs = [threadID]
+        service.isConnected = true
+        service.isInitialized = true
+
+        service.handleReceiveError(
+            CodexServiceError.disconnected,
+            relayCloseCode: .privateCode(4002)
+        )
+
+        XCTAssertTrue(service.resumedThreadIDs.isEmpty)
+    }
+
+    func testMacAbsenceBufferOverflowKeepsPairingAndShowsRetryMessage() {
+        let service = makeService()
+
+        withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
+            service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
+            service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            service.isConnected = true
+            service.isInitialized = true
+            service.lastErrorMessage = nil
+            service.setForegroundState(true)
+
+            service.handleReceiveError(
+                CodexServiceError.disconnected,
+                relayCloseCode: .privateCode(4004)
+            )
+
+            XCTAssertFalse(service.isConnected)
+            XCTAssertFalse(service.isInitialized)
+            XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+            XCTAssertEqual(service.connectionRecoveryState, .idle)
+            XCTAssertEqual(service.relaySessionId, SecureStore.readString(for: CodexSecureKeys.relaySessionId))
+            XCTAssertEqual(service.relayUrl, SecureStore.readString(for: CodexSecureKeys.relayUrl))
+            XCTAssertEqual(
+                service.lastErrorMessage,
+                "The Mac was temporarily unavailable and this message could not be delivered. Wait a moment, then try again."
             )
         }
     }

@@ -342,7 +342,7 @@ extension CodexService {
 extension CodexService {
     // Shares the thread-bound working directory with timeline/revert UI without exposing the full change-set helper surface.
     func gitWorkingDirectory(for threadId: String) -> String? {
-        let workingDirectory = threads.first(where: { $0.id == threadId })?.gitWorkingDirectory
+        let workingDirectory = thread(for: threadId)?.gitWorkingDirectory
         return canonicalRepoIdentifier(for: workingDirectory) ?? workingDirectory
     }
 

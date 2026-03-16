@@ -16,6 +16,7 @@ function createRelayServer({
   pushRateLimiter = createFixedWindowRateLimiter({ windowMs: 60_000, maxRequests: 30 }),
   upgradeRateLimiter = createFixedWindowRateLimiter({ windowMs: 60_000, maxRequests: 60 }),
   pushSessionService,
+  relayOptions = {},
   trustProxy = false,
 } = {}) {
   const pushEnabled = Boolean(enablePushService || pushSessionService);
@@ -43,7 +44,7 @@ function createRelayServer({
     });
   });
   const wss = new WebSocketServer({ noServer: true });
-  setupRelay(wss);
+  setupRelay(wss, relayOptions);
 
   server.on("upgrade", (req, socket, head) => {
     const pathname = safePathname(req.url);

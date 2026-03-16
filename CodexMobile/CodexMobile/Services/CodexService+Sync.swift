@@ -150,7 +150,7 @@ extension CodexService {
             return
         }
 
-        if threads.first(where: { $0.id == threadId })?.syncState == .archivedLocal {
+        if thread(for: threadId)?.syncState == .archivedLocal {
             return
         }
 
@@ -255,7 +255,7 @@ extension CodexService {
         refreshAllThreadTimelineStates()
 
         if activeThreadId == nil {
-            activeThreadId = threads.first(where: { $0.syncState == .live })?.id
+            activeThreadId = firstLiveThreadID()
         }
 
         if pendingNotificationOpenThreadID != nil {
@@ -271,7 +271,7 @@ extension CodexService {
         clearRunningState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
-        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        if let index = threadIndex(for: threadId) {
             threads[index].syncState = .archivedLocal
         } else {
             threads.append(CodexThread(id: threadId, title: "Conversation", syncState: .archivedLocal))
@@ -317,7 +317,7 @@ extension CodexService {
         removeThreadTimelineState(for: threadId)
         clearOutcomeBadge(for: threadId)
 
-        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        if let index = threadIndex(for: threadId) {
             threads[index].syncState = .archivedLocal
         }
 
@@ -348,7 +348,7 @@ extension CodexService {
     }
 
     func unarchiveThread(_ threadId: String) {
-        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        if let index = threadIndex(for: threadId) {
             threads[index].syncState = .live
         }
         removeLocallyArchivedThreadID(threadId)
@@ -365,7 +365,7 @@ extension CodexService {
 
     func renameThread(_ threadId: String, name: String) {
         // Optimistic local update.
-        if let index = threads.firstIndex(where: { $0.id == threadId }) {
+        if let index = threadIndex(for: threadId) {
             threads[index].name = name
             threads[index].title = name
         }

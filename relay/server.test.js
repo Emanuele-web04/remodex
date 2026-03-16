@@ -294,6 +294,116 @@ test("websocket relay forwards between mac and iphone on the base relay path", a
   });
 });
 
+test("relay keeps the iPhone connected briefly but rejects new sends while the mac is absent", async () => {
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-grace`, {
+      headers: { "x-role": "mac" },
+    });
+    const iphone = new WebSocket(`ws://127.0.0.1:${port}/relay/session-grace`, {
+      headers: { "x-role": "iphone" },
+    });
+
+    await Promise.all([onceOpen(mac), onceOpen(iphone)]);
+
+    let iphoneClosed = false;
+    iphone.once("close", () => {
+      iphoneClosed = true;
+    });
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+
+    await delay(40);
+    assert.equal(iphoneClosed, false);
+
+    const closeDetails = onceCloseDetails(iphone);
+    iphone.send(JSON.stringify({ buffered: true }));
+
+    const { code, reason } = await closeDetails;
+    assert.equal(code, 4004);
+    assert.equal(reason, "Mac temporarily unavailable");
+  }, {
+    relayOptions: {
+      macAbsenceGraceMs: 250,
+    },
+  });
+});
+
+test("relay lets the iPhone reconnect during the mac absence grace window", async () => {
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-grace-rejoin`, {
+      headers: { "x-role": "mac" },
+    });
+    const iphone = new WebSocket(`ws://127.0.0.1:${port}/relay/session-grace-rejoin`, {
+      headers: { "x-role": "iphone" },
+    });
+
+    await Promise.all([onceOpen(mac), onceOpen(iphone)]);
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+
+    const iphoneClosed = onceClosed(iphone);
+    iphone.close();
+    await iphoneClosed;
+
+    const rejoinedIphone = new WebSocket(`ws://127.0.0.1:${port}/relay/session-grace-rejoin`, {
+      headers: { "x-role": "iphone" },
+    });
+    await onceOpen(rejoinedIphone);
+
+    const reconnectedMac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-grace-rejoin`, {
+      headers: { "x-role": "mac" },
+    });
+    await onceOpen(reconnectedMac);
+
+    const received = onceMessage(reconnectedMac);
+    rejoinedIphone.send(JSON.stringify({ liveAfterRejoin: true }));
+
+    assert.equal(await received, "{\"liveAfterRejoin\":true}");
+
+    const rejoinedIphoneClosed = onceClosed(rejoinedIphone);
+    const reconnectedMacClosed = onceClosed(reconnectedMac);
+    rejoinedIphone.close();
+    reconnectedMac.close();
+    await Promise.all([rejoinedIphoneClosed, reconnectedMacClosed]);
+  }, {
+    relayOptions: {
+      macAbsenceGraceMs: 250,
+    },
+  });
+});
+
+test("relay closes with a dedicated code when the iphone sends during mac absence", async () => {
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-buffer-full`, {
+      headers: { "x-role": "mac" },
+    });
+    const iphone = new WebSocket(`ws://127.0.0.1:${port}/relay/session-buffer-full`, {
+      headers: { "x-role": "iphone" },
+    });
+
+    await Promise.all([onceOpen(mac), onceOpen(iphone)]);
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+
+    const closeDetails = onceCloseDetails(iphone);
+    iphone.send(JSON.stringify({ buffered: 1 }));
+
+    const { code, reason } = await closeDetails;
+    assert.equal(code, 4004);
+    assert.equal(reason, "Mac temporarily unavailable");
+  }, {
+    relayOptions: {
+      macAbsenceGraceMs: 250,
+    },
+  });
+});
+
 async function withServer(run, serverOptions = {}) {
   const { server, wss } = createRelayServer(serverOptions);
   const address = await listen(server);
@@ -336,6 +446,12 @@ function onceOpen(socket) {
   });
 }
 
+function onceMessage(socket) {
+  return new Promise((resolve, reject) => {
+    socket.once("message", (value) => resolve(value.toString("utf8")));
+    socket.once("error", reject);
+  });
+}
 
 function onceClosed(socket) {
   return new Promise((resolve) => {
@@ -345,5 +461,27 @@ function onceClosed(socket) {
     }
 
     socket.once("close", resolve);
+  });
+}
+
+function onceCloseDetails(socket) {
+  return new Promise((resolve) => {
+    if (socket.readyState === WebSocket.CLOSED) {
+      resolve({ code: 1005, reason: "" });
+      return;
+    }
+
+    socket.once("close", (code, reasonBuffer) => {
+      resolve({
+        code,
+        reason: reasonBuffer.toString("utf8"),
+      });
+    });
+  });
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
   });
 }
