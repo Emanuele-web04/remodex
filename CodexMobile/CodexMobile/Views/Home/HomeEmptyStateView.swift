@@ -8,6 +8,7 @@ import SwiftUI
 
 struct HomeEmptyStateView<AuthSection: View>: View {
     let connectionPhase: CodexConnectionPhase
+    let statusMessage: String?
     let securityLabel: String?
     let onToggleConnection: () -> Void
     @ViewBuilder let authSection: () -> AuthSection
@@ -59,6 +60,13 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                     Text(securityLabel)
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
+                }
+
+                if let statusMessage, !statusMessage.isEmpty {
+                    Text(statusMessage)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
 
                 // Keeps the remembered relay pairing actionable after app relaunch or stale reconnects.

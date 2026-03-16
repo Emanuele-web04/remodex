@@ -41,6 +41,7 @@ extension CodexService {
 
         let normalizedServerURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let url = try validateConnectionURL(normalizedServerURL)
+        try await requestLocalNetworkAuthorizationIfNeeded(for: url)
         let serverIdentity = canonicalServerIdentity(for: url)
         if let previousIdentity = connectedServerIdentity, previousIdentity != serverIdentity {
             resetThreadRuntimeStateForServerSwitch()
@@ -48,9 +49,9 @@ extension CodexService {
         connectedServerIdentity = serverIdentity
 
         let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        let connection: NWConnection
+        let transport: CodexWebSocketTransport
         do {
-            connection = try await establishWebSocketConnection(url: url, token: trimmedToken, role: role)
+            transport = try await establishWebSocketConnection(url: url, token: trimmedToken, role: role)
         } catch {
             let friendlyMessage = userFacingConnectError(
                 error: error,
@@ -65,8 +66,22 @@ extension CodexService {
             }
             throw CodexServiceError.invalidInput(friendlyMessage)
         }
-        webSocketConnection = connection
-        startReceiveLoop(with: connection)
+        switch transport {
+        case .network(let connection):
+            usesManualWebSocketTransport = false
+            webSocketConnection = connection
+            startReceiveLoop(with: connection)
+        case .manualTCP(let connection):
+            usesManualWebSocketTransport = true
+            manualWebSocketReadBuffer = Data()
+            webSocketConnection = connection
+            startManualReceiveLoop(with: connection)
+        case .urlSession(let session, let task):
+            usesManualWebSocketTransport = false
+            webSocketSession = session
+            webSocketTask = task
+            startReceiveLoop(with: task)
+        }
         clearHydrationCaches()
         let isTrustedReconnectAttempt = hasTrustedReconnectContext
 
@@ -160,6 +175,7 @@ extension CodexService {
         relayMacIdentityPublicKey = nil
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
+        shouldForceQRBootstrapOnNextHandshake = false
         trustedReconnectFailureCount = 0
         secureConnectionState = .notPaired
         secureMacFingerprint = nil
@@ -339,13 +355,25 @@ extension CodexService {
 
     // Removes the current socket reference before reconnect/teardown logic mutates shared state.
     private func cancelCurrentSocketConnection() {
-        guard let connection = webSocketConnection else {
-            return
+        if let connection = webSocketConnection {
+            connection.stateUpdateHandler = nil
+            webSocketConnection = nil
+            connection.cancel()
         }
 
-        connection.stateUpdateHandler = nil
-        webSocketConnection = nil
-        connection.cancel()
+        if let task = webSocketTask {
+            webSocketTask = nil
+            task.cancel(with: .goingAway, reason: nil)
+        }
+
+        if let session = webSocketSession {
+            webSocketSession = nil
+            session.invalidateAndCancel()
+        }
+
+        webSocketSessionDelegate = nil
+        manualWebSocketReadBuffer = Data()
+        usesManualWebSocketTransport = false
     }
 
     // Drops sync work tied to the old transport so reconnect starts from a clean baseline.
@@ -360,6 +388,7 @@ extension CodexService {
     // Avoids wiping thread/runtime state when reconnecting after a socket that already died.
     func prepareForConnectionAttempt(preserveReconnectIntent: Bool = true) async {
         let needsTransportReset = webSocketConnection != nil
+            || webSocketTask != nil
             || isConnected
             || isInitialized
             || !pendingRequests.isEmpty
@@ -376,6 +405,7 @@ extension CodexService {
     // Identifies reconnects that should reuse a previously trusted Mac instead of going through QR bootstrap.
     var hasTrustedReconnectContext: Bool {
         guard hasSavedRelaySession,
+              !shouldForceQRBootstrapOnNextHandshake,
               let relayMacDeviceId = normalizedRelayMacDeviceId else {
             return false
         }
@@ -523,6 +553,8 @@ extension CodexService {
             switch nwError {
             case .posix(let code) where code == .ECONNREFUSED:
                 return "Connection refused by relay server at \(attemptedURL)."
+            case .posix(let code) where code == .ENETDOWN || code == .ENETUNREACH || code == .EHOSTUNREACH:
+                return "Cannot reach relay server at \(attemptedURL). Check that the iPhone can access the Mac on the local network."
             case .posix(let code) where code == .ETIMEDOUT:
                 return "Connection timed out. Check server/network."
             case .dns(let code):
@@ -534,6 +566,13 @@ extension CodexService {
 
         if isRecoverableTransientConnectionError(error) {
             return "Connection timed out. Check server/network."
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain,
+           nsError.code == NSURLErrorNotConnectedToInternet,
+           requiresLocalNetworkAuthorization(for: URL(string: attemptedURL) ?? URL(fileURLWithPath: "/")) {
+            return "Remodex cannot open the local relay connection on this iPhone. Check Local Network and the app's Wi-Fi/Cellular access in Settings, then retry."
         }
 
         return error.localizedDescription
@@ -718,5 +757,62 @@ extension CodexService {
             return true
         }
         return host == "127.0.0.1" || host.hasPrefix("127.")
+    }
+
+    // Triggers iOS local-network privacy before dialing LAN relay hosts so pairing
+    // does not fail with an opaque socket wait when the permission prompt was never shown.
+    func requestLocalNetworkAuthorizationIfNeeded(for url: URL) async throws {
+        guard requiresLocalNetworkAuthorization(for: url),
+              localNetworkAuthorizationStatus != .granted else {
+            return
+        }
+
+        let requester = LocalNetworkAuthorizationRequester()
+        let status = await requester.request()
+        localNetworkAuthorizationStatus = status
+
+        guard status != .denied else {
+            let message =
+                "Remodex is not allowed to access your local network. Enable Local Network for Remodex in iPhone Settings and try again."
+            lastErrorMessage = message
+            throw CodexServiceError.invalidInput(message)
+        }
+    }
+
+    func requiresLocalNetworkAuthorization(for url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else {
+            return false
+        }
+
+        return host.hasSuffix(".local")
+            || isPrivateIPv4Host(host)
+            || isLocalIPv6Host(host)
+    }
+
+    private func isPrivateIPv4Host(_ host: String) -> Bool {
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4 else {
+            return false
+        }
+
+        switch (octets[0], octets[1]) {
+        case (10, _):
+            return true
+        case (172, 16...31):
+            return true
+        case (192, 168):
+            return true
+        case (169, 254):
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isLocalIPv6Host(_ host: String) -> Bool {
+        let normalized = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        return normalized.hasPrefix("fe80:")
+            || normalized.hasPrefix("fc")
+            || normalized.hasPrefix("fd")
     }
 }

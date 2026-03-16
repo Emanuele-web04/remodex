@@ -373,7 +373,7 @@ extension CodexService {
     }
 
     private func sendThreadNameSetRPC(threadId: String, name: String) {
-        guard isConnected, webSocketConnection != nil else { return }
+        guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -629,7 +629,7 @@ extension CodexService {
     /// Best-effort server-side archive/unarchive. Failures are logged but never
     /// surface to the user or trigger reconnection side-effects.
     private func sendThreadArchiveRPC(threadId: String, unarchive: Bool) {
-        guard isConnected, webSocketConnection != nil else { return }
+        guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
         let method = unarchive ? "thread/unarchive" : "thread/archive"
         Task { @MainActor [weak self] in
             guard let self else { return }

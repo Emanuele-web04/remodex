@@ -41,8 +41,19 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>Remodex needs camera access to let you take photos and attach them to your messages.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>CodexMobile needs local network access to connect to your Codex app-server running on your Mac.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_remodex-permission._tcp</string>
+	</array>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>CodexMobile needs photo library access to let you attach images to your messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

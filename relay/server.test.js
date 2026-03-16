@@ -7,7 +7,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const WebSocket = require("ws");
-const { createRelayServer, createFixedWindowRateLimiter, clientAddressKey } = require("./server");
+const {
+  createRelayServer,
+  createFixedWindowRateLimiter,
+  clientAddressKey,
+  redactRelayPathname,
+} = require("./server");
 
 test("health is minimal by default and detailed only when enabled", async () => {
   const minimal = await withServer(async ({ port }) => {
@@ -223,6 +228,45 @@ test("clientAddressKey ignores forwarded headers until trustProxy is enabled", (
     }),
     "10.0.0.1"
   );
+});
+
+test("relay logs redact live session identifiers", async () => {
+  const capturedLogs = [];
+  const originalLog = console.log;
+  console.log = (...args) => {
+    capturedLogs.push(args.join(" "));
+  };
+
+  try {
+    await withServer(async ({ port }) => {
+      const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-sensitive`, {
+        headers: { "x-role": "mac" },
+      });
+      const iphone = new WebSocket(`ws://127.0.0.1:${port}/relay/session-sensitive`, {
+        headers: { "x-role": "iphone" },
+      });
+
+      await Promise.all([onceOpen(mac), onceOpen(iphone)]);
+
+      const macClosed = onceClosed(mac);
+      const iphoneClosed = onceClosed(iphone);
+      mac.close();
+      iphone.close();
+      await Promise.all([macClosed, iphoneClosed]);
+    });
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.ok(capturedLogs.some((line) => line.includes("/relay/[session]")));
+  assert.ok(capturedLogs.some((line) => line.includes("session#")));
+  assert.ok(capturedLogs.every((line) => !line.includes("session-sensitive")));
+});
+
+test("redactRelayPathname hides the session path segment", () => {
+  assert.equal(redactRelayPathname("/relay/session-123"), "/relay/[session]");
+  assert.equal(redactRelayPathname("/relay/session-123/extra"), "/relay/[session]/extra");
+  assert.equal(redactRelayPathname("/health"), "/health");
 });
 
 test("websocket relay forwards between mac and iphone on the base relay path", async () => {

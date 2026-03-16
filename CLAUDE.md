@@ -13,6 +13,9 @@ This repo is local-first now. Do not reintroduce hosted-service assumptions, rem
 - Preserve single responsibility: shared logic belongs in services/coordinators, not duplicated in views.
 - Treat this repo as open source: avoid junk code, placeholder hacks, noisy one-off workarounds, and low-signal docs.
 - If you touch docs, keep them local-only and remove stale hosted-service notes instead of adding compatibility layers.
+- Do not create one-off report markdown files in the repo root (security reports, audit notes, scratch summaries, etc.) unless the user explicitly asks for a file. Keep ad-hoc analysis in the chat.
+- For open-source/self-hosted safety, do not log live relay `sessionId` values or other bearer-like pairing identifiers in server logs; redact or hash them instead.
+- Keep user-facing answers compact by default unless the user explicitly asks for more detail.
 
 ## iOS runtime + timeline guardrails
 
@@ -31,6 +34,8 @@ This repo is local-first now. Do not reintroduce hosted-service assumptions, rem
 - Avoid hardcoded remote domains; default to local values or explicit user config.
 - Keep pairing/auth UX stable: do not clear saved relay info too early during reconnect flows.
 - Preserve reconnect behavior across relaunch when the local host session is still valid.
+- Preserve the QR/local-relay pairing path: do not regress the scanner -> saved pairing -> connect flow by letting onboarding/auto-reconnect race manual scan control.
+- For local relay recovery, keep resumed desktop-thread live mirroring and rollout fallback logic intact so reopened/running threads still recover state even when the rollout file is older than the recent-candidate window.
 
 ## Build guardrails
 

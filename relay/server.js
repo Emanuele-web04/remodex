@@ -47,12 +47,19 @@ function createRelayServer({
 
   server.on("upgrade", (req, socket, head) => {
     const pathname = safePathname(req.url);
+    const loggedPathname = redactRelayPathname(pathname);
+    console.log(
+      `[relay] upgrade request path=${loggedPathname} remote=${clientAddressKey(req, { trustProxy })} `
+      + `role=${readHeaderString(req.headers["x-role"]) || "missing"}`
+    );
     if (!pathname.startsWith("/relay/")) {
+      console.log(`[relay] rejecting upgrade for non-relay path: ${loggedPathname}`);
       socket.destroy();
       return;
     }
 
     if (!upgradeRateLimiter.allow(clientAddressKey(req, { trustProxy }))) {
+      console.log(`[relay] rejecting upgrade due to rate limit: ${loggedPathname}`);
       socket.write(
         "HTTP/1.1 429 Too Many Requests\r\n" +
         "Connection: close\r\n" +
@@ -223,6 +230,17 @@ function safePathname(rawUrl) {
   }
 }
 
+// Hides bearer-like relay session ids from operational logs while preserving route shape.
+function redactRelayPathname(pathname) {
+  if (typeof pathname !== "string" || !pathname.startsWith("/relay/")) {
+    return pathname || "/";
+  }
+
+  const [, relayPrefix, ...rest] = pathname.split("/");
+  const suffix = rest.length > 1 ? `/${rest.slice(1).join("/")}` : "";
+  return `/${relayPrefix}/[session]${suffix}`;
+}
+
 // Trust forwarded client IPs only when a known reverse proxy sits in front of the relay.
 function clientAddressKey(req, { trustProxy = false } = {}) {
   if (trustProxy) {
@@ -337,4 +355,5 @@ module.exports = {
   createFixedWindowRateLimiter,
   clientAddressKey,
   readOptionalBooleanEnv,
+  redactRelayPathname,
 };

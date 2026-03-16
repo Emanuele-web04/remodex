@@ -29,8 +29,11 @@ struct ContentView: View {
 
     var body: some View {
         rootContent
-            // Keep launch/foreground reconnect observers alive even while the QR scanner is visible.
+            // Only resume saved-pairing recovery after onboarding is done and the manual scanner is not in control.
             .task {
+                guard hasSeenOnboarding, !isShowingManualScanner else {
+                    return
+                }
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
             }
             .onChange(of: showSettings) { _, show in
@@ -73,13 +76,16 @@ struct ContentView: View {
             .onChange(of: scenePhase) { _, phase in
                 codex.setForegroundState(phase != .background)
                 if phase == .active {
+                    guard hasSeenOnboarding, !isShowingManualScanner else {
+                        return
+                    }
                     Task {
                         await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
                     }
                 }
             }
             .onChange(of: codex.shouldAutoReconnectOnForeground) { _, shouldReconnect in
-                guard shouldReconnect, scenePhase == .active else {
+                guard shouldReconnect, scenePhase == .active, hasSeenOnboarding, !isShowingManualScanner else {
                     return
                 }
                 Task {
@@ -150,7 +156,7 @@ struct ContentView: View {
     private var rootContent: some View {
         if !hasSeenOnboarding {
             OnboardingView {
-                withAnimation { hasSeenOnboarding = true }
+                finishOnboardingAndShowScanner()
             }
         } else if isShowingManualScanner && !codex.isConnected {
             qrScannerBody
@@ -161,6 +167,16 @@ struct ContentView: View {
             mainAppBody
         } else {
             qrScannerBody
+        }
+    }
+
+    private func finishOnboardingAndShowScanner() {
+        codex.shouldAutoReconnectOnForeground = false
+        codex.connectionRecoveryState = .idle
+        codex.lastErrorMessage = nil
+        withAnimation {
+            hasSeenOnboarding = true
+            isShowingManualScanner = true
         }
     }
 
@@ -237,6 +253,7 @@ struct ContentView: View {
         } else {
             HomeEmptyStateView(
                 connectionPhase: homeConnectionPhase,
+                statusMessage: codex.lastErrorMessage,
                 securityLabel: codex.secureConnectionState.statusLabel,
                 onToggleConnection: {
                     Task {
@@ -439,22 +456,16 @@ struct ContentView: View {
         presentManualScannerAfterStoppingReconnect()
     }
 
-    // Waits for reconnect teardown before showing the scanner so stale retries cannot race the new QR flow.
+    // Shows the QR scanner immediately and tears down any stale reconnect in the background.
     private func presentManualScannerAfterStoppingReconnect() {
-        guard !isPreparingManualScanner, !isShowingManualScanner else {
+        guard !isShowingManualScanner else {
             return
         }
 
-        isPreparingManualScanner = true
+        isShowingManualScanner = true
 
         Task {
             await viewModel.stopAutoReconnectForManualScan(codex: codex)
-            await MainActor.run {
-                isPreparingManualScanner = false
-                if !codex.isConnected {
-                    isShowingManualScanner = true
-                }
-            }
         }
     }
 

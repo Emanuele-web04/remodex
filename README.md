@@ -126,6 +126,8 @@ cd remodex
 
 That launcher starts a local pairing endpoint, points the bridge at `ws://<your-host>:9000/relay`, and prints the pairing QR for the iPhone app.
 
+For iPhone self-hosting, the recommended path is Tailscale or another stable private network. Plain LAN pairing over `ws://<lan-ip>` on the same Wi-Fi is still available for local testing, but it can be unreliable on some iOS devices even when the relay and Wi-Fi are healthy.
+
 Options:
 
 - `./run-local-remodex.sh --hostname <lan-hostname-or-ip>`
@@ -142,6 +144,8 @@ If you want the npm bridge to point at your own setup instead of the built-in de
 ```sh
 REMODEX_RELAY="ws://localhost:9000/relay" remodex up
 ```
+
+For self-hosted iPhone usage, prefer a relay URL reachable over Tailscale or another stable private network. Treat plain local `ws://192.168.x.x` pairing as best-effort rather than the recommended production path on iOS.
 
 Reverse-proxy subpaths work too, so a hosted relay behind Traefik can live under the same domain as other APIs:
 
@@ -250,6 +254,7 @@ On the relay/VPS side, keep push disabled until you actually want it. The HTTP p
 ## Pairing and Safety
 
 - Remodex is local-first: Codex, git operations, and workspace actions run on your Mac, while the iPhone acts as a paired remote control.
+- On iPhone, the most reliable self-host setup is a Tailscale-reachable relay. Plain LAN pairing over `ws://` on the same Wi-Fi can fail on some iOS devices because local-network routing from the app is not always reliable.
 - The pairing QR carries the connection URL, the session ID, and the bridge identity key used to bootstrap end-to-end encryption. After a successful scan, the iPhone stores that pairing in Keychain and the bridge persists its trusted device identity locally on the Mac.
 - The iPhone stores pairing metadata in Keychain, but you should not rely on hands-free reconnect across bridge restarts or fresh runs. In practice, expect to scan a fresh QR code when you start a new bridge session.
 - The bridge state lives canonically in `~/.remodex/device-state.json` with local-only permissions. On macOS the bridge also mirrors that state to Keychain as best-effort backup/migration data.

@@ -36,6 +36,81 @@ struct CodexSecureControlWaiter {
     let continuation: CheckedContinuation<String, Error>
 }
 
+enum CodexWebSocketTransport {
+    case network(NWConnection)
+    case manualTCP(NWConnection)
+    case urlSession(URLSession, URLSessionWebSocketTask)
+}
+
+final class CodexURLSessionWebSocketDelegate: NSObject, URLSessionWebSocketDelegate, URLSessionTaskDelegate {
+    private let lock = NSLock()
+    private var openContinuation: CheckedContinuation<Void, Error>?
+    private var openResult: Result<Void, Error>?
+
+    // Waits for URLSession to confirm the websocket handshake before connect() continues.
+    func waitForOpen() async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            defer { lock.unlock() }
+            if let openResult {
+                continuation.resume(with: openResult)
+                return
+            }
+            openContinuation = continuation
+        }
+    }
+
+    // Resolves the initial websocket open exactly once from any delegate callback.
+    func resolveOpen(with result: Result<Void, Error>) {
+        lock.lock()
+        guard openResult == nil else {
+            lock.unlock()
+            return
+        }
+        openResult = result
+        let continuation = openContinuation
+        openContinuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didOpenWithProtocol protocol: String?
+    ) {
+        resolveOpen(with: .success(()))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        webSocketTask: URLSessionWebSocketTask,
+        didCloseWith closeCode: URLSessionWebSocketTask.CloseCode,
+        reason: Data?
+    ) {
+        if closeCode == .invalid {
+            resolveOpen(with: .failure(CodexServiceError.disconnected))
+            return
+        }
+
+        resolveOpen(
+            with: .failure(
+                CodexServiceError.invalidInput("WebSocket closed during connect (\(closeCode.rawValue))")
+            )
+        )
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didCompleteWithError error: Error?
+    ) {
+        if let error {
+            resolveOpen(with: .failure(error))
+        }
+    }
+}
+
 struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
     let id = UUID()
     let title: String
@@ -244,6 +319,8 @@ final class CodexService {
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    // Fresh QR scans must use bootstrap once, even if this Mac was already trusted before.
+    var shouldForceQRBootstrapOnNextHandshake = false
     // Stops infinite trusted-reconnect loops by escalating back to QR after repeated handshake failures.
     var trustedReconnectFailureCount = 0
     var secureConnectionState: CodexSecureConnectionState = .notPaired
@@ -259,6 +336,12 @@ final class CodexService {
     // --- Internal wiring ------------------------------------------------------
 
     var webSocketConnection: NWConnection?
+    var webSocketSession: URLSession?
+    var webSocketSessionDelegate: CodexURLSessionWebSocketDelegate?
+    var webSocketTask: URLSessionWebSocketTask?
+    // Raw frame buffer used when the relay runs over manual TCP websocket framing.
+    var manualWebSocketReadBuffer = Data()
+    var usesManualWebSocketTransport = false
     let webSocketQueue = DispatchQueue(label: "CodexMobile.WebSocket", qos: .userInitiated)
     var pendingRequests: [String: CheckedContinuation<RPCMessage, Error>] = [:]
     // Test hook: intercepts outbound RPC requests without requiring a live socket.
@@ -289,10 +372,9 @@ final class CodexService {
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
-    // Desktop-mirrored runs can miss assistant deltas, so we temporarily allow
-    // forced thread/resume catch-up while the turn is still active.
     var mirroredRunningCatchupThreadIDs: Set<String> = []
     var lastMirroredRunningCatchupAtByThread: [String: Date] = [:]
+    var localNetworkAuthorizationStatus: LocalNetworkAuthorizationStatus = .unknown
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]

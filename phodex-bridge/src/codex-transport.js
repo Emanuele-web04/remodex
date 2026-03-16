@@ -7,9 +7,13 @@
 const { spawn } = require("child_process");
 const WebSocket = require("ws");
 
-function createCodexTransport({ endpoint = "", env = process.env } = {}) {
+function createCodexTransport({
+  endpoint = "",
+  env = process.env,
+  WebSocketImpl = WebSocket,
+} = {}) {
   if (endpoint) {
-    return createWebSocketTransport({ endpoint });
+    return createWebSocketTransport({ endpoint, WebSocketImpl });
   }
 
   return createSpawnTransport({ env });
@@ -167,8 +171,8 @@ function isIgnorableStdinShutdownError(error) {
   return error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED";
 }
 
-function createWebSocketTransport({ endpoint }) {
-  const socket = new WebSocket(endpoint);
+function createWebSocketTransport({ endpoint, WebSocketImpl = WebSocket }) {
+  const socket = new WebSocketImpl(endpoint);
   const listeners = createListenerBag();
 
   socket.on("message", (chunk) => {

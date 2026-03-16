@@ -76,16 +76,20 @@ function startBridge() {
   let reconnectAttempt = 0;
   let reconnectTimer = null;
   let lastConnectionStatus = null;
-  // A freshly connected external Codex endpoint still needs a real initialize
-  // before it can serve thread/list or thread/start. Only mark it warm after
-  // we observe an initialize success (or explicit "already initialized").
-  let codexHandshakeState = "cold";
+  let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
   const secureTransport = createBridgeSecureTransport({
     sessionId,
     relayUrl: relayBaseUrl,
     deviceState,
   });
+  // Only the spawned local runtime needs rollout mirroring; a real endpoint
+  // already provides the authoritative live stream for resumed threads.
+  const rolloutLiveMirror = !config.codexEndpoint
+    ? createRolloutLiveMirrorController({
+      sendApplicationResponse,
+    })
+    : null;
   let contextUsageWatcher = null;
   let watchedContextUsageKey = null;
 
@@ -202,7 +206,7 @@ function startBridge() {
         socket = null;
       }
       stopContextUsageWatcher();
-      rolloutLiveMirror.stopAll();
+      rolloutLiveMirror?.stopAll();
       desktopRefresher.handleTransportReset();
       scheduleRelayReconnect(code);
     });
@@ -233,7 +237,7 @@ function startBridge() {
     isShuttingDown = true;
     clearReconnectTimer();
     stopContextUsageWatcher();
-    rolloutLiveMirror.stopAll();
+    rolloutLiveMirror?.stopAll();
     desktopRefresher.handleTransportReset();
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
       socket.close();
@@ -273,9 +277,7 @@ function startBridge() {
       return;
     }
     desktopRefresher.handleInbound(rawMessage);
-    if (!config.codexEndpoint) {
-      rolloutLiveMirror.observeInbound(rawMessage);
-    }
+    rolloutLiveMirror?.observeInbound(rawMessage);
     rememberThreadFromMessage("phone", rawMessage);
     codex.send(rawMessage);
   }
@@ -288,13 +290,6 @@ function startBridge() {
       }
     });
   }
-
-  // Replays desktop-origin rollout activity only for spawned-runtime sessions.
-  // When the bridge is attached to a real Codex endpoint, let that live stream
-  // be authoritative to avoid duplicating mirrored thinking/tool activity.
-  const rolloutLiveMirror = createRolloutLiveMirrorController({
-    sendApplicationResponse,
-  });
 
   function rememberThreadFromMessage(source, rawMessage) {
     const context = extractBridgeMessageContext(rawMessage);

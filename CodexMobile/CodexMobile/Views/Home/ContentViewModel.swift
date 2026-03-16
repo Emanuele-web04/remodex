@@ -38,15 +38,20 @@ final class ContentViewModel {
     func connectToRelay(pairingPayload: CodexPairingQRPayload, codex: CodexService) async {
         await stopAutoReconnectForManualScan(codex: codex)
         let fullURL = "\(pairingPayload.relay)/\(pairingPayload.sessionId)"
+        print("[PAIRING] QR scanned — relay=\(pairingPayload.relay) session=\(pairingPayload.sessionId)")
+        print("[PAIRING] full URL=\(fullURL)")
         codex.rememberRelayPairing(pairingPayload)
 
         do {
+            print("[PAIRING] starting connectWithAutoRecovery")
             try await connectWithAutoRecovery(
                 codex: codex,
                 serverURL: fullURL,
                 performAutoRetry: true
             )
+            print("[PAIRING] connected OK")
         } catch {
+            print("[PAIRING] connect failed: \(error)")
             if codex.lastErrorMessage?.isEmpty ?? true {
                 codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
             }

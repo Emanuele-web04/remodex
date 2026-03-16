@@ -19,7 +19,11 @@ extension CodexService {
         }
 
         let trustedMac = trustedMacRegistry.records[macDeviceId]
-        let handshakeMode: CodexSecureHandshakeMode = trustedMac != nil ? .trustedReconnect : .qrBootstrap
+        // Fresh QR scans must go through bootstrap once so we verify the scanned session,
+        // instead of silently reusing an older trusted-reconnect path.
+        let handshakeMode: CodexSecureHandshakeMode = (!shouldForceQRBootstrapOnNextHandshake && trustedMac != nil)
+            ? .trustedReconnect
+            : .qrBootstrap
         let expectedMacIdentityPublicKey: String
         switch handshakeMode {
         case .trustedReconnect:
@@ -176,6 +180,7 @@ extension CodexService {
             nextOutboundCounter: 0
         )
         pendingHandshake = nil
+        shouldForceQRBootstrapOnNextHandshake = false
         secureConnectionState = .encrypted
         secureMacFingerprint = codexSecureFingerprint(for: serverHello.macIdentityPublicKey)
         bridgeUpdatePrompt = nil
@@ -260,6 +265,7 @@ extension CodexService {
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
+        shouldForceQRBootstrapOnNextHandshake = true
         trustedReconnectFailureCount = 0
         secureConnectionState = trustedMacRegistry.records[payload.macDeviceId] == nil ? .handshaking : .trustedMac
         secureMacFingerprint = codexSecureFingerprint(for: payload.macIdentityPublicKey)
@@ -277,6 +283,16 @@ extension CodexService {
             for waiter in waiters {
                 waiter.continuation.resume(throwing: CodexServiceError.disconnected)
             }
+        }
+
+        if secureConnectionState == .rePairRequired || secureConnectionState == .updateRequired {
+            return
+        }
+
+        if shouldForceQRBootstrapOnNextHandshake, normalizedRelaySessionId != nil {
+            secureConnectionState = trustedMacRegistry.records[relayMacDeviceId ?? ""] == nil ? .handshaking : .trustedMac
+            secureMacFingerprint = normalizedRelayMacIdentityPublicKey.map { codexSecureFingerprint(for: $0) }
+            return
         }
 
         if let relayMacDeviceId,

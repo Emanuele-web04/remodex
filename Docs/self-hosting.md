@@ -31,7 +31,7 @@ The relay does not run Codex and does not get your plaintext application payload
 
 ## Option 1: Local LAN Setup
 
-This is the easiest way to try the public repo.
+This is the easiest way to try the public repo, but on iPhone it should be treated as a best-effort local test path. The recommended self-host setup for regular use is Tailscale or another stable private network path to your relay.
 
 ### What you need
 
@@ -220,6 +220,8 @@ Try a concrete LAN IP:
 ./run-local-remodex.sh --hostname 192.168.1.10
 ```
 
+If local LAN pairing still fails on iPhone even though the relay health check works, prefer a Tailscale-reachable relay instead of continuing to rely on plain `ws://` over the same Wi-Fi.
+
 ### The relay health check works, but pairing still fails
 
 That usually means one of these:
@@ -233,6 +235,7 @@ That usually means one of these:
 If you cloned the public repo, the supported self-hosting story is:
 
 - run the relay yourself
+- prefer a relay path reachable from iPhone over Tailscale or another stable private network
 - point the bridge at your relay with `REMODEX_RELAY`
 - scan the QR from the iPhone app
 - keep private hostnames and credentials out of the public repo
