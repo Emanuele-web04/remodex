@@ -62,8 +62,9 @@ struct SidebarThreadRowView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, isSelected ? 12 : 12)
+            .contentShape(Rectangle())
             .background {
                 if isSelected {
                     Color(.tertiarySystemFill).opacity(0.8)

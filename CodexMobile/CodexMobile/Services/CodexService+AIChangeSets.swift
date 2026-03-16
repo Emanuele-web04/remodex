@@ -317,9 +317,13 @@ extension CodexService {
         }
 
         // Rebuild repo-busy state immediately so sibling threads pick up the canonical root mid-run.
+        // Use the no-refresh variant to avoid a double full-thread refresh:
+        // refreshBusyRepoRoots already refreshes affected threads, and the revert cache is invalidated.
         if didChange {
-            invalidateAssistantRevertStates()
-            refreshBusyRepoRootsAndDependentTimelineStates()
+            invalidateAssistantRevertStatesWithoutRefresh()
+            if !refreshBusyRepoRootsAndDependentTimelineStates() {
+                refreshAllThreadTimelineStates()
+            }
         }
     }
 

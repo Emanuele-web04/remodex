@@ -147,7 +147,7 @@ struct CodexMissingNotificationThreadPrompt: Identifiable, Equatable, Sendable {
     let threadId: String
 }
 
-enum CodexThreadRunBadgeState: Equatable, Sendable {
+enum CodexThreadRunBadgeState: Hashable, Sendable {
     case running
     case ready
     case failed
@@ -352,6 +352,8 @@ final class CodexService {
     var commandExecutionDetailsByItemID: [String: CommandExecutionDetails] = [:]
     // Debounces disk writes while streaming to keep UI responsive.
     var messagePersistenceDebounceTask: Task<Void, Never>?
+    // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
+    var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
     var assistantCompletionFingerprintByThread: [String: (text: String, timestamp: Date)] = [:]
     // Dedupes concise activity feed lines per thread/turn to avoid visual spam.

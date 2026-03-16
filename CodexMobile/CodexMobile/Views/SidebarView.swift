@@ -23,9 +23,13 @@ struct SidebarView: View {
     @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
     @State private var threadPendingDeletion: CodexThread? = nil
     @State private var createThreadErrorMessage: String? = nil
+    @State private var cachedDiffTotals: [String: TurnSessionDiffTotals] = [:]
+    @State private var cachedRunBadges: [String: CodexThreadRunBadgeState] = [:]
+    @State private var lastDiffFingerprint: Int = 0
+    @State private var lastBadgeFingerprint: Int = 0
 
     var body: some View {
-        let diffTotalsByThreadID = sidebarDiffTotalsByThreadID
+        let diffTotalsByThreadID = cachedDiffTotals
 
         VStack(alignment: .leading, spacing: 0) {
             SidebarHeaderView()
@@ -54,7 +58,7 @@ struct SidebarView: View {
                 bottomContentInset: 0,
                 timingLabelProvider: { SidebarRelativeTimeFormatter.compactLabel(for: $0) },
                 diffTotalsByThreadID: diffTotalsByThreadID,
-                runBadgeStateByThreadID: runBadgeStateByThreadID,
+                runBadgeStateByThreadID: cachedRunBadges,
                 onSelectThread: selectThread,
                 onCreateThreadInProjectGroup: { group in
                     handleNewChatTap(preferredProjectPath: group.projectPath)
@@ -93,15 +97,23 @@ struct SidebarView: View {
         .background(Color(.systemBackground))
         .task {
             rebuildGroupedThreads()
+            rebuildCachedSidebarState()
             if codex.isConnected, codex.threads.isEmpty {
                 await refreshThreads()
             }
         }
         .onChange(of: codex.threads) { _, _ in
             rebuildGroupedThreads()
+            rebuildCachedSidebarState()
         }
         .onChange(of: searchText) { _, _ in
             rebuildGroupedThreads()
+        }
+        .onChange(of: diffFingerprint) { _, _ in
+            rebuildCachedDiffTotals()
+        }
+        .onChange(of: badgeFingerprint) { _, _ in
+            rebuildCachedRunBadges()
         }
         .overlay {
             if codex.isLoadingThreads {
@@ -273,19 +285,39 @@ struct SidebarView: View {
         groupedThreads = SidebarThreadGrouping.makeGroups(from: source)
     }
 
-    private var runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] {
-        var byThreadID: [String: CodexThreadRunBadgeState] = [:]
+    // Cheap fingerprint: hashes thread IDs + message revisions (O(n) integer work, no message access).
+    private var diffFingerprint: Int {
+        var hasher = Hasher()
         for thread in codex.threads {
-            if let state = codex.threadRunBadgeState(for: thread.id) {
-                byThreadID[thread.id] = state
-            }
+            hasher.combine(thread.id)
+            hasher.combine(codex.messageRevision(for: thread.id))
         }
-        return byThreadID
+        return hasher.finalize()
     }
 
-    private var sidebarDiffTotalsByThreadID: [String: TurnSessionDiffTotals] {
-        var byThreadID: [String: TurnSessionDiffTotals] = [:]
+    // Cheap fingerprint for run badge state — changes when running/ready/failed sets change.
+    private var badgeFingerprint: Int {
+        var hasher = Hasher()
+        for thread in codex.threads {
+            hasher.combine(thread.id)
+            if let badge = codex.threadRunBadgeState(for: thread.id) {
+                hasher.combine(badge)
+            }
+        }
+        return hasher.finalize()
+    }
 
+    private func rebuildCachedSidebarState() {
+        rebuildCachedDiffTotals()
+        rebuildCachedRunBadges()
+    }
+
+    private func rebuildCachedDiffTotals() {
+        let fp = diffFingerprint
+        guard fp != lastDiffFingerprint else { return }
+        lastDiffFingerprint = fp
+
+        var byThreadID: [String: TurnSessionDiffTotals] = [:]
         for thread in codex.threads {
             let messages = codex.messages(for: thread.id)
             if let totals = TurnSessionDiffSummaryCalculator.totals(
@@ -295,8 +327,21 @@ struct SidebarView: View {
                 byThreadID[thread.id] = totals
             }
         }
+        cachedDiffTotals = byThreadID
+    }
 
-        return byThreadID
+    private func rebuildCachedRunBadges() {
+        let fp = badgeFingerprint
+        guard fp != lastBadgeFingerprint else { return }
+        lastBadgeFingerprint = fp
+
+        var byThreadID: [String: CodexThreadRunBadgeState] = [:]
+        for thread in codex.threads {
+            if let state = codex.threadRunBadgeState(for: thread.id) {
+                byThreadID[thread.id] = state
+            }
+        }
+        cachedRunBadges = byThreadID
     }
 
     // Keeps the chooser in sync with the same project buckets shown in the sidebar.

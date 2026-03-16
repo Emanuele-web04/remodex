@@ -10,36 +10,74 @@
 
 import Foundation
 
-enum MarkdownRenderableTextCache {
-    static let maxEntries = 512
-    static let lock = NSLock()
-    static var renderedByKey: [String: String] = [:]
+// Thread-safe bounded cache that evicts roughly half its entries when full instead of discarding everything.
+final class BoundedCache<Key: Hashable, Value> {
+    private let maxEntries: Int
+    private let lock = NSLock()
+    private var storage: [Key: Value] = [:]
 
-    // Caches markdown-to-renderable transformation to reduce repeated line/regex work.
-    static func rendered(
-        raw: String,
-        profile: MarkdownRenderProfile,
-        builder: () -> String
-    ) -> String {
-        let cacheKey = "\(profile.cacheKey)|\(raw.hashValue)"
+    init(maxEntries: Int) {
+        self.maxEntries = maxEntries
+    }
 
+    func get(_ key: Key) -> Value? {
         lock.lock()
-        if let cached = renderedByKey[cacheKey] {
+        defer { lock.unlock() }
+        return storage[key]
+    }
+
+    func set(_ key: Key, value: Value) {
+        lock.lock()
+        evictIfNeeded()
+        storage[key] = value
+        lock.unlock()
+    }
+
+    func getOrSet(_ key: Key, builder: () -> Value) -> Value {
+        lock.lock()
+        if let cached = storage[key] {
             lock.unlock()
             return cached
         }
         lock.unlock()
 
-        let rendered = builder()
+        let built = builder()
 
         lock.lock()
-        if renderedByKey.count >= maxEntries {
-            renderedByKey.removeAll(keepingCapacity: true)
-        }
-        renderedByKey[cacheKey] = rendered
+        evictIfNeeded()
+        storage[key] = built
         lock.unlock()
 
-        return rendered
+        return built
+    }
+
+    func removeAll() {
+        lock.lock()
+        storage.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
+
+    private func evictIfNeeded() {
+        guard storage.count >= maxEntries else { return }
+        let evictCount = maxEntries / 2
+        var removed = 0
+        for key in storage.keys {
+            guard removed < evictCount else { break }
+            storage.removeValue(forKey: key)
+            removed += 1
+        }
+    }
+}
+
+enum MarkdownRenderableTextCache {
+    private static let cache = BoundedCache<String, String>(maxEntries: 512)
+
+    static func rendered(
+        raw: String,
+        profile: MarkdownRenderProfile,
+        builder: () -> String
+    ) -> String {
+        cache.getOrSet("\(profile.cacheKey)|\(raw.hashValue)", builder: builder)
     }
 }
 
@@ -70,37 +108,15 @@ struct MessageRowRenderModel {
 }
 
 enum MessageRowRenderModelCache {
-    static let maxEntries = 512
-    static let lock = NSLock()
-    static var cache: [String: MessageRowRenderModel] = [:]
+    private static let cache = BoundedCache<String, MessageRowRenderModel>(maxEntries: 512)
 
-    // Bundles all row-level parsing into one cache hit so timeline cells avoid repeated parser churn.
     static func model(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
         let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(message.isStreaming)|\(displayText.hashValue)"
-
-        lock.lock()
-        if let cached = cache[key] {
-            lock.unlock()
-            return cached
-        }
-        lock.unlock()
-
-        let built = buildModel(for: message, displayText: displayText)
-
-        lock.lock()
-        if cache.count >= maxEntries {
-            cache.removeAll(keepingCapacity: true)
-        }
-        cache[key] = built
-        lock.unlock()
-
-        return built
+        return cache.getOrSet(key) { buildModel(for: message, displayText: displayText) }
     }
 
     static func reset() {
-        lock.lock()
-        cache.removeAll(keepingCapacity: false)
-        lock.unlock()
+        cache.removeAll()
     }
 
     private static func buildModel(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
@@ -173,31 +189,13 @@ enum MessageRowRenderModelCache {
 }
 
 enum CommandExecutionStatusCache {
-    static let maxEntries = 256
-    static let lock = NSLock()
-    static var statusByKey: [String: CommandExecutionStatusModel] = [:]
+    private static let cache = BoundedCache<String, CommandExecutionStatusModel>(maxEntries: 256)
 
     static func status(messageID: String, text: String) -> CommandExecutionStatusModel? {
-        let cacheKey = "\(messageID)|\(text.hashValue)"
-
-        lock.lock()
-        if let cached = statusByKey[cacheKey] {
-            lock.unlock()
-            return cached
-        }
-        lock.unlock()
-
-        guard let parsed = parse(text) else {
-            return nil
-        }
-
-        lock.lock()
-        if statusByKey.count >= maxEntries {
-            statusByKey.removeAll(keepingCapacity: true)
-        }
-        statusByKey[cacheKey] = parsed
-        lock.unlock()
-
+        let key = "\(messageID)|\(text.hashValue)"
+        if let cached = cache.get(key) { return cached }
+        guard let parsed = parse(text) else { return nil }
+        cache.set(key, value: parsed)
         return parsed
     }
 
@@ -221,40 +219,21 @@ enum CommandExecutionStatusCache {
 }
 
 enum FileChangeSystemRenderCache {
-    static let maxEntries = 256
-    static let lock = NSLock()
-    static var stateByKey: [String: FileChangeRenderState] = [:]
+    private static let cache = BoundedCache<String, FileChangeRenderState>(maxEntries: 256)
 
-    // Caches file-change parse artifacts to keep scrolling smooth on long patch threads.
     static func renderState(messageID: String, sourceText: String) -> FileChangeRenderState {
-        let cacheKey = "\(messageID)|\(sourceText.hashValue)"
-
-        lock.lock()
-        if let cached = stateByKey[cacheKey] {
-            lock.unlock()
-            return cached
+        cache.getOrSet("\(messageID)|\(sourceText.hashValue)") {
+            let summary = TurnFileChangeSummaryParser.parse(from: sourceText)
+            let actionEntries = summary?.entries.filter { $0.action != nil } ?? []
+            let bodyText = actionEntries.isEmpty
+                ? sourceText
+                : TurnFileChangeSummaryParser.removingInlineEditingRows(from: sourceText)
+            return FileChangeRenderState(
+                summary: summary,
+                actionEntries: actionEntries,
+                bodyText: bodyText
+            )
         }
-        lock.unlock()
-
-        let summary = TurnFileChangeSummaryParser.parse(from: sourceText)
-        let actionEntries = summary?.entries.filter { $0.action != nil } ?? []
-        let bodyText = actionEntries.isEmpty
-            ? sourceText
-            : TurnFileChangeSummaryParser.removingInlineEditingRows(from: sourceText)
-        let state = FileChangeRenderState(
-            summary: summary,
-            actionEntries: actionEntries,
-            bodyText: bodyText
-        )
-
-        lock.lock()
-        if stateByKey.count >= maxEntries {
-            stateByKey.removeAll(keepingCapacity: true)
-        }
-        stateByKey[cacheKey] = state
-        lock.unlock()
-
-        return state
     }
 }
 
@@ -418,99 +397,43 @@ enum PerFileDiffParser {
 // ─── Per-File Diff Chunk Cache ──────────────────────────────────────
 
 enum PerFileDiffChunkCache {
-    static let maxEntries = 128
-    static let lock = NSLock()
-    static var cache: [String: [PerFileDiffChunk]] = [:]
+    private static let cache = BoundedCache<String, [PerFileDiffChunk]>(maxEntries: 128)
 
     static func chunks(messageID: String, bodyText: String, entries: [TurnFileChangeSummaryEntry]) -> [PerFileDiffChunk] {
-        let key = "\(messageID)|\(bodyText.hashValue)"
-
-        lock.lock()
-        if let cached = cache[key] {
-            lock.unlock()
-            return cached
+        cache.getOrSet("\(messageID)|\(bodyText.hashValue)") {
+            PerFileDiffParser.parse(bodyText: bodyText, entries: entries)
         }
-        lock.unlock()
-
-        let parsed = PerFileDiffParser.parse(bodyText: bodyText, entries: entries)
-
-        lock.lock()
-        if cache.count >= maxEntries {
-            cache.removeAll(keepingCapacity: true)
-        }
-        cache[key] = parsed
-        lock.unlock()
-
-        return parsed
     }
 }
 
 // ─── Code Comment Directive Content Cache ───────────────────────────
 
 enum CodeCommentDirectiveContentCache {
-    static let maxEntries = 256
-    static let lock = NSLock()
-    static var cache: [String: CodeCommentDirectiveContent] = [:]
+    private static let cache = BoundedCache<String, CodeCommentDirectiveContent>(maxEntries: 256)
 
     static func content(messageID: String, text: String) -> CodeCommentDirectiveContent {
-        let key = "\(messageID)|\(text.hashValue)"
-
-        lock.lock()
-        if let cached = cache[key] {
-            lock.unlock()
-            return cached
+        cache.getOrSet("\(messageID)|\(text.hashValue)") {
+            CodeCommentDirectiveParser.parse(from: text)
         }
-        lock.unlock()
-
-        let parsed = CodeCommentDirectiveParser.parse(from: text)
-
-        lock.lock()
-        if cache.count >= maxEntries {
-            cache.removeAll(keepingCapacity: true)
-        }
-        cache[key] = parsed
-        lock.unlock()
-
-        return parsed
     }
 }
 
 // ─── Thinking Disclosure Content Cache ──────────────────────────────
 
 enum ThinkingDisclosureContentCache {
-    static let maxEntries = 256
-    static let lock = NSLock()
-    static var cache: [String: ThinkingDisclosureContent] = [:]
+    private static let cache = BoundedCache<String, ThinkingDisclosureContent>(maxEntries: 256)
 
     static func content(messageID: String, text: String) -> ThinkingDisclosureContent {
-        let key = "\(messageID)|\(text.hashValue)"
-
-        lock.lock()
-        if let cached = cache[key] {
-            lock.unlock()
-            return cached
+        cache.getOrSet("\(messageID)|\(text.hashValue)") {
+            ThinkingDisclosureParser.parse(from: text)
         }
-        lock.unlock()
-
-        let parsed = ThinkingDisclosureParser.parse(from: text)
-
-        lock.lock()
-        if cache.count >= maxEntries {
-            cache.removeAll(keepingCapacity: true)
-        }
-        cache[key] = parsed
-        lock.unlock()
-
-        return parsed
     }
 }
 
 // ─── Diff Block Detection Cache ─────────────────────────────────────
 
 enum DiffBlockDetectionCache {
-    static let maxEntries = 512
-    static let lock = NSLock()
-    static var cache: [Int: Bool] = [:]
+    private static let cache = BoundedCache<Int, Bool>(maxEntries: 512)
 
     static func isDiffBlock(code: String, profile: MarkdownRenderProfile) -> Bool {
         switch profile {
@@ -518,25 +441,9 @@ enum DiffBlockDetectionCache {
             break
         }
 
-        let key = code.hashValue
-
-        lock.lock()
-        if let cached = cache[key] {
-            lock.unlock()
-            return cached
+        return cache.getOrSet(code.hashValue) {
+            TurnDiffLineKind.detectVerifiedPatch(in: code)
         }
-        lock.unlock()
-
-        let result = TurnDiffLineKind.detectVerifiedPatch(in: code)
-
-        lock.lock()
-        if cache.count >= maxEntries {
-            cache.removeAll(keepingCapacity: true)
-        }
-        cache[key] = result
-        lock.unlock()
-
-        return result
     }
 }
 
@@ -549,9 +456,7 @@ struct FileChangeGroup: Identifiable {
 }
 
 enum FileChangeGroupingCache {
-    static let maxEntries = 256
-    static let lock = NSLock()
-    static var cache: [String: [FileChangeGroup]] = [:]
+    private static let cache = BoundedCache<String, [FileChangeGroup]>(maxEntries: 256)
 
     static func grouped(messageID: String, entries: [TurnFileChangeSummaryEntry]) -> [FileChangeGroup] {
         var hasher = Hasher()
@@ -564,29 +469,15 @@ enum FileChangeGroupingCache {
         }
         let key = "\(hasher.finalize())"
 
-        lock.lock()
-        if let cached = cache[key] {
-            lock.unlock()
-            return cached
+        return cache.getOrSet(key) {
+            var order: [String] = []
+            var dict: [String: [TurnFileChangeSummaryEntry]] = [:]
+            for entry in entries {
+                let groupKey = entry.action?.rawValue ?? "Edited"
+                if dict[groupKey] == nil { order.append(groupKey) }
+                dict[groupKey, default: []].append(entry)
+            }
+            return order.map { FileChangeGroup(key: $0, entries: dict[$0]!) }
         }
-        lock.unlock()
-
-        var order: [String] = []
-        var dict: [String: [TurnFileChangeSummaryEntry]] = [:]
-        for entry in entries {
-            let groupKey = entry.action?.rawValue ?? "Edited"
-            if dict[groupKey] == nil { order.append(groupKey) }
-            dict[groupKey, default: []].append(entry)
-        }
-        let result = order.map { FileChangeGroup(key: $0, entries: dict[$0]!) }
-
-        lock.lock()
-        if cache.count >= maxEntries {
-            cache.removeAll(keepingCapacity: true)
-        }
-        cache[key] = result
-        lock.unlock()
-
-        return result
     }
 }

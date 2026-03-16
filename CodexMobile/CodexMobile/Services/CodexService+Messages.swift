@@ -156,6 +156,8 @@ extension CodexService {
         mirroredRunningCatchupThreadIDs.removeAll()
         lastMirroredRunningCatchupAtByThread.removeAll()
         refreshBusyRepoRootsAndDependentTimelineStates()
+        // Always refresh all threads: threads without a gitWorkingDirectory won't appear in
+        // changedRoots but still need their isThreadRunning flag updated after clearing.
         refreshAllThreadTimelineStates()
     }
 
@@ -1818,7 +1820,6 @@ extension CodexService {
         activeTurnIdByThread.removeAll()
         threadsPendingCompletionHaptic.removeAll()
         clearAllRunningState()
-        refreshAllThreadTimelineStates()
         streamingAssistantMessageByTurnID.removeAll()
         streamingSystemMessageByItemID.removeAll()
         threadIdByTurnID.removeAll()
@@ -1922,7 +1923,10 @@ extension CodexService {
     }
 
     // Recomputes which repos are currently busy so revert buttons update without scanning all threads per row.
-    func refreshBusyRepoRootsAndDependentTimelineStates() {
+    // Returns true if busy-roots actually changed and dependent timelines were refreshed.
+    @discardableResult
+    func refreshBusyRepoRootsAndDependentTimelineStates() -> Bool {
+        let previousBusyRepoRoots = busyRepoRoots
         let nextBusyRepoRoots = Set(
             threads.compactMap { thread -> String? in
                 guard runningThreadIDs.contains(thread.id)
@@ -1935,13 +1939,25 @@ extension CodexService {
             }
         )
 
-        guard nextBusyRepoRoots != busyRepoRoots else {
-            return
+        guard nextBusyRepoRoots != previousBusyRepoRoots else {
+            return false
         }
 
         busyRepoRoots = nextBusyRepoRoots
         busyRepoRootsRevision &+= 1
-        refreshAllThreadTimelineStates()
+
+        // Only refresh threads whose repo is in the changed set, not all threads.
+        let changedRoots = previousBusyRepoRoots.symmetricDifference(nextBusyRepoRoots)
+        let workingDirByThread: [String: String?] = Dictionary(
+            uniqueKeysWithValues: threads.map { ($0.id, $0.gitWorkingDirectory) }
+        )
+        for threadId in threadTimelineStateByThread.keys {
+            let workingDir = workingDirByThread[threadId] ?? nil
+            let repoId = canonicalRepoIdentifier(for: workingDir) ?? workingDir
+            guard let repoId, changedRoots.contains(repoId) else { continue }
+            refreshThreadTimelineState(for: threadId)
+        }
+        return true
     }
 
     // Keeps stopped-turn lookup thread-local so scroll/render code never rescans full transcripts.
@@ -2002,9 +2018,26 @@ extension CodexService {
 
     // Invalidates revert presentations globally because sibling threads can change file-overlap risk.
     func invalidateAssistantRevertStates() {
+        invalidateAssistantRevertStatesWithoutRefresh()
+        scheduleCoalescedRevertRefresh()
+    }
+
+    // Bumps the revert revision and clears cache without triggering a full timeline refresh.
+    // Callers that already perform their own refresh (e.g. rememberRepoRoot) use this to avoid double work.
+    func invalidateAssistantRevertStatesWithoutRefresh() {
         assistantRevertStateRevision &+= 1
         assistantRevertStateCacheByThread.removeAll(keepingCapacity: true)
-        refreshAllThreadTimelineStates()
+    }
+
+    // Coalesces multiple revert invalidation calls within the same run loop tick into a single
+    // refreshAllThreadTimelineStates(). The Task yields once, so back-to-back callers collapse.
+    func scheduleCoalescedRevertRefresh() {
+        coalescedRevertRefreshTask?.cancel()
+        coalescedRevertRefreshTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self else { return }
+            self.refreshAllThreadTimelineStates()
+        }
     }
 
     // Mirrors the stop-button teardown moment with a single success haptic when a live run really finishes.

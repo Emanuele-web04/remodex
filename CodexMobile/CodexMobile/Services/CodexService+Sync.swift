@@ -251,6 +251,7 @@ extension CodexService {
         threads = sortThreads(Array(merged.values))
         assistantRevertStateCacheByThread.removeAll()
         refreshBusyRepoRootsAndDependentTimelineStates()
+        // Full reconciliation — always refresh all threads even if busy-roots already hit some.
         refreshAllThreadTimelineStates()
 
         if activeThreadId == nil {

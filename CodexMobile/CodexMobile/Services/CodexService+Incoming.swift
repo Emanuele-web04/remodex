@@ -14,6 +14,46 @@ private struct CommandExecutionMessageContext {
     let itemId: String?
 }
 
+// Off-actor wire message classification and JSON-RPC decoding so transport callbacks
+// can parse before dispatching typed results to MainActor.
+enum WireMessagePreDecoder {
+    enum Result: Sendable {
+        case message(RPCMessage)
+        case decodeFailed
+        case invalidUTF8
+    }
+
+    struct Classification: Sendable {
+        let isSecure: Bool
+        let rpcResult: Result?
+    }
+
+    private static let secureKindValues = [
+        "\"serverHello\"", "\"secureReady\"", "\"secureError\"", "\"encryptedEnvelope\""
+    ]
+
+    static func decodeRPCMessage(from text: String) -> Result {
+        guard let data = text.data(using: .utf8) else { return .invalidUTF8 }
+        do {
+            let message = try JSONDecoder().decode(RPCMessage.self, from: data)
+            return .message(message)
+        } catch {
+            return .decodeFailed
+        }
+    }
+
+    static func classify(_ text: String) -> Classification {
+        if text.contains("\"kind\":") {
+            for value in secureKindValues {
+                if text.contains(value) {
+                    return Classification(isSecure: true, rpcResult: nil)
+                }
+            }
+        }
+        return Classification(isSecure: false, rpcResult: decodeRPCMessage(from: text))
+    }
+}
+
 extension CodexService {
     func processIncomingText(_ text: String) {
         guard let payloadData = text.data(using: .utf8) else {
@@ -25,6 +65,19 @@ extension CodexService {
             handleIncomingRPCMessage(message)
         } catch {
             lastErrorMessage = "Unable to decode server payload"
+        }
+    }
+
+    // Handles a pre-decoded RPC message from off-actor transport paths.
+    func handleDecodedRPCResult(_ result: WireMessagePreDecoder.Result, rawText: String) {
+        switch result {
+        case .message(let message):
+            lastRawMessage = rawText
+            handleIncomingRPCMessage(message)
+        case .decodeFailed:
+            lastErrorMessage = "Unable to decode server payload"
+        case .invalidUTF8:
+            break
         }
     }
 

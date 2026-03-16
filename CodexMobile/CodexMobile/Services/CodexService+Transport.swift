@@ -145,6 +145,10 @@ extension CodexService {
         connection.receiveMessage { [weak self] data, context, _, error in
             guard let self else { return }
 
+            // Pre-decode wire text off the main actor so JSONDecoder doesn't block UI frames.
+            let wireText: String? = data.flatMap { String(data: $0, encoding: .utf8) }
+            let preDecoded = wireText.map { WireMessagePreDecoder.classify($0) }
+
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.webSocketConnection === connection else { return }
@@ -156,7 +160,6 @@ extension CodexService {
 
                 if let metadata = context?.protocolMetadata(definition: NWProtocolWebSocket.definition) as? NWProtocolWebSocket.Metadata,
                    metadata.opcode == .close {
-                    // Relay close frames carry the reason we need to tell stale QR pairings from retryable blips.
                     self.handleReceiveError(
                         CodexServiceError.disconnected,
                         relayCloseCode: metadata.closeCode
@@ -164,10 +167,13 @@ extension CodexService {
                     return
                 }
 
-                if let data,
-                   let text = String(data: data, encoding: .utf8) {
-                    self.lastRawMessage = text
-                    self.processIncomingWireText(text)
+                if let text = wireText, let decoded = preDecoded {
+                    if decoded.isSecure {
+                        // Secure control or encrypted envelope — must stay on MainActor.
+                        self.processIncomingWireText(text)
+                    } else if let rpcResult = decoded.rpcResult {
+                        self.handleDecodedRPCResult(rpcResult, rawText: text)
+                    }
                 }
 
                 self.receiveNextMessage(on: connection)
@@ -208,6 +214,23 @@ extension CodexService {
         task.receive { [weak self] result in
             guard let self else { return }
 
+            // Extract text and pre-decode off the main actor.
+            var wireText: String?
+            var preDecoded: WireMessagePreDecoder.Classification?
+            if case .success(let message) = result {
+                switch message {
+                case .string(let text):
+                    wireText = text
+                case .data(let data):
+                    wireText = String(data: data, encoding: .utf8)
+                @unknown default:
+                    break
+                }
+                if let text = wireText {
+                    preDecoded = WireMessagePreDecoder.classify(text)
+                }
+            }
+
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard self.webSocketTask === task else { return }
@@ -218,18 +241,13 @@ extension CodexService {
                         error,
                         relayCloseCode: self.relayCloseCode(for: task.closeCode)
                     )
-                case .success(let message):
-                    switch message {
-                    case .string(let text):
-                        self.lastRawMessage = text
-                        self.processIncomingWireText(text)
-                    case .data(let data):
-                        if let text = String(data: data, encoding: .utf8) {
-                            self.lastRawMessage = text
+                case .success:
+                    if let text = wireText, let decoded = preDecoded {
+                        if decoded.isSecure {
                             self.processIncomingWireText(text)
+                        } else if let rpcResult = decoded.rpcResult {
+                            self.handleDecodedRPCResult(rpcResult, rawText: text)
                         }
-                    @unknown default:
-                        break
                     }
 
                     self.receiveNextMessage(on: task)

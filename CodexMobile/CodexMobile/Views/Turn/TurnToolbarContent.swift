@@ -134,7 +134,7 @@ private struct TurnToolbarDiffTotalsLabel: View {
     let onTap: (() -> Void)?
 
     // Keeps small diff totals tappable without forcing large-count pills into a fixed width.
-    private let minPillWidth: CGFloat = 64
+    private let minPillWidth: CGFloat = 50
 
     var body: some View {
         Group {

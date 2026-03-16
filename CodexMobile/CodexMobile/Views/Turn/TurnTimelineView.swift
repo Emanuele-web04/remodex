@@ -268,7 +268,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             hasher.combine(message.kind)
             hasher.combine(message.turnId)
             hasher.combine(message.isStreaming)
-            hasher.combine(message.text)
+            // During streaming, text changes every delta — hash only the length to avoid
+            // O(text_length) hashing per frame. Once finalized, hash full text for reconciliation.
+            if message.isStreaming {
+                hasher.combine(message.text.count)
+            } else {
+                hasher.combine(message.text)
+            }
         }
 
         return hasher.finalize()
@@ -364,6 +370,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Stops follow-bottom as soon as the user drags away so queued snaps cannot fight the gesture.
     private func handleScrolledToBottomChanged(_ nextValue: Bool) {
         guard nextValue != isScrolledToBottom else { return }
+
+        // Ignore transient "not at bottom" geometry while a newly selected chat is still
+        // performing its initial recovery snap, otherwise fast chat switches can downgrade
+        // follow-bottom to manual before the first bottom jump lands.
+        if !nextValue,
+           initialRecoverySnapPendingThreadID == threadID,
+           autoScrollMode == .followBottom {
+            return
+        }
 
         if nextValue {
             isScrolledToBottom = true
