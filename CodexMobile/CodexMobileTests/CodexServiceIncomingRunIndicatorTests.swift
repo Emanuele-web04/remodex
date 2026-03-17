@@ -722,6 +722,46 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.currentOutput, "First chunk")
     }
 
+    func testAssistantStreamingFallbackKeepsCurrentOutputInSyncWithoutTimelineState() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.activeThreadId = threadID
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+
+        XCTAssertEqual(service.currentOutput, "First chunk")
+        XCTAssertEqual(service.timelineState(for: threadID).renderSnapshot.messages.first?.text, "First chunk")
+    }
+
+    func testLateDeltaForOlderAssistantItemDoesNotReplaceLatestOutput() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        _ = service.timelineState(for: threadID)
+        service.activeThreadId = threadID
+
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-2", delta: "Second")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " tail")
+
+        XCTAssertEqual(service.currentOutput, "Second")
+    }
+
+    func testMergeAssistantDeltaKeepsLongReplayOverlapWithoutDuplication() {
+        let service = makeService()
+        let overlap = String(repeating: "a", count: 300)
+        let existing = "prefix-" + overlap
+        let incoming = overlap + "-suffix"
+
+        let merged = service.mergeAssistantDelta(existingText: existing, incomingDelta: incoming)
+
+        XCTAssertEqual(merged, "prefix-" + overlap + "-suffix")
+    }
+
     func testMarkTurnCompletedFinalizesAllAssistantItemsForTurn() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

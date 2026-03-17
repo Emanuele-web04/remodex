@@ -68,6 +68,8 @@ extension CodexService {
     func updateStreamingAssistantOutput(for threadId: String, messageId: String) {
         noteMessagesChanged(for: threadId)
 
+        // Keep the visible output anchored to the latest assistant bubble, even if a late
+        // delta updates an older item inside the same turn.
         let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
         if activeThreadId == threadId {
             currentOutput = latestAssistantText
@@ -1868,8 +1870,7 @@ extension CodexService {
     // Keeps the "latest output" cache in sync for both full refreshes and lightweight streaming updates.
     func syncLatestAssistantOutputCache(for threadId: String) -> String {
         let latestAssistantText = messagesByThread[threadId]?
-            .reversed()
-            .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+            .last(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
             .text ?? ""
         latestAssistantOutputByThread[threadId] = latestAssistantText
         return latestAssistantText
@@ -2295,6 +2296,7 @@ extension CodexService {
             return existingText
         }
 
+        // Preserve reconnect/replay correctness by checking the full overlap window.
         let maxOverlap = min(existingText.count, incomingDelta.count)
         if maxOverlap > 0 {
             for overlap in stride(from: maxOverlap, through: 1, by: -1) {
