@@ -8,6 +8,7 @@ import AVFoundation
 import SwiftUI
 
 struct QRScannerView: View {
+    let onBack: (() -> Void)?
     let onScan: (CodexPairingQRPayload) -> Void
 
     @State private var scannerError: String?
@@ -20,8 +21,10 @@ struct QRScannerView: View {
         initialBridgeUpdatePrompt: CodexBridgeUpdatePrompt? = nil,
         initialHasCameraPermission: Bool = false,
         initialIsCheckingPermission: Bool = true,
+        onBack: (() -> Void)? = nil,
         onScan: @escaping (CodexPairingQRPayload) -> Void
     ) {
+        self.onBack = onBack
         self.onScan = onScan
         _bridgeUpdatePrompt = State(initialValue: initialBridgeUpdatePrompt)
         _hasCameraPermission = State(initialValue: initialHasCameraPermission)
@@ -46,6 +49,13 @@ struct QRScannerView: View {
                 scannerOverlay
             } else {
                 cameraPermissionView
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if let onBack {
+                backButton(action: onBack)
+                    .padding(.leading, 20)
+                    .padding(.top, 12)
             }
         }
         .task {
@@ -154,6 +164,23 @@ struct QRScannerView: View {
         }
     }
 
+    // Keeps the first-run scanner escapable without turning reconnect recovery into onboarding.
+    private func backButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Color.white.opacity(0.12), in: Circle())
+                .overlay(
+                    Circle()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Back to onboarding")
+    }
+
     private var scannerOverlay: some View {
         VStack(spacing: 24) {
             Spacer()
@@ -236,7 +263,8 @@ private extension CodexBridgeUpdatePrompt {
 #Preview("Bridge Update Required") {
     QRScannerView(
         initialBridgeUpdatePrompt: .previewScannerMismatch,
-        initialIsCheckingPermission: false
+        initialIsCheckingPermission: false,
+        onBack: {}
     ) { _ in }
 }
 

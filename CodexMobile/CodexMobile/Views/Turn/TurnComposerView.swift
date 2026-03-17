@@ -63,6 +63,7 @@ struct TurnComposerView: View {
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
+    let onRemoveComposerSubagentsSelection: () -> Void
     let onPasteImageData: ([Data]) -> Void
     let onResumeQueue: () -> Void
     let onSteerQueuedDraft: (String) -> Void
@@ -74,15 +75,6 @@ struct TurnComposerView: View {
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
         VStack(spacing: 6) {
-            TurnComposerAutocompletePanels(
-                state: autocompleteState,
-                onSelectFileAutocomplete: onSelectFileAutocomplete,
-                onSelectSkillAutocomplete: onSelectSkillAutocomplete,
-                onSelectSlashCommand: onSelectSlashCommand,
-                onSelectCodeReviewTarget: onSelectCodeReviewTarget,
-                onRemoveComposerReviewSelection: onRemoveComposerReviewSelection
-            )
-
             TurnComposerQueuedDraftsSection(
                 drafts: accessoryState.queuedDrafts,
                 canSteerDrafts: accessoryState.canSteerQueuedDrafts,
@@ -97,7 +89,8 @@ struct TurnComposerView: View {
                     onRemoveAttachment: onRemoveAttachment,
                     onRemoveMentionedFile: onRemoveMentionedFile,
                     onRemoveMentionedSkill: onRemoveMentionedSkill,
-                    onRemoveComposerReviewSelection: onRemoveComposerReviewSelection
+                    onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
+                    onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection
                 )
 
                 ZStack(alignment: .topLeading) {
@@ -122,6 +115,7 @@ struct TurnComposerView: View {
                     )
                     .frame(height: composerInputHeight)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding)
                 .padding(.bottom, 12)
@@ -156,6 +150,22 @@ struct TurnComposerView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 28))
+            .overlay(alignment: .topLeading) {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
+                    .overlay(alignment: .bottomLeading) {
+                        TurnComposerAutocompletePanels(
+                            state: autocompleteState,
+                            onSelectFileAutocomplete: onSelectFileAutocomplete,
+                            onSelectSkillAutocomplete: onSelectSkillAutocomplete,
+                            onSelectSlashCommand: onSelectSlashCommand,
+                            onSelectCodeReviewTarget: onSelectCodeReviewTarget,
+                            onRemoveComposerReviewSelection: onRemoveComposerReviewSelection
+                        )
+                    }
+                    .offset(y: -8)
+            }
+            .zIndex(2)
 
             if !isInputFocused.wrappedValue {
                 // The secondary control row is nice to have, but when the keyboard is up
@@ -205,6 +215,7 @@ struct TurnComposerView: View {
         .padding(.horizontal, 12)
         .padding(.top, 6)
         .padding(.bottom, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.easeInOut(duration: 0.18), value: isInputFocused.wrappedValue)
     }
 
@@ -296,7 +307,7 @@ private struct TurnComposerAutocompletePanels: View {
     let onRemoveComposerReviewSelection: () -> Void
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 0) {
             if state.isFileAutocompleteVisible {
                 FileAutocompletePanel(
                     items: state.fileAutocompleteItems,
@@ -329,6 +340,10 @@ private struct TurnComposerAutocompletePanels: View {
                 )
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .layoutPriority(1)
+        .zIndex(1)
     }
 }
 
@@ -371,6 +386,7 @@ private struct TurnComposerAccessorySection: View {
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
+    let onRemoveComposerSubagentsSelection: () -> Void
 
     var body: some View {
         Group {
@@ -414,10 +430,33 @@ private struct TurnComposerAccessorySection: View {
                 .padding(.top, 8)
             }
 
+            if state.showsSubagentsSelection {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ComposerActionChip(
+                            title: "Subagents",
+                            symbolName: "person.3",
+                            tintColor: .teal,
+                            removeAccessibilityLabel: "Remove subagents"
+                        ) {
+                            onRemoveComposerSubagentsSelection()
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+            }
+
             if let reviewTarget = state.reviewTarget {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
-                        ReviewMentionChip(title: "Code Review: \(reviewTarget.title)") {
+                        ComposerActionChip(
+                            title: "Code Review: \(reviewTarget.title)",
+                            symbolName: "checklist",
+                            tintColor: .teal,
+                            removeAccessibilityLabel: "Remove code review"
+                        ) {
                             onRemoveComposerReviewSelection()
                         }
                     }
@@ -426,6 +465,7 @@ private struct TurnComposerAccessorySection: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
             }
+
         }
     }
 }
@@ -458,7 +498,8 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     composerAttachments: [],
                     composerMentionedFiles: [],
                     composerMentionedSkills: [],
-                    composerReviewSelection: nil
+                    composerReviewSelection: nil,
+                    isSubagentsSelectionArmed: true
                 ),
                 autocompleteState: TurnComposerAutocompleteState(
                     fileAutocompleteItems: [],
@@ -532,6 +573,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 onRemoveMentionedFile: { _ in },
                 onRemoveMentionedSkill: { _ in },
                 onRemoveComposerReviewSelection: {},
+                onRemoveComposerSubagentsSelection: {},
                 onPasteImageData: { _ in },
                 onResumeQueue: {},
                 onSteerQueuedDraft: { _ in },

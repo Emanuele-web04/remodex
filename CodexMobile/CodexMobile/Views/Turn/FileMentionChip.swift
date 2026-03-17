@@ -1,7 +1,7 @@
 // FILE: FileMentionChip.swift
 // Purpose: Shared file-mention chip UI used in the composer (removable) and message timeline (read-only).
 // Layer: View Component
-// Exports: FileMentionChip, SkillMentionChip, ReviewMentionChip, FileMentionChipRow, UserMentionChipRow, UserMessageParser, UserMessageParsed, SkillDisplayNameFormatter
+// Exports: FileMentionChip, SkillMentionChip, ComposerActionChip, FileMentionChipRow, UserMentionChipRow, UserMessageParser, UserMessageParsed, SkillDisplayNameFormatter
 // Depends on: SwiftUI
 
 import SwiftUI
@@ -76,37 +76,40 @@ struct SkillMentionChip: View {
     }
 }
 
-/// Compact inline review-action pill shown when the composer is armed for review/start.
-struct ReviewMentionChip: View {
+/// Compact inline action pill shown when the composer is armed for a slash-command shortcut.
+struct ComposerActionChip: View {
     let title: String
+    let symbolName: String
+    let tintColor: Color
+    let removeAccessibilityLabel: String
     var onRemove: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "checklist")
+            Image(systemName: symbolName)
                 .font(AppFont.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.teal)
+                .foregroundStyle(tintColor)
 
             Text(title)
                 .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(Color.teal)
+                .foregroundStyle(tintColor)
                 .lineLimit(1)
 
             if let onRemove {
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
                         .font(AppFont.system(size: 8, weight: .bold))
-                        .foregroundStyle(Color.teal)
+                        .foregroundStyle(tintColor)
                         .frame(width: 14, height: 14)
-                        .background(Color.teal.opacity(0.14), in: Circle())
+                        .background(tintColor.opacity(0.14), in: Circle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Remove code review")
+                .accessibilityLabel(removeAccessibilityLabel)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color.teal.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .background(tintColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

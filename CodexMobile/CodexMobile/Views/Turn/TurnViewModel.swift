@@ -16,13 +16,14 @@ struct TurnComposerSendAvailability {
     let hasBlockingAttachmentState: Bool
     let hasReviewSelection: Bool
     let hasPendingReviewSelection: Bool
+    let hasSubagentsSelection: Bool
 
     // Evaluates whether sending is allowed for the current composer state.
     var isSendDisabled: Bool {
         isSending
             || !isConnected
             || hasPendingReviewSelection
-            || (trimmedInput.isEmpty && !hasReadyImages && !hasReviewSelection)
+            || (trimmedInput.isEmpty && !hasReadyImages && !hasReviewSelection && !hasSubagentsSelection)
             || hasBlockingAttachmentState
     }
 }
@@ -74,6 +75,7 @@ final class TurnViewModel {
         let rawSkillMentions: [TurnComposerMentionedSkill]
         let rawAttachments: [TurnComposerImageAttachment]
         let rawReviewSelection: TurnComposerReviewSelection?
+        let rawSubagentsSelectionArmed: Bool
     }
 
     // Splits contiguous filename segments into search-friendly word chunks.
@@ -95,6 +97,7 @@ final class TurnViewModel {
     var composerMentionedFiles: [TurnComposerMentionedFile] = []
     var composerMentionedSkills: [TurnComposerMentionedSkill] = []
     var composerReviewSelection: TurnComposerReviewSelection?
+    var isSubagentsSelectionArmed = false
     var fileAutocompleteItems: [CodexFuzzyFileMatch] = []
     var isFileAutocompleteVisible = false
     var isFileAutocompleteLoading = false
@@ -220,7 +223,8 @@ final class TurnViewModel {
             trimmedInput: trimmedComposerInput,
             mentionedFileCount: composerMentionedFiles.count,
             mentionedSkillCount: composerMentionedSkills.count,
-            attachmentCount: composerAttachments.count
+            attachmentCount: composerAttachments.count,
+            hasSubagentsSelection: isSubagentsSelectionArmed
         )
     }
 
@@ -274,7 +278,8 @@ final class TurnViewModel {
             hasReadyImages: hasReadyImages,
             hasBlockingAttachmentState: hasBlockingAttachmentState,
             hasReviewSelection: hasComposerReviewSelection,
-            hasPendingReviewSelection: hasPendingComposerReviewSelection
+            hasPendingReviewSelection: hasPendingComposerReviewSelection,
+            hasSubagentsSelection: isSubagentsSelectionArmed
         ).isSendDisabled
     }
 
@@ -282,6 +287,7 @@ final class TurnViewModel {
         resetFileAutocompleteState()
         resetSkillAutocompleteState()
         resetSlashCommandState(clearPendingSelection: true, clearConfirmedSelection: true)
+        isSubagentsSelectionArmed = false
         input = ""
         composerAttachments.removeAll()
         composerMentionedFiles.removeAll()
@@ -577,15 +583,17 @@ final class TurnViewModel {
         slashCommandPanelState = .commands(query: token.query)
     }
 
-    // Turns the selected slash command into an inline composer flow instead of injecting plain text.
+    // Turns the selected slash command into the matching inline composer behavior.
     func onSelectSlashCommand(_ command: TurnComposerSlashCommand) {
-        removeTrailingSlashCommandTokenFromInputIfNeeded()
-
         switch command {
         case .codeReview:
+            removeTrailingSlashCommandTokenFromInputIfNeeded()
             armCodeReviewSelection(command: command, target: nil)
         case .status:
+            removeTrailingSlashCommandTokenFromInputIfNeeded()
             resetSlashCommandState(clearPendingSelection: true)
+        case .subagents:
+            armSubagentsSelection()
         }
     }
 
@@ -597,6 +605,11 @@ final class TurnViewModel {
     func clearComposerReviewSelection() {
         composerReviewSelection = nil
         resetSlashCommandState()
+    }
+
+    func clearSubagentsSelection() {
+        isSubagentsSelectionArmed = false
+        resetSlashCommandState(clearPendingSelection: true)
     }
 
     func removeMentionedFile(id: String) {
@@ -763,7 +776,8 @@ final class TurnViewModel {
             rawFileMentions: composerMentionedFiles,
             rawSkillMentions: composerMentionedSkills,
             rawAttachments: composerAttachments,
-            rawReviewSelection: reviewSelection
+            rawReviewSelection: reviewSelection,
+            rawSubagentsSelectionArmed: isSubagentsSelectionArmed
         )
         let threadBusy = isThreadBusy(codex: codex, threadID: threadID)
         let queuePaused = isQueuePaused(codex: codex, threadID: threadID)
@@ -992,6 +1006,10 @@ final class TurnViewModel {
     // Extracts only a final `/query` token so slash commands open from the same composer input.
     static func trailingSlashCommandToken(in text: String) -> TurnTrailingSlashCommandToken? {
         TurnComposerCommandLogic.trailingSlashCommandToken(in: text)
+    }
+
+    static func replacingTrailingSlashCommandToken(in text: String, with replacement: String) -> String? {
+        TurnComposerCommandLogic.replacingTrailingSlashCommandToken(in: text, with: replacement)
     }
 
     static func replacingTrailingFileAutocompleteToken(in text: String, with selectedPath: String) -> String? {
@@ -1453,6 +1471,7 @@ final class TurnViewModel {
         composerMentionedSkills = pendingSend.rawSkillMentions
         composerAttachments = pendingSend.rawAttachments
         composerReviewSelection = pendingSend.rawReviewSelection
+        isSubagentsSelectionArmed = pendingSend.rawSubagentsSelectionArmed
     }
 
     // Resolves the active turn id for manual steer without relying on async autoclosure operators.
@@ -1565,6 +1584,14 @@ final class TurnViewModel {
         slashCommandPanelState = (target == nil) ? .codeReviewTargets : .hidden
     }
 
+    // Arms the composer-level subagents chip without leaking a slash token into the draft.
+    private func armSubagentsSelection() {
+        removeTrailingSlashCommandTokenFromInputIfNeeded()
+        clearComposerReviewSelectionIfNeededForNonReviewContent()
+        isSubagentsSelectionArmed = true
+        resetSlashCommandState(clearPendingSelection: true)
+    }
+
     private func clearComposerReviewSelectionIfNeededForInput(_ text: String) {
         guard composerReviewSelection?.target != nil else {
             return
@@ -1594,26 +1621,43 @@ final class TurnViewModel {
         }
     }
 
+    // Prefixes the composer draft with the canned delegation prompt when the chip is armed.
+    static func applyingSubagentsSelection(to text: String, isSelected: Bool) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isSelected,
+              let cannedPrompt = TurnComposerSlashCommand.subagents.cannedPrompt else {
+            return trimmed
+        }
+
+        guard !trimmed.isEmpty else {
+            return cannedPrompt
+        }
+
+        return "\(cannedPrompt)\n\n\(trimmed)"
+    }
+
     // Replaces inline `@filename` with `@fullpath` for each mentioned file.
     private func buildPayloadWithMentions() -> String {
-        var text = trimmedComposerInput
-        guard !composerMentionedFiles.isEmpty else {
-            return text
+        var text = input
+
+        if !composerMentionedFiles.isEmpty {
+            let ambiguousKeys = Self.ambiguousFileNameAliasKeys(in: composerMentionedFiles)
+
+            for mention in composerMentionedFiles {
+                let collisionKey = Self.fileNameAliasCollisionKey(for: mention.fileName)
+                let allowFileNameAliases = collisionKey.map { !ambiguousKeys.contains($0) } ?? true
+                text = Self.replacingFileMentionAliases(
+                    in: text,
+                    with: mention,
+                    allowFileNameAliases: allowFileNameAliases
+                )
+            }
         }
 
-        let ambiguousKeys = Self.ambiguousFileNameAliasKeys(in: composerMentionedFiles)
-
-        for mention in composerMentionedFiles {
-            let collisionKey = Self.fileNameAliasCollisionKey(for: mention.fileName)
-            let allowFileNameAliases = collisionKey.map { !ambiguousKeys.contains($0) } ?? true
-            text = Self.replacingFileMentionAliases(
-                in: text,
-                with: mention,
-                allowFileNameAliases: allowFileNameAliases
-            )
-        }
-
-        return text
+        return Self.applyingSubagentsSelection(
+            to: text,
+            isSelected: isSubagentsSelectionArmed
+        )
     }
 
     // Reuses the git base-branch selector so review requests stay aligned with the visible compare target.

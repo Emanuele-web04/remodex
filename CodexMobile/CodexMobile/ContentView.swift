@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var navigationPath = NavigationPath()
     @State private var showSettings = false
     @State private var isShowingManualScanner = false
+    @State private var scannerCanReturnToOnboarding = false
     @State private var isSearchActive = false
     @State private var isRetryingBridgeUpdate = false
     @State private var isPreparingManualScanner = false
@@ -177,19 +178,32 @@ struct ContentView: View {
         withAnimation {
             hasSeenOnboarding = true
             isShowingManualScanner = true
+            scannerCanReturnToOnboarding = true
         }
     }
 
-    private var qrScannerBody: some View {
-        QRScannerView { pairingPayload in
-            Task {
-                isShowingManualScanner = false
-                await viewModel.connectToRelay(
-                    pairingPayload: pairingPayload,
-                    codex: codex
-                )
-            }
+    // Gives the scanner a typed optional back action only during first-run onboarding.
+    private var scannerBackAction: (() -> Void)? {
+        guard scannerCanReturnToOnboarding else {
+            return nil
         }
+        return { returnFromScannerToOnboarding() }
+    }
+
+    private var qrScannerBody: some View {
+        QRScannerView(
+            onBack: scannerBackAction,
+            onScan: { pairingPayload in
+                Task {
+                    isShowingManualScanner = false
+                    scannerCanReturnToOnboarding = false
+                    await viewModel.connectToRelay(
+                        pairingPayload: pairingPayload,
+                        codex: codex
+                    )
+                }
+            }
+        )
     }
 
     private var effectiveSidebarWidth: CGFloat {
@@ -462,10 +476,24 @@ struct ContentView: View {
             return
         }
 
+        scannerCanReturnToOnboarding = false
         isShowingManualScanner = true
 
         Task {
             await viewModel.stopAutoReconnectForManualScan(codex: codex)
+        }
+    }
+
+    // Lets first-run pairing step back into onboarding without changing later recovery flows.
+    private func returnFromScannerToOnboarding() {
+        codex.shouldAutoReconnectOnForeground = false
+        codex.connectionRecoveryState = .idle
+        codex.lastErrorMessage = nil
+
+        withAnimation {
+            isShowingManualScanner = false
+            scannerCanReturnToOnboarding = false
+            hasSeenOnboarding = false
         }
     }
 

@@ -224,6 +224,15 @@ extension CodexService {
         updateBackgroundRunGraceTask()
     }
 
+    // Hides the visible running state when a stop attempt proves we still do not have a
+    // usable turn id, while keeping fallback recovery alive in the background.
+    func demoteVisibleRunningStateToProtectedFallback(for threadId: String) {
+        runningThreadIDs.remove(threadId)
+        refreshBusyRepoRootsAndDependentTimelineStates()
+        refreshThreadTimelineState(for: threadId)
+        updateBackgroundRunGraceTask()
+    }
+
     // Removes outcome badges while preserving the active-running state.
     func clearOutcomeBadge(for threadId: String) {
         readyThreadIDs.remove(threadId)

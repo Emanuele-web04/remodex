@@ -192,6 +192,7 @@ final class ContentViewModel {
 
                 let isRetryable = codex.isRecoverableTransientConnectionError(error)
                     || codex.isBenignBackgroundDisconnect(error)
+                    || codex.isRetryableSavedSessionConnectError(error)
 
                 guard isRetryable else {
                     codex.connectionRecoveryState = .idle
@@ -273,6 +274,7 @@ extension ContentViewModel {
 
                 let isRetryable = codex.isRecoverableTransientConnectionError(error)
                     || codex.isBenignBackgroundDisconnect(error)
+                    || codex.isRetryableSavedSessionConnectError(error)
 
                 guard performAutoRetry,
                       isRetryable,

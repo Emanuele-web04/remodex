@@ -295,33 +295,30 @@ enum TurnTimelineReducer {
 
     // Keeps only the newest matching file-change card when multiple event channels emit the same diff.
     static func removeDuplicateFileChangeMessages(in messages: [CodexMessage]) -> [CodexMessage] {
-        var latestIndexByKey: [String: Int] = [:]
-        for (index, message) in messages.enumerated() {
-            guard message.role == .system,
-                  message.kind == .fileChange,
-                  let key = duplicateFileChangeKey(for: message) else {
-                continue
-            }
-            latestIndexByKey[key] = index
-        }
+        let signatures = messages.map { fileChangeDedupSignature(for: $0) }
+        var supersededIndices: Set<Int> = []
 
-        var result: [CodexMessage] = []
-        result.reserveCapacity(messages.count)
-
-        for (index, message) in messages.enumerated() {
-            guard message.role == .system,
-                  message.kind == .fileChange,
-                  let key = duplicateFileChangeKey(for: message) else {
-                result.append(message)
+        for olderIndex in messages.indices {
+            guard let olderSignature = signatures[olderIndex] else {
                 continue
             }
 
-            if latestIndexByKey[key] == index {
-                result.append(message)
+            for newerIndex in messages.indices where newerIndex > olderIndex {
+                guard let newerSignature = signatures[newerIndex],
+                      fileChangeMessage(newerSignature, supersedes: olderSignature) else {
+                    continue
+                }
+                supersededIndices.insert(olderIndex)
+                break
             }
         }
 
-        return result
+        return messages.enumerated().compactMap { index, message in
+            if signatures[index] != nil, supersededIndices.contains(index) {
+                return nil
+            }
+            return message
+        }
     }
 
     // Collapses back-to-back subagent cards when the first one is only a transient
@@ -424,4 +421,59 @@ enum TurnTimelineReducer {
         }
         return "\(turnId)|\(normalizedText)"
     }
+
+    // Captures the parts of a file-change row that matter for timeline dedupe.
+    private static func fileChangeDedupSignature(for message: CodexMessage) -> FileChangeDedupSignature? {
+        guard message.role == .system,
+              message.kind == .fileChange,
+              let turnId = normalizedIdentifier(message.turnId),
+              let key = duplicateFileChangeKey(for: message) else {
+            return nil
+        }
+
+        let paths = Set(
+            TurnFileChangeSummaryParser.parse(from: message.text)?
+                .entries
+                .map(\.path) ?? []
+        )
+
+        return FileChangeDedupSignature(
+            turnId: turnId,
+            key: key,
+            paths: paths,
+            isStreaming: message.isStreaming
+        )
+    }
+
+    // Treats newer file-change snapshots as authoritative only when they describe the
+    // same turn and either the same dedupe key or a provisional-to-final snapshot upgrade.
+    private static func fileChangeMessage(
+        _ newer: FileChangeDedupSignature,
+        supersedes older: FileChangeDedupSignature
+    ) -> Bool {
+        guard newer.turnId == older.turnId else {
+            return false
+        }
+
+        if newer.key == older.key {
+            return true
+        }
+
+        guard !newer.paths.isEmpty, !older.paths.isEmpty else {
+            return false
+        }
+
+        if older.isStreaming && !newer.isStreaming && newer.paths == older.paths {
+            return true
+        }
+
+        return false
+    }
+}
+
+private struct FileChangeDedupSignature {
+    let turnId: String
+    let key: String
+    let paths: Set<String>
+    let isStreaming: Bool
 }

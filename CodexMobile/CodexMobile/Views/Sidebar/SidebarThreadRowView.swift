@@ -21,6 +21,7 @@ struct SidebarThreadRowView: View {
 
     @State private var isShowingRenameAlert = false
     @State private var renameText = ""
+    private let titleLeadingSlotWidth: CGFloat = 16
 
     var body: some View {
         Group {
@@ -53,21 +54,14 @@ struct SidebarThreadRowView: View {
     private var parentRow: some View {
         Button(action: { HapticFeedback.shared.triggerImpactFeedback(style: .light); onTap() }) {
             HStack(alignment: .center, spacing: 8) {
-                if let runBadgeState {
-                    SidebarThreadRunBadgeView(state: runBadgeState)
-                        .padding(.leading, 10)
-                        .padding(.top, 4)
-                } else {
-                    Color.clear
-                        .frame(width: 10, height: 10)
-                        .padding(.leading, 10)
-                        .padding(.top, 4)
-                }
+                leadingIndicatorSlot
 
+                // Keep trailing metadata inside the main stack so long titles truncate before it.
                 VStack(alignment: .leading, spacing: 4) {
                     Text(thread.displayTitle)
                         .font(AppFont.body())
                         .lineLimit(1)
+                        .truncationMode(.tail)
                         .foregroundStyle(.primary)
 
                     if thread.syncState == .archivedLocal {
@@ -75,19 +69,19 @@ struct SidebarThreadRowView: View {
                             .font(AppFont.footnote())
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                Spacer(minLength: 0)
+                parentTrailingMeta
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .overlay(alignment: .trailing) { parentTrailingMeta }
-        .padding(.leading, 16)
-        .padding(.trailing, 16)
+        .padding(.horizontal, 12)
         .padding(.vertical, 12)
     }
 
@@ -115,7 +109,6 @@ struct SidebarThreadRowView: View {
                     .lineLimit(1)
             }
         }
-        .padding(.trailing, 16)
     }
 
     // MARK: - Subagent row (CodexService isolated in SubagentNameLabel)
@@ -123,23 +116,19 @@ struct SidebarThreadRowView: View {
     private var subagentRow: some View {
         Button(action: { HapticFeedback.shared.triggerImpactFeedback(style: .light); onTap() }) {
             HStack(alignment: .center, spacing: 8) {
-                // Matches the parent badge area width so text aligns with parent title.
-                Color.clear
-                    .frame(width: 10, height: 10)
-                    .padding(.leading, 10)
+                leadingIndicatorSlot
 
                 SidebarSubagentNameLabel(thread: thread)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                Spacer(minLength: 0)
+                subagentTrailingMeta
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .overlay(alignment: .trailing) { subagentTrailingMeta }
-        .padding(.leading, 16)
-        .padding(.trailing, 16)
+        .padding(.horizontal, 12)
         .padding(.vertical, 4)
     }
 
@@ -154,10 +143,22 @@ struct SidebarThreadRowView: View {
                     .lineLimit(1)
             }
         }
-        .padding(.trailing, 16)
     }
 
     // MARK: - Shared
+
+    @ViewBuilder
+    private var leadingIndicatorSlot: some View {
+        Group {
+            if let runBadgeState, !thread.isSubagent {
+                SidebarThreadRunBadgeView(state: runBadgeState)
+            } else {
+                Color.clear
+                    .frame(width: 10, height: 10)
+            }
+        }
+        .frame(width: titleLeadingSlotWidth, alignment: .center)
+    }
 
     @ViewBuilder
     private var expansionToggleButton: some View {

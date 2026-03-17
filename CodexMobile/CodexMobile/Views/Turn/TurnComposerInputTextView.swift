@@ -27,6 +27,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.textColor = UIColor.label
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
+        textView.textContainer.widthTracksTextView = true
         textView.autocorrectionType = .default
         textView.autocapitalizationType = .sentences
         textView.isScrollEnabled = true
@@ -35,6 +36,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.onPasteImageData = onPasteImageData
         textView.runtimeState = runtimeState
         textView.runtimeActions = runtimeActions
+        textView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         textView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         textView.accessibilityIdentifier = "turn.composer.input"
         context.coordinator.syncFocusIfNeeded(
@@ -60,9 +62,11 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         uiView.isEditable = isEditable
         uiView.isSelectable = true
         uiView.font = composerUIFont()
+        uiView.textContainer.widthTracksTextView = true
         uiView.onPasteImageData = onPasteImageData
         uiView.runtimeState = runtimeState
         uiView.runtimeActions = runtimeActions
+        uiView.setContentHuggingPriority(.defaultLow, for: .horizontal)
         context.coordinator.syncFocusIfNeeded(
             for: uiView,
             shouldBeFocused: isFocused,

@@ -126,6 +126,17 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testConnectTimeSessionUnavailableCloseIsRetryable() {
+        let service = CodexService()
+        let error = CodexServiceError.invalidInput("WebSocket closed during connect (4002)")
+
+        XCTAssertTrue(service.isRetryableSavedSessionConnectError(error))
+        XCTAssertEqual(
+            service.userFacingConnectFailureMessage(error),
+            "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
+        )
+    }
+
     func testPrepareForConnectionAttemptKeepsThreadStateWhenSocketAlreadyDropped() async {
         let service = CodexService()
         let threadID = "thread-\(UUID().uuidString)"

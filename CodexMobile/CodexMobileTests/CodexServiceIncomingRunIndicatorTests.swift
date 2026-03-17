@@ -520,7 +520,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         }
     }
 
-    func testMacUnavailableCloseClearsSavedPairingAndDisablesReconnect() {
+    func testMacUnavailableCloseKeepsSavedPairingAndRetriesReconnect() {
         let service = makeService()
 
         withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
@@ -538,14 +538,14 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
             XCTAssertFalse(service.isConnected)
             XCTAssertFalse(service.isInitialized)
-            XCTAssertFalse(service.shouldAutoReconnectOnForeground)
-            XCTAssertNil(service.relaySessionId)
-            XCTAssertNil(service.relayUrl)
+            XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+            XCTAssertEqual(service.relaySessionId, SecureStore.readString(for: CodexSecureKeys.relaySessionId))
+            XCTAssertEqual(service.relayUrl, SecureStore.readString(for: CodexSecureKeys.relayUrl))
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "This relay pairing is no longer valid. Scan a new QR code to reconnect."
+                "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
             )
-            XCTAssertEqual(service.connectionRecoveryState, .idle)
+            XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
         }
     }
 

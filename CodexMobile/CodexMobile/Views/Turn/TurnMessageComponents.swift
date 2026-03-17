@@ -886,26 +886,40 @@ struct MessageRow: View, Equatable {
     private func thinkingSystemView(renderModel: MessageRowRenderModel) -> some View {
         let thinkingText = renderModel.thinkingText ?? ""
         let thinkingContent = renderModel.thinkingContent ?? ThinkingDisclosureContent(sections: [], fallbackText: "")
+        let activityPreview = ThinkingDisclosureParser.compactActivityPreview(fromNormalizedText: thinkingText)
         Group {
             // Keep completed reasoning visible too; older builds showed thinking blocks
             // even after stream completion whenever content was present.
             if message.isStreaming || !thinkingText.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Thinking...")
+                if let activityPreview {
+                    // Show compact tool activity as one status line instead of a stacked thinking header.
+                    Text(activityPreview)
                         .font(AppFont.mono(.caption))
                         .fontWeight(.regular)
                         .italic()
                         .foregroundStyle(.secondary.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .padding(.vertical, 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Thinking...")
+                            .font(AppFont.mono(.caption))
+                            .fontWeight(.regular)
+                            .italic()
+                            .foregroundStyle(.secondary.opacity(0.9))
 
-                    if !thinkingText.isEmpty {
-                        ThinkingDisclosureView(
-                            messageID: message.id,
-                            content: thinkingContent
-                        )
+                        if !thinkingText.isEmpty {
+                            ThinkingDisclosureView(
+                                messageID: message.id,
+                                content: thinkingContent
+                            )
+                        }
                     }
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.vertical, 2)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }

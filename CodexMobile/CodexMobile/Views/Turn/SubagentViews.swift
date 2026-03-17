@@ -104,6 +104,7 @@ struct SubagentActionCard: View {
             onOpen: onOpenSubagent.map { openSubagent in
                 {
                     HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    selectedAgentDetails = nil
                     openSubagent(resolved)
                 }
             }

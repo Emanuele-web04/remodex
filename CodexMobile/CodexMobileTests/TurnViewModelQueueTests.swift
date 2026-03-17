@@ -12,7 +12,7 @@ final class TurnViewModelQueueTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
     private static var retainedViewModels: [TurnViewModel] = []
 
-    func testSendTurnQueuesImmediatelyWhenThreadBusy() async {
+    func testSendTurnQueuesImmediatelyWhenThreadBusy() async throws {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
@@ -581,6 +581,50 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertTrue(service.runningThreadIDs.contains("thread-queue"))
         XCTAssertEqual(service.activeTurnIdByThread["thread-queue"], "turn-latest")
         XCTAssertEqual(service.activeTurnId, "turn-latest")
+    }
+
+    func testInterruptTurnDoesNotTargetCompletedLatestTurnWhenRunningTurnHasNoID() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.runningThreadIDs.insert("thread-queue")
+        service.protectedRunningFallbackThreadIDs.insert("thread-queue")
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            XCTAssertEqual(method, "thread/read")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "turns": .array([
+                            .object([
+                                "status": .string("in_progress"),
+                            ]),
+                            .object([
+                                "id": .string("turn-completed"),
+                                "status": .string("completed"),
+                            ]),
+                        ])
+                    ])
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        do {
+            try await service.interruptTurn(turnId: nil, threadId: "thread-queue")
+            XCTFail("interruptTurn should fail when no interruptible turn id is available")
+        } catch {
+            XCTAssertTrue(
+                service.userFacingTurnErrorMessage(from: error).contains("interruptible turn ID")
+            )
+        }
+
+        XCTAssertEqual(recordedMethods, ["thread/read"])
+        XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
+        XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains("thread-queue"))
     }
 
     func testSteerQueuedDraftIsNoOpWhenThreadIsNotRunning() async {

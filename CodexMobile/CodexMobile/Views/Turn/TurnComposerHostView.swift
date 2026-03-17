@@ -50,7 +50,8 @@ struct TurnComposerHostView: View {
             composerAttachments: viewModel.composerAttachments,
             composerMentionedFiles: viewModel.composerMentionedFiles,
             composerMentionedSkills: viewModel.composerMentionedSkills,
-            composerReviewSelection: viewModel.composerReviewSelection
+            composerReviewSelection: viewModel.composerReviewSelection,
+            isSubagentsSelectionArmed: viewModel.isSubagentsSelectionArmed
         )
         let runtimeState = TurnComposerRuntimeState.resolve(
             codex: codex,
@@ -133,6 +134,8 @@ struct TurnComposerHostView: View {
                 case .status:
                     viewModel.onSelectSlashCommand(command)
                     onShowStatus()
+                case .subagents:
+                    viewModel.onSelectSlashCommand(command)
                 }
             },
             onSelectCodeReviewTarget: { target in
@@ -142,6 +145,7 @@ struct TurnComposerHostView: View {
             onRemoveMentionedFile: viewModel.removeMentionedFile,
             onRemoveMentionedSkill: viewModel.removeMentionedSkill,
             onRemoveComposerReviewSelection: viewModel.clearComposerReviewSelection,
+            onRemoveComposerSubagentsSelection: viewModel.clearSubagentsSelection,
             onPasteImageData: { imageDataItems in
                 viewModel.enqueuePastedImageData(imageDataItems, codex: codex)
             },

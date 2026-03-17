@@ -99,6 +99,7 @@ extension CodexService {
         }
 
         let parentThread = thread(for: parentThreadId)
+        var unresolvedChildThreadIDs: [String] = []
         upsertSubagentIdentity(action: action)
 
         for agent in action.agentRows {
@@ -108,6 +109,10 @@ extension CodexService {
             }
 
             let existing = thread(for: childThreadId)
+            let resolvedIdentity = resolvedSubagentIdentity(
+                threadId: childThreadId,
+                agentId: agent.agentId
+            )
             let placeholderTimestamp = existing?.updatedAt
                 ?? existing?.createdAt
                 ?? parentThread?.updatedAt
@@ -124,8 +129,8 @@ extension CodexService {
                 metadata: existing?.metadata,
                 parentThreadId: parentThreadId,
                 agentId: agent.agentId,
-                agentNickname: agent.nickname,
-                agentRole: agent.role,
+                agentNickname: existing?.agentNickname ?? agent.nickname ?? resolvedIdentity?.nickname,
+                agentRole: existing?.agentRole ?? agent.role ?? resolvedIdentity?.role,
                 // Requested spawn-model hints stay on the timeline row until a real child-thread
                 // payload arrives; avoid persisting them as canonical thread metadata.
                 model: existing?.model ?? (agent.modelIsRequestedHint ? nil : agent.model),
@@ -133,6 +138,22 @@ extension CodexService {
                 syncState: existing?.syncState ?? parentThread?.syncState ?? .live
             )
             upsertThread(placeholder)
+
+            let hasResolvedIdentity = placeholder.preferredSubagentLabel != nil
+                || normalizedIdentifier(placeholder.agentNickname) != nil
+                || normalizedIdentifier(placeholder.agentRole) != nil
+            if !hasResolvedIdentity {
+                unresolvedChildThreadIDs.append(childThreadId)
+            }
+        }
+
+        // Starts child-thread hydration as soon as placeholders exist so sidebar/timeline
+        // labels can upgrade from ids to names before the card itself appears on screen.
+        if !unresolvedChildThreadIDs.isEmpty {
+            let threadIDs = unresolvedChildThreadIDs
+            Task {
+                await loadSubagentThreadMetadataIfNeeded(threadIds: threadIDs)
+            }
         }
     }
 
@@ -185,7 +206,7 @@ extension CodexService {
     }
 
     func upsertSubagentIdentity(action: CodexSubagentAction, incrementVersion: Bool = true) {
-        for agent in action.receiverAgents {
+        for agent in action.agentRows {
             upsertSubagentIdentity(
                 threadId: agent.threadId,
                 agentId: agent.agentId,

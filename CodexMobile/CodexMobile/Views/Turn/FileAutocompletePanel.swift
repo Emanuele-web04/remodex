@@ -15,6 +15,10 @@ struct FileAutocompletePanel: View {
     private static let rowHeight: CGFloat = 38
     private static let maxVisibleRows = 6
 
+    private static func visibleListHeight(for count: Int) -> CGFloat {
+        rowHeight * CGFloat(min(count, maxVisibleRows))
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if isLoading {
@@ -62,14 +66,11 @@ struct FileAutocompletePanel: View {
                     }
                 }
                 .scrollIndicators(.visible)
-                .frame(
-                    maxHeight: Self.rowHeight * CGFloat(
-                        min(items.count, Self.maxVisibleRows)
-                    )
-                )
+                .frame(height: Self.visibleListHeight(for: items.count))
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
         .padding(4)
         .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .padding(.horizontal, 4)

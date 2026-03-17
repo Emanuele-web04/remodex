@@ -78,4 +78,26 @@ final class ThinkingDisclosureParserTests: XCTestCase {
             """
         )
     }
+
+    func testCompactActivityPreviewReturnsLatestToolLine() {
+        let preview = ThinkingDisclosureParser.compactActivityPreview(
+            fromNormalizedText: """
+            Running sed -n '80,140p' TurnComposerReviewModeTests.swift
+            Running rg -n \"/subagents\" CodexMobile/CodexMobileTests
+            """
+        )
+
+        XCTAssertEqual(
+            preview,
+            "Running rg -n \"/subagents\" CodexMobile/CodexMobileTests"
+        )
+    }
+
+    func testCompactActivityPreviewKeepsReasoningBlocksExpanded() {
+        let preview = ThinkingDisclosureParser.compactActivityPreview(
+            fromNormalizedText: "I found the exact insertion point and I am updating the composer."
+        )
+
+        XCTAssertNil(preview)
+    }
 }

@@ -9,6 +9,9 @@ import Foundation
 enum TurnComposerSlashCommand: String, Identifiable, Equatable {
     case codeReview
     case status
+    case subagents
+
+    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .status, .subagents]
 
     var id: String { rawValue }
 
@@ -18,6 +21,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
             return "Code Review"
         case .status:
             return "Status"
+        case .subagents:
+            return "Subagents"
         }
     }
 
@@ -27,6 +32,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
             return "Run the reviewer on your local changes"
         case .status:
             return "Show context usage and rate limits"
+        case .subagents:
+            return "Insert a canned prompt that asks Codex to delegate work"
         }
     }
 
@@ -36,6 +43,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
             return "ladybug"
         case .status:
             return "speedometer"
+        case .subagents:
+            return "person.3"
         }
     }
 
@@ -45,6 +54,18 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
             return "/review"
         case .status:
             return "/status"
+        case .subagents:
+            return "/subagents"
+        }
+    }
+
+    // Supplies canned prompt text for slash actions that expand into the visible draft.
+    var cannedPrompt: String? {
+        switch self {
+        case .subagents:
+            return "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results."
+        case .codeReview, .status:
+            return nil
         }
     }
 
@@ -54,11 +75,10 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
 
     static func filtered(matching query: String) -> [TurnComposerSlashCommand] {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let allCases: [TurnComposerSlashCommand] = [.codeReview, .status]
         guard !trimmedQuery.isEmpty else {
-            return allCases
+            return allCommands
         }
-        return allCases.filter { $0.searchBlob.contains(trimmedQuery) }
+        return allCommands.filter { $0.searchBlob.contains(trimmedQuery) }
     }
 }
 
@@ -107,13 +127,15 @@ enum TurnComposerCommandLogic {
         trimmedInput: String,
         mentionedFileCount: Int,
         mentionedSkillCount: Int,
-        attachmentCount: Int
+        attachmentCount: Int,
+        hasSubagentsSelection: Bool
     ) -> Bool {
         let draftText = removingTrailingSlashCommandToken(in: trimmedInput) ?? trimmedInput
         return !draftText.isEmpty
             || mentionedFileCount > 0
             || mentionedSkillCount > 0
             || attachmentCount > 0
+            || hasSubagentsSelection
     }
 
     // Parses only a final `/query` token so ordinary prose and paths do not trigger the command menu.
@@ -150,5 +172,20 @@ enum TurnComposerCommandLogic {
         var updated = text
         updated.replaceSubrange(token.tokenRange, with: "")
         return updated.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func replacingTrailingSlashCommandToken(
+        in text: String,
+        with replacement: String
+    ) -> String? {
+        let trimmedReplacement = replacement.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedReplacement.isEmpty,
+              let token = trailingSlashCommandToken(in: text) else {
+            return nil
+        }
+
+        var updated = text
+        updated.replaceSubrange(token.tokenRange, with: trimmedReplacement)
+        return updated
     }
 }

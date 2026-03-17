@@ -31,6 +31,7 @@ struct TurnComposerAccessoryState {
     let composerMentionedFiles: [TurnComposerMentionedFile]
     let composerMentionedSkills: [TurnComposerMentionedSkill]
     let composerReviewSelection: TurnComposerReviewSelection?
+    let isSubagentsSelectionArmed: Bool
 
     var showsComposerAttachments: Bool {
         !composerAttachments.isEmpty
@@ -48,7 +49,11 @@ struct TurnComposerAccessoryState {
         composerReviewSelection?.target
     }
 
+    var showsSubagentsSelection: Bool {
+        isSubagentsSelectionArmed
+    }
+
     var topInputPadding: CGFloat {
-        showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || reviewTarget != nil ? 8 : 14
+        showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || showsSubagentsSelection || reviewTarget != nil ? 8 : 14
     }
 }
