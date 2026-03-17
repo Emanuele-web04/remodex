@@ -38,13 +38,8 @@ private struct FileChangeInlineActionRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
 
-                HStack(spacing: 4) {
-                    Text("+\(entry.additions)")
-                        .foregroundStyle(Color.green)
-                    Text("-\(entry.deletions)")
-                        .foregroundStyle(Color.red)
-                }
-                .font(AppFont.mono(.caption))
+                DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                    .font(AppFont.mono(.caption))
             }
             .font(AppFont.body())
         }
@@ -79,10 +74,7 @@ private struct FileChangeActionButtons: View {
                         Image(systemName: "doc.text.magnifyingglass")
                             .font(AppFont.system(size: 10, weight: .medium))
                         Text("Diff")
-                        Text("+\(totalAdditions)")
-                            .foregroundStyle(Color.green)
-                        Text("-\(totalDeletions)")
-                            .foregroundStyle(Color.red)
+                        DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
                     }
                     .font(AppFont.mono(.body))
                     .padding(.horizontal, 14)
@@ -619,6 +611,7 @@ struct MessageRow: View, Equatable {
     // Disables timer-driven adornments while the user reads older content.
     var showsStreamingAnimations: Bool = true
     @Environment(\.assistantRevertAction) private var assistantRevertAction
+    @Environment(\.subagentOpenAction) private var subagentOpenAction
     @State private var previewImage: PreviewImagePayload?
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
 
@@ -640,6 +633,7 @@ struct MessageRow: View, Equatable {
                 "Thinking...",
                 "Applying file changes...",
                 "Updating...",
+                "Coordinating agents...",
                 "Planning...",
                 "Waiting for input...",
             ]
@@ -653,18 +647,23 @@ struct MessageRow: View, Equatable {
     var body: some View {
         let text = displayText
         let renderModel = MessageRowRenderModelCache.model(for: message, displayText: text)
-        switch message.role {
-        case .user:
-            userBubble(text: text)
-        case .assistant:
-            assistantView(text: text, renderModel: renderModel)
-        case .system:
-            VStack(alignment: .leading, spacing: 8) {
-                systemView(text: text, renderModel: renderModel)
-                if let blockText = copyBlockText {
-                    CopyBlockButton(text: blockText)
+        Group {
+            switch message.role {
+            case .user:
+                userBubble(text: text)
+            case .assistant:
+                assistantView(text: text, renderModel: renderModel)
+            case .system:
+                VStack(alignment: .leading, spacing: 8) {
+                    systemView(text: text, renderModel: renderModel)
+                    if let blockText = copyBlockText {
+                        CopyBlockButton(text: blockText)
+                    }
                 }
             }
+        }
+        .sheet(item: $selectableTextSheet) { sheet in
+            SelectableMessageTextSheet(state: sheet)
         }
     }
 
@@ -856,9 +855,6 @@ struct MessageRow: View, Equatable {
         .contextMenu {
             selectableTextActions(text: text, usesMarkdownSelection: true)
         }
-        .sheet(item: $selectableTextSheet) { sheet in
-            SelectableMessageTextSheet(state: sheet)
-        }
     }
 
     @ViewBuilder
@@ -870,6 +866,8 @@ struct MessageRow: View, Equatable {
             fileChangeSystemView(text: text, renderModel: renderModel)
         case .commandExecution:
             commandExecutionSystemView(text: text, renderModel: renderModel)
+        case .subagentAction:
+            subagentActionSystemView(text: text)
         case .plan:
             PlanSystemCard(message: message)
         case .userInputPrompt:
@@ -955,9 +953,6 @@ struct MessageRow: View, Equatable {
         .contextMenu {
             selectableTextActions(text: text, usesMarkdownSelection: false)
         }
-        .sheet(item: $selectableTextSheet) { sheet in
-            SelectableMessageTextSheet(state: sheet)
-        }
     }
 
     private func defaultSystemView(text: String) -> some View {
@@ -969,9 +964,6 @@ struct MessageRow: View, Equatable {
             .contextMenu {
                 selectableTextActions(text: text, usesMarkdownSelection: false)
             }
-            .sheet(item: $selectableTextSheet) { sheet in
-                SelectableMessageTextSheet(state: sheet)
-            }
     }
 
     @ViewBuilder
@@ -981,6 +973,20 @@ struct MessageRow: View, Equatable {
            !text.isEmpty,
            let commandStatus = renderModel.commandStatus {
             CommandExecutionStatusCard(status: commandStatus, itemId: message.itemId)
+        } else {
+            defaultSystemView(text: text)
+        }
+    }
+
+    @ViewBuilder
+    private func subagentActionSystemView(text: String) -> some View {
+        if let subagentAction = message.subagentAction {
+            SubagentActionCard(
+                parentThreadId: message.threadId,
+                action: subagentAction,
+                isStreaming: message.isStreaming && showsStreamingAnimations,
+                onOpenSubagent: subagentOpenAction
+            )
         } else {
             defaultSystemView(text: text)
         }
@@ -1228,41 +1234,62 @@ private struct CommandExecutionStatusCard: View {
     }
 }
 
-// ─── Typing indicator ───────────────────────────────────────────────
+// ─── Subagent UI — see SubagentViews.swift ──────────────────────
 
-private struct TypingIndicator: View {
-    private let dotCount = 3
-    private let dotWidth: CGFloat = 4
-    private let dotHeight: CGFloat = 4
-    private let spacing: CGFloat = 5
-    private let duration: TimeInterval = 0.85
-    @State private var isAnimating = false
+// ─── Shared diff counts ─────────────────────────────────────────────
+
+/// Compact `+N -M` label in green/red. Caller applies `.font()`.
+struct DiffCountsLabel: View {
+    let additions: Int
+    let deletions: Int
 
     var body: some View {
-        HStack(spacing: spacing) {
-            ForEach(0..<dotCount, id: \.self) { index in
-                indicatorDot(delay: Double(index) * 0.14)
+        HStack(spacing: 4) {
+            Text("+\(additions)")
+                .foregroundStyle(Color.green)
+            Text("-\(deletions)")
+                .foregroundStyle(Color.red)
+        }
+    }
+}
+
+// ─── Typing indicator ───────────────────────────────────────────────
+
+struct TypingIndicator: View {
+    private let trackWidth: CGFloat = 26
+    private let trackHeight: CGFloat = 6
+    private let highlightWidth: CGFloat = 16
+    private let duration: TimeInterval = 1.0
+    @State private var shimmerOffset: CGFloat = -21
+
+    var body: some View {
+        Capsule(style: .continuous)
+            .fill(Color.secondary.opacity(0.12))
+            .frame(width: trackWidth, height: trackHeight)
+            .overlay {
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color.secondary.opacity(0.04),
+                                Color.secondary.opacity(0.42),
+                                Color.secondary.opacity(0.04),
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: highlightWidth, height: trackHeight)
+                    .offset(x: shimmerOffset)
+            }
+            .clipShape(Capsule(style: .continuous))
+        .onAppear {
+            guard shimmerOffset < 0 else { return }
+            withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
+                shimmerOffset = 21
             }
         }
-        .onAppear {
-            guard !isAnimating else { return }
-            isAnimating = true
-        }
         .accessibilityHidden(true)
-    }
-
-    // Uses lightweight implicit animation instead of a continuously ticking timeline.
-    private func indicatorDot(delay: Double) -> some View {
-        Capsule(style: .continuous)
-            .fill(Color.secondary.opacity(isAnimating ? 0.55 : 0.2))
-            .frame(width: dotWidth, height: dotHeight)
-            .scaleEffect(isAnimating ? 1 : 0.72)
-            .animation(
-                .easeInOut(duration: duration)
-                    .repeatForever(autoreverses: true)
-                    .delay(delay),
-                value: isAnimating
-            )
     }
 }
 

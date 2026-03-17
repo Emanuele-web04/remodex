@@ -56,6 +56,41 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertFalse(service.shouldSuppressUserFacingConnectionError(error))
     }
 
+    func testOversizedRelayPayloadGetsFriendlyFailureCopy() {
+        let service = CodexService()
+        let error = NWError.posix(.EMSGSIZE)
+
+        XCTAssertTrue(service.isOversizedRelayPayloadError(error))
+        XCTAssertEqual(
+            service.userFacingConnectFailureMessage(error),
+            "A thread payload was too large for the relay connection. This can happen while reopening image-heavy chats even if you didn't press Send."
+        )
+    }
+
+    func testReceiveDispositionUsesFriendlyOversizedPayloadMessage() {
+        let service = CodexService()
+        let error = NWError.posix(.EMSGSIZE)
+
+        service.handleReceiveError(error)
+
+        XCTAssertEqual(
+            service.lastErrorMessage,
+            "A thread payload was too large for the relay connection. This can happen while reopening image-heavy chats even if you didn't press Send."
+        )
+    }
+
+    func testValidateOutgoingWebSocketMessageSizeRejectsOversizedPayload() {
+        let service = CodexService()
+        let oversizedText = String(repeating: "a", count: codexWebSocketMaximumMessageSizeBytes + 1)
+
+        XCTAssertThrowsError(try service.validateOutgoingWebSocketMessageSize(oversizedText)) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "This payload is too large for the relay connection. Try fewer or smaller images and retry."
+            )
+        }
+    }
+
     func testBenignDisconnectStaysSilentWhileAutoReconnectIsRunning() {
         let service = CodexService()
         let error = CodexServiceError.disconnected

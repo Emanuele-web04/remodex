@@ -295,6 +295,13 @@ extension CodexService {
             return true
         }
 
+        // Freshly created empty chats do not need an immediate resume/read pass.
+        // Skipping that first hydration avoids extra RPC contention when another
+        // thread is already running and the user simply wants a blank composer.
+        if shouldSkipInitialDisplayHydration(threadId: threadId) {
+            return true
+        }
+
         do {
             try await ensureThreadResumed(threadId: threadId)
         } catch {
@@ -324,6 +331,19 @@ extension CodexService {
             updateCurrentOutput(for: threadId)
         }
         requestImmediateSync(threadId: threadId)
+        return true
+    }
+
+    // Detects a brand-new local thread that has no timeline to hydrate yet.
+    func shouldSkipInitialDisplayHydration(threadId: String) -> Bool {
+        guard resumedThreadIDs.contains(threadId),
+              !hydratedThreadIDs.contains(threadId),
+              !threadHasActiveOrRunningTurn(threadId),
+              messages(for: threadId).isEmpty,
+              thread(for: threadId)?.syncState == .live else {
+            return false
+        }
+
         return true
     }
 
@@ -362,7 +382,11 @@ extension CodexService {
     }
 
     // Loads thread/read(includeTurns=true) once per thread to backfill old messages.
-    func loadThreadHistoryIfNeeded(threadId: String, forceRefresh: Bool = false) async throws {
+    func loadThreadHistoryIfNeeded(
+        threadId: String,
+        forceRefresh: Bool = false,
+        markHydratedWhenNotMaterialized: Bool = true
+    ) async throws {
         if !forceRefresh, hydratedThreadIDs.contains(threadId) {
             return
         }
@@ -387,8 +411,11 @@ extension CodexService {
             response = try await sendRequest(method: "thread/read", params: paramsWithTurns)
         } catch let error as CodexServiceError {
             if case .rpcError(let rpcError) = error, rpcError.code == -32600 {
-                // Thread not materialized yet — mark as hydrated and return silently.
-                hydratedThreadIDs.insert(threadId)
+                // Sidebar/timeline metadata fetches should keep retrying while the child thread
+                // is still materializing, but full history hydration can stop here.
+                if markHydratedWhenNotMaterialized {
+                    hydratedThreadIDs.insert(threadId)
+                }
                 return
             }
             throw error
@@ -401,6 +428,13 @@ extension CodexService {
 
         extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
 
+        // Upsert thread metadata (name, agentNickname, agentRole, model, etc.)
+        // so subagent identity resolves without navigating into the child thread.
+        if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
+           let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
+            upsertThread(decoded)
+        }
+
         // A turn may have started while thread/read was in flight. Normal background
         // history loads should still stay out of the way, but forced refreshes are
         // used when reopening a running thread and need to merge the latest snapshot.
@@ -410,6 +444,7 @@ extension CodexService {
         }
 
         let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+        registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
         if !historyMessages.isEmpty {
             let existingMessages = messagesByThread[threadId] ?? []
             let activeThreadIDs = Set(activeTurnIdByThread.keys)
@@ -668,6 +703,165 @@ extension CodexService {
         messagesByThread[threadId]?[messageIndex].planState = planState
         persistMessages()
         updateCurrentOutput(for: threadId)
+    }
+
+    // Keeps multi-agent orchestration events on a single structured timeline row.
+    func upsertSubagentActionMessage(
+        threadId: String,
+        turnId: String?,
+        itemId: String?,
+        action: CodexSubagentAction,
+        isStreaming: Bool
+    ) {
+        let summaryText = action.summaryText
+        registerSubagentThreads(action: action, parentThreadId: threadId)
+        let resolvedItemId = resolvedSubagentActionItemId(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: itemId,
+            action: action
+        )
+
+        if let resolvedItemId, !resolvedItemId.isEmpty {
+            upsertStreamingSystemItemMessage(
+                threadId: threadId,
+                turnId: turnId,
+                itemId: resolvedItemId,
+                kind: .subagentAction,
+                text: summaryText,
+                isStreaming: isStreaming
+            )
+        } else {
+            appendSystemMessage(
+                threadId: threadId,
+                text: summaryText,
+                turnId: turnId,
+                itemId: resolvedItemId,
+                kind: .subagentAction,
+                isStreaming: isStreaming
+            )
+        }
+
+        guard let messageIndex = findLatestSubagentActionMessageIndex(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: resolvedItemId
+        ) else {
+            return
+        }
+
+        messagesByThread[threadId]?[messageIndex].text = summaryText
+        messagesByThread[threadId]?[messageIndex].subagentAction = action
+        persistMessages()
+        updateCurrentOutput(for: threadId)
+    }
+
+    private func resolvedSubagentActionItemId(
+        threadId: String,
+        turnId: String?,
+        itemId: String?,
+        action: CodexSubagentAction
+    ) -> String? {
+        if let itemId = normalizedStreamingItemID(itemId) {
+            if let turnId = normalizedStreamingItemID(turnId), !turnId.isEmpty {
+                rebindMatchingSyntheticSubagentActionMessageIfNeeded(
+                    threadId: threadId,
+                    turnId: turnId,
+                    realItemId: itemId,
+                    action: action
+                )
+            }
+            return itemId
+        }
+
+        guard let turnId = normalizedStreamingItemID(turnId), !turnId.isEmpty else {
+            return nil
+        }
+
+        if let existingItemId = matchingSubagentActionMessage(
+            threadId: threadId,
+            turnId: turnId,
+            action: action
+        )?.itemId {
+            return existingItemId
+        }
+
+        return nextSyntheticSubagentActionItemId(threadId: threadId, turnId: turnId)
+    }
+
+    private func matchingSubagentActionMessage(
+        threadId: String,
+        turnId: String,
+        action: CodexSubagentAction
+    ) -> CodexMessage? {
+        let incomingPrompt = normalizedIdentifier(action.prompt)
+        let incomingModel = normalizedIdentifier(action.model)
+
+        return messagesByThread[threadId]?.reversed().first(where: { candidate in
+            guard candidate.role == .system,
+                  candidate.kind == .subagentAction,
+                  candidate.turnId == turnId,
+                  let candidateAction = candidate.subagentAction,
+                  candidateAction.normalizedTool == action.normalizedTool else {
+                return false
+            }
+
+            guard candidate.isStreaming,
+                  candidate.text == action.summaryText else {
+                return false
+            }
+
+            let candidatePrompt = normalizedIdentifier(candidateAction.prompt)
+            let candidateModel = normalizedIdentifier(candidateAction.model)
+            if let incomingPrompt, incomingPrompt == candidatePrompt {
+                return true
+            }
+            if incomingPrompt == nil,
+               let incomingModel,
+               incomingModel == candidateModel {
+                return true
+            }
+
+            return false
+        })
+    }
+
+    private func nextSyntheticSubagentActionItemId(threadId: String, turnId: String) -> String {
+        let prefix = syntheticSubagentActionItemIdPrefix(turnId: turnId)
+        let existingCount = messagesByThread[threadId]?.reduce(into: 0) { count, candidate in
+            guard candidate.role == .system,
+                  candidate.kind == .subagentAction,
+                  candidate.turnId == turnId,
+                  candidate.itemId?.hasPrefix(prefix) == true else {
+                return
+            }
+            count += 1
+        } ?? 0
+
+        return "\(prefix)\(existingCount + 1)"
+    }
+
+    private func rebindMatchingSyntheticSubagentActionMessageIfNeeded(
+        threadId: String,
+        turnId: String,
+        realItemId: String,
+        action: CodexSubagentAction
+    ) {
+        let realKey = streamingItemMessageKey(threadId: threadId, itemId: realItemId)
+        guard streamingSystemMessageByItemID[realKey] == nil,
+              let existing = matchingSubagentActionMessage(threadId: threadId, turnId: turnId, action: action),
+              let existingItemId = normalizedStreamingItemID(existing.itemId),
+              existingItemId.hasPrefix(syntheticSubagentActionItemIdPrefix(turnId: turnId)),
+              let messageIndex = findMessageIndex(threadId: threadId, messageId: existing.id) else {
+            return
+        }
+
+        let existingKey = streamingItemMessageKey(threadId: threadId, itemId: existingItemId)
+        messagesByThread[threadId]?[messageIndex].itemId = realItemId
+        if let existingMessageId = streamingSystemMessageByItemID[existingKey] {
+            streamingSystemMessageByItemID[realKey] = existingMessageId
+            streamingSystemMessageByItemID.removeValue(forKey: existingKey)
+        }
     }
 
     // Adds or refreshes an inline structured question card for plan mode clarification requests.
@@ -1867,7 +2061,7 @@ extension CodexService {
 extension CodexService {
     // Reuses the sidebar "ready" signal to surface a lightweight in-app banner for off-screen chats.
     func presentThreadCompletionBannerIfNeeded(threadId: String) {
-        guard let thread = thread(for: threadId) else {
+        guard let thread = thread(for: threadId), !thread.isSubagent else {
             return
         }
 
@@ -2187,6 +2381,33 @@ extension CodexService {
         })
     }
 
+    func findLatestSubagentActionMessageIndex(threadId: String, turnId: String?, itemId: String?) -> Int? {
+        if let itemId, !itemId.isEmpty {
+            if let directIndex = messagesByThread[threadId]?.indices.reversed().first(where: { index in
+                let candidate = messagesByThread[threadId]?[index]
+                return candidate?.role == .system
+                    && candidate?.kind == .subagentAction
+                    && candidate?.itemId == itemId
+            }) {
+                return directIndex
+            }
+        }
+
+        if let turnId, !turnId.isEmpty {
+            return messagesByThread[threadId]?.indices.reversed().first(where: { index in
+                let candidate = messagesByThread[threadId]?[index]
+                return candidate?.role == .system
+                    && candidate?.kind == .subagentAction
+                    && candidate?.turnId == turnId
+            })
+        }
+
+        return messagesByThread[threadId]?.indices.reversed().first(where: { index in
+            let candidate = messagesByThread[threadId]?[index]
+            return candidate?.role == .system && candidate?.kind == .subagentAction
+        })
+    }
+
     func ensureStreamingAssistantMessage(threadId: String, turnId: String, itemId: String?) -> String? {
         let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: turnId)
         let normalizedItemId = normalizedStreamingItemID(itemId)
@@ -2277,6 +2498,10 @@ extension CodexService {
         "turn:\(turnId)|kind:\(kind.rawValue)"
     }
 
+    func syntheticSubagentActionItemIdPrefix(turnId: String) -> String {
+        "turn:\(turnId)|kind:\(CodexMessageKind.subagentAction.rawValue)|action:"
+    }
+
     func streamingPlaceholderText(for kind: CodexMessageKind) -> String {
         switch kind {
         case .thinking:
@@ -2285,6 +2510,8 @@ extension CodexService {
             return "Applying file changes..."
         case .commandExecution:
             return "Running command"
+        case .subagentAction:
+            return "Coordinating agents..."
         case .plan:
             return "Planning..."
         case .userInputPrompt:

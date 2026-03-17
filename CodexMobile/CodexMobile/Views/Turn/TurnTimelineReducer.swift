@@ -19,7 +19,8 @@ enum TurnTimelineReducer {
         let reordered = enforceIntraTurnOrder(in: visibleMessages)
         let collapsedThinking = collapseConsecutiveThinkingMessages(in: reordered)
         let dedupedFileChanges = removeDuplicateFileChangeMessages(in: collapsedThinking)
-        let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedFileChanges)
+        let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
+        let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
         return TurnTimelineProjection(messages: dedupedAssistant)
     }
 
@@ -130,10 +131,12 @@ enum TurnTimelineReducer {
                 return 1
             case .commandExecution:
                 return 2
+            case .subagentAction:
+                return 3
             case .chat:
-                return 3
+                return 4
             case .plan:
-                return 3
+                return 4
             case .userInputPrompt:
                 return 6
             case .fileChange:
@@ -319,6 +322,90 @@ enum TurnTimelineReducer {
         }
 
         return result
+    }
+
+    // Collapses back-to-back subagent cards when the first one is only a transient
+    // placeholder and the second one carries the real child-thread payload.
+    static func removeDuplicateSubagentActionMessages(in messages: [CodexMessage]) -> [CodexMessage] {
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for message in messages {
+            guard let action = message.subagentAction,
+                  message.role == .system,
+                  message.kind == .subagentAction else {
+                result.append(message)
+                continue
+            }
+
+            guard let previous = result.last,
+                  let previousAction = previous.subagentAction,
+                  shouldMergeSubagentActionMessages(
+                      previous: previous,
+                      previousAction: previousAction,
+                      incoming: message,
+                      incomingAction: action
+                  ) else {
+                result.append(message)
+                continue
+            }
+
+            result[result.count - 1] = preferredSubagentActionMessage(previous: previous, incoming: message)
+        }
+
+        return result
+    }
+
+    private static func shouldMergeSubagentActionMessages(
+        previous: CodexMessage,
+        previousAction: CodexSubagentAction,
+        incoming: CodexMessage,
+        incomingAction: CodexSubagentAction
+    ) -> Bool {
+        guard previous.role == .system,
+              previous.kind == .subagentAction,
+              previous.threadId == incoming.threadId,
+              normalizedIdentifier(previous.turnId) == normalizedIdentifier(incoming.turnId),
+              previousAction.normalizedTool == incomingAction.normalizedTool,
+              previous.text == incoming.text else {
+            return false
+        }
+
+        guard let previousItemId = normalizedIdentifier(previous.itemId),
+              let incomingItemId = normalizedIdentifier(incoming.itemId) else {
+            return false
+        }
+        if previousItemId != incomingItemId {
+            return false
+        }
+
+        let previousRows = previousAction.agentRows
+        let incomingRows = incomingAction.agentRows
+
+        if previousRows.isEmpty && !incomingRows.isEmpty {
+            return true
+        }
+
+        if previousRows == incomingRows {
+            return true
+        }
+
+        return false
+    }
+
+    private static func preferredSubagentActionMessage(previous: CodexMessage, incoming: CodexMessage) -> CodexMessage {
+        let previousRows = previous.subagentAction?.agentRows ?? []
+        let incomingRows = incoming.subagentAction?.agentRows ?? []
+
+        if previousRows.isEmpty && !incomingRows.isEmpty {
+            return incoming
+        }
+
+        if incoming.isStreaming != previous.isStreaming {
+            return incoming.isStreaming ? previous : incoming
+        }
+
+        return incoming.orderIndex >= previous.orderIndex ? incoming : previous
     }
 
     // Keys file-change cards by turn + rendered payload so repeated turn/diff snapshots collapse to one row.

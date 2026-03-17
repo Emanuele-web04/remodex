@@ -63,4 +63,53 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
 
         XCTAssertNil(thread.gitWorkingDirectory)
     }
+
+    func testAgentDisplayLabelCombinesNicknameAndRole() {
+        let thread = CodexThread(
+            id: "thread-agent",
+            agentNickname: "Locke",
+            agentRole: "explorer"
+        )
+
+        XCTAssertEqual(thread.agentDisplayLabel, "Locke [explorer]")
+    }
+
+    func testDisplayTitlePrefersAgentLabelOverGenericConversation() {
+        let thread = CodexThread(
+            id: "thread-agent",
+            title: "Conversation",
+            parentThreadId: "parent-thread",
+            agentNickname: "Locke",
+            agentRole: "explorer"
+        )
+
+        XCTAssertEqual(thread.displayTitle, "Locke [explorer]")
+    }
+
+    func testModelDisplayLabelPrefersProviderName() {
+        let thread = CodexThread(
+            id: "thread-agent",
+            model: "gpt-5.4",
+            modelProvider: "gpt-5.4-mini"
+        )
+
+        XCTAssertEqual(thread.modelDisplayLabel, "gpt-5.4-mini")
+    }
+
+    func testAgentDisplayLabelIgnoresCollabToolItemTypeNoise() throws {
+        let payload = """
+        {
+          "id": "thread-agent",
+          "metadata": {
+            "agentNickname": "Locke",
+            "type": "collabAgentToolCall",
+            "agentRole": "explorer"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let thread = try JSONDecoder().decode(CodexThread.self, from: payload)
+
+        XCTAssertEqual(thread.agentDisplayLabel, "Locke [explorer]")
+    }
 }

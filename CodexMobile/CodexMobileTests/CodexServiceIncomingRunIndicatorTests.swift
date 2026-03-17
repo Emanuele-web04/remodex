@@ -330,6 +330,37 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertNil(service.threadRunBadgeState(for: threadID))
     }
 
+    func testPrepareThreadForDisplaySkipsHydrationForFreshEmptyThread() async {
+        let service = makeService()
+        let freshThreadID = "thread-fresh-\(UUID().uuidString)"
+        let runningThreadID = "thread-running-\(UUID().uuidString)"
+        let runningTurnID = "turn-running-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [
+            CodexThread(id: freshThreadID, createdAt: Date(), updatedAt: Date()),
+            CodexThread(id: runningThreadID, createdAt: Date(), updatedAt: Date())
+        ]
+        service.resumedThreadIDs.insert(freshThreadID)
+        service.runningThreadIDs.insert(runningThreadID)
+        service.activeTurnIdByThread[runningThreadID] = runningTurnID
+        service.activeThreadId = runningThreadID
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            XCTFail("Fresh empty thread should not trigger RPC during initial display prep")
+            return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+        }
+
+        let didPrepare = await service.prepareThreadForDisplay(threadId: freshThreadID)
+
+        XCTAssertTrue(didPrepare)
+        XCTAssertEqual(service.activeThreadId, freshThreadID)
+        XCTAssertTrue(recordedMethods.isEmpty)
+    }
+
     func testActiveThreadDoesNotReceiveReadyOrFailedBadge() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

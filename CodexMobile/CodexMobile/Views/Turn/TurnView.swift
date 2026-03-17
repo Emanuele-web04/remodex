@@ -34,77 +34,43 @@ struct TurnView: View {
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
 
         return TurnConversationContainerView(
-            threadID: thread.id,
-            messages: renderSnapshot.messages,
-            timelineChangeToken: renderSnapshot.timelineChangeToken,
-            activeTurnID: activeTurnID,
-            isThreadRunning: isThreadRunning,
-            latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
-            stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
-            assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
-            errorMessage: codex.lastErrorMessage,
-            shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
-            isScrolledToBottom: isScrolledToBottomBinding,
-            emptyState: AnyView(emptyState),
-            composer: AnyView(
-                TurnComposerHostView(
-                    viewModel: viewModel,
-                    codex: codex,
-                    thread: thread,
+                threadID: thread.id,
+                messages: renderSnapshot.messages,
+                timelineChangeToken: renderSnapshot.timelineChangeToken,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning,
+                latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
+                stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
+                assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
+                errorMessage: codex.lastErrorMessage,
+                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
+                isScrolledToBottom: isScrolledToBottomBinding,
+                emptyState: AnyView(emptyState),
+                composer: AnyView(composerWithSubagentAccessory(
                     activeTurnID: activeTurnID,
                     isThreadRunning: isThreadRunning,
-                    isInputFocused: $isInputFocused,
-                    orderedModelOptions: orderedModelOptions,
-                    selectedModelTitle: selectedModelTitle,
-                    reasoningDisplayOptions: reasoningDisplayOptions,
                     showsGitControls: showsGitControls,
-                    isGitBranchSelectorEnabled: canRunGitAction(
-                        isThreadRunning: isThreadRunning,
-                        gitWorkingDirectory: gitWorkingDirectory
-                    ),
-                    onSelectGitBranch: { branch in
-                        guard canRunGitAction(
-                            isThreadRunning: isThreadRunning,
-                            gitWorkingDirectory: gitWorkingDirectory
-                        ) else { return }
-
-                        viewModel.switchGitBranch(
-                            to: branch,
-                            codex: codex,
-                            workingDirectory: gitWorkingDirectory,
-                            threadID: thread.id,
-                            activeTurnID: activeTurnID
-                        )
-                    },
-                    onRefreshGitBranches: {
-                        guard showsGitControls else { return }
-                        viewModel.refreshGitBranchTargets(
-                            codex: codex,
-                            workingDirectory: gitWorkingDirectory,
-                            threadID: thread.id
-                        )
-                    },
-                    onStartCodeReviewThread: startCodeReviewThread,
-                    onShowStatus: presentStatusSheet,
-                    onSend: handleSend
-                )
-            ),
-            repositoryLoadingToastOverlay: AnyView(EmptyView()),
-            usageToastOverlay: AnyView(EmptyView()),
-            isRepositoryLoadingToastVisible: false,
-            onRetryUserMessage: { messageText in
-                viewModel.input = messageText
-                isInputFocused = true
-            },
-            onTapAssistantRevert: { message in
-                startAssistantRevertPreview(message: message, gitWorkingDirectory: gitWorkingDirectory)
-            },
-            onTapOutsideComposer: {
-                guard isInputFocused else { return }
-                isInputFocused = false
-                viewModel.clearComposerAutocomplete()
-            }
-        )
+                    gitWorkingDirectory: gitWorkingDirectory
+                )),
+                repositoryLoadingToastOverlay: AnyView(EmptyView()),
+                usageToastOverlay: AnyView(EmptyView()),
+                isRepositoryLoadingToastVisible: false,
+                onRetryUserMessage: { messageText in
+                    viewModel.input = messageText
+                    isInputFocused = true
+                },
+                onTapAssistantRevert: { message in
+                    startAssistantRevertPreview(message: message, gitWorkingDirectory: gitWorkingDirectory)
+                },
+                onTapSubagent: { subagent in
+                    openThread(subagent.threadId)
+                },
+                onTapOutsideComposer: {
+                    guard isInputFocused else { return }
+                    isInputFocused = false
+                    viewModel.clearComposerAutocomplete()
+                }
+            )
         .environment(\.inlineCommitAndPushAction, showsGitControls ? {
             viewModel.inlineCommitAndPush(
                 codex: codex,
@@ -612,6 +578,14 @@ struct TurnView: View {
         return requestThreadID == thread.id ? request : nil
     }
 
+    private var parentThread: CodexThread? {
+        guard let parentThreadId = thread.parentThreadId else {
+            return nil
+        }
+
+        return codex.thread(for: parentThreadId)
+    }
+
     private var threadNavigationContext: TurnThreadNavigationContext? {
         guard let path = thread.normalizedProjectPath ?? thread.cwd,
               !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -624,6 +598,73 @@ struct TurnView: View {
             subtitle: fullPath,
             fullPath: fullPath
         )
+    }
+
+    private func composerWithSubagentAccessory(
+        activeTurnID: String?,
+        isThreadRunning: Bool,
+        showsGitControls: Bool,
+        gitWorkingDirectory: String?
+    ) -> some View {
+        VStack(spacing: 8) {
+            if let parentThread = parentThread {
+                SubagentParentAccessoryCard(
+                    parentTitle: parentThread.displayTitle,
+                    agentLabel: codex.resolvedSubagentDisplayLabel(threadId: thread.id, agentId: thread.agentId)
+                        ?? "Subagent",
+                    onTap: { openThread(parentThread.id) }
+                )
+                .padding(.horizontal, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            TurnComposerHostView(
+                viewModel: viewModel,
+                codex: codex,
+                thread: thread,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning,
+                isInputFocused: $isInputFocused,
+                orderedModelOptions: orderedModelOptions,
+                selectedModelTitle: selectedModelTitle,
+                reasoningDisplayOptions: reasoningDisplayOptions,
+                showsGitControls: showsGitControls,
+                isGitBranchSelectorEnabled: canRunGitAction(
+                    isThreadRunning: isThreadRunning,
+                    gitWorkingDirectory: gitWorkingDirectory
+                ),
+                onSelectGitBranch: { branch in
+                    guard canRunGitAction(
+                        isThreadRunning: isThreadRunning,
+                        gitWorkingDirectory: gitWorkingDirectory
+                    ) else { return }
+
+                    viewModel.switchGitBranch(
+                        to: branch,
+                        codex: codex,
+                        workingDirectory: gitWorkingDirectory,
+                        threadID: thread.id,
+                        activeTurnID: activeTurnID
+                    )
+                },
+                onRefreshGitBranches: {
+                    guard showsGitControls else { return }
+                    viewModel.refreshGitBranchTargets(
+                        codex: codex,
+                        workingDirectory: gitWorkingDirectory,
+                        threadID: thread.id
+                    )
+                },
+                onStartCodeReviewThread: startCodeReviewThread,
+                onShowStatus: presentStatusSheet,
+                onSend: handleSend
+            )
+        }
+    }
+
+    private func openThread(_ threadId: String) {
+        codex.activeThreadId = threadId
+        codex.markThreadAsViewed(threadId)
     }
 
     // MARK: - Empty State
@@ -647,6 +688,49 @@ struct TurnView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+private struct SubagentParentAccessoryCard: View {
+    let parentTitle: String
+    let agentLabel: String
+    let onTap: () -> Void
+
+    var body: some View {
+        GlassAccessoryCard(onTap: onTap) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.1))
+                    .frame(width: 22, height: 22)
+
+                Image(systemName: "arrow.turn.up.left")
+                    .font(AppFont.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
+        } header: {
+            HStack(alignment: .center, spacing: 6) {
+                Text("Subagent")
+                    .font(AppFont.mono(.caption2))
+                    .foregroundStyle(.secondary)
+
+                Circle()
+                    .fill(Color(.separator).opacity(0.6))
+                    .frame(width: 3, height: 3)
+
+                SubagentLabelParser.styledText(for: agentLabel)
+                    .font(AppFont.caption(weight: .regular))
+                    .lineLimit(1)
+            }
+        } summary: {
+            Text("Back to \(parentTitle)")
+                .font(AppFont.subheadline(weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        } trailing: {
+            Image(systemName: "chevron.right")
+                .font(AppFont.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
     }
 }
 

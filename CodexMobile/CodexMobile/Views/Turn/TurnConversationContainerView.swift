@@ -25,6 +25,7 @@ struct TurnConversationContainerView: View {
     let isRepositoryLoadingToastVisible: Bool
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
+    let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
     let onTapOutsideComposer: () -> Void
 
     @State private var isShowingPinnedPlanSheet = false
@@ -71,6 +72,7 @@ struct TurnConversationContainerView: View {
                 isScrolledToBottom: isScrolledToBottom,
                 onRetryUserMessage: onRetryUserMessage,
                 onTapAssistantRevert: onTapAssistantRevert,
+                onTapSubagent: onTapSubagent,
                 onTapOutsideComposer: onTapOutsideComposer
             ) {
                 timelineEmptyState

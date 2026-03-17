@@ -31,6 +31,17 @@ struct CodexRunningThreadWatch: Equatable, Sendable {
     let expiresAt: Date
 }
 
+struct CodexSubagentIdentityEntry: Equatable, Sendable {
+    var threadId: String?
+    var agentId: String?
+    var nickname: String?
+    var role: String?
+
+    var hasMetadata: Bool {
+        threadId != nil || agentId != nil || nickname != nil || role != nil
+    }
+}
+
 struct CodexSecureControlWaiter {
     let id: UUID
     let continuation: CheckedContinuation<String, Error>
@@ -315,6 +326,8 @@ final class CodexService {
     var supportsServiceTier = true
     // Seeds brand-new chats with one-shot composer actions like code review.
     var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
+    // In-memory identity directory for subagents, keyed by thread id and agent id.
+    var subagentIdentityVersion: Int = 0
 
     // Relay session persistence
     var relaySessionId: String?
@@ -369,6 +382,7 @@ final class CodexService {
     var threadIdByTurnID: [String: String] = [:]
     var hydratedThreadIDs: Set<String> = []
     var loadingThreadIDs: Set<String> = []
+    @ObservationIgnored var subagentMetadataLoadingThreadIDs: Set<String> = []
     var resumedThreadIDs: Set<String> = []
     var isAppInForeground = true
     var threadListSyncTask: Task<Void, Never>?
@@ -405,6 +419,8 @@ final class CodexService {
     @ObservationIgnored var threadByID: [String: CodexThread] = [:]
     @ObservationIgnored var threadIndexByID: [String: Int] = [:]
     @ObservationIgnored var firstLiveThreadIDCache: String?
+    @ObservationIgnored var subagentIdentityByThreadID: [String: CodexSubagentIdentityEntry] = [:]
+    @ObservationIgnored var subagentIdentityByAgentID: [String: CodexSubagentIdentityEntry] = [:]
     // Canonical repo roots keyed by observed working directories from bridge git/status responses.
     var repoRootByWorkingDirectory: [String: String] = [:]
     var knownRepoRoots: Set<String> = []
@@ -460,6 +476,7 @@ final class CodexService {
         }
         CodexMessageOrderCounter.seed(from: loadedMessages)
         self.messagesByThread = loadedMessages
+        rebuildSubagentIdentityDirectory()
 
         let loadedChangeSets = aiChangeSetPersistence.load()
         self.aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in

@@ -624,6 +624,7 @@ extension CodexService {
 
             if let threadObject = threadValue.objectValue {
                 let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
                 if !historyMessages.isEmpty {
                     let existingMessages = messagesByThread[threadId] ?? []
                     let activeThreadIDs = Set(activeTurnIdByThread.keys)
@@ -1362,27 +1363,40 @@ extension CodexService {
         }
 
         let turnObjects = threadObject["turns"]?.arrayValue?.compactMap { $0.objectValue } ?? []
-        guard let latestTurnObject = turnObjects.last else {
+        guard !turnObjects.isEmpty else {
             return (nil, false, nil)
         }
 
-        let latestTurnID = normalizedInterruptIdentifier(
-            latestTurnObject["id"]?.stringValue
-                ?? latestTurnObject["turnId"]?.stringValue
-                ?? latestTurnObject["turn_id"]?.stringValue
-        )
-        let latestStatus = normalizedInterruptTurnStatus(from: latestTurnObject)
+        let latestTurnID = turnObjects.reversed().compactMap { turnObject in
+            normalizedInterruptIdentifier(
+                turnObject["id"]?.stringValue
+                    ?? turnObject["turnId"]?.stringValue
+                    ?? turnObject["turn_id"]?.stringValue
+            )
+        }.first
 
-        // Missing status should stay permissive so incomplete payloads do not clear live UI state.
-        guard isInterruptibleTurnStatus(latestStatus) else {
-            return (nil, false, latestTurnID)
+        // Some thread/read payloads can include a newer completed turn after the currently
+        // running one, so scan backwards for the most recent interruptible turn instead of
+        // assuming the array tail is always the active run.
+        var hasInterruptibleTurnWithoutID = false
+        for turnObject in turnObjects.reversed() {
+            let turnStatus = normalizedInterruptTurnStatus(from: turnObject)
+            guard isInterruptibleTurnStatus(turnStatus) else {
+                continue
+            }
+
+            if let interruptibleTurnID = normalizedInterruptIdentifier(
+                turnObject["id"]?.stringValue
+                    ?? turnObject["turnId"]?.stringValue
+                    ?? turnObject["turn_id"]?.stringValue
+            ) {
+                return (interruptibleTurnID, false, latestTurnID)
+            }
+
+            hasInterruptibleTurnWithoutID = true
         }
 
-        if let latestTurnID {
-            return (latestTurnID, false, latestTurnID)
-        }
-
-        return (nil, true, latestTurnID)
+        return (nil, hasInterruptibleTurnWithoutID, latestTurnID)
     }
 
     // Retries after refreshing turn id when local activeTurn cache is stale.

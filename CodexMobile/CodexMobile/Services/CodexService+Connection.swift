@@ -468,7 +468,7 @@ extension CodexService {
         } else if let explicitRelayDropMessage {
             lastErrorMessage = explicitRelayDropMessage
         } else if !shouldSuppressMessage && !shouldAttemptAutoRecovery {
-            lastErrorMessage = error.localizedDescription
+            lastErrorMessage = userFacingConnectFailureMessage(error)
         } else {
             lastErrorMessage = nil
         }
@@ -565,6 +565,8 @@ extension CodexService {
             switch nwError {
             case .posix(let code) where code == .ECONNREFUSED:
                 return "Connection refused by relay server at \(attemptedURL)."
+            case .posix(let code) where code == .EMSGSIZE:
+                return oversizedRelayPayloadMessage
             case .posix(let code) where code == .ENETDOWN || code == .ENETUNREACH || code == .EHOSTUNREACH:
                 return "Cannot reach relay server at \(attemptedURL). Check that the iPhone can access the Mac on the local network."
             case .posix(let code) where code == .ETIMEDOUT:
@@ -700,6 +702,9 @@ extension CodexService {
     }
 
     func userFacingConnectFailureMessage(_ error: Error) -> String {
+        if isOversizedRelayPayloadError(error) {
+            return oversizedRelayPayloadMessage
+        }
         if isBenignBackgroundDisconnect(error) {
             return "Connection was interrupted. Tap Reconnect to try again."
         }
@@ -707,6 +712,23 @@ extension CodexService {
             return "Connection timed out. Check server/network."
         }
         return error.localizedDescription
+    }
+
+    // Distinguishes relay frame-size failures from generic disconnects so reconnect UI can explain them.
+    func isOversizedRelayPayloadError(_ error: Error) -> Bool {
+        if let nwError = error as? NWError,
+           case .posix(let code) = nwError,
+           code == .EMSGSIZE {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSPOSIXErrorDomain
+            && nsError.code == Int(POSIXErrorCode.EMSGSIZE.rawValue)
+    }
+
+    var oversizedRelayPayloadMessage: String {
+        "A thread payload was too large for the relay connection. This can happen while reopening image-heavy chats even if you didn't press Send."
     }
 
     // Treats `.inactive` app switches like background for user-facing reconnect noise.

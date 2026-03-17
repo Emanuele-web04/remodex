@@ -29,6 +29,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
+    let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
     let onTapOutsideComposer: () -> Void
     @ViewBuilder let emptyState: () -> EmptyState
     @ViewBuilder let composer: () -> Composer
@@ -118,6 +119,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                                 )
                                 .equatable()
                                 .environment(\.assistantRevertAction, onTapAssistantRevert)
+                                .environment(\.subagentOpenAction, onTapSubagent)
                                 .id(message.id)
                             }
                         }

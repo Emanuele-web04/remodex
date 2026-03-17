@@ -1,19 +1,18 @@
 {
-  "fill-specializations" : [
-    {
-      "value" : "system-light"
-    },
-    {
-      "appearance" : "dark",
-      "value" : "system-light"
-    }
-  ],
+  "fill" : "system-light",
   "groups" : [
     {
       "layers" : [
         {
-          "image-name" : "Group 9.png",
-          "name" : "Group 9"
+          "image-name" : "Group 11.png",
+          "name" : "Group 11",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -31.25,
+              0
+            ]
+          }
         }
       ],
       "shadow" : {
@@ -21,7 +20,7 @@
         "opacity" : 0.5
       },
       "translucency" : {
-        "enabled" : true,
+        "enabled" : false,
         "value" : 0.5
       }
     }
