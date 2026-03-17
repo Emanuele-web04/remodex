@@ -411,6 +411,8 @@ final class CodexService {
     // Service-owned per-thread UI state keeps the active chat isolated from unrelated thread mutations.
     @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
+    // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
+    @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]
     @ObservationIgnored var latestAssistantOutputByThread: [String: String] = [:]
     @ObservationIgnored var latestRepoAffectingMessageSignalByThread: [String: String] = [:]
     @ObservationIgnored var assistantRevertStateCacheByThread: [String: AssistantRevertStateCacheEntry] = [:]

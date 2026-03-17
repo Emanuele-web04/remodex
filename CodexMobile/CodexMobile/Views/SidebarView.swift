@@ -116,7 +116,10 @@ struct SidebarView: View {
             rebuildCachedRunBadges()
         }
         .overlay {
-            if codex.isLoadingThreads {
+            if SidebarThreadsLoadingPresentation.shouldShowOverlay(
+                isLoadingThreads: codex.isLoadingThreads,
+                threadCount: codex.threads.count
+            ) {
                 ProgressView()
                     .padding()
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
@@ -351,6 +354,13 @@ struct SidebarView: View {
 
     private var canCreateThread: Bool {
         codex.isConnected && codex.isInitialized
+    }
+}
+
+enum SidebarThreadsLoadingPresentation {
+    // Keeps pull-to-refresh from stacking a second spinner over an already populated sidebar.
+    static func shouldShowOverlay(isLoadingThreads: Bool, threadCount: Int) -> Bool {
+        isLoadingThreads && threadCount == 0
     }
 }
 

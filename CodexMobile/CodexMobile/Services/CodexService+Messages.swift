@@ -34,6 +34,7 @@ extension CodexService {
     func removeThreadTimelineState(for threadId: String) {
         threadTimelineStateByThread.removeValue(forKey: threadId)
         stoppedTurnIDsByThread.removeValue(forKey: threadId)
+        messageIndexCacheByThread.removeValue(forKey: threadId)
         latestAssistantOutputByThread.removeValue(forKey: threadId)
         latestRepoAffectingMessageSignalByThread.removeValue(forKey: threadId)
         assistantRevertStateCacheByThread.removeValue(forKey: threadId)
@@ -44,6 +45,7 @@ extension CodexService {
     func removeAllThreadTimelineState() {
         threadTimelineStateByThread.removeAll()
         stoppedTurnIDsByThread.removeAll()
+        messageIndexCacheByThread.removeAll()
         latestAssistantOutputByThread.removeAll()
         latestRepoAffectingMessageSignalByThread.removeAll()
         assistantRevertStateCacheByThread.removeAll()
@@ -65,7 +67,7 @@ extension CodexService {
 
     // Fast-paths plain assistant text streaming so one delta does not rebuild every derived row cache.
     // Falls back to the full projection path whenever the visible snapshot shape changed underneath us.
-    func updateStreamingAssistantOutput(for threadId: String, messageId: String) {
+    func updateStreamingAssistantOutput(for threadId: String, messageId: String, rawMessageIndex: Int? = nil) {
         noteMessagesChanged(for: threadId)
 
         // Keep the visible output anchored to the latest assistant bubble, even if a late
@@ -77,11 +79,19 @@ extension CodexService {
 
         guard let state = threadTimelineStateByThread[threadId],
               let rawMessages = messagesByThread[threadId],
-              let updatedMessage = rawMessages.first(where: { $0.id == messageId }),
+              let updatedMessageIndex = resolvedMessageIndex(
+                  threadId: threadId,
+                  messageId: messageId,
+                  preferredIndex: rawMessageIndex,
+                  in: rawMessages
+              ),
+              rawMessages.indices.contains(updatedMessageIndex),
+              rawMessages[updatedMessageIndex].id == messageId,
               let projectedIndex = state.renderSnapshot.messages.firstIndex(where: { $0.id == messageId }) else {
             refreshThreadTimelineState(for: threadId)
             return
         }
+        let updatedMessage = rawMessages[updatedMessageIndex]
 
         let revision = messageRevisionByThread[threadId] ?? 0
         var projectedMessages = state.renderSnapshot.messages
@@ -1517,7 +1527,7 @@ extension CodexService {
         }
 
         persistMessages()
-        updateStreamingAssistantOutput(for: threadId, messageId: messageID)
+        updateStreamingAssistantOutput(for: threadId, messageId: messageID, rawMessageIndex: messageIndex)
     }
 
     // Finalizes assistant text when item/completed carries the canonical message body.
@@ -1837,12 +1847,17 @@ extension CodexService {
 
 extension CodexService {
     func persistMessages() {
-        let snapshot = messagesByThread
         messagePersistenceDebounceTask?.cancel()
-        messagePersistenceDebounceTask = Task.detached { [messagePersistence] in
+        messagePersistenceDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled else { return }
-            messagePersistence.save(snapshot)
+            guard !Task.isCancelled, let self else { return }
+
+            let snapshot = self.messagesByThread
+            self.messagePersistenceDebounceTask = nil
+
+            Task.detached { [messagePersistence] in
+                messagePersistence.save(snapshot)
+            }
         }
     }
 }
@@ -2112,7 +2127,37 @@ extension CodexService {
     }
 
     func findMessageIndex(threadId: String, messageId: String) -> Int? {
-        messagesByThread[threadId]?.firstIndex(where: { $0.id == messageId })
+        guard let messages = messagesByThread[threadId] else {
+            return nil
+        }
+
+        if let cachedIndex = messageIndexCacheByThread[threadId]?[messageId],
+           messages.indices.contains(cachedIndex),
+           messages[cachedIndex].id == messageId {
+            return cachedIndex
+        }
+
+        let rebuiltIndex = Dictionary(
+            uniqueKeysWithValues: messages.enumerated().map { ($0.element.id, $0.offset) }
+        )
+        messageIndexCacheByThread[threadId] = rebuiltIndex
+        return rebuiltIndex[messageId]
+    }
+
+    // Reuses a caller-provided index when still valid, otherwise falls back to the cached lookup map.
+    func resolvedMessageIndex(
+        threadId: String,
+        messageId: String,
+        preferredIndex: Int?,
+        in messages: [CodexMessage]
+    ) -> Int? {
+        if let preferredIndex,
+           messages.indices.contains(preferredIndex),
+           messages[preferredIndex].id == messageId {
+            return preferredIndex
+        }
+
+        return findMessageIndex(threadId: threadId, messageId: messageId)
     }
 
     func findLatestPlanMessageIndex(threadId: String, turnId: String?, itemId: String?) -> Int? {
