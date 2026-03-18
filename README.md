@@ -234,6 +234,15 @@ macOS only. Prints the current `launchd` / bridge status, including whether the 
 
 macOS only. Internal service entrypoint used by `launchd`. You normally do not run this manually.
 
+### `remodex --version`
+
+Prints the installed Remodex CLI version.
+
+```sh
+remodex --version
+# => 1.2.9
+```
+
 ### `remodex reset-pairing`
 
 Clears the saved bridge pairing state so the next trusted connection requires a fresh QR bootstrap again.

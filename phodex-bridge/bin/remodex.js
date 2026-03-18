@@ -18,6 +18,7 @@ const {
   openLastActiveThread,
   watchThreadRollout,
 } = require("../src");
+const { version } = require("../package.json");
 
 const command = process.argv[2] || "up";
 
@@ -26,6 +27,11 @@ void main();
 // ─── ENTRY POINT ─────────────────────────────────────────────
 
 async function main() {
+  if (isVersionCommand(command)) {
+    console.log(version);
+    return;
+  }
+
   if (command === "up") {
     if (process.platform === "darwin") {
       const result = await startMacOSBridgeService({
@@ -114,7 +120,10 @@ async function main() {
   }
 
   console.error(`Unknown command: ${command}`);
-  console.error("Usage: remodex up | remodex run | remodex start | remodex stop | remodex status | remodex reset-pairing | remodex resume | remodex watch [threadId]");
+  console.error(
+    "Usage: remodex up | remodex run | remodex start | remodex stop | remodex status | "
+    + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version"
+  );
   process.exit(1);
 }
 
@@ -125,4 +134,8 @@ function assertMacOSCommand(name) {
 
   console.error(`[remodex] \`${name}\` is only available on macOS. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
   process.exit(1);
+}
+
+function isVersionCommand(value) {
+  return value === "-v" || value === "--v" || value === "-V" || value === "--version" || value === "version";
 }
