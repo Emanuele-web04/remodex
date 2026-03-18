@@ -125,8 +125,30 @@ async function continueOnMac(
     ? await isAppRunning(appPath)
     : await detectRunningCodexApp(appPath, executor);
 
-  // Match the restored hard-handoff behavior from 2aea434: when Codex is already
-  // open, relaunch it before opening the requested thread so the UI actually switches.
+  // Preserve the safer direct-open path for threads the desktop already knows
+  // about. Relaunching here regressed handoff reliability for existing threads.
+  if (desktopKnown) {
+    try {
+      await openCodexTarget(targetUrl, { bundleId, appPath, executor });
+    } catch (error) {
+      throw desktopError(
+        "handoff_failed",
+        "Could not open Codex.app on this Mac.",
+        error
+      );
+    }
+
+    return {
+      success: true,
+      relaunched: false,
+      targetUrl,
+      threadId,
+      desktopKnown,
+    };
+  }
+
+  // Brand-new phone-authored threads still need a short boot/materialization
+  // window before the final deep link is likely to work.
   if (!appRunning) {
     try {
       await openCodexApp({ bundleId, appPath, executor });

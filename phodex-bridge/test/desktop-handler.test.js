@@ -113,7 +113,7 @@ test("desktop/continueOnMac boots Codex before deep-linking unknown threads", as
   assert.equal(responses[0].result?.relaunched, false);
 });
 
-test("desktop/continueOnMac still relaunches Codex when a desktop-known thread is requested", async () => {
+test("desktop/continueOnMac deep-links directly when a desktop-known thread is requested", async () => {
   const executorCalls = [];
   const responses = [];
   let running = true;
@@ -165,15 +165,18 @@ test("desktop/continueOnMac still relaunches Codex when a desktop-known thread i
 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(executorCalls.length, 3);
-  assert.equal(executorCalls[0][0], "pkill");
-  assert.equal(executorCalls[1][0], "open");
-  assert.equal(executorCalls[2][0], "open");
-  assert.equal(responses[0].result?.relaunched, true);
+  assert.equal(executorCalls.length, 1);
+  assert.equal(executorCalls[0][0], "open");
+  assert.deepEqual(executorCalls[0][1], [
+    "-b",
+    "com.openai.codex",
+    "codex://threads/thread-desktop-known",
+  ]);
+  assert.equal(responses[0].result?.relaunched, false);
   assert.equal(responses[0].result?.desktopKnown, true);
 });
 
-test("desktop/continueOnMac still relaunches Codex when the thread already exists locally", async () => {
+test("desktop/continueOnMac deep-links directly when the thread already exists locally", async () => {
   const executorCalls = [];
   const responses = [];
   let running = true;
@@ -217,11 +220,14 @@ test("desktop/continueOnMac still relaunches Codex when the thread already exist
 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(executorCalls.length, 3);
-  assert.equal(executorCalls[0][0], "pkill");
-  assert.equal(executorCalls[1][0], "open");
-  assert.equal(executorCalls[2][0], "open");
-  assert.equal(responses[0].result?.relaunched, true);
+  assert.equal(executorCalls.length, 1);
+  assert.equal(executorCalls[0][0], "open");
+  assert.deepEqual(executorCalls[0][1], [
+    "-b",
+    "com.openai.codex",
+    "codex://threads/thread-phone-known",
+  ]);
+  assert.equal(responses[0].result?.relaunched, false);
   assert.equal(responses[0].result?.desktopKnown, true);
 });
 
