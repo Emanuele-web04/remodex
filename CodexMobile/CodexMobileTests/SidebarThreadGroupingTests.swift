@@ -61,6 +61,29 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups[1].threads.map(\.id), ["archived-thread"])
     }
 
+    func testMakeGroupsMarksCodexManagedWorktreesInLabelAndIcon() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            makeThread(id: "main-thread", updatedAt: now, cwd: "/Users/me/work/Remodex"),
+            makeThread(
+                id: "worktree-thread",
+                updatedAt: now.addingTimeInterval(-60),
+                cwd: "/Users/me/.codex/worktrees/ce15/Remodex"
+            ),
+        ]
+
+        let groups = SidebarThreadGrouping.makeGroups(from: threads, now: now)
+        let mainGroup = try XCTUnwrap(groups.first(where: { $0.projectPath == "/Users/me/work/Remodex" }))
+        let worktreeGroup = try XCTUnwrap(
+            groups.first(where: { $0.projectPath == "/Users/me/.codex/worktrees/ce15/Remodex" })
+        )
+
+        XCTAssertEqual(mainGroup.label, "Remodex")
+        XCTAssertEqual(mainGroup.iconSystemName, "folder")
+        XCTAssertEqual(worktreeGroup.label, "Remodex 15")
+        XCTAssertEqual(worktreeGroup.iconSystemName, "arrow.triangle.branch")
+    }
+
     func testMakeProjectChoicesReusesLiveProjectBucketsAndSkipsNoProject() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
@@ -78,7 +101,28 @@ final class SidebarThreadGroupingTests: XCTestCase {
         let choices = SidebarThreadGrouping.makeProjectChoices(from: threads)
 
         XCTAssertEqual(choices.map(\.label), ["app", "site"])
+        XCTAssertEqual(choices.map(\.iconSystemName), ["folder", "folder"])
         XCTAssertEqual(choices.map(\.projectPath), ["/Users/me/work/app", "/Users/me/work/site"])
+    }
+
+    func testMakeProjectChoicesKeepWorktreeSelectionCompactWithoutShowingPathInLabel() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            makeThread(id: "main-thread", updatedAt: now, cwd: "/Users/me/work/Remodex"),
+            makeThread(
+                id: "worktree-thread",
+                updatedAt: now.addingTimeInterval(-60),
+                cwd: "/Users/me/.codex/worktrees/ce15/Remodex"
+            ),
+        ]
+
+        let choices = SidebarThreadGrouping.makeProjectChoices(from: threads)
+        let labelsByPath = Dictionary(uniqueKeysWithValues: choices.map { ($0.projectPath, $0) })
+
+        XCTAssertEqual(labelsByPath["/Users/me/work/Remodex"]?.label, "Remodex")
+        XCTAssertEqual(labelsByPath["/Users/me/work/Remodex"]?.iconSystemName, "folder")
+        XCTAssertEqual(labelsByPath["/Users/me/.codex/worktrees/ce15/Remodex"]?.label, "Remodex 15")
+        XCTAssertEqual(labelsByPath["/Users/me/.codex/worktrees/ce15/Remodex"]?.iconSystemName, "arrow.triangle.branch")
     }
 
     func testLiveThreadIDsForProjectGroupUsesAllThreadsNotJustFilteredMatches() {

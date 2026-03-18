@@ -89,6 +89,14 @@ struct SidebarView: View {
 
             HStack(spacing: 10) {
                 SidebarFloatingSettingsButton(colorScheme: colorScheme, action: openSettings)
+                Spacer(minLength: 0)
+                if let trustedPairPresentation = codex.trustedPairPresentation {
+                    SidebarMacConnectionStatusView(
+                        name: trustedPairPresentation.name,
+                        systemName: trustedPairPresentation.systemName,
+                        isConnected: codex.isConnected
+                    )
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 10)
@@ -387,24 +395,15 @@ private struct SidebarNewChatProjectPickerSheet: View {
                             dismiss()
                             onSelectProject(choice.projectPath)
                         } label: {
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: "folder")
+                            HStack(spacing: 12) {
+                                Image(systemName: choice.iconSystemName)
                                     .font(AppFont.body(weight: .medium))
                                     .foregroundStyle(.secondary)
 
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(choice.label)
-                                        .font(AppFont.body(weight: .semibold))
-                                        .foregroundStyle(.primary)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                                    Text(choice.projectPath)
-                                        .font(AppFont.mono(.caption))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                        .truncationMode(.middle)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
+                                Text(choice.label)
+                                    .font(AppFont.body(weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .padding(.vertical, 2)
                         }

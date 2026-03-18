@@ -7,9 +7,48 @@
 import Foundation
 
 struct CodexTrustedPairPresentation: Equatable, Sendable {
+    let deviceId: String?
     let title: String
     let name: String
+    let systemName: String?
     let detail: String?
+}
+
+enum SidebarMacNicknameStore {
+    private static let keyPrefix = "codex.sidebarMacNickname."
+
+    // Keeps sidebar aliases scoped to a stable Mac id instead of a single global setting.
+    static func nickname(for deviceId: String?) -> String {
+        guard let storageKey = storageKey(for: deviceId) else {
+            return ""
+        }
+
+        return UserDefaults.standard.string(forKey: storageKey) ?? ""
+    }
+
+    // Clears blank aliases so stale names do not survive after users switch back to the system name.
+    static func setNickname(_ nickname: String, for deviceId: String?) {
+        guard let storageKey = storageKey(for: deviceId) else {
+            return
+        }
+
+        let trimmed = nickname.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            UserDefaults.standard.removeObject(forKey: storageKey)
+            return
+        }
+
+        UserDefaults.standard.set(trimmed, forKey: storageKey)
+    }
+
+    private static func storageKey(for deviceId: String?) -> String? {
+        guard let deviceId = deviceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !deviceId.isEmpty else {
+            return nil
+        }
+
+        return keyPrefix + deviceId
+    }
 }
 
 extension CodexService {
@@ -21,9 +60,17 @@ extension CodexService {
             return nil
         }
 
+        let fallbackName = "Mac \(macFingerprint ?? "")".trimmingCharacters(in: .whitespacesAndNewlines)
+        let systemName = macName ?? fallbackName
+        let nickname = SidebarMacNicknameStore.nickname(for: trustedPairDeviceId)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveName = nickname.isEmpty ? systemName : nickname
+
         return CodexTrustedPairPresentation(
+            deviceId: trustedPairDeviceId,
             title: trustedPairTitle,
-            name: macName ?? "Mac \(macFingerprint ?? "")".trimmingCharacters(in: .whitespacesAndNewlines),
+            name: effectiveName,
+            systemName: nickname.isEmpty ? nil : systemName,
             detail: trustedPairDetail(displayName: macName, fingerprint: macFingerprint)
         )
     }
@@ -39,6 +86,11 @@ private extension CodexService {
         }
 
         return preferredTrustedMacRecord
+    }
+
+    // Reuses the connected device id when available, otherwise falls back to the saved preferred Mac.
+    var trustedPairDeviceId: String? {
+        normalizedRelayMacDeviceId ?? visibleTrustedMacRecord?.macDeviceId
     }
 
     var trustedPairDisplayName: String? {

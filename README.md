@@ -15,6 +15,7 @@ Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a 
 - End-to-end encrypted pairing and chats between your iPhone and Mac
 - Fast mode for lower-latency turns
 - Plan mode for structured planning before execution
+- Subagents from iPhone with the `/subagents` command
 - Steer active runs without starting over
 - Queue follow-up prompts while a turn is still running
 - In-app notifications when turns finish or need attention

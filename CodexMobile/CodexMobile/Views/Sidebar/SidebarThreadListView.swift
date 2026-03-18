@@ -117,7 +117,7 @@ struct SidebarThreadListView: View {
                 toggleProjectGroupExpansion(group.id)
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: "folder")
+                    Image(systemName: group.iconSystemName)
                         .font(AppFont.body(weight: .medium))
                         .foregroundStyle(.primary)
                     Text(group.label)

@@ -303,16 +303,29 @@ extension CodexThread {
 
     // User-facing project label shown in the sidebar section header.
     var projectDisplayName: String {
+        Self.projectDisplayLabel(for: normalizedProjectPath)
+    }
+
+    // Distinguishes Codex-managed worktrees from the main repo in compact sidebar UIs.
+    static func projectDisplayLabel(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
             return "No Project"
         }
 
-        let lastComponent = (normalizedProjectPath as NSString).lastPathComponent
-        if !lastComponent.isEmpty, lastComponent != "/" {
-            return lastComponent
+        let baseLabel = projectBaseDisplayName(for: normalizedProjectPath)
+        guard let worktreeToken = codexManagedWorktreeDisplayToken(for: normalizedProjectPath) else {
+            return baseLabel
         }
 
-        return normalizedProjectPath
+        return "\(baseLabel) \(worktreeToken)"
+    }
+
+    static func projectIconSystemName(for normalizedProjectPath: String?) -> String {
+        guard let normalizedProjectPath else {
+            return "folder"
+        }
+
+        return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "folder" : "arrow.triangle.branch"
     }
 
     // --- Date parsing ---------------------------------------------------------
@@ -449,5 +462,44 @@ extension CodexThread {
         }
 
         return normalized.isEmpty ? "/" : normalized
+    }
+
+    private static func projectBaseDisplayName(for normalizedProjectPath: String) -> String {
+        let lastComponent = (normalizedProjectPath as NSString).lastPathComponent
+        if !lastComponent.isEmpty, lastComponent != "/" {
+            return lastComponent
+        }
+
+        return normalizedProjectPath
+    }
+
+    private static func codexManagedWorktreeToken(for normalizedProjectPath: String) -> String? {
+        let components = URL(fileURLWithPath: normalizedProjectPath).standardized.pathComponents
+        guard let worktreesIndex = components.firstIndex(of: "worktrees"),
+              worktreesIndex > 0,
+              components[worktreesIndex - 1] == ".codex" else {
+            return nil
+        }
+
+        let tokenIndex = components.index(after: worktreesIndex)
+        guard components.indices.contains(tokenIndex) else {
+            return nil
+        }
+
+        let token = components[tokenIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty ? nil : token
+    }
+
+    private static func codexManagedWorktreeDisplayToken(for normalizedProjectPath: String) -> String? {
+        guard let token = codexManagedWorktreeToken(for: normalizedProjectPath) else {
+            return nil
+        }
+
+        let trailingDigits = token.reversed().prefix { $0.isNumber }.reversed()
+        if !trailingDigits.isEmpty {
+            return String(trailingDigits)
+        }
+
+        return token
     }
 }

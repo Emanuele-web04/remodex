@@ -9,11 +9,13 @@ import SwiftUI
 struct TrustedPairSummaryView: View {
     let title: String
     let name: String
+    let systemName: String?
     let detail: String?
 
-    init(title: String, name: String, detail: String?) {
+    init(title: String, name: String, systemName: String?, detail: String?) {
         self.title = title
         self.name = name
+        self.systemName = systemName
         self.detail = detail
     }
 
@@ -21,6 +23,7 @@ struct TrustedPairSummaryView: View {
         self.init(
             title: presentation.title,
             name: presentation.name,
+            systemName: presentation.systemName,
             detail: presentation.detail
         )
     }
@@ -46,6 +49,13 @@ struct TrustedPairSummaryView: View {
                         .font(AppFont.subheadline(weight: .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
+
+                    if let systemName, !systemName.isEmpty {
+                        Text("\"\(systemName)\"")
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
 
                     if let detail, !detail.isEmpty {
                         Text(detail)
