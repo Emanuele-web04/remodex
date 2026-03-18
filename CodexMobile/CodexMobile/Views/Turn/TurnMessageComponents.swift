@@ -892,16 +892,23 @@ struct MessageRow: View, Equatable {
             // even after stream completion whenever content was present.
             if message.isStreaming || !thinkingText.isEmpty {
                 if let activityPreview {
-                    // Show compact tool activity as one status line instead of a stacked thinking header.
-                    Text(activityPreview)
-                        .font(AppFont.mono(.caption))
-                        .fontWeight(.regular)
-                        .italic()
-                        .foregroundStyle(.secondary.opacity(0.9))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .padding(.vertical, 2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Thinking...")
+                            .font(AppFont.mono(.caption))
+                            .fontWeight(.regular)
+                            .italic()
+                            .foregroundStyle(.secondary.opacity(0.9))
+
+                        Text(activityPreview)
+                            .font(AppFont.mono(.caption))
+                            .fontWeight(.regular)
+                            .italic()
+                            .foregroundStyle(.secondary.opacity(0.9))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Thinking...")

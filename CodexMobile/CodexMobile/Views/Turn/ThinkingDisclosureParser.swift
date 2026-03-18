@@ -142,16 +142,23 @@ enum ThinkingDisclosureParser {
             return nil
         }
 
-        let isActivityOnly = lines.allSatisfy { line in
+        let activityLines = lines.filter { line in
             let normalizedLine = line.lowercased()
             return compactActivityPrefixes.contains(where: { normalizedLine.hasPrefix($0) })
         }
 
+        let isActivityOnly = activityLines.count == lines.count
+
         guard isActivityOnly else {
+            // Some streamed command previews wrap onto follow-up lines that no longer carry the
+            // original prefix. In that case keep the first meaningful activity line.
+            if activityLines.count == 1, let firstActivityLine = activityLines.first {
+                return firstActivityLine
+            }
             return nil
         }
 
-        return lines.last
+        return activityLines.last
     }
 
     private static func summaryTitle(from line: String) -> String? {
