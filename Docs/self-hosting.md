@@ -14,6 +14,8 @@ The public source tree is local-first and self-host friendly:
 - there is no public production relay baked into the GitHub source
 - local pairing should work out of the box with `./run-local-remodex.sh`
 - internet-facing setups should pass their own relay URL explicitly with `REMODEX_RELAY`
+- the first QR scan bootstraps trust, then later reconnects can reuse the same trusted Mac through that relay
+- the built-in background daemon for trusted reconnect is currently macOS-only
 
 ## What Remodex Self-Hosting Means
 
@@ -25,7 +27,7 @@ That means:
 - Codex runs on your own Mac
 - git commands run on your own Mac
 - your iPhone is a remote control
-- the relay is only a transport layer for pairing and encrypted message forwarding
+- the relay is only a transport layer for pairing, trusted-session resolve, and encrypted message forwarding
 
 The relay does not run Codex and does not get your plaintext application payloads after the secure handshake completes.
 
@@ -53,13 +55,14 @@ What this does:
 
 - starts a local relay on your machine
 - starts the Remodex bridge
-- prints a pairing QR code
+- prints a pairing QR code for first-time trust bootstrap or recovery
 
 Then:
 
 1. Open the iPhone app
 2. Scan the QR code from inside the app
 3. Start a thread and send a message
+4. On later launches, let the app try trusted reconnect before scanning again
 
 ### If your iPhone cannot reach the default hostname
 
@@ -88,6 +91,8 @@ You should get:
 ## Option 2: Self-Hosted VPS Relay
 
 Use this when you want the bridge on your Mac to connect through a relay you run on a VPS.
+
+This is also the best base for a Tailscale setup: the relay can live on a Mac, a mini server, or a VPS you control, as long as the iPhone can reach it reliably.
 
 ### What runs where
 
@@ -158,9 +163,18 @@ npm install
 REMODEX_RELAY="wss://relay.example.com/relay" npm start
 ```
 
-The bridge will print a QR code.
+The bridge will print a QR code the first time you trust that Mac, or later if you intentionally reset trust.
 
 That QR carries the relay URL and session information, so the iPhone does not need a hardcoded relay endpoint in the public source build.
+
+After the first successful scan:
+
+- the iPhone stores the Mac as a trusted device
+- the bridge keeps its local device identity
+- the relay can resolve the current live session for that trusted Mac
+- the app can reconnect without requiring a new QR every time
+
+Today, that background-service path is built in for macOS. If you self-host against a non-macOS bridge, pairing and relay routing still work, but you must manage persistence/background service behavior yourself.
 
 If you install the bridge from npm and do not use the local launcher, make sure you export `REMODEX_RELAY` before running `remodex up`.
 
@@ -237,5 +251,7 @@ If you cloned the public repo, the supported self-hosting story is:
 - run the relay yourself
 - prefer a relay path reachable from iPhone over Tailscale or another stable private network
 - point the bridge at your relay with `REMODEX_RELAY`
-- scan the QR from the iPhone app
+- scan the QR from the iPhone app once to trust the Mac
+- let reconnect reuse that trusted Mac over the same relay
+- remember that the built-in daemon path is currently macOS-only
 - keep private hostnames and credentials out of the public repo

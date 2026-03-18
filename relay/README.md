@@ -1,6 +1,6 @@
 # Relay
 
-This folder contains the public relay and push-service code used by Remodex pairing.
+This folder contains the public relay and push-service code used by Remodex pairing and trusted reconnect.
 
 The point of keeping this code in the repo is transparency: anyone forking Remodex can inspect the transport boundary, verify the encrypted-session flow, and run a compatible relay of their own. What should stay private is the actual deployed endpoint and any production credentials.
 
@@ -8,6 +8,8 @@ The point of keeping this code in the repo is transparency: anyone forking Remod
 
 - accepts WebSocket connections at `/relay/{sessionId}`
 - pairs one Mac host with one live iPhone client for a session
+- keeps an in-memory index of the current live session for each trusted Mac
+- resolves the current live session for a previously trusted iPhone through an authenticated HTTP lookup
 - forwards secure control messages and encrypted payloads between Mac and iPhone
 - exposes optional HTTP endpoints for push registration and run-completion alerts only when push is enabled explicitly
 - logs only connection metadata and payload sizes, not plaintext prompts or responses
@@ -26,6 +28,7 @@ Codex, git, and local file operations still run on the user's Mac.
 Remodex uses the relay as a transport hop, not as a trusted application server.
 
 - The pairing QR gives the iPhone the bridge identity public key plus short-lived session details.
+- After the first successful QR bootstrap, the relay can help the iPhone find the Mac's current live session again through a signed trusted-session resolve request.
 - The iPhone and bridge perform a signed handshake, derive shared AES-256-GCM keys with X25519 + HKDF-SHA256, and then encrypt application payloads end to end.
 - The relay can still observe connection metadata and the plaintext secure control messages needed to establish the encrypted session.
 - The relay does not receive plaintext Remodex application payloads after the secure session is active.
@@ -38,6 +41,7 @@ flowchart TD
     B --> C[Bridge prints QR with relay URL, sessionId, bridge identity key, expiry]
     B --> D[Mac opens WebSocket to /relay/{sessionId}<br/>x-role: mac]
     D --> E[Relay creates in-memory session room]
+    D --> E2[Relay records macDeviceId plus trusted phone metadata for live-session resolve]
 
     C --> F[iPhone scans QR]
     F --> G[iPhone opens WebSocket to /relay/{sessionId}<br/>x-role: iphone]
@@ -75,6 +79,12 @@ flowchart TD
     D --> AA{Mac disconnects?}
     AA -- Yes --> AB[Relay closes iPhone socket(s)<br/>4002 Mac disconnected]
     AB --> AC[Empty session cleaned up after delay]
+
+    T --> AD[Later app reopen]
+    AD --> AE[iPhone calls POST /v1/trusted/session/resolve]
+    AE --> AF[Relay verifies trusted-device signature, nonce, and freshness]
+    AF --> AG[Relay returns current live sessionId for that Mac]
+    AG --> G
 ```
 
 ## Protocol Notes
@@ -89,8 +99,11 @@ flowchart TD
 Optional HTTP endpoints:
 
 - `GET /health`
+- `POST /v1/trusted/session/resolve`
 - `POST /v1/push/session/register-device`
 - `POST /v1/push/session/notify-completion`
+
+The trusted-session resolve endpoint is intended for phones that have already completed the first QR bootstrap. It returns the current live session only after signature, nonce, and freshness checks pass.
 
 Push is disabled by default. Enable it only when you are ready to wire APNs and the bridge-side `REMODEX_PUSH_SERVICE_URL`, for example with `REMODEX_ENABLE_PUSH_SERVICE=true`.
 

@@ -58,7 +58,7 @@ This launcher:
 1. Spawns a Codex `app-server` process
 2. Starts a local relay on `/relay/{sessionId}`
 3. Points the bridge at that relay
-4. Prints a QR code in your terminal
+4. Prints a QR code in your terminal for the initial trust bootstrap
 
 If you only want the bridge process:
 
@@ -71,9 +71,10 @@ REMODEX_RELAY="ws://localhost:9000/relay" npm start
 That runs `remodex up`, which:
 1. Spawns a Codex `app-server` process
 2. Connects to the configured relay
-3. Prints a QR code in your terminal
+3. On macOS, starts the built-in background bridge service
+4. Prints a QR code in your terminal when first-time pairing or recovery is needed
 
-Scan the QR code with the Remodex iOS app to pair.
+Scan the QR code with the Remodex iOS app to trust that Mac.
 
 ### iOS app setup
 
@@ -95,6 +96,7 @@ The app uses SwiftUI and the current project target is iOS 18.6. No CocoaPods or
 3. Create a new thread from the app
 4. Send a message — you should see Codex respond in real-time
 5. Try git operations from the phone (commit, push, branch switching)
+6. Reopen the app and verify that the trusted reconnect path is used instead of forcing a fresh QR immediately
 
 ### Environment variables
 
@@ -156,6 +158,8 @@ remodex/
 
 ### Trust model
 
-- The QR pairing is possession-based: it contains the relay URL and a live session ID.
+- The first QR pairing is possession-based: it contains the relay URL and a live session ID.
+- After that first handshake, the iPhone stores a trusted Mac record and can ask the relay for the Mac's current live session again.
 - Set `REMODEX_RELAY` to a relay you control when you are not using the local launcher. Use `wss://` when you want TLS in transit.
 - Remodex uses an authenticated end-to-end encrypted transport after pairing completes. The relay code is public for inspection, but deployed relay details should stay in private config.
+- The built-in daemon / background service path is currently macOS-only. Linux and Windows can still run the bridge, but contributors should treat the daemon logic as platform-specific.
