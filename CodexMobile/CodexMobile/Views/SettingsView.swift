@@ -105,19 +105,13 @@ struct SettingsView: View {
 
     @ViewBuilder private var connectionSection: some View {
         SettingsCard(title: "Connection") {
-            Text("Status: \(connectionStatusLabel)")
+            if let trustedPairPresentation = codex.trustedPairPresentation {
+                TrustedPairSummaryView(presentation: trustedPairPresentation)
+            }
+
+            Text("Connection: \(connectionStatusLabel)")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
-
-            Text("Security: \(codex.secureConnectionState.statusLabel)")
-                .font(AppFont.caption())
-                .foregroundStyle(codex.secureConnectionState == .encrypted ? .green : .secondary)
-
-            if let fingerprint = codex.secureMacFingerprint, !fingerprint.isEmpty {
-                Text("Trusted Mac: \(fingerprint)")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
 
             if connectionPhaseShowsProgress {
                 HStack(spacing: 8) {
@@ -145,6 +139,11 @@ struct SettingsView: View {
                 SettingsButton("Disconnect", role: .destructive) {
                     HapticFeedback.shared.triggerImpactFeedback()
                     disconnectRelay()
+                }
+            } else if codex.hasTrustedMacReconnectCandidate {
+                SettingsButton("Forget Pair", role: .destructive) {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    codex.forgetTrustedMac()
                 }
             }
         }

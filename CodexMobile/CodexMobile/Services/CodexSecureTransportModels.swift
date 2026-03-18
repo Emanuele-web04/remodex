@@ -12,6 +12,8 @@ let codexPairingQRVersion = 2
 let codexSecureHandshakeTag = "remodex-e2ee-v1"
 let codexSecureHandshakeLabel = "client-auth"
 let codexSecureClockSkewToleranceSeconds: TimeInterval = 60
+let codexTrustedSessionResolveTag = "remodex-trusted-session-resolve-v1"
+let codexTrustedSessionResolveClockSkewToleranceSeconds: TimeInterval = 90
 
 enum CodexSecureHandshakeMode: String, Codable, Sendable {
     case qrBootstrap = "qr_bootstrap"
@@ -21,6 +23,7 @@ enum CodexSecureHandshakeMode: String, Codable, Sendable {
 enum CodexSecureConnectionState: Equatable, Sendable {
     case notPaired
     case trustedMac
+    case liveSessionUnresolved
     case handshaking
     case encrypted
     case reconnecting
@@ -47,6 +50,11 @@ struct CodexTrustedMacRecord: Codable, Sendable {
     let macDeviceId: String
     let macIdentityPublicKey: String
     let lastPairedAt: Date
+    var relayURL: String? = nil
+    var displayName: String? = nil
+    var lastResolvedSessionId: String? = nil
+    var lastResolvedAt: Date? = nil
+    var lastUsedAt: Date? = nil
 }
 
 struct CodexTrustedMacRegistry: Codable, Sendable {
@@ -137,6 +145,29 @@ struct CodexSecureSession {
     var nextOutboundCounter: Int
 }
 
+struct CodexTrustedSessionResolveRequest: Codable, Sendable {
+    let macDeviceId: String
+    let phoneDeviceId: String
+    let phoneIdentityPublicKey: String
+    let nonce: String
+    let timestamp: Int64
+    let signature: String
+}
+
+struct CodexTrustedSessionResolveResponse: Codable, Sendable {
+    let ok: Bool
+    let macDeviceId: String
+    let macIdentityPublicKey: String
+    let displayName: String?
+    let sessionId: String
+}
+
+struct CodexRelayErrorResponse: Codable, Sendable {
+    let ok: Bool?
+    let error: String?
+    let code: String?
+}
+
 struct CodexPendingHandshake {
     let mode: CodexSecureHandshakeMode
     let transcriptBytes: Data
@@ -166,6 +197,29 @@ enum CodexSecureTransportError: LocalizedError {
     }
 }
 
+enum CodexTrustedSessionResolveError: LocalizedError {
+    case noTrustedMac
+    case unsupportedRelay
+    case macOffline(String)
+    case rePairRequired(String)
+    case invalidResponse(String)
+    case network(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .noTrustedMac:
+            return "No trusted Mac is available to reconnect."
+        case .unsupportedRelay:
+            return "This relay does not support trusted reconnect yet."
+        case .macOffline(let message),
+             .rePairRequired(let message),
+             .invalidResponse(let message),
+             .network(let message):
+            return message
+        }
+    }
+}
+
 extension CodexSecureConnectionState {
     var statusLabel: String {
         switch self {
@@ -173,6 +227,8 @@ extension CodexSecureConnectionState {
             return "Not paired"
         case .trustedMac:
             return "Trusted Mac"
+        case .liveSessionUnresolved:
+            return "Trusted Mac ready"
         case .handshaking:
             return "Secure handshake in progress"
         case .encrypted:
@@ -185,6 +241,23 @@ extension CodexSecureConnectionState {
             return "Update required"
         }
     }
+}
+
+func codexTrustedSessionResolveTranscriptBytes(
+    macDeviceId: String,
+    phoneDeviceId: String,
+    phoneIdentityPublicKey: String,
+    nonce: String,
+    timestamp: Int64
+) -> Data {
+    var data = Data()
+    data.appendLengthPrefixedUTF8(codexTrustedSessionResolveTag)
+    data.appendLengthPrefixedUTF8(macDeviceId)
+    data.appendLengthPrefixedUTF8(phoneDeviceId)
+    data.appendLengthPrefixedData(Data(base64EncodedOrEmpty: phoneIdentityPublicKey))
+    data.appendLengthPrefixedUTF8(nonce)
+    data.appendLengthPrefixedUTF8(String(timestamp))
+    return data
 }
 
 // Builds the exact transcript bytes used by both signatures and HKDF salt.

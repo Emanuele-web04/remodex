@@ -363,6 +363,8 @@ final class CodexService {
     var pendingRequests: [String: CheckedContinuation<RPCMessage, Error>] = [:]
     // Test hook: intercepts outbound RPC requests without requiring a live socket.
     @ObservationIgnored var requestTransportOverride: ((String, JSONValue?) async throws -> RPCMessage)?
+    // Test hook: stubs trusted-session lookup without performing a real relay HTTP request.
+    @ObservationIgnored var trustedSessionResolverOverride: (() async throws -> CodexTrustedSessionResolveResponse)?
     var streamingAssistantMessageByTurnID: [String: String] = [:]
     var streamingSystemMessageByItemID: [String: String] = [:]
     /// Rich metadata for command execution tool calls, keyed by itemId.
@@ -409,6 +411,7 @@ final class CodexService {
     var pendingHandshake: CodexPendingHandshake?
     var phoneIdentityState: CodexPhoneIdentityState
     var trustedMacRegistry: CodexTrustedMacRegistry
+    var lastTrustedMacDeviceId: String?
     var pendingSecureControlContinuations: [String: [CodexSecureControlWaiter]] = [:]
     var bufferedSecureControlMessages: [String: [String]] = [:]
     // Assistant-scoped patch ledger used by the revert-changes flow.
@@ -466,6 +469,7 @@ final class CodexService {
         self.remoteNotificationRegistrar = remoteNotificationRegistrar
         self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
         self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
+        self.lastTrustedMacDeviceId = SecureStore.readString(for: CodexSecureKeys.lastTrustedMacDeviceId)
         let loadedMessages = messagePersistence.load().mapValues { messages in
             messages.map { message in
                 var value = message
@@ -547,6 +551,9 @@ final class CodexService {
            let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
             self.secureConnectionState = .trustedMac
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+        } else if let trustedMac = preferredTrustedMacRecord {
+            self.secureConnectionState = .liveSessionUnresolved
+            self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
     }
@@ -580,6 +587,41 @@ final class CodexService {
         relayMacIdentityPublicKey?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
+    }
+
+    var normalizedLastTrustedMacDeviceId: String? {
+        lastTrustedMacDeviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+    }
+
+    var preferredTrustedMacDeviceId: String? {
+        if let normalizedLastTrustedMacDeviceId,
+           trustedMacRegistry.records[normalizedLastTrustedMacDeviceId] != nil {
+            return normalizedLastTrustedMacDeviceId
+        }
+
+        return trustedMacRegistry.records.values
+            .sorted { lhs, rhs in
+                (lhs.lastUsedAt ?? lhs.lastPairedAt) > (rhs.lastUsedAt ?? rhs.lastPairedAt)
+            }
+            .first?
+            .macDeviceId
+    }
+
+    var preferredTrustedMacRecord: CodexTrustedMacRecord? {
+        guard let preferredTrustedMacDeviceId else {
+            return nil
+        }
+        return trustedMacRegistry.records[preferredTrustedMacDeviceId]
+    }
+
+    var hasTrustedMacReconnectCandidate: Bool {
+        preferredTrustedMacRecord?.relayURL?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    var hasReconnectCandidate: Bool {
+        hasSavedRelaySession || hasTrustedMacReconnectCandidate
     }
 
     // Separates transport readiness from post-connect hydration so the UI can explain delays honestly.

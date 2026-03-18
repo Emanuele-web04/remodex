@@ -51,11 +51,14 @@ struct QRScannerView: View {
                 cameraPermissionView
             }
         }
-        .overlay(alignment: .topLeading) {
+        .safeAreaInset(edge: .top) {
             if let onBack {
-                backButton(action: onBack)
-                    .padding(.leading, 20)
-                    .padding(.top, 12)
+                HStack {
+                    backButton(action: onBack)
+                    Spacer()
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
             }
         }
         .task {
@@ -178,7 +181,7 @@ struct QRScannerView: View {
                 )
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Back to onboarding")
+        .accessibilityLabel("Back")
     }
 
     private var scannerOverlay: some View {
@@ -222,16 +225,26 @@ struct QRScannerView: View {
         }
     }
 
+    // Keeps permission-prompt teardown on the main actor so backing out mid-prompt
+    // does not race a stale state write against SwiftUI dismissal.
+    @MainActor
     private func checkCameraPermission() async {
+        let hasPermission: Bool
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         switch status {
         case .authorized:
-            hasCameraPermission = true
+            hasPermission = true
         case .notDetermined:
-            hasCameraPermission = await AVCaptureDevice.requestAccess(for: .video)
+            hasPermission = await AVCaptureDevice.requestAccess(for: .video)
         default:
-            hasCameraPermission = false
+            hasPermission = false
         }
+
+        guard !Task.isCancelled else {
+            return
+        }
+
+        hasCameraPermission = hasPermission
         isCheckingPermission = false
     }
 

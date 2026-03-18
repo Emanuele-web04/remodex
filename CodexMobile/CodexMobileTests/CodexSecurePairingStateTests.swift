@@ -10,6 +10,16 @@ import XCTest
 
 @MainActor
 final class CodexSecurePairingStateTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        clearStoredSecureRelayState()
+    }
+
+    override func tearDown() {
+        clearStoredSecureRelayState()
+        super.tearDown()
+    }
+
     func testRememberRelayPairingForcesFreshQRBootstrapEvenForTrustedMac() {
         let service = CodexService()
         let macDeviceID = "mac-\(UUID().uuidString)"
@@ -70,5 +80,73 @@ final class CodexSecurePairingStateTests: XCTestCase {
 
         XCTAssertEqual(service.secureConnectionState, .rePairRequired)
         XCTAssertEqual(service.secureMacFingerprint, "ABC123")
+    }
+
+    func testApplyingResolvedTrustedSessionResetsReplayCursorWhenLiveSessionChanges() {
+        let service = CodexService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.relaySessionId = "stale-session"
+        service.relayUrl = "wss://relay.local/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.lastAppliedBridgeOutboundSeq = 17
+        SecureStore.writeString("17", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+
+        service.applyResolvedTrustedSession(
+            CodexTrustedSessionResolveResponse(
+                ok: true,
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: Data(repeating: 7, count: 32).base64EncodedString(),
+                displayName: "Desk Mac",
+                sessionId: "fresh-session"
+            ),
+            relayURL: "wss://relay.local/relay"
+        )
+
+        XCTAssertEqual(service.lastAppliedBridgeOutboundSeq, 0)
+        XCTAssertEqual(
+            SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
+            "0"
+        )
+    }
+
+    func testApplyingResolvedTrustedSessionKeepsReplayCursorWhenLiveSessionIsUnchanged() {
+        let service = CodexService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.relaySessionId = "same-session"
+        service.relayUrl = "wss://relay.local/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.lastAppliedBridgeOutboundSeq = 17
+        SecureStore.writeString("17", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+
+        service.applyResolvedTrustedSession(
+            CodexTrustedSessionResolveResponse(
+                ok: true,
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: Data(repeating: 8, count: 32).base64EncodedString(),
+                displayName: "Desk Mac",
+                sessionId: "same-session"
+            ),
+            relayURL: "wss://relay.local/relay"
+        )
+
+        XCTAssertEqual(service.lastAppliedBridgeOutboundSeq, 17)
+        XCTAssertEqual(
+            SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
+            "17"
+        )
+    }
+
+    // Clears the persisted relay session keys touched by secure reconnect tests.
+    private func clearStoredSecureRelayState() {
+        SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+        SecureStore.deleteValue(for: CodexSecureKeys.trustedMacRegistry)
+        SecureStore.deleteValue(for: CodexSecureKeys.lastTrustedMacDeviceId)
     }
 }

@@ -6,7 +6,12 @@
 
 const http = require("http");
 const { WebSocketServer } = require("ws");
-const { setupRelay, getRelayStats, hasAuthenticatedMacSession } = require("./relay");
+const {
+  setupRelay,
+  getRelayStats,
+  hasAuthenticatedMacSession,
+  resolveTrustedMacSession,
+} = require("./relay");
 const { createPushSessionService } = require("./push-service");
 
 function createRelayServer({
@@ -134,6 +139,10 @@ async function handleHTTPRequest(req, res, {
       return writeRateLimitResponse(res);
     }
     return handleJSONRoute(req, res, async (body) => pushSessionService.notifyCompletion(body));
+  }
+
+  if (req.method === "POST" && pathname === "/v1/trusted/session/resolve") {
+    return handleJSONRoute(req, res, async (body) => resolveTrustedMacSession(body));
   }
 
   return writeJSON(res, 404, {

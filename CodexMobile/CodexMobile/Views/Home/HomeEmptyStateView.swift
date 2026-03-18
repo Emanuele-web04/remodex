@@ -10,7 +10,9 @@ struct HomeEmptyStateView<AuthSection: View>: View {
     let connectionPhase: CodexConnectionPhase
     let statusMessage: String?
     let securityLabel: String?
-    let onToggleConnection: () -> Void
+    let trustedPairPresentation: CodexTrustedPairPresentation?
+    let offlinePrimaryButtonTitle: String
+    let onPrimaryAction: () -> Void
     @ViewBuilder let authSection: () -> AuthSection
 
     @State private var dotPulse = false
@@ -56,7 +58,9 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                         .stroke(Color.primary.opacity(0.08), lineWidth: 1)
                 )
 
-                if let securityLabel, !securityLabel.isEmpty {
+                if let trustedPairPresentation {
+                    TrustedPairSummaryView(presentation: trustedPairPresentation)
+                } else if let securityLabel, !securityLabel.isEmpty {
                     Text(securityLabel)
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
@@ -69,8 +73,8 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                         .multilineTextAlignment(.center)
                 }
 
-                // Keeps the remembered relay pairing actionable after app relaunch or stale reconnects.
-                Button(action: onToggleConnection) {
+                // Keeps reconnect or a fresh QR scan one tap away from the empty state.
+                Button(action: onPrimaryAction) {
                     HStack(spacing: 10) {
                         if isBusy {
                             ProgressView()
@@ -163,7 +167,7 @@ struct HomeEmptyStateView<AuthSection: View>: View {
         case .connected:
             return "Disconnect"
         case .offline:
-            return "Reconnect"
+            return offlinePrimaryButtonTitle
         }
     }
 

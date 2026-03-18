@@ -2,10 +2,11 @@
 // Purpose: Runs Codex locally, bridges relay traffic, and coordinates desktop refreshes for Codex.app.
 // Layer: CLI service
 // Exports: startBridge
-// Depends on: ws, crypto, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch
+// Depends on: ws, crypto, os, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch
 
 const WebSocket = require("ws");
 const { randomBytes } = require("crypto");
+const os = require("os");
 const {
   CodexDesktopRefresher,
   readBridgeConfig,
@@ -28,8 +29,13 @@ const {
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 
-function startBridge() {
-  const config = readBridgeConfig();
+function startBridge({
+  config: explicitConfig = null,
+  printPairingQr = true,
+  onPairingPayload = null,
+  onBridgeStatus = null,
+} = {}) {
+  const config = explicitConfig || readBridgeConfig();
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
   if (!relayBaseUrl) {
     console.error("[remodex] No relay URL configured.");
@@ -82,6 +88,10 @@ function startBridge() {
     sessionId,
     relayUrl: relayBaseUrl,
     deviceState,
+    onTrustedPhoneUpdate(nextDeviceState) {
+      deviceState = nextDeviceState;
+      sendRelayRegistrationUpdate(nextDeviceState);
+    },
   });
   // Keeps one stable sender identity across reconnects so buffered replay state
   // reflects what actually made it onto the current relay socket.
@@ -108,8 +118,20 @@ function startBridge() {
     env: process.env,
     logPrefix: "[remodex]",
   });
+  publishBridgeStatus({
+    state: "starting",
+    connectionStatus: "starting",
+    pid: process.pid,
+    lastError: "",
+  });
 
   codex.onError((error) => {
+    publishBridgeStatus({
+      state: "error",
+      connectionStatus: "error",
+      pid: process.pid,
+      lastError: error.message,
+    });
     if (config.codexEndpoint) {
       console.error(`[remodex] Failed to connect to Codex endpoint: ${config.codexEndpoint}`);
     } else {
@@ -137,6 +159,12 @@ function startBridge() {
     }
 
     lastConnectionStatus = status;
+    publishBridgeStatus({
+      state: "running",
+      connectionStatus: status,
+      pid: process.pid,
+      lastError: "",
+    });
     console.log(`[remodex] ${status}`);
   }
 
@@ -179,6 +207,7 @@ function startBridge() {
       headers: {
         "x-role": "mac",
         "x-notification-secret": notificationSecret,
+        ...buildMacRegistrationHeaders(deviceState),
       },
     });
     socket = nextSocket;
@@ -188,6 +217,7 @@ function startBridge() {
       reconnectAttempt = 0;
       logConnectionStatus("connected");
       secureTransport.bindLiveSendWireMessage(sendRelayWireMessage);
+      sendRelayRegistrationUpdate(deviceState);
     });
 
     nextSocket.on("message", (data) => {
@@ -222,7 +252,11 @@ function startBridge() {
     });
   }
 
-  printQR(secureTransport.createPairingPayload());
+  const pairingPayload = secureTransport.createPairingPayload();
+  onPairingPayload?.(pairingPayload);
+  if (printPairingQr) {
+    printQR(pairingPayload);
+  }
   pushServiceClient.logUnavailable();
   connectRelay();
 
@@ -236,6 +270,12 @@ function startBridge() {
 
   codex.onClose(() => {
     logConnectionStatus("disconnected");
+    publishBridgeStatus({
+      state: "stopped",
+      connectionStatus: "disconnected",
+      pid: process.pid,
+      lastError: "",
+    });
     isShuttingDown = true;
     clearReconnectTimer();
     stopContextUsageWatcher();
@@ -435,6 +475,49 @@ function startBridge() {
       codexHandshakeState = "warm";
     }
   }
+
+  function publishBridgeStatus(status) {
+    onBridgeStatus?.(status);
+  }
+
+  // Refreshes the relay's trusted-mac index after the QR bootstrap locks in a phone identity.
+  function sendRelayRegistrationUpdate(nextDeviceState) {
+    deviceState = nextDeviceState;
+    if (socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    socket.send(JSON.stringify({
+      kind: "relayMacRegistration",
+      registration: buildMacRegistration(nextDeviceState),
+    }));
+  }
+}
+
+// Registers the canonical Mac identity and the one trusted iPhone allowed for auto-resolve.
+function buildMacRegistrationHeaders(deviceState) {
+  const registration = buildMacRegistration(deviceState);
+  const headers = {
+    "x-mac-device-id": registration.macDeviceId,
+    "x-mac-identity-public-key": registration.macIdentityPublicKey,
+    "x-machine-name": registration.displayName,
+  };
+  if (registration.trustedPhoneDeviceId && registration.trustedPhonePublicKey) {
+    headers["x-trusted-phone-device-id"] = registration.trustedPhoneDeviceId;
+    headers["x-trusted-phone-public-key"] = registration.trustedPhonePublicKey;
+  }
+  return headers;
+}
+
+function buildMacRegistration(deviceState) {
+  const trustedPhoneEntry = Object.entries(deviceState?.trustedPhones || {})[0] || null;
+  return {
+    macDeviceId: normalizeNonEmptyString(deviceState?.macDeviceId),
+    macIdentityPublicKey: normalizeNonEmptyString(deviceState?.macIdentityPublicKey),
+    displayName: normalizeNonEmptyString(os.hostname()),
+    trustedPhoneDeviceId: normalizeNonEmptyString(trustedPhoneEntry?.[0]),
+    trustedPhonePublicKey: normalizeNonEmptyString(trustedPhoneEntry?.[1]),
+  };
 }
 
 function shutdown(codex, getSocket, beforeExit = () => {}) {
@@ -528,6 +611,10 @@ function extractTurnId(method, params) {
 
 function readString(value) {
   return typeof value === "string" && value ? value : null;
+}
+
+function normalizeNonEmptyString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
 module.exports = { startBridge };

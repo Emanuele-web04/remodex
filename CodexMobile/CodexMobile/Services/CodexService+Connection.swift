@@ -182,11 +182,54 @@ extension CodexService {
         lastAppliedBridgeOutboundSeq = 0
         shouldForceQRBootstrapOnNextHandshake = false
         trustedReconnectFailureCount = 0
-        secureConnectionState = .notPaired
-        secureMacFingerprint = nil
+        if let trustedMac = preferredTrustedMacRecord {
+            secureConnectionState = .liveSessionUnresolved
+            secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+        } else {
+            secureConnectionState = .notPaired
+            secureMacFingerprint = nil
+        }
         pendingNotificationOpenThreadID = nil
         lastPushRegistrationSignature = nil
         clearTransientConnectionPrompts()
+    }
+
+    func forgetTrustedMac(deviceId: String? = nil) {
+        let targetDeviceId = deviceId ?? preferredTrustedMacDeviceId
+        guard let targetDeviceId else {
+            return
+        }
+
+        trustedMacRegistry.records.removeValue(forKey: targetDeviceId)
+        SecureStore.writeCodable(trustedMacRegistry, for: CodexSecureKeys.trustedMacRegistry)
+
+        if normalizedLastTrustedMacDeviceId == targetDeviceId {
+            SecureStore.deleteValue(for: CodexSecureKeys.lastTrustedMacDeviceId)
+            lastTrustedMacDeviceId = nil
+        }
+
+        if normalizedRelayMacDeviceId == targetDeviceId {
+            clearSavedRelaySession()
+        } else {
+            resetSecureTransportState()
+        }
+    }
+
+    // Gives the UI one stable "forget pair" action whether reconnect comes from a trusted record
+    // or only from the last saved relay session.
+    func forgetReconnectCandidate() {
+        if let normalizedRelayMacDeviceId,
+           trustedMacRegistry.records[normalizedRelayMacDeviceId] != nil {
+            forgetTrustedMac(deviceId: normalizedRelayMacDeviceId)
+            return
+        }
+
+        if preferredTrustedMacDeviceId != nil {
+            forgetTrustedMac()
+            return
+        }
+
+        clearSavedRelaySession()
     }
 
     func initializeSession() async throws {

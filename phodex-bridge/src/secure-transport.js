@@ -33,7 +33,12 @@ const MAX_PAIRING_AGE_MS = 5 * 60 * 1000;
 const MAX_BRIDGE_OUTBOUND_MESSAGES = 500;
 const MAX_BRIDGE_OUTBOUND_BYTES = 10 * 1024 * 1024;
 
-function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
+function createBridgeSecureTransport({
+  sessionId,
+  relayUrl,
+  deviceState,
+  onTrustedPhoneUpdate = null,
+}) {
   let currentDeviceState = deviceState;
   let pendingHandshake = null;
   let activeSession = null;
@@ -349,11 +354,18 @@ function createBridgeSecureTransport({ sessionId, relayUrl, deviceState }) {
       || getTrustedPhonePublicKey(currentDeviceState, pendingHandshake.phoneDeviceId)
     ) {
       // Lock the trusted phone identity so later reconnects can be verified cleanly.
+      const previousTrustedPhonePublicKey = getTrustedPhonePublicKey(
+        currentDeviceState,
+        pendingHandshake.phoneDeviceId
+      );
       currentDeviceState = rememberTrustedPhone(
         currentDeviceState,
         pendingHandshake.phoneDeviceId,
         pendingHandshake.phoneIdentityPublicKey
       );
+      if (previousTrustedPhonePublicKey !== pendingHandshake.phoneIdentityPublicKey) {
+        onTrustedPhoneUpdate?.(currentDeviceState);
+      }
     }
     if (pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {
       resetOutboundReplayState();
