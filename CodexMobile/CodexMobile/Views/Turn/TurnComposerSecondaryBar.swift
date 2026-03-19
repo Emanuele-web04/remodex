@@ -43,6 +43,7 @@ struct TurnComposerSecondaryBar: View {
     private let branchLabelColor = Color(.secondaryLabel)
     private var branchTextFont: Font { AppFont.subheadline() }
     private var branchChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
+    private var runtimeLabelTitle: String { isWorktreeProject ? "Worktree" : "Local" }
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -150,11 +151,7 @@ struct TurnComposerSecondaryBar: View {
                     // Returning to Local is intentionally disabled until it can move code + branch safely.
                 } label: {
                     TurnComposerRuntimeMenuRow(title: "Local") {
-                        if isWorktreeProject {
-                            Image(uiImage: CodexWorktreeIcon.menuImage(pointSize: 12, weight: .regular))
-                        } else {
-                            Image(systemName: "laptopcomputer")
-                        }
+                        Image(systemName: "laptopcomputer")
                     }
                 }
                 .disabled(true)
@@ -168,7 +165,7 @@ struct TurnComposerSecondaryBar: View {
                         .font(branchTextFont)
                 }
 
-                Text("Local")
+                Text(runtimeLabelTitle)
                     .font(branchTextFont)
                     .fontWeight(.regular)
                     .lineLimit(1)
