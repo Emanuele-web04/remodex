@@ -113,7 +113,7 @@ test("desktop/continueOnMac boots Codex before deep-linking unknown threads", as
   assert.equal(responses[0].result?.relaunched, false);
 });
 
-test("desktop/continueOnMac deep-links directly when a desktop-known thread is requested", async () => {
+test("desktop/continueOnMac relaunches when a desktop-known thread is requested and Codex is already open", async () => {
   const executorCalls = [];
   const responses = [];
   let running = true;
@@ -165,21 +165,31 @@ test("desktop/continueOnMac deep-links directly when a desktop-known thread is r
 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(executorCalls.length, 1);
-  assert.equal(executorCalls[0][0], "open");
+  assert.equal(executorCalls.length, 3);
+  assert.equal(executorCalls[0][0], "pkill");
   assert.deepEqual(executorCalls[0][1], [
+    "-x",
+    "Codex",
+  ]);
+  assert.equal(executorCalls[1][0], "open");
+  assert.deepEqual(executorCalls[1][1], [
+    "-b",
+    "com.openai.codex",
+  ]);
+  assert.equal(executorCalls[2][0], "open");
+  assert.deepEqual(executorCalls[2][1], [
     "-b",
     "com.openai.codex",
     "codex://threads/thread-desktop-known",
   ]);
-  assert.equal(responses[0].result?.relaunched, false);
+  assert.equal(responses[0].result?.relaunched, true);
   assert.equal(responses[0].result?.desktopKnown, true);
 });
 
-test("desktop/continueOnMac deep-links directly when the thread already exists locally", async () => {
+test("desktop/continueOnMac deep-links directly when the thread already exists locally but Codex is closed", async () => {
   const executorCalls = [];
   const responses = [];
-  let running = true;
+  let running = false;
   const fakeFS = {
     existsSync(targetPath) {
       return targetPath.endsWith("/sessions");
@@ -209,9 +219,6 @@ test("desktop/continueOnMac deep-links directly when the thread already exists l
     fsModule: fakeFS,
     executor: async (...args) => {
       executorCalls.push(args);
-      if (args[0] === "pkill") {
-        running = false;
-      }
       return { stdout: "", stderr: "" };
     },
     isAppRunning: async () => running,

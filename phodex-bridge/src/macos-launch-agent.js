@@ -322,17 +322,29 @@ function bootoutLaunchAgent({
   execFileSyncImpl = execFileSync,
   ignoreMissing = false,
 } = {}) {
-  try {
-    execFileSyncImpl("launchctl", [
-      "bootout",
-      launchAgentLabelDomain(env),
-    ], { stdio: ["ignore", "ignore", "pipe"] });
-  } catch (error) {
-    if (ignoreMissing && isMissingLaunchAgentError(error)) {
+  const bootoutTargets = [
+    // Some macOS setups only fully unload the agent when bootout targets the plist path.
+    [launchAgentDomain(env), resolveLaunchAgentPlistPath({ env })],
+    [launchAgentLabelDomain(env)],
+  ];
+  let lastError = null;
+
+  for (const targetArgs of bootoutTargets) {
+    try {
+      execFileSyncImpl("launchctl", [
+        "bootout",
+        ...targetArgs,
+      ], { stdio: ["ignore", "ignore", "pipe"] });
       return;
+    } catch (error) {
+      lastError = error;
     }
-    throw error;
   }
+
+  if (ignoreMissing && isMissingLaunchAgentError(lastError)) {
+    return;
+  }
+  throw lastError;
 }
 
 function readLaunchAgentState({

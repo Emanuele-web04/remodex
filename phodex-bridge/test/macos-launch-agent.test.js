@@ -70,6 +70,42 @@ test("stopMacOSBridgeService clears stale pairing and status files", () => {
   });
 });
 
+test("stopMacOSBridgeService falls back to label bootout when plist bootout fails", () => {
+  withTempDaemonEnv(() => {
+    const calls = [];
+
+    stopMacOSBridgeService({
+      platform: "darwin",
+      execFileSyncImpl(command, args) {
+        calls.push([command, args]);
+        if (args[1] === `gui/${process.getuid()}`) {
+          const error = new Error("Input/output error");
+          error.stderr = Buffer.from("Bootstrap failed: 5: Input/output error");
+          throw error;
+        }
+      },
+    });
+
+    assert.deepEqual(calls, [
+      [
+        "launchctl",
+        [
+          "bootout",
+          `gui/${process.getuid()}`,
+          path.join(process.env.HOME, "Library", "LaunchAgents", "com.remodex.bridge.plist"),
+        ],
+      ],
+      [
+        "launchctl",
+        [
+          "bootout",
+          `gui/${process.getuid()}/com.remodex.bridge`,
+        ],
+      ],
+    ]);
+  });
+});
+
 test("resetMacOSBridgePairing stops the daemon before revoking persisted trust", () => {
   withTempDaemonEnv(() => {
     writePairingSession({ sessionId: "session-reset" });
@@ -91,7 +127,7 @@ test("resetMacOSBridgePairing stops the daemon before revoking persisted trust",
       },
     });
 
-    assert.equal(stopCalls, 1);
+    assert.equal(stopCalls, 2);
     assert.equal(resetCalls, 1);
     assert.equal(result.hadState, true);
     assert.equal(readPairingSession(), null);

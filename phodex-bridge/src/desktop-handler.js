@@ -125,9 +125,9 @@ async function continueOnMac(
     ? await isAppRunning(appPath)
     : await detectRunningCodexApp(appPath, executor);
 
-  // Preserve the safer direct-open path for threads the desktop already knows
-  // about. Relaunching here regressed handoff reliability for existing threads.
-  if (desktopKnown) {
+  // If Codex.app is already open, explicit handoff should still feel like a
+  // real device switch: close, reopen, then focus the requested thread.
+  if (desktopKnown && !appRunning) {
     try {
       await openCodexTarget(targetUrl, { bundleId, appPath, executor });
     } catch (error) {
