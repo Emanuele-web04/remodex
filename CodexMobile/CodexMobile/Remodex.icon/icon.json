@@ -4,15 +4,29 @@
     {
       "layers" : [
         {
-          "image-name" : "Group 11.png",
-          "name" : "Group 11",
-          "position" : {
-            "scale" : 1,
-            "translation-in-points" : [
-              -31.25,
-              0
-            ]
-          }
+          "image-name" : "Group 110.png",
+          "name" : "Group 110",
+          "position-specializations" : [
+            {
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  -39.5,
+                  0
+                ]
+              }
+            },
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.92,
+                "translation-in-points" : [
+                  -29.28771270659354,
+                  0
+                ]
+              }
+            }
+          ]
         }
       ],
       "shadow" : {

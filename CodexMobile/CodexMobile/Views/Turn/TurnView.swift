@@ -21,17 +21,32 @@ struct TurnView: View {
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
     @State private var alertApprovalRequest: CodexApprovalRequest?
     @State private var isShowingMacHandoffConfirm = false
+    @State private var isShowingWorktreeHandoff = false
     @State private var macHandoffErrorMessage: String?
     @State private var isHandingOffToMac = false
+    @State private var isStartingSiblingChat = false
+    @State private var checkedOutElsewhereAlert: CheckedOutElsewhereAlert?
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
+        let resolvedThread = currentResolvedThread
         let timelineState = codex.timelineState(for: thread.id)
         let renderSnapshot = timelineState.renderSnapshot
         let activeTurnID = renderSnapshot.activeTurnID
-        let gitWorkingDirectory = thread.gitWorkingDirectory
+        let gitWorkingDirectory = resolvedThread.gitWorkingDirectory
         let isThreadRunning = renderSnapshot.isThreadRunning
+        let isEmptyThread = renderSnapshot.messages.isEmpty
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
+        let isWorktreeProject = resolvedThread.isManagedWorktreeProject
+        let isWorktreeHandoffAvailable = isWorktreeHandoffAvailable(
+            isThreadRunning: isThreadRunning,
+            gitWorkingDirectory: gitWorkingDirectory
+        )
+        let canHandOffToWorktree = canHandOffToWorktree(
+            isThreadRunning: isThreadRunning,
+            gitWorkingDirectory: gitWorkingDirectory,
+            isWorktreeProject: isWorktreeProject
+        )
 
         return TurnConversationContainerView(
                 threadID: thread.id,
@@ -47,8 +62,11 @@ struct TurnView: View {
                 isScrolledToBottom: isScrolledToBottomBinding,
                 emptyState: AnyView(emptyState),
                 composer: AnyView(composerWithSubagentAccessory(
+                    currentThread: resolvedThread,
                     activeTurnID: activeTurnID,
                     isThreadRunning: isThreadRunning,
+                    isEmptyThread: isEmptyThread,
+                    isWorktreeProject: isWorktreeProject,
                     showsGitControls: showsGitControls,
                     gitWorkingDirectory: gitWorkingDirectory
                 )),
@@ -78,14 +96,17 @@ struct TurnView: View {
                 threadID: thread.id
             )
         } as (() -> Void)? : nil)
-        .navigationTitle(thread.displayTitle)
+        .navigationTitle(resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             TurnToolbarContent(
-                displayTitle: thread.displayTitle,
-                navigationContext: threadNavigationContext,
-                showsMacHandoff: codex.isConnected,
+                displayTitle: resolvedThread.displayTitle,
+                navigationContext: threadNavigationContext(for: resolvedThread),
+                showsThreadActions: codex.isConnected,
                 isHandingOffToMac: isHandingOffToMac,
+                isStartingNewChat: isStartingSiblingChat,
+                canHandOffToWorktree: canHandOffToWorktree,
+                isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
                 repoDiffTotals: viewModel.gitRepoSync?.repoDiffTotals,
                 isLoadingRepoDiff: isLoadingRepositoryDiff,
                 showsGitActions: showsGitControls,
@@ -93,11 +114,18 @@ struct TurnView: View {
                     isThreadRunning: isThreadRunning,
                     gitWorkingDirectory: gitWorkingDirectory
                 ),
+                disabledGitActions: viewModel.canCreatePullRequest ? [] : [.createPR],
                 isRunningGitAction: viewModel.isRunningGitAction,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
                 onTapMacHandoff: codex.isConnected ? {
                     isShowingMacHandoffConfirm = true
+                } : nil,
+                onTapWorktreeHandoff: showsGitControls ? {
+                    isShowingWorktreeHandoff = true
+                } : nil,
+                onTapNewChat: codex.isConnected && !isWorktreeProject ? {
+                    startSiblingChat()
                 } : nil,
                 onTapRepoDiff: showsGitControls ? {
                     presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
@@ -111,6 +139,25 @@ struct TurnView: View {
                 },
                 isShowingPathSheet: $isShowingThreadPathSheet
             )
+        }
+        .overlay {
+            if isShowingWorktreeHandoff {
+                TurnWorktreeHandoffOverlay(
+                    preferredBaseBranch: preferredWorktreeBaseBranch,
+                    isHandoffAvailable: isWorktreeHandoffAvailable,
+                    isSubmitting: viewModel.isCreatingGitWorktree,
+                    onClose: { isShowingWorktreeHandoff = false },
+                    onSubmit: { branchName, baseBranch in
+                        submitWorktreeHandoff(
+                            branchName: branchName,
+                            baseBranch: baseBranch,
+                            gitWorkingDirectory: gitWorkingDirectory,
+                            activeTurnID: activeTurnID
+                        )
+                    }
+                )
+                .transition(.opacity)
+            }
         }
         .fullScreenCover(isPresented: isCameraPresentedBinding) {
             CameraImagePicker { data in
@@ -181,8 +228,14 @@ struct TurnView: View {
             )
         }
         .sheet(isPresented: $isShowingThreadPathSheet) {
-            if let context = threadNavigationContext {
-                TurnThreadPathSheet(context: context)
+            if let context = threadNavigationContext(for: resolvedThread) {
+                TurnThreadPathSheet(
+                    context: context,
+                    threadTitle: resolvedThread.displayTitle,
+                    onRenameThread: { newName in
+                        codex.renameThread(thread.id, name: newName)
+                    }
+                )
             }
         }
         .sheet(isPresented: $isShowingStatusSheet) {
@@ -233,10 +286,31 @@ struct TurnView: View {
                     activeTurnID: codex.activeTurnID(for: thread.id)
                 )
             },
+            onDismissGitSyncAlert: {
+                viewModel.dismissGitSyncAlert()
+            },
             onConfirmMacHandoff: {
                 continueOnMac()
             }
         )
+        .alert(
+            checkedOutElsewhereAlert?.title ?? "Branch already open elsewhere",
+            isPresented: checkedOutElsewhereAlertIsPresented,
+            presenting: checkedOutElsewhereAlert
+        ) { alert in
+            Button("Close", role: .cancel) {
+                checkedOutElsewhereAlert = nil
+            }
+
+            if let threadID = alert.threadID {
+                Button("Open Chat") {
+                    checkedOutElsewhereAlert = nil
+                    openThread(threadID)
+                }
+            }
+        } message: { alert in
+            Text(alert.message)
+        }
     }
 
     // MARK: - Bindings
@@ -299,12 +373,12 @@ struct TurnView: View {
         )
     }
 
-    // Opens the local session summary and refreshes rate limits in the background.
+    // Opens the local session summary and refreshes both thread context usage and rate limits.
     private func presentStatusSheet() {
         isShowingStatusSheet = true
 
         Task {
-            await codex.refreshRateLimits()
+            await codex.refreshUsageStatus(threadId: thread.id)
         }
     }
 
@@ -324,10 +398,45 @@ struct TurnView: View {
         }
     }
 
+    // Starts a sibling chat scoped to the same cwd as the current thread.
+    private func startSiblingChat() {
+        Task { @MainActor in
+            guard !isStartingSiblingChat else { return }
+            guard !currentResolvedThread.isManagedWorktreeProject else { return }
+            isStartingSiblingChat = true
+            defer { isStartingSiblingChat = false }
+
+            do {
+                _ = try await codex.startThreadIfReady(preferredProjectPath: resolvedProjectPathForFollowUpThread())
+            } catch {
+                if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                    codex.lastErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
     private var gitSyncAlertBinding: Binding<TurnGitSyncAlert?> {
         Binding(
             get: { viewModel.gitSyncAlert },
-            set: { viewModel.gitSyncAlert = $0 }
+            set: { newValue in
+                if let newValue {
+                    viewModel.gitSyncAlert = newValue
+                } else {
+                    viewModel.dismissGitSyncAlert()
+                }
+            }
+        )
+    }
+
+    private var checkedOutElsewhereAlertIsPresented: Binding<Bool> {
+        Binding(
+            get: { checkedOutElsewhereAlert != nil },
+            set: { isPresented in
+                if !isPresented {
+                    checkedOutElsewhereAlert = nil
+                }
+            }
         )
     }
 
@@ -369,6 +478,34 @@ struct TurnView: View {
             isThreadRunning: isThreadRunning,
             hasGitWorkingDirectory: gitWorkingDirectory != nil
         )
+    }
+
+    // Re-resolves the active thread so handoff/reconnect UI always uses the freshest cwd + title.
+    private var currentResolvedThread: CodexThread {
+        codex.thread(for: thread.id) ?? thread
+    }
+
+    // Reuses the same running-thread gate as Stop/Git actions so worktree handoff never races a live run.
+    private func isWorktreeHandoffAvailable(
+        isThreadRunning: Bool,
+        gitWorkingDirectory: String?
+    ) -> Bool {
+        canRunGitAction(
+            isThreadRunning: isThreadRunning,
+            gitWorkingDirectory: gitWorkingDirectory
+        )
+    }
+
+    // Centralizes the toolbar/composer availability rule so both entry points stay aligned.
+    private func canHandOffToWorktree(
+        isThreadRunning: Bool,
+        gitWorkingDirectory: String?,
+        isWorktreeProject: Bool
+    ) -> Bool {
+        isWorktreeHandoffAvailable(
+            isThreadRunning: isThreadRunning,
+            gitWorkingDirectory: gitWorkingDirectory
+        ) && !isWorktreeProject && !viewModel.isCreatingGitWorktree
     }
 
     private func handleInitialAppear(activeTurnID: String?) {
@@ -488,21 +625,59 @@ struct TurnView: View {
         )
     }
 
+    // Shares the same default base branch between the toolbar overlay and the empty-thread Local menu.
+    private var preferredWorktreeBaseBranch: String {
+        let currentBranch = viewModel.currentGitBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentBranch.isEmpty {
+            return currentBranch
+        }
+
+        let selectedBaseBranch = viewModel.selectedGitBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !selectedBaseBranch.isEmpty {
+            return selectedBaseBranch
+        }
+        return viewModel.gitDefaultBranch
+    }
+
+    // Creates the worktree first, then rebinds this same chat to the returned project path.
+    private func submitWorktreeHandoff(
+        branchName: String,
+        baseBranch: String,
+        gitWorkingDirectory: String?,
+        activeTurnID: String?
+    ) {
+        viewModel.requestCreateGitWorktree(
+            named: branchName,
+            fromBaseBranch: baseBranch,
+            codex: codex,
+            workingDirectory: gitWorkingDirectory,
+            threadID: thread.id,
+            activeTurnID: activeTurnID,
+            onOpenWorktree: { worktreePath, branch in
+                isShowingWorktreeHandoff = false
+                TurnViewWorktreeActions.handoffCurrentThreadToWorktree(
+                    projectPath: worktreePath,
+                    branch: branch,
+                    codex: codex,
+                    viewModel: viewModel,
+                    threadID: thread.id
+                )
+            }
+        )
+    }
+
+    // Re-resolves the thread at action time so follow-up chats inherit the freshest cwd after sync/reconnect.
+    private func resolvedProjectPathForFollowUpThread() -> String? {
+        let currentThread = codex.thread(for: thread.id) ?? thread
+        return currentThread.normalizedProjectPath
+    }
+
     // Creates a fresh thread in the same project and opens it straight into the review flow.
     private func startCodeReviewThread(target: TurnComposerReviewTarget) {
         Task { @MainActor in
-            guard codex.isConnected else {
-                codex.lastErrorMessage = "Connect to runtime first."
-                return
-            }
-            guard codex.isInitialized else {
-                codex.lastErrorMessage = "Runtime is still initializing. Wait a moment and retry."
-                return
-            }
-
             do {
-                _ = try await codex.startThread(
-                    preferredProjectPath: thread.normalizedProjectPath,
+                _ = try await codex.startThreadIfReady(
+                    preferredProjectPath: resolvedProjectPathForFollowUpThread(),
                     pendingComposerAction: .codeReview(target: pendingCodeReviewTarget(for: target))
                 )
                 viewModel.clearComposerReviewSelection()
@@ -586,7 +761,7 @@ struct TurnView: View {
         return codex.thread(for: parentThreadId)
     }
 
-    private var threadNavigationContext: TurnThreadNavigationContext? {
+    private func threadNavigationContext(for thread: CodexThread) -> TurnThreadNavigationContext? {
         guard let path = thread.normalizedProjectPath ?? thread.cwd,
               !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
@@ -600,9 +775,13 @@ struct TurnView: View {
         )
     }
 
+    @ViewBuilder
     private func composerWithSubagentAccessory(
+        currentThread: CodexThread,
         activeTurnID: String?,
         isThreadRunning: Bool,
+        isEmptyThread: Bool,
+        isWorktreeProject: Bool,
         showsGitControls: Bool,
         gitWorkingDirectory: String?
     ) -> some View {
@@ -621,9 +800,11 @@ struct TurnView: View {
             TurnComposerHostView(
                 viewModel: viewModel,
                 codex: codex,
-                thread: thread,
+                thread: currentThread,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
+                isEmptyThread: isEmptyThread,
+                isWorktreeProject: isWorktreeProject,
                 isInputFocused: $isInputFocused,
                 orderedModelOptions: orderedModelOptions,
                 selectedModelTitle: selectedModelTitle,
@@ -639,8 +820,43 @@ struct TurnView: View {
                         gitWorkingDirectory: gitWorkingDirectory
                     ) else { return }
 
-                    viewModel.switchGitBranch(
+                    if let worktreePath = viewModel.worktreePathForCheckedOutElsewhereBranch(branch) {
+                        if let normalizedWorktreePath = CodexThreadStartProjectBinding.normalizedProjectPath(worktreePath) {
+                            let resolvedWorktreePath = TurnWorktreeRouting.canonicalProjectPath(normalizedWorktreePath)
+                                ?? normalizedWorktreePath
+                            if TurnWorktreeRouting.comparableProjectPath(currentThread.normalizedProjectPath) == resolvedWorktreePath {
+                                return
+                            }
+                        }
+
+                        let existingThread = TurnViewWorktreeActions.liveThreadForCheckedOutElsewhereBranch(
+                            projectPath: worktreePath,
+                            codex: codex,
+                            currentThread: currentThread
+                        )
+                        checkedOutElsewhereAlert = CheckedOutElsewhereAlert(
+                            branch: branch,
+                            threadID: existingThread?.id
+                        )
+                        return
+                    }
+
+                    viewModel.requestSwitchGitBranch(
                         to: branch,
+                        codex: codex,
+                        workingDirectory: gitWorkingDirectory,
+                        threadID: thread.id,
+                        activeTurnID: activeTurnID
+                    )
+                },
+                onCreateGitBranch: { branchName in
+                    guard canRunGitAction(
+                        isThreadRunning: isThreadRunning,
+                        gitWorkingDirectory: gitWorkingDirectory
+                    ) else { return }
+
+                    viewModel.requestCreateGitBranch(
+                        named: branchName,
                         codex: codex,
                         workingDirectory: gitWorkingDirectory,
                         threadID: thread.id,
@@ -656,6 +872,9 @@ struct TurnView: View {
                     )
                 },
                 onStartCodeReviewThread: startCodeReviewThread,
+                onOpenWorktreeHandoff: {
+                    isShowingWorktreeHandoff = true
+                },
                 onShowStatus: presentStatusSheet,
                 onSend: handleSend
             )
@@ -731,6 +950,24 @@ private struct SubagentParentAccessoryCard: View {
                 .font(AppFont.system(size: 11, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
+    }
+}
+
+private struct CheckedOutElsewhereAlert: Identifiable {
+    let id = UUID()
+    let branch: String
+    let threadID: String?
+
+    var title: String {
+        "Branch already open elsewhere"
+    }
+
+    var message: String {
+        if threadID != nil {
+            return "'\(branch)' is already checked out in another worktree. Open that chat to continue there."
+        }
+
+        return "'\(branch)' is already checked out in another worktree. Open that chat from the sidebar to continue there."
     }
 }
 

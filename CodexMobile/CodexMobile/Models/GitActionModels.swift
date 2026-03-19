@@ -1,7 +1,7 @@
 // FILE: GitActionModels.swift
 // Purpose: Data models for git operations executed via the phodex-bridge.
 // Layer: Model
-// Exports: GitDiffTotals, GitRepoSyncResult, GitRepoDiffResult, GitCommitResult, GitPushResult, GitBranchesResult, GitCheckoutResult, GitPullResult, GitResetResult, TurnGitActionKind, TurnGitSyncAlert, TurnGitSyncAlertAction
+// Exports: GitDiffTotals, GitChangedFile, GitRepoSyncResult, GitRepoDiffResult, GitCommitResult, GitPushResult, GitBranchesResult, GitCreateBranchResult, GitCreateWorktreeResult, GitCheckoutResult, GitPullResult, GitResetResult, TurnGitActionKind, TurnGitSyncAlert, TurnGitSyncAlertButton, TurnGitSyncAlertAction
 // Depends on: JSONValue
 
 import Foundation
@@ -40,6 +40,21 @@ struct GitDiffTotals: Equatable, Sendable {
     }
 }
 
+struct GitChangedFile: Equatable, Sendable {
+    let path: String
+    let status: String
+
+    init?(from json: [String: JSONValue]) {
+        let path = json["path"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !path.isEmpty else {
+            return nil
+        }
+
+        self.path = path
+        self.status = json["status"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+}
+
 struct GitRepoSyncResult: Sendable {
     let repoRoot: String?
     let currentBranch: String?
@@ -47,8 +62,11 @@ struct GitRepoSyncResult: Sendable {
     let isDirty: Bool
     let aheadCount: Int
     let behindCount: Int
+    let localOnlyCommitCount: Int
     let state: String
     let canPush: Bool
+    let isPublishedToRemote: Bool
+    let files: [GitChangedFile]
     let repoDiffTotals: GitDiffTotals?
 
     init(from json: [String: JSONValue]) {
@@ -58,8 +76,14 @@ struct GitRepoSyncResult: Sendable {
         self.isDirty = json["dirty"]?.boolValue ?? false
         self.aheadCount = json["ahead"]?.intValue ?? 0
         self.behindCount = json["behind"]?.intValue ?? 0
+        self.localOnlyCommitCount = json["localOnlyCommitCount"]?.intValue ?? 0
         self.state = json["state"]?.stringValue ?? "up_to_date"
         self.canPush = json["canPush"]?.boolValue ?? false
+        self.isPublishedToRemote = json["publishedToRemote"]?.boolValue ?? false
+        self.files = json["files"]?.arrayValue?.compactMap { value in
+            guard let object = value.objectValue else { return nil }
+            return GitChangedFile(from: object)
+        } ?? []
         self.repoDiffTotals = GitDiffTotals(from: json["diff"]?.objectValue)
     }
 }
@@ -103,6 +127,7 @@ struct GitPushResult: Sendable {
 struct GitBranchesResult: Sendable {
     let branches: [String]
     let branchesCheckedOutElsewhere: Set<String>
+    let worktreePathByBranch: [String: String]
     let currentBranch: String?
     let defaultBranch: String?
 
@@ -111,8 +136,35 @@ struct GitBranchesResult: Sendable {
         self.branchesCheckedOutElsewhere = Set(
             json["branchesCheckedOutElsewhere"]?.arrayValue?.compactMap(\.stringValue) ?? []
         )
+        self.worktreePathByBranch = Self.stringDictionary(from: json["worktreePathByBranch"]?.objectValue)
         self.currentBranch = json["current"]?.stringValue
         self.defaultBranch = json["default"]?.stringValue
+    }
+}
+
+struct GitCreateBranchResult: Sendable {
+    let branch: String
+    let status: GitRepoSyncResult?
+
+    init(from json: [String: JSONValue]) {
+        self.branch = json["branch"]?.stringValue ?? ""
+        if let statusObj = json["status"]?.objectValue {
+            self.status = GitRepoSyncResult(from: statusObj)
+        } else {
+            self.status = nil
+        }
+    }
+}
+
+struct GitCreateWorktreeResult: Sendable {
+    let branch: String
+    let worktreePath: String
+    let alreadyExisted: Bool
+
+    init(from json: [String: JSONValue]) {
+        self.branch = json["branch"]?.stringValue ?? ""
+        self.worktreePath = json["worktreePath"]?.stringValue ?? ""
+        self.alreadyExisted = json["alreadyExisted"]?.boolValue ?? false
     }
 }
 
@@ -173,6 +225,7 @@ struct GitRemoteUrlResult: Sendable {
 struct GitBranchesWithStatusResult: Sendable {
     let branches: [String]
     let branchesCheckedOutElsewhere: Set<String>
+    let worktreePathByBranch: [String: String]
     let currentBranch: String?
     let defaultBranch: String?
     let status: GitRepoSyncResult?
@@ -182,6 +235,7 @@ struct GitBranchesWithStatusResult: Sendable {
         self.branchesCheckedOutElsewhere = Set(
             json["branchesCheckedOutElsewhere"]?.arrayValue?.compactMap(\.stringValue) ?? []
         )
+        self.worktreePathByBranch = Self.stringDictionary(from: json["worktreePathByBranch"]?.objectValue)
         self.currentBranch = json["current"]?.stringValue
         self.defaultBranch = json["default"]?.stringValue
         if let statusObj = json["status"]?.objectValue {
@@ -189,6 +243,23 @@ struct GitBranchesWithStatusResult: Sendable {
         } else {
             self.status = nil
         }
+    }
+}
+
+private extension GitBranchesResult {
+    static func stringDictionary(from json: [String: JSONValue]?) -> [String: String] {
+        json?.reduce(into: [:]) { partialResult, pair in
+            let key = pair.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = pair.value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !key.isEmpty, !value.isEmpty else { return }
+            partialResult[key] = value
+        } ?? [:]
+    }
+}
+
+private extension GitBranchesWithStatusResult {
+    static func stringDictionary(from json: [String: JSONValue]?) -> [String: String] {
+        GitBranchesResult.stringDictionary(from: json)
     }
 }
 
@@ -220,10 +291,67 @@ struct TurnGitSyncAlert: Identifiable {
     let id = UUID()
     let title: String
     let message: String
-    let action: TurnGitSyncAlertAction
+    let buttons: [TurnGitSyncAlertButton]
+
+    init(title: String, message: String, action: TurnGitSyncAlertAction) {
+        self.title = title
+        self.message = message
+        self.buttons = TurnGitSyncAlertButton.defaultButtons(for: action)
+    }
+
+    init(title: String, message: String, buttons: [TurnGitSyncAlertButton]) {
+        self.title = title
+        self.message = message
+        self.buttons = buttons
+    }
 }
 
-enum TurnGitSyncAlertAction: Sendable {
+struct TurnGitSyncAlertButton: Identifiable, Sendable {
+    let id = UUID()
+    let title: String
+    let role: TurnGitSyncAlertButtonRole?
+    let action: TurnGitSyncAlertAction
+
+    // Keeps alert construction declarative while centralizing the button/action wiring.
+    static func defaultButtons(for action: TurnGitSyncAlertAction) -> [TurnGitSyncAlertButton] {
+        switch action {
+        case .dismissOnly:
+            return [
+                TurnGitSyncAlertButton(title: "OK", role: .cancel, action: .dismissOnly)
+            ]
+        case .pullRebase:
+            return [
+                TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                TurnGitSyncAlertButton(title: "Pull & Rebase", role: nil, action: .pullRebase)
+            ]
+        case .continueGitBranchOperation:
+            return [
+                TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                TurnGitSyncAlertButton(title: "Continue", role: nil, action: .continueGitBranchOperation)
+            ]
+        case .commitAndContinueGitBranchOperation:
+            return [
+                TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                TurnGitSyncAlertButton(title: "Commit & Continue", role: nil, action: .commitAndContinueGitBranchOperation)
+            ]
+        case .discardRuntimeChanges:
+            return [
+                TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                TurnGitSyncAlertButton(title: "Discard Local Changes", role: .destructive, action: .discardRuntimeChanges)
+            ]
+        }
+    }
+}
+
+enum TurnGitSyncAlertButtonRole: Sendable {
+    case cancel
+    case destructive
+}
+
+enum TurnGitSyncAlertAction: Equatable, Sendable {
     case dismissOnly
     case pullRebase
+    case continueGitBranchOperation
+    case commitAndContinueGitBranchOperation
+    case discardRuntimeChanges
 }

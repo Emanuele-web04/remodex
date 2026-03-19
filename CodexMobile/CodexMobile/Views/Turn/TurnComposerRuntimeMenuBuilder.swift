@@ -36,22 +36,14 @@ struct TurnComposerRuntimeMenuBuilder {
             return nil
         }
 
-        var children: [UIMenuElement] = [
-            UIAction(title: "Auto", state: runtimeState.usesAutomaticReasoning ? .on : .off) { _ in
-                runtimeActions.selectAutomaticReasoning()
+        let children = runtimeState.reasoningDisplayOptions.map { option in
+            UIAction(
+                title: option.title,
+                state: runtimeState.isSelectedReasoning(option.effort) ? .on : .off
+            ) { _ in
+                runtimeActions.selectReasoning(option.effort)
             }
-        ]
-
-        children.append(
-            contentsOf: runtimeState.reasoningDisplayOptions.map { option in
-                UIAction(
-                    title: option.title,
-                    state: runtimeState.isSelectedReasoning(option.effort) ? .on : .off
-                ) { _ in
-                    runtimeActions.selectReasoning(option.effort)
-                }
-            }
-        )
+        }
 
         return UIMenu(
             title: "Reasoning",

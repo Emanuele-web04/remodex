@@ -16,6 +16,7 @@ private struct TurnViewAlertModifier: ViewModifier {
     let onDeclineApproval: () -> Void
     let onApproveApproval: () -> Void
     let onConfirmGitSyncAction: (TurnGitSyncAlertAction) -> Void
+    let onDismissGitSyncAlert: () -> Void
     let onConfirmMacHandoff: () -> Void
 
     func body(content: Content) -> some View {
@@ -46,19 +47,15 @@ private struct TurnViewAlertModifier: ViewModifier {
                 isPresented: gitSyncAlertIsPresented,
                 presenting: gitSyncAlert
             ) { alert in
-                switch alert.action {
-                case .dismissOnly:
-                    Button("OK", role: .cancel) {
-                        gitSyncAlert = nil
-                    }
-                case .pullRebase:
-                    Button("Cancel", role: .cancel) {
-                        gitSyncAlert = nil
-                    }
-                    Button("Pull & Rebase") {
-                        let action = alert.action
-                        gitSyncAlert = nil
-                        onConfirmGitSyncAction(action)
+                // Renders alert buttons from the shared model so new Git prompts do not add more switch cases here.
+                ForEach(alert.buttons) { alertButton in
+                    Button(alertButton.title, role: buttonRole(for: alertButton.role)) {
+                        let action = alertButton.action
+                        if action == .dismissOnly {
+                            onDismissGitSyncAlert()
+                        } else {
+                            onConfirmGitSyncAction(action)
+                        }
                     }
                 }
             } message: { alert in
@@ -100,7 +97,7 @@ private struct TurnViewAlertModifier: ViewModifier {
             get: { gitSyncAlert != nil },
             set: { isPresented in
                 if !isPresented {
-                    gitSyncAlert = nil
+                    onDismissGitSyncAlert()
                 }
             }
         )
@@ -136,6 +133,17 @@ private struct TurnViewAlertModifier: ViewModifier {
 
         return lines.joined(separator: "\n\n")
     }
+
+    private func buttonRole(for role: TurnGitSyncAlertButtonRole?) -> ButtonRole? {
+        switch role {
+        case .cancel:
+            return .cancel
+        case .destructive:
+            return .destructive
+        case nil:
+            return nil
+        }
+    }
 }
 
 extension View {
@@ -148,6 +156,7 @@ extension View {
         onDeclineApproval: @escaping () -> Void,
         onApproveApproval: @escaping () -> Void,
         onConfirmGitSyncAction: @escaping (TurnGitSyncAlertAction) -> Void,
+        onDismissGitSyncAlert: @escaping () -> Void,
         onConfirmMacHandoff: @escaping () -> Void
     ) -> some View {
         modifier(
@@ -160,6 +169,7 @@ extension View {
                 onDeclineApproval: onDeclineApproval,
                 onApproveApproval: onApproveApproval,
                 onConfirmGitSyncAction: onConfirmGitSyncAction,
+                onDismissGitSyncAlert: onDismissGitSyncAlert,
                 onConfirmMacHandoff: onConfirmMacHandoff
             )
         )

@@ -15,8 +15,8 @@ extension CodexService {
     private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4003]
     private static let explicitRelayDropCloseCodeRawValues: Set<UInt16> = [4004]
     private static let maxTrustedReconnectFailures = 3
-    private static let trustedReconnectFailureMessage =
-        "Secure reconnect could not be restored. Scan a new QR code to reconnect."
+    private static let trustedReconnectRecoveryMessage =
+        "Secure reconnect could not be restored from the saved session. Try reconnecting again."
 
     // Models how one socket failure should affect reconnect state, pairing persistence, and UI copy.
     private struct ReceiveErrorDisposition {
@@ -113,14 +113,13 @@ extension CodexService {
                 schedulePostConnectSyncPass()
             }
         } catch {
-            let shouldFallbackToManualPairing = recordTrustedReconnectFailureIfNeeded(
+            let shouldResetSavedSession = recordTrustedReconnectFailureIfNeeded(
                 isTrustedReconnectAttempt: isTrustedReconnectAttempt
             )
             presentConnectionErrorIfNeeded(error)
             await disconnect()
-            if shouldFallbackToManualPairing {
-                secureConnectionState = .rePairRequired
-                lastErrorMessage = Self.trustedReconnectFailureMessage
+            if shouldResetSavedSession {
+                recoverTrustedReconnectCandidate()
             }
             throw error
         }
@@ -158,6 +157,7 @@ extension CodexService {
         }
         supportsStructuredSkillInput = true
         supportsTurnCollaborationMode = false
+        hasResolvedRateLimitsSnapshot = false
         clearConnectionSyncState()
         clearHydrationCaches()
         resumedThreadIDs.removeAll()
@@ -294,8 +294,7 @@ extension CodexService {
             if recordTrustedReconnectFailureIfNeeded(isTrustedReconnectAttempt: true) {
                 shouldAutoReconnectOnForeground = false
                 connectionRecoveryState = .idle
-                secureConnectionState = .rePairRequired
-                lastErrorMessage = Self.trustedReconnectFailureMessage
+                recoverTrustedReconnectCandidate()
                 failAllPendingRequests(with: error)
                 return
             }
@@ -464,7 +463,8 @@ extension CodexService {
         return trustedMacRegistry.records[relayMacDeviceId] != nil
     }
 
-    // Counts reconnect handshake failures so the app can stop looping forever and fall back to manual QR.
+    // Counts reconnect handshake failures so repeated stale-session wakeups can fall back to
+    // trusted-session resolution instead of forcing an unnecessary fresh QR scan.
     @discardableResult
     func recordTrustedReconnectFailureIfNeeded(isTrustedReconnectAttempt: Bool) -> Bool {
         guard isTrustedReconnectAttempt else {
@@ -480,6 +480,13 @@ extension CodexService {
         shouldAutoReconnectOnForeground = false
         connectionRecoveryState = .idle
         return true
+    }
+
+    // Keeps both the trusted Mac and the last saved relay session available after repeated
+    // reconnect failures so a manual reconnect can still try the existing session first.
+    func recoverTrustedReconnectCandidate() {
+        secureConnectionState = .liveSessionUnresolved
+        lastErrorMessage = Self.trustedReconnectRecoveryMessage
     }
 
     // Centralizes the "should we retry, stay silent, or force a re-pair?" rules for socket failures.

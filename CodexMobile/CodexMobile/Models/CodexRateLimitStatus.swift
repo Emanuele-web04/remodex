@@ -81,8 +81,51 @@ struct CodexRateLimitBucket: Identifiable, Equatable, Sendable {
         return limitId
     }
 
+    // Normalizes mixed payload shapes into one visible row per logical window label.
+    static func visibleDisplayRows(from buckets: [CodexRateLimitBucket]) -> [CodexRateLimitDisplayRow] {
+        let rows = buckets.flatMap(\.displayRows)
+        var dedupedByLabel: [String: CodexRateLimitDisplayRow] = [:]
+
+        for row in rows {
+            if let existing = dedupedByLabel[row.label] {
+                dedupedByLabel[row.label] = preferredDisplayRow(existing, row)
+            } else {
+                dedupedByLabel[row.label] = row
+            }
+        }
+
+        return dedupedByLabel.values.sorted { lhs, rhs in
+            let lhsDuration = lhs.window.windowDurationMins ?? Int.max
+            let rhsDuration = rhs.window.windowDurationMins ?? Int.max
+            if lhsDuration == rhsDuration {
+                return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+            }
+            return lhsDuration < rhsDuration
+        }
+    }
+
     private static func label(for window: CodexRateLimitWindow, fallback: String) -> String {
         durationLabel(minutes: window.windowDurationMins) ?? fallback
+    }
+
+    private static func preferredDisplayRow(
+        _ current: CodexRateLimitDisplayRow,
+        _ candidate: CodexRateLimitDisplayRow
+    ) -> CodexRateLimitDisplayRow {
+        if candidate.window.clampedUsedPercent != current.window.clampedUsedPercent {
+            return candidate.window.clampedUsedPercent > current.window.clampedUsedPercent ? candidate : current
+        }
+
+        switch (current.window.resetsAt, candidate.window.resetsAt) {
+        case (.none, .some):
+            return candidate
+        case (.some, .none):
+            return current
+        case let (.some(currentReset), .some(candidateReset)):
+            return candidateReset < currentReset ? candidate : current
+        case (.none, .none):
+            return current
+        }
     }
 
     private static func durationLabel(minutes: Int?) -> String? {

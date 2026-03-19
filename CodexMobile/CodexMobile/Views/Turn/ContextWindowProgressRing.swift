@@ -2,19 +2,23 @@
 // Purpose: Compact progress indicator for context window token usage in composer/meta rows.
 // Layer: View Component
 // Exports: ContextWindowProgressRing
-// Depends on: SwiftUI, HapticFeedback
+// Depends on: SwiftUI, HapticFeedback, UsageStatusSummaryContent
 
 import SwiftUI
 
 struct ContextWindowProgressRing: View {
     let usage: ContextWindowUsage?
-    let onRefresh: (() async -> Void)?
+    let rateLimitBuckets: [CodexRateLimitBucket]
+    let isLoadingRateLimits: Bool
+    let rateLimitsErrorMessage: String?
+    let shouldAutoRefreshStatus: Bool
+    let onRefreshStatus: (() async -> Void)?
     @State private var isShowingPopover = false
     @State private var isRefreshing = false
 
     private let ringSize: CGFloat = 18
     private let lineWidth: CGFloat = 2.25
-    private let tapTargetSize: CGFloat = 20
+    private let tapTargetSize: CGFloat = 36
 
     var body: some View {
         Button {
@@ -43,7 +47,8 @@ struct ContextWindowProgressRing: View {
             }
             .frame(width: ringSize, height: ringSize)
             .frame(width: tapTargetSize, height: tapTargetSize)
-            .contentShape(Rectangle())
+            .adaptiveGlass(.regular, in: Circle())
+            .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Context window")
@@ -52,65 +57,29 @@ struct ContextWindowProgressRing: View {
             popoverContent
                 .presentationCompactAdaptation(.popover)
         }
+        .onChange(of: isShowingPopover) { _, isPresented in
+            guard isPresented, shouldAutoRefreshStatus else { return }
+            refreshStatus(triggerHaptic: false)
+        }
     }
 
     private var popoverContent: some View {
-        VStack(spacing: 8) {
-            Text("Context window:")
-                .font(AppFont.subheadline())
-                .foregroundStyle(.secondary)
-
-            if let usage {
-                Text("\(usage.percentUsed)% full")
-                    .font(AppFont.headline())
-
-                Text("\(usage.tokensUsedFormatted) / \(usage.tokenLimitFormatted) tokens used")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Unavailable")
-                    .font(AppFont.headline())
-
-                Text("Waiting for token usage from the runtime")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
+        UsageStatusSummaryContent(
+            contextWindowUsage: usage,
+            rateLimitBuckets: rateLimitBuckets,
+            isLoadingRateLimits: isLoadingRateLimits,
+            rateLimitsErrorMessage: rateLimitsErrorMessage,
+            contextPlacement: .bottom,
+            refreshControl: onRefreshStatus.map { _ in
+                UsageStatusRefreshControl(
+                    title: "Refresh",
+                    isRefreshing: isRefreshing,
+                    action: { refreshStatus() }
+                )
             }
-
-            if let onRefresh {
-                Divider()
-
-                Button {
-                    guard !isRefreshing else { return }
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    isRefreshing = true
-
-                    Task {
-                        await onRefresh()
-                        await MainActor.run {
-                            isRefreshing = false
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        if isRefreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(AppFont.system(size: 12, weight: .semibold))
-                        }
-
-                        Text(isRefreshing ? "Refreshing..." : "Refresh")
-                            .font(AppFont.subheadline(weight: .semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.plain)
-                .disabled(isRefreshing)
-            }
-        }
+        )
         .padding()
-        .frame(minWidth: 180)
+        .frame(minWidth: 260)
     }
 
     private var usageAccessibilityValue: String {
@@ -125,6 +94,22 @@ struct ContextWindowProgressRing: View {
         case 0.85...: return .red
         case 0.65..<0.85: return .orange
         default: return Color(.systemGray2)
+        }
+    }
+
+    // Refreshes both thread context usage and account windows for the compact status popover.
+    private func refreshStatus(triggerHaptic: Bool = true) {
+        guard !isRefreshing, let onRefreshStatus else { return }
+        if triggerHaptic {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        }
+        isRefreshing = true
+
+        Task {
+            await onRefreshStatus()
+            await MainActor.run {
+                isRefreshing = false
+            }
         }
     }
 }

@@ -19,8 +19,7 @@ struct SidebarThreadRowView: View {
     var onArchiveToggle: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
 
-    @State private var isShowingRenameAlert = false
-    @State private var renameText = ""
+    @State private var renamePrompt = ThreadRenamePromptState()
     private let titleLeadingSlotWidth: CGFloat = 16
 
     var body: some View {
@@ -39,13 +38,8 @@ struct SidebarThreadRowView: View {
         }
         .padding(.horizontal, 12)
         .contextMenu { contextMenuContent }
-        .alert("Rename Conversation", isPresented: $isShowingRenameAlert) {
-            TextField("Name", text: $renameText)
-            Button("Rename") {
-                let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { onRename?(trimmed) }
-            }
-            Button("Cancel", role: .cancel) {}
+        .threadRenamePrompt(state: $renamePrompt) { newName in
+            onRename?(newName)
         }
     }
 
@@ -102,6 +96,11 @@ struct SidebarThreadRowView: View {
 
             expansionToggleButton
 
+            if thread.isManagedWorktreeProject {
+                CodexWorktreeIcon(pointSize: 12, weight: .medium)
+                    .foregroundStyle(.secondary)
+            }
+
             if let timingLabel {
                 Text(timingLabel)
                     .font(AppFont.footnote())
@@ -135,6 +134,11 @@ struct SidebarThreadRowView: View {
     private var subagentTrailingMeta: some View {
         HStack(spacing: 4) {
             expansionToggleButton
+
+            if thread.isManagedWorktreeProject {
+                CodexWorktreeIcon(pointSize: 11, weight: .medium)
+                    .foregroundStyle(.secondary)
+            }
 
             if let timingLabel {
                 Text(timingLabel)
@@ -183,8 +187,7 @@ struct SidebarThreadRowView: View {
         if onRename != nil {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                renameText = thread.displayTitle
-                isShowingRenameAlert = true
+                renamePrompt.present(currentTitle: thread.displayTitle)
             } label: {
                 Label("Rename", systemImage: "pencil")
             }

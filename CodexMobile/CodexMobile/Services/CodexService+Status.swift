@@ -7,6 +7,26 @@
 import Foundation
 
 extension CodexService {
+    // Refreshes the shared usage surfaces with thread context (when available) plus account rate limits.
+    func refreshUsageStatus(threadId: String?) async {
+        if let normalizedThreadID = normalizedUsageStatusThreadID(threadId) {
+            await refreshContextWindowUsage(threadId: normalizedThreadID)
+        }
+        await refreshRateLimits()
+    }
+
+    // Shared auto-refresh rule for status surfaces so empty-but-valid buckets do not loop forever.
+    func shouldAutoRefreshUsageStatus(threadId: String?) -> Bool {
+        guard isConnected else { return false }
+
+        let needsContextUsage = normalizedUsageStatusThreadID(threadId).map { normalizedThreadID in
+            contextWindowUsageByThread[normalizedThreadID] == nil
+        } ?? false
+
+        let needsRateLimits = !hasResolvedRateLimitsSnapshot
+        return needsContextUsage || needsRateLimits
+    }
+
     // Fetches the latest thread-scoped context usage from the local bridge fallback.
     func refreshContextWindowUsage(threadId: String) async {
         let trimmedThreadID = threadId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -47,8 +67,10 @@ extension CodexService {
             }
 
             applyRateLimitsPayload(resultObject, mergeWithExisting: false)
+            hasResolvedRateLimitsSnapshot = true
             rateLimitsErrorMessage = nil
         } catch {
+            hasResolvedRateLimitsSnapshot = false
             rateLimitBuckets = []
             let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
             rateLimitsErrorMessage = message.isEmpty ? "Unable to load rate limits" : message
@@ -58,11 +80,21 @@ extension CodexService {
     func handleRateLimitsUpdated(_ paramsObject: IncomingParamsObject?) {
         guard let paramsObject else { return }
         applyRateLimitsPayload(paramsObject, mergeWithExisting: true)
+        hasResolvedRateLimitsSnapshot = true
         rateLimitsErrorMessage = nil
     }
 }
 
 private extension CodexService {
+    func normalizedUsageStatusThreadID(_ threadId: String?) -> String? {
+        guard let rawThreadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawThreadId.isEmpty else {
+            return nil
+        }
+
+        return rawThreadId
+    }
+
     // Retries the account RPC with both accepted explicit-param shapes because runtimes disagree.
     func fetchRateLimitsWithCompatRetry() async throws -> RPCMessage {
         do {

@@ -306,10 +306,15 @@ extension CodexThread {
         Self.projectDisplayLabel(for: normalizedProjectPath)
     }
 
+    // Reuses the same worktree detection across the sidebar, toolbar, and composer affordances.
+    var isManagedWorktreeProject: Bool {
+        Self.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch"
+    }
+
     // Distinguishes Codex-managed worktrees from the main repo in compact sidebar UIs.
     static func projectDisplayLabel(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
-            return "No Project"
+            return "Cloud"
         }
 
         let baseLabel = projectBaseDisplayName(for: normalizedProjectPath)
@@ -322,10 +327,10 @@ extension CodexThread {
 
     static func projectIconSystemName(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
-            return "folder"
+            return "cloud"
         }
 
-        return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "folder" : "arrow.triangle.branch"
+        return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "laptopcomputer" : "arrow.triangle.branch"
     }
 
     // --- Date parsing ---------------------------------------------------------
@@ -495,11 +500,6 @@ extension CodexThread {
             return nil
         }
 
-        let trailingDigits = token.reversed().prefix { $0.isNumber }.reversed()
-        if !trailingDigits.isEmpty {
-            return String(trailingDigits)
-        }
-
-        return token
+        return "[\(token)]"
     }
 }

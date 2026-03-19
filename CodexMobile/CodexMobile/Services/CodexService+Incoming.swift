@@ -904,7 +904,11 @@ extension CodexService {
             }
         }
 
-        let statusText = decodeCommandExecutionStatusText(payloadObject, isCompleted: false)
+        let statusText = decodeCommandExecutionStatusText(
+            payloadObject,
+            threadId: context.threadId,
+            isCompleted: false
+        )
         appendCommandExecutionOutputToDetails(itemId: context.itemId, paramsObject: paramsObject, eventObject: eventObject)
         publishCommandExecutionStatus(
             context: context,
@@ -1409,7 +1413,7 @@ extension CodexService {
             if let itemId, !itemId.isEmpty {
                 // Ensure details entry exists so output is captured.
                 if commandExecutionDetailsByItemID[itemId] == nil {
-                    upsertCommandExecutionDetails(from: state, isCompleted: false)
+                    upsertCommandExecutionDetails(from: state, threadId: threadId, isCompleted: false)
                 }
                 appendCommandExecutionOutputToDetails(itemId: itemId, paramsObject: normalizedParams, eventObject: payload)
 
@@ -1433,7 +1437,7 @@ extension CodexService {
         }
 
         let isCompleted = (eventType == "exec_command_end")
-        upsertCommandExecutionDetails(from: state, isCompleted: isCompleted)
+        upsertCommandExecutionDetails(from: state, threadId: threadId, isCompleted: isCompleted)
         let statusText = commandExecutionStatusText(for: state)
         if let itemId, !itemId.isEmpty {
             if isCompleted {
@@ -2155,6 +2159,7 @@ extension CodexService {
 
     private func decodeCommandExecutionStatusText(
         _ itemObject: IncomingParamsObject,
+        threadId: String? = nil,
         isCompleted: Bool
     ) -> String {
         let state = decodeCommandRunViewState(
@@ -2162,7 +2167,7 @@ extension CodexService {
             paramsObject: nil,
             eventType: isCompleted ? "exec_command_end" : "exec_command_begin"
         )
-        upsertCommandExecutionDetails(from: state, isCompleted: isCompleted)
+        upsertCommandExecutionDetails(from: state, threadId: threadId, isCompleted: isCompleted)
         return commandExecutionStatusText(for: state)
     }
 
@@ -2170,8 +2175,15 @@ extension CodexService {
         "\(state.phase.rawValue) \(state.shortCommand)"
     }
 
-    private func upsertCommandExecutionDetails(from state: CommandRunViewState, isCompleted: Bool) {
+    private func upsertCommandExecutionDetails(
+        from state: CommandRunViewState,
+        threadId: String? = nil,
+        isCompleted: Bool
+    ) {
         guard let itemId = state.itemId, !itemId.isEmpty else { return }
+        if let threadId {
+            adoptManagedWorktreeProjectPathIfNeeded(threadId: threadId, projectPath: state.cwd)
+        }
         if var existing = commandExecutionDetailsByItemID[itemId] {
             if state.fullCommand.count > existing.fullCommand.count {
                 existing.fullCommand = state.fullCommand

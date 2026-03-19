@@ -14,16 +14,22 @@ struct TurnThreadNavigationContext {
 struct TurnToolbarContent: ToolbarContent {
     let displayTitle: String
     let navigationContext: TurnThreadNavigationContext?
-    let showsMacHandoff: Bool
+    let showsThreadActions: Bool
     let isHandingOffToMac: Bool
+    let isStartingNewChat: Bool
+    let canHandOffToWorktree: Bool
+    let isCreatingGitWorktree: Bool
     let repoDiffTotals: GitDiffTotals?
     let isLoadingRepoDiff: Bool
     let showsGitActions: Bool
     let isGitActionEnabled: Bool
+    let disabledGitActions: Set<TurnGitActionKind>
     let isRunningGitAction: Bool
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
     var onTapMacHandoff: (() -> Void)?
+    var onTapWorktreeHandoff: (() -> Void)?
+    var onTapNewChat: (() -> Void)?
     var onTapRepoDiff: (() -> Void)?
     let onGitAction: (TurnGitActionKind) -> Void
 
@@ -31,6 +37,13 @@ struct TurnToolbarContent: ToolbarContent {
 
     var body: some ToolbarContent {
         let hasTrailingCluster = repoDiffTotals != nil || showsGitActions
+        let isThreadActionLoading = isHandingOffToMac || isStartingNewChat
+        let canTapMacHandoff = onTapMacHandoff != nil && !isThreadActionLoading
+        let canTapWorktreeHandoff = onTapWorktreeHandoff != nil
+            && canHandOffToWorktree
+            && !isCreatingGitWorktree
+            && !isThreadActionLoading
+        let canTapNewChat = onTapNewChat != nil && !isThreadActionLoading
 
         ToolbarItem(placement: .principal) {
             VStack(alignment: .leading, spacing: 1) {
@@ -57,20 +70,51 @@ struct TurnToolbarContent: ToolbarContent {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
 
-        if showsMacHandoff, let onTapMacHandoff {
+        if showsThreadActions {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onTapMacHandoff()
+                Menu {
+                    // Keeps all "branch from here" actions together behind the compact toolbar affordance.
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onTapMacHandoff?()
+                    } label: {
+                        HStack(spacing: 10) {
+                            ResizableThreadActionSymbol(systemName: "arrow.left.arrow.right", pointSize: 13)
+                            Text("Hand off to Mac")
+                        }
+                    }
+                    .disabled(!canTapMacHandoff)
+
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onTapWorktreeHandoff?()
+                    } label: {
+                        CodexWorktreeMenuLabelRow(
+                            title: isCreatingGitWorktree ? "Creating worktree..." : "Hand off to worktree",
+                            pointSize: 12,
+                            weight: .regular
+                        )
+                    }
+                    .disabled(!canTapWorktreeHandoff)
+
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onTapNewChat?()
+                    } label: {
+                        HStack(spacing: 10) {
+                            ResizableThreadActionSymbol(systemName: "plus.app", pointSize: 13)
+                            Text("New chat")
+                        }
+                    }
+                    .disabled(!canTapNewChat)
                 } label: {
-                    TurnMacHandoffToolbarLabel(isLoading: isHandingOffToMac)
+                    TurnMacHandoffToolbarLabel(isLoading: isThreadActionLoading)
                 }
-                .disabled(isHandingOffToMac)
-                .accessibilityLabel("Hand off to Mac app")
+                .accessibilityLabel("Thread actions")
             }
         }
 
-        if showsMacHandoff, onTapMacHandoff != nil, hasTrailingCluster {
+        if showsThreadActions, hasTrailingCluster {
             if #available(iOS 26.0, *) {
                 ToolbarSpacer(.fixed, placement: .topBarTrailing)
             }
@@ -89,6 +133,7 @@ struct TurnToolbarContent: ToolbarContent {
                 if showsGitActions {
                     TurnGitActionsToolbarButton(
                         isEnabled: isGitActionEnabled,
+                        disabledActions: disabledGitActions,
                         isRunningAction: isRunningGitAction,
                         showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
                         gitSyncState: gitSyncState,
@@ -103,9 +148,6 @@ struct TurnToolbarContent: ToolbarContent {
 private struct TurnMacHandoffToolbarLabel: View {
     let isLoading: Bool
 
-    private let iconSize: CGFloat = 10
-    private let minToolbarButtonSize: CGFloat = 32
-
     var body: some View {
         Group {
             if isLoading {
@@ -113,18 +155,50 @@ private struct TurnMacHandoffToolbarLabel: View {
                     .controlSize(.small)
                     .frame(width: 24, height: 24)
             } else {
-                VStack(spacing: 1.5) {
-                    Image(systemName: "arrow.right")
-                        .font(.system(size: iconSize, weight: .semibold))
-                    Image(systemName: "arrow.left")
-                        .font(.system(size: iconSize, weight: .semibold))
-                }
-                .foregroundStyle(.primary)
-                .frame(width: 24, height: 24)
+                ResizableThreadActionSymbol(systemName: "arrow.up", pointSize: 14)
+                    .foregroundStyle(.primary)
+                    .frame(width: 24, height: 24)
             }
         }
         .contentShape(Circle())
         .adaptiveToolbarItem(in: Circle())
+    }
+}
+
+private struct ResizableThreadActionSymbol: View {
+    let systemName: String
+    let pointSize: CGFloat
+    var weight: UIImage.SymbolWeight = .semibold
+
+    var body: some View {
+        Image(uiImage: resizedSymbol(named: systemName, pointSize: pointSize, weight: weight))
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(width: pointSize, height: pointSize)
+    }
+
+    private func resizedSymbol(named name: String, pointSize: CGFloat, weight: UIImage.SymbolWeight) -> UIImage {
+        let config = UIImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+        guard let symbol = UIImage(systemName: name, withConfiguration: config)?
+            .withRenderingMode(.alwaysTemplate) else {
+            return UIImage()
+        }
+
+        let canvasSide = max(symbol.size.width, symbol.size.height)
+        let canvasSize = CGSize(width: canvasSide, height: canvasSide)
+        let renderer = UIGraphicsImageRenderer(size: canvasSize)
+        let scale = min(canvasSize.width / symbol.size.width, canvasSize.height / symbol.size.height)
+        let scaledSize = CGSize(width: symbol.size.width * scale, height: symbol.size.height * scale)
+        let origin = CGPoint(
+            x: (canvasSize.width - scaledSize.width) / 2,
+            y: (canvasSize.height - scaledSize.height) / 2
+        )
+
+        return renderer.image { _ in
+            symbol.draw(in: CGRect(origin: origin, size: scaledSize))
+        }
+        .withRenderingMode(.alwaysTemplate)
     }
 }
 
@@ -172,7 +246,6 @@ private struct TurnToolbarDiffTotalsLabel: View {
             }
         }
         .font(AppFont.mono(.caption))
-        .padding(.horizontal, 4)
         .frame(minWidth: minPillWidth, minHeight: 28)
         .contentShape(Capsule())
         .fixedSize(horizontal: true, vertical: false)
@@ -190,20 +263,64 @@ private struct TurnToolbarDiffTotalsLabel: View {
 
 struct TurnThreadPathSheet: View {
     let context: TurnThreadNavigationContext
+    let threadTitle: String
+    var onRenameThread: ((String) -> Void)? = nil
+
+    @State private var renamePrompt = ThreadRenamePromptState()
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                Text(context.fullPath)
-                    .font(AppFont.mono(.callout))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
+                VStack(alignment: .leading, spacing: 20) {
+                    if onRenameThread != nil {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Thread")
+                                .font(AppFont.caption(weight: .semibold))
+                                .foregroundStyle(.secondary)
+
+                            HStack(alignment: .center, spacing: 12) {
+                                Text(threadTitle)
+                                    .font(AppFont.body(weight: .medium))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Button {
+                                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                                    renamePrompt.present(currentTitle: threadTitle)
+                                } label: {
+                                    Image(systemName: "pencil")
+                                        .font(AppFont.system(size: 14, weight: .semibold))
+                                        .frame(width: 32, height: 32)
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Rename conversation")
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Path")
+                            .font(AppFont.caption(weight: .semibold))
+                            .foregroundStyle(.secondary)
+
+                        Text(context.fullPath)
+                            .font(AppFont.mono(.callout))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding()
             }
             .navigationTitle(context.folderName)
             .navigationBarTitleDisplayMode(.inline)
             .adaptiveNavigationBar()
         }
-        .presentationDetents([.fraction(0.25), .medium])
+        .presentationDetents([.fraction(0.4), .medium])
+        .threadRenamePrompt(state: $renamePrompt) { newTitle in
+            onRenameThread?(newTitle)
+        }
     }
 }

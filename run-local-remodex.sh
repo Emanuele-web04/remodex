@@ -18,6 +18,7 @@ RELAY_PORT="${RELAY_PORT:-9000}"
 RELAY_HOSTNAME="${RELAY_HOSTNAME:-}"
 RELAY_BRIDGE_HOST=""
 RELAY_PID=""
+BRIDGE_SERVICE_STARTED="false"
 
 log() {
   echo "[run-local-remodex] $*"
@@ -123,6 +124,13 @@ healthcheck_host() {
 }
 
 cleanup() {
+  if [[ "${BRIDGE_SERVICE_STARTED}" == "true" ]]; then
+    (
+      cd "${BRIDGE_DIR}"
+      node ./bin/remodex.js stop >/dev/null 2>&1 || true
+    )
+  fi
+
   if [[ -n "${RELAY_PID}" ]] && kill -0 "${RELAY_PID}" 2>/dev/null; then
     kill "${RELAY_PID}" 2>/dev/null || true
     wait "${RELAY_PID}" 2>/dev/null || true
@@ -293,6 +301,13 @@ start_bridge() {
   # The bridge bakes REMODEX_RELAY into the pairing QR, so advertise the host
   # the iPhone can actually reach instead of the loopback health-check host.
   REMODEX_RELAY="ws://${RELAY_HOSTNAME}:${RELAY_PORT}/relay" node ./bin/remodex.js up
+  BRIDGE_SERVICE_STARTED="true"
+}
+
+hold_open() {
+  log "Local relay is ready. Keep this terminal open while testing."
+  log "Press Ctrl+C to stop both the local relay and the Remodex bridge service."
+  wait "${RELAY_PID}"
 }
 
 trap cleanup EXIT INT TERM
@@ -310,3 +325,4 @@ print_summary
 start_embedded_relay
 wait_for_relay
 start_bridge
+hold_open

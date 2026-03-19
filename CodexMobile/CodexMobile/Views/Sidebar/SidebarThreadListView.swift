@@ -29,6 +29,8 @@ struct SidebarThreadListView: View {
     @State private var hasInitializedProjectGroupExpansion = false
     @State private var isArchivedExpanded = false
     @State private var expandedSubagentParentIDs: Set<String> = []
+    // Tracks project sections whose preview cap was manually lifted with Show more.
+    @State private var revealedProjectGroupIDs: Set<String> = []
 
     var body: some View {
         ScrollView {
@@ -61,11 +63,13 @@ struct SidebarThreadListView: View {
         }
         .onAppear {
             syncExpandedProjectGroupState()
+            syncRevealedProjectGroupState()
             revealSelectedThreadProjectGroup()
             revealSelectedSubagentAncestors()
         }
         .onChange(of: groups.map(\.id)) { _, _ in
             syncExpandedProjectGroupState()
+            syncRevealedProjectGroupState()
             revealSelectedThreadProjectGroup()
             revealSelectedSubagentAncestors()
         }
@@ -91,23 +95,71 @@ struct SidebarThreadListView: View {
     }
 
     private func projectGroupSection(_ group: SidebarThreadGroup) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let hierarchy = SidebarSubagentHierarchy(groupThreads: group.threads)
+        let visibleRootThreads = SidebarProjectThreadPreviewState.visibleRootThreads(
+            for: group,
+            selectedThread: selectedThread,
+            isFiltering: isFiltering,
+            manuallyExpandedGroupIDs: revealedProjectGroupIDs
+        )
+        let shouldShowMoreButton = SidebarProjectThreadPreviewState.shouldShowMoreButton(
+            for: group,
+            selectedThread: selectedThread,
+            isFiltering: isFiltering,
+            manuallyExpandedGroupIDs: revealedProjectGroupIDs
+        )
+
+        return VStack(alignment: .leading, spacing: 0) {
             projectHeader(group)
 
             if expandedProjectGroupIDs.contains(group.id) {
                 VStack(spacing: 2) {
-                    let hierarchy = SidebarSubagentHierarchy(groupThreads: group.threads)
-                    ForEach(hierarchy.rootThreads) { thread in
+                    ForEach(visibleRootThreads) { thread in
                         threadRowTree(
                             thread,
                             childrenByParentID: hierarchy.childrenByParentID
                         )
+                    }
+
+                    if shouldShowMoreButton {
+                        let totalRootCount = SidebarProjectThreadPreviewState.rootThreads(in: group.threads).count
+                        let hiddenCount = totalRootCount - visibleRootThreads.count
+                        projectGroupShowMoreButton(group, hiddenCount: hiddenCount)
                     }
                 }
                 .padding(.bottom, 14)
                 .transition(.opacity)
             }
         }
+    }
+
+    @State private var showMoreChevronRotated = false
+
+    private func projectGroupShowMoreButton(_ group: SidebarThreadGroup, hiddenCount: Int) -> some View {
+        HStack {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showMoreChevronRotated = true
+                    revealedProjectGroupIDs.insert(group.id)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(hiddenCount > 0 ? "Show \(hiddenCount) more" : "Show more")
+                    Image(systemName: "chevron.down")
+                        .font(AppFont.system(size: 10, weight: .semibold))
+                        .rotationEffect(.degrees(showMoreChevronRotated ? 180 : 0))
+                }
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 48)
+        .padding(.top, 6)
+        .onAppear { showMoreChevronRotated = false }
     }
 
     private func projectHeader(_ group: SidebarThreadGroup) -> some View {
@@ -117,9 +169,14 @@ struct SidebarThreadListView: View {
                 toggleProjectGroupExpansion(group.id)
             } label: {
                 HStack(spacing: 8) {
-                    Image(systemName: group.iconSystemName)
-                        .font(AppFont.body(weight: .medium))
-                        .foregroundStyle(.primary)
+                    if group.iconSystemName == "arrow.triangle.branch" {
+                        CodexWorktreeIcon(pointSize: 16, weight: .medium)
+                            .foregroundStyle(.primary)
+                    } else {
+                        Image(systemName: group.iconSystemName)
+                            .font(AppFont.body(weight: .medium))
+                            .foregroundStyle(.primary)
+                    }
                     Text(group.label)
                         .font(AppFont.body(weight: .medium))
                         .foregroundStyle(.primary)
@@ -277,7 +334,13 @@ struct SidebarThreadListView: View {
             case .project:
                 guard expandedProjectGroupIDs.contains(group.id) else { continue }
                 let hierarchy = SidebarSubagentHierarchy(groupThreads: group.threads)
-                for rootThread in hierarchy.rootThreads {
+                let visibleRootThreads = SidebarProjectThreadPreviewState.visibleRootThreads(
+                    for: group,
+                    selectedThread: selectedThread,
+                    isFiltering: isFiltering,
+                    manuallyExpandedGroupIDs: revealedProjectGroupIDs
+                )
+                for rootThread in visibleRootThreads {
                     collectVisibleSubagentThreadIDs(
                         from: rootThread,
                         childrenByParentID: hierarchy.childrenByParentID,
@@ -333,6 +396,7 @@ struct SidebarThreadListView: View {
         )
         if expandedProjectGroupIDs.contains(groupID) {
             expandedProjectGroupIDs.remove(groupID)
+            revealedProjectGroupIDs.remove(groupID)
             persistedCollapsedGroupIDs.insert(groupID)
         } else {
             expandedProjectGroupIDs.insert(groupID)
@@ -357,6 +421,16 @@ struct SidebarThreadListView: View {
         expandedProjectGroupIDs = nextState.expandedGroupIDs
         knownProjectGroupIDs = nextState.knownGroupIDs
         hasInitializedProjectGroupExpansion = true
+    }
+
+    // Keeps Show more expansion state only for project groups that still exist on screen.
+    private func syncRevealedProjectGroupState() {
+        let visibleProjectGroupIDs = Set(
+            groups
+                .filter { $0.kind == .project }
+                .map(\.id)
+        )
+        revealedProjectGroupIDs = revealedProjectGroupIDs.intersection(visibleProjectGroupIDs)
     }
 
     // Keeps an externally selected thread visible without re-opening unrelated project groups.
@@ -400,6 +474,118 @@ struct SidebarThreadListView: View {
         }
 
         return ancestorIDs
+    }
+}
+
+enum SidebarProjectThreadPreviewState {
+    static let collapsedRootThreadLimit = 10
+
+    // Caps each project section to the latest root conversations until the user expands it.
+    static func visibleRootThreads(
+        for group: SidebarThreadGroup,
+        selectedThread: CodexThread?,
+        isFiltering: Bool,
+        manuallyExpandedGroupIDs: Set<String>
+    ) -> [CodexThread] {
+        let rootThreads = rootThreads(in: group.threads)
+        if shouldRevealAllRootThreads(
+            for: group,
+            rootThreads: rootThreads,
+            selectedThread: selectedThread,
+            isFiltering: isFiltering,
+            manuallyExpandedGroupIDs: manuallyExpandedGroupIDs
+        ) {
+            return rootThreads
+        }
+
+        return Array(rootThreads.prefix(collapsedRootThreadLimit))
+    }
+
+    static func shouldShowMoreButton(
+        for group: SidebarThreadGroup,
+        selectedThread: CodexThread?,
+        isFiltering: Bool,
+        manuallyExpandedGroupIDs: Set<String>
+    ) -> Bool {
+        let rootThreads = rootThreads(in: group.threads)
+        guard group.kind == .project,
+              rootThreads.count > collapsedRootThreadLimit,
+              !isFiltering,
+              !manuallyExpandedGroupIDs.contains(group.id) else {
+            return false
+        }
+
+        return !selectedThreadRequiresExpansion(
+            selectedThread,
+            in: group,
+            rootThreads: rootThreads
+        )
+    }
+
+    // Root order matches the sidebar tree order, so previewing keeps parent/subagent layout stable.
+    static func rootThreads(in groupThreads: [CodexThread]) -> [CodexThread] {
+        let groupThreadIDs = Set(groupThreads.map(\.id))
+        return groupThreads.filter { thread in
+            guard let parentThreadID = thread.parentThreadId else {
+                return true
+            }
+
+            return !groupThreadIDs.contains(parentThreadID)
+        }
+    }
+
+    // Keeps the active conversation visible when it would otherwise land below the preview cap.
+    static func selectedThreadRequiresExpansion(
+        _ selectedThread: CodexThread?,
+        in group: SidebarThreadGroup,
+        rootThreads: [CodexThread]? = nil
+    ) -> Bool {
+        guard let selectedThread, group.contains(selectedThread) else {
+            return false
+        }
+
+        let groupRootThreads = rootThreads ?? self.rootThreads(in: group.threads)
+        let visibleRootThreadIDs = Set(groupRootThreads.prefix(collapsedRootThreadLimit).map(\.id))
+        let selectedRootThreadID = rootThreadID(containing: selectedThread, in: group.threads) ?? selectedThread.id
+
+        return !visibleRootThreadIDs.contains(selectedRootThreadID)
+    }
+
+    private static func shouldRevealAllRootThreads(
+        for group: SidebarThreadGroup,
+        rootThreads: [CodexThread],
+        selectedThread: CodexThread?,
+        isFiltering: Bool,
+        manuallyExpandedGroupIDs: Set<String>
+    ) -> Bool {
+        guard group.kind == .project, rootThreads.count > collapsedRootThreadLimit else {
+            return true
+        }
+
+        if isFiltering || manuallyExpandedGroupIDs.contains(group.id) {
+            return true
+        }
+
+        return selectedThreadRequiresExpansion(
+            selectedThread,
+            in: group,
+            rootThreads: rootThreads
+        )
+    }
+
+    private static func rootThreadID(containing thread: CodexThread, in groupThreads: [CodexThread]) -> String? {
+        let threadsByID = Dictionary(uniqueKeysWithValues: groupThreads.map { ($0.id, $0) })
+        var currentThread = thread
+        var visitedThreadIDs: Set<String> = [thread.id]
+
+        while let parentThreadID = currentThread.parentThreadId,
+              !visitedThreadIDs.contains(parentThreadID),
+              let parentThread = threadsByID[parentThreadID] {
+            currentThread = parentThread
+            visitedThreadIDs.insert(parentThreadID)
+        }
+
+        return currentThread.id
     }
 }
 

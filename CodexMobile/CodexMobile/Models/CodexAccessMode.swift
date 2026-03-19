@@ -13,9 +13,9 @@ enum CodexAccessMode: String, Codable, CaseIterable, Hashable, Sendable {
     var displayName: String {
         switch self {
         case .onRequest:
-            return "On-Request"
+            return "Ask"
         case .fullAccess:
-            return "Full access"
+            return "Full"
         }
     }
 

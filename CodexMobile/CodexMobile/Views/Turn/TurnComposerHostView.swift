@@ -13,6 +13,8 @@ struct TurnComposerHostView: View {
     let thread: CodexThread
     let activeTurnID: String?
     let isThreadRunning: Bool
+    let isEmptyThread: Bool
+    let isWorktreeProject: Bool
     let isInputFocused: Binding<Bool>
     let orderedModelOptions: [CodexModelOption]
     let selectedModelTitle: String
@@ -20,8 +22,10 @@ struct TurnComposerHostView: View {
     let showsGitControls: Bool
     let isGitBranchSelectorEnabled: Bool
     let onSelectGitBranch: (String) -> Void
+    let onCreateGitBranch: (String) -> Void
     let onRefreshGitBranches: () -> Void
     let onStartCodeReviewThread: (TurnComposerReviewTarget) -> Void
+    let onOpenWorktreeHandoff: () -> Void
     let onShowStatus: () -> Void
     let onSend: () -> Void
 
@@ -46,6 +50,7 @@ struct TurnComposerHostView: View {
         let accessoryState = TurnComposerAccessoryState(
             queuedDrafts: viewModel.queuedDraftsList(codex: codex, threadID: thread.id),
             canSteerQueuedDrafts: isThreadRunning,
+            canRestoreQueuedDrafts: viewModel.canRestoreQueuedDrafts,
             steeringDraftID: viewModel.steeringDraftID,
             composerAttachments: viewModel.composerAttachments,
             composerMentionedFiles: viewModel.composerMentionedFiles,
@@ -72,6 +77,8 @@ struct TurnComposerHostView: View {
             isQueuePaused: viewModel.isQueuePaused(codex: codex, threadID: thread.id),
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning,
+            isEmptyThread: isEmptyThread,
+            isWorktreeProject: isWorktreeProject,
             orderedModelOptions: orderedModelOptions,
             selectedModelID: codex.selectedModelOption()?.id,
             selectedModelTitle: selectedModelTitle,
@@ -80,24 +87,37 @@ struct TurnComposerHostView: View {
             runtimeActions: runtimeActions,
             selectedAccessMode: codex.selectedAccessMode,
             contextWindowUsage: codex.contextWindowUsageByThread[thread.id],
+            rateLimitBuckets: codex.rateLimitBuckets,
+            isLoadingRateLimits: codex.isLoadingRateLimits,
+            rateLimitsErrorMessage: codex.rateLimitsErrorMessage,
+            shouldAutoRefreshUsageStatus: codex.shouldAutoRefreshUsageStatus(threadId: thread.id),
             showsGitBranchSelector: showsGitControls,
             isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
             availableGitBranchTargets: viewModel.availableGitBranchTargets,
             gitBranchesCheckedOutElsewhere: viewModel.gitBranchesCheckedOutElsewhere,
+            gitWorktreePathsByBranch: viewModel.gitWorktreePathsByBranch,
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
             currentGitBranch: viewModel.currentGitBranch,
             gitDefaultBranch: viewModel.gitDefaultBranch,
             isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
             isSwitchingGitBranch: viewModel.isSwitchingGitBranch,
+            isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
             onSelectGitBranch: onSelectGitBranch,
-            onSelectGitBaseBranch: viewModel.selectGitBaseBranch,
+            onCreateGitBranch: onCreateGitBranch,
+            onSelectGitBaseBranch: { branch in
+                viewModel.selectGitBaseBranch(branch)
+            },
             onRefreshGitBranches: onRefreshGitBranches,
-            onRefreshContextWindowUsage: {
-                await codex.refreshContextWindowUsage(threadId: thread.id)
+            onRefreshUsageStatus: {
+                await codex.refreshUsageStatus(threadId: thread.id)
             },
             onSelectAccessMode: codex.setSelectedAccessMode,
+            canHandOffToWorktree: isGitBranchSelectorEnabled
+                && !isWorktreeProject
+                && !viewModel.isCreatingGitWorktree,
             onTapAddImage: { viewModel.openPhotoLibraryPicker(codex: codex) },
             onTapTakePhoto: { viewModel.openCamera(codex: codex) },
+            onTapCreateWorktree: onOpenWorktreeHandoff,
             onSetPlanModeArmed: viewModel.setPlanModeArmed,
             onRemoveAttachment: viewModel.removeComposerAttachment,
             onStopTurn: { turnID in
@@ -151,6 +171,9 @@ struct TurnComposerHostView: View {
             },
             onResumeQueue: {
                 viewModel.resumeQueueAndFlushIfPossible(codex: codex, threadID: thread.id)
+            },
+            onRestoreQueuedDraft: { draftID in
+                viewModel.restoreQueuedDraftToComposer(id: draftID, codex: codex, threadID: thread.id)
             },
             onSteerQueuedDraft: { draftID in
                 viewModel.steerQueuedDraft(id: draftID, codex: codex, threadID: thread.id)

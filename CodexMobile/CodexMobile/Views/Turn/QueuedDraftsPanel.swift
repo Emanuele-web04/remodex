@@ -9,7 +9,9 @@ import SwiftUI
 struct QueuedDraftsPanel: View {
     let drafts: [QueuedTurnDraft]
     let canSteerDrafts: Bool
+    let canRestoreDrafts: Bool
     let steeringDraftID: String?
+    let onRestore: (String) -> Void
     let onSteer: (String) -> Void
     let onRemove: (String) -> Void
 
@@ -28,6 +30,25 @@ struct QueuedDraftsPanel: View {
                         .truncationMode(.tail)
 
                     Spacer(minLength: 4)
+
+                    // Pulls one queued row back into the composer for manual editing.
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onRestore(draft.id)
+                    } label: {
+                        Image(systemName: "arrow.down")
+                            .font(AppFont.system(size: 12, weight: .medium))
+                            .foregroundStyle(canRestoreDrafts ? .primary : .tertiary)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                            .background(
+                                Circle()
+                                    .fill(.regularMaterial)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canRestoreDrafts)
+                    .accessibilityLabel("Move draft into input")
 
                     if canSteerDrafts {
                         Button {
@@ -98,7 +119,9 @@ struct QueuedDraftsPanel: View {
             ),
         ],
         canSteerDrafts: true,
+        canRestoreDrafts: true,
         steeringDraftID: nil,
+        onRestore: { _ in },
         onSteer: { _ in },
         onRemove: { _ in }
     )
@@ -125,7 +148,9 @@ struct QueuedDraftsPanel: View {
             ),
         ],
         canSteerDrafts: true,
+        canRestoreDrafts: false,
         steeringDraftID: "draft-1",
+        onRestore: { _ in },
         onSteer: { _ in },
         onRemove: { _ in }
     )

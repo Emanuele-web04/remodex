@@ -43,14 +43,6 @@ struct SidebarMacConnectionStatusView: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-
-            if let systemName, !systemName.isEmpty {
-                Text("\"\(systemName)\"")
-                    .font(AppFont.mono(.caption2))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
         }
         .frame(maxWidth: 170, alignment: .trailing)
     }

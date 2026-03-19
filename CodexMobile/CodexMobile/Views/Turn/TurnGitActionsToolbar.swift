@@ -52,6 +52,7 @@ extension TurnGitActionKind {
 
 struct TurnGitActionsToolbarButton: View {
     let isEnabled: Bool
+    let disabledActions: Set<TurnGitActionKind>
     let isRunningAction: Bool
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
@@ -134,7 +135,7 @@ struct TurnGitActionsToolbarButton: View {
         .controlSize(.small)
         .buttonStyle(.plain)
         .foregroundStyle(.primary)
-        .padding(4)
+        .padding(.vertical, 4)
         .frame(minWidth: minToolbarButtonSize, minHeight: minToolbarButtonSize)
         .contentShape(Circle())
         .adaptiveToolbarItem(in: Circle())
@@ -157,7 +158,7 @@ struct TurnGitActionsToolbarButton: View {
                 Image(uiImage: action.menuIcon())
             }
         }
-        .disabled(!isEnabled)
+        .disabled(!isEnabled || disabledActions.contains(action))
     }
 
     @ViewBuilder

@@ -53,7 +53,39 @@ struct QueuedTurnDraft: Identifiable {
     let skillMentions: [CodexTurnSkillMention]
     // Preserves special send semantics, such as plan mode, while a busy thread queues locally.
     let collaborationMode: CodexCollaborationModeKind?
+    // Preserves the original composer state so a queued row can move back into the input intact.
+    let rawInput: String
+    let rawFileMentions: [TurnComposerMentionedFile]
+    let rawSkillMentions: [TurnComposerMentionedSkill]
+    let rawAttachments: [TurnComposerImageAttachment]
+    let rawSubagentsSelectionArmed: Bool
     let createdAt: Date
+
+    init(
+        id: String,
+        text: String,
+        attachments: [CodexImageAttachment],
+        skillMentions: [CodexTurnSkillMention],
+        collaborationMode: CodexCollaborationModeKind?,
+        rawInput: String? = nil,
+        rawFileMentions: [TurnComposerMentionedFile] = [],
+        rawSkillMentions: [TurnComposerMentionedSkill] = [],
+        rawAttachments: [TurnComposerImageAttachment] = [],
+        rawSubagentsSelectionArmed: Bool = false,
+        createdAt: Date
+    ) {
+        self.id = id
+        self.text = text
+        self.attachments = attachments
+        self.skillMentions = skillMentions
+        self.collaborationMode = collaborationMode
+        self.rawInput = rawInput ?? text
+        self.rawFileMentions = rawFileMentions
+        self.rawSkillMentions = rawSkillMentions
+        self.rawAttachments = rawAttachments
+        self.rawSubagentsSelectionArmed = rawSubagentsSelectionArmed
+        self.createdAt = createdAt
+    }
 }
 
 enum QueuePauseState: Equatable {
@@ -64,6 +96,12 @@ enum QueuePauseState: Equatable {
 @MainActor
 @Observable
 final class TurnViewModel {
+    enum GitBranchUserOperation: Equatable {
+        case create(String)
+        case switchTo(String)
+        case createWorktree(branchName: String, baseBranch: String)
+    }
+
     // Preserves the exact composer payload + raw chips so stale-busy recovery can retry cleanly.
     private struct PendingTurnSend {
         let payload: String
@@ -115,13 +153,47 @@ final class TurnViewModel {
     var gitSyncAlert: TurnGitSyncAlert? = nil
     var isLoadingGitBranchTargets = false
     var isSwitchingGitBranch = false
+    var isCreatingGitWorktree = false
     var selectedGitBaseBranch = ""
     var currentGitBranch = ""
     var availableGitBranchTargets: [String] = []
     var gitBranchesCheckedOutElsewhere: Set<String> = []
+    var gitWorktreePathsByBranch: [String: String] = [:]
     var gitDefaultBranch = ""
     var gitRepoSync: GitRepoSyncResult? = nil
     var gitSyncState: String? { gitRepoSync?.state }
+    // Keeps PR creation tied to live Git state instead of chat-local remembered branch state.
+    var createPullRequestValidationMessage: String? {
+        guard let repoSync = gitRepoSync else {
+            return "Git status is still loading. Wait a moment and retry."
+        }
+
+        let branch = (repoSync.currentBranch ?? currentGitBranch).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !branch.isEmpty else {
+            return "No current branch found."
+        }
+
+        let defaultBranch = gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !defaultBranch.isEmpty else {
+            return "Could not determine the repository default branch."
+        }
+
+        guard branch != defaultBranch else {
+            return "Switch to a feature branch before creating a PR."
+        }
+
+        let trackingBranch = repoSync.trackingBranch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trackingBranch.isEmpty || repoSync.isPublishedToRemote else {
+            return "Push this branch before creating a PR."
+        }
+
+        guard repoSync.aheadCount == 0 else {
+            return "Push this branch before creating a PR."
+        }
+
+        return nil
+    }
+    var canCreatePullRequest: Bool { createPullRequestValidationMessage == nil }
     var shouldShowDiscardRuntimeChangesAndSync: Bool {
         guard let sync = gitRepoSync else { return false }
         let dangerousStates = ["dirty", "dirty_and_behind", "diverged"]
@@ -139,6 +211,7 @@ final class TurnViewModel {
             && !isThreadRunning
             && !isRunningGitAction
             && !isSwitchingGitBranch
+            && !isCreatingGitWorktree
     }
 
     // Cached projected timeline to avoid re-running TurnTimelineReducer on every SwiftUI evaluation.
@@ -147,7 +220,9 @@ final class TurnViewModel {
 
     @ObservationIgnored var fileAutocompleteDebounceTask: Task<Void, Never>?
     @ObservationIgnored var skillAutocompleteDebounceTask: Task<Void, Never>?
-    @ObservationIgnored private var gitStatusRefreshTask: Task<Void, Never>?
+    @ObservationIgnored var gitStatusRefreshTask: Task<Void, Never>?
+    @ObservationIgnored var pendingGitBranchOperation: GitBranchUserOperation?
+    @ObservationIgnored var pendingGitWorktreeOpenHandler: ((String, String) -> Void)?
     @ObservationIgnored private var cachedSkillSearchIndexByRoot: [String: [TurnSkillSearchIndexEntry]] = [:]
     @ObservationIgnored var unsupportedSkillsAutocompleteRoots: Set<String> = []
 
@@ -156,7 +231,7 @@ final class TurnViewModel {
     let maxSkillAutocompleteItems = 6
     private let fileAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
     private let skillAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
-    private let gitStatusRefreshDebounceNanoseconds: UInt64 = 350_000_000
+    let gitStatusRefreshDebounceNanoseconds: UInt64 = 350_000_000
 
     init() {}
 
@@ -214,6 +289,24 @@ final class TurnViewModel {
         composerReviewSelection?.target != nil
     }
 
+    // Keeps queue restore disabled whenever the composer already contains something meaningful.
+    var hasComposerDraftContent: Bool {
+        !trimmedComposerInput.isEmpty
+            || !composerAttachments.isEmpty
+            || !composerMentionedFiles.isEmpty
+            || !composerMentionedSkills.isEmpty
+            || composerReviewSelection != nil
+            || isSubagentsSelectionArmed
+            || isPlanModeArmed
+    }
+
+    // Allows only one queued row at a time to move back into the composer.
+    var canRestoreQueuedDrafts: Bool {
+        !isSending
+            && steeringDraftID == nil
+            && !hasComposerDraftContent
+    }
+
     var hasPendingComposerReviewSelection: Bool {
         composerReviewSelection != nil && composerReviewSelection?.target == nil
     }
@@ -251,6 +344,24 @@ final class TurnViewModel {
         var drafts = queuedDrafts(codex: codex, threadID: threadID)
         drafts.removeAll { $0.id == id }
         setQueuedDrafts(drafts, codex: codex, threadID: threadID)
+    }
+
+    // Moves one queued row back into the composer so the user can edit/resend it manually.
+    func restoreQueuedDraftToComposer(id: String, codex: CodexService, threadID: String) {
+        guard canRestoreQueuedDrafts else {
+            return
+        }
+
+        var drafts = queuedDrafts(codex: codex, threadID: threadID)
+        guard let draftIndex = drafts.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+
+        let draft = drafts.remove(at: draftIndex)
+        setQueuedDrafts(drafts, codex: codex, threadID: threadID)
+        restoreComposerState(from: draft)
+        clearComposerAutocomplete()
+        shouldAnchorToAssistantResponse = false
     }
 
     func isSteeringQueuedDraft(_ draftID: String) -> Bool {
@@ -765,6 +876,11 @@ final class TurnViewModel {
             attachments: attachments,
             skillMentions: skillMentions,
             collaborationMode: isPlanModeArmed ? .plan : nil,
+            rawInput: input,
+            rawFileMentions: composerMentionedFiles,
+            rawSkillMentions: composerMentionedSkills,
+            rawAttachments: composerAttachments,
+            rawSubagentsSelectionArmed: isSubagentsSelectionArmed,
             createdAt: Date()
         ) : nil
         let pendingSend = PendingTurnSend(
@@ -1472,6 +1588,18 @@ final class TurnViewModel {
         composerAttachments = pendingSend.rawAttachments
         composerReviewSelection = pendingSend.rawReviewSelection
         isSubagentsSelectionArmed = pendingSend.rawSubagentsSelectionArmed
+        isPlanModeArmed = pendingSend.collaborationMode == .plan
+    }
+
+    // Restores a queued row using the exact composer payload captured before it entered the queue.
+    private func restoreComposerState(from draft: QueuedTurnDraft) {
+        input = draft.rawInput
+        composerMentionedFiles = draft.rawFileMentions
+        composerMentionedSkills = draft.rawSkillMentions
+        composerAttachments = draft.rawAttachments
+        composerReviewSelection = nil
+        isSubagentsSelectionArmed = draft.rawSubagentsSelectionArmed
+        isPlanModeArmed = draft.collaborationMode == .plan
     }
 
     // Resolves the active turn id for manual steer without relying on async autoclosure operators.
@@ -1737,10 +1865,17 @@ final class TurnViewModel {
                 case .syncNow:
                     let result = try await gitService.status()
                     applyGitRepoSync(result)
-                    if result.state == "behind_only" || result.state == "diverged" || result.state == "dirty_and_behind" {
+                    if result.state == "behind_only" {
+                        let pullResult = try await gitService.pull()
+                        if let status = pullResult.status {
+                            applyGitRepoSync(status)
+                        }
+                    } else if result.state == "diverged" || result.state == "dirty_and_behind" {
                         gitSyncAlert = TurnGitSyncAlert(
-                            title: "Branch is behind remote",
-                            message: "Pull with rebase to update?",
+                            title: result.state == "diverged" ? "Branch diverged from remote" : "Local changes need attention",
+                            message: result.state == "diverged"
+                                ? "Local and remote history both moved. Pull with rebase to reconcile them?"
+                                : "You have local changes and the remote branch moved ahead. Pull with rebase only if you're ready to reconcile those changes.",
                             action: .pullRebase
                         )
                     }
@@ -1771,6 +1906,9 @@ final class TurnViewModel {
                     )
 
                 case .createPR:
+                    if let validationMessage = createPullRequestValidationMessage {
+                        throw GitActionsError.bridgeError(code: "pull_request_unavailable", message: validationMessage)
+                    }
                     let remoteResult = try await getRemoteURL(codex: codex, workingDirectory: workingDirectory)
                     guard let ownerRepo = remoteResult.ownerRepo else {
                         throw GitActionsError.bridgeError(code: "no_remote", message: "Could not determine repository from remote URL.")
@@ -1779,15 +1917,34 @@ final class TurnViewModel {
                     guard !branch.isEmpty else {
                         throw GitActionsError.bridgeError(code: "no_branch", message: "No current branch found.")
                     }
-                    let base = selectedGitBaseBranch.nilIfEmpty ?? gitDefaultBranch
+                    let base = gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !base.isEmpty else {
+                        throw GitActionsError.bridgeError(
+                            code: "no_default_branch",
+                            message: "Could not determine the repository default branch."
+                        )
+                    }
                     let prURL = buildPRURL(ownerRepo: ownerRepo, branch: branch, base: base)
                     if let url = URL(string: prURL) {
                         await UIApplication.shared.open(url)
                     }
 
                 case .discardRuntimeChangesAndSync:
-                    let result = try await gitService.resetToRemote()
-                    if let status = result.status { applyGitRepoSync(status) }
+                    let unpushedCommitWarning: String
+                    if let repoSync = gitRepoSync, repoSync.aheadCount > 0 {
+                        let commitLabel = repoSync.aheadCount == 1 ? "1 local commit" : "\(repoSync.aheadCount) local commits"
+                        unpushedCommitWarning = " This also deletes \(commitLabel) that have not been pushed."
+                    } else {
+                        unpushedCommitWarning = ""
+                    }
+                    gitSyncAlert = TurnGitSyncAlert(
+                        title: "Discard local changes?",
+                        message: "This resets the current branch to match the remote and removes local uncommitted changes.\(unpushedCommitWarning) This cannot be undone from the app.",
+                        buttons: [
+                            TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                            TurnGitSyncAlertButton(title: "Discard Changes", role: .destructive, action: .discardRuntimeChanges)
+                        ]
+                    )
                 }
             } catch let error as GitActionsError {
                 switch error {
@@ -1842,225 +1999,6 @@ final class TurnViewModel {
             } catch {
                 gitSyncAlert = TurnGitSyncAlert(
                     title: "Git Error",
-                    message: error.localizedDescription,
-                    action: .dismissOnly
-                )
-            }
-        }
-    }
-
-    func refreshGitBranchTargets(codex: CodexService, workingDirectory: String?, threadID: String) {
-        guard !isLoadingGitBranchTargets else { return }
-        isLoadingGitBranchTargets = true
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.isLoadingGitBranchTargets = false }
-
-            let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
-            do {
-                let result = try await gitService.branchesWithStatus()
-                availableGitBranchTargets = result.branches
-                gitBranchesCheckedOutElsewhere = result.branchesCheckedOutElsewhere
-                if let current = result.currentBranch, !current.isEmpty {
-                    currentGitBranch = current
-                }
-                if let defaultBranch = result.defaultBranch, !defaultBranch.isEmpty {
-                    gitDefaultBranch = defaultBranch
-                    if selectedGitBaseBranch.isEmpty {
-                        selectedGitBaseBranch = defaultBranch
-                    }
-                }
-                if let status = result.status {
-                    applyObservedGitRepoSync(
-                        status,
-                        codex: codex,
-                        workingDirectory: workingDirectory,
-                        threadID: threadID
-                    )
-                }
-            } catch {
-                // Silently fail — branches will just be empty
-            }
-        }
-    }
-
-    // Debounces repo status refreshes so live file-change streams can update the topbar safely.
-    func scheduleGitStatusRefresh(codex: CodexService, workingDirectory: String?, threadID: String) {
-        gitStatusRefreshTask?.cancel()
-        gitStatusRefreshTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-
-            do {
-                try await Task.sleep(nanoseconds: gitStatusRefreshDebounceNanoseconds)
-            } catch {
-                return
-            }
-
-            let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
-            do {
-                let result = try await gitService.status()
-                applyObservedGitRepoSync(
-                    result,
-                    codex: codex,
-                    workingDirectory: workingDirectory,
-                    threadID: threadID
-                )
-            } catch {
-                // Non-fatal: the next lifecycle refresh/manual action can recover the badge.
-            }
-        }
-    }
-
-    func switchGitBranch(
-        to branch: String,
-        codex: CodexService,
-        workingDirectory: String?,
-        threadID: String,
-        activeTurnID: String?
-    ) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard activeTurnID == nil,
-                  !codex.runningThreadIDs.contains(threadID),
-                  !self.isRunningGitAction,
-                  !self.isSwitchingGitBranch else { return }
-
-            if gitBranchesCheckedOutElsewhere.contains(branch) {
-                gitSyncAlert = TurnGitSyncAlert(
-                    title: "Branch Switch Failed",
-                    message: "Cannot switch branches: this branch is already open in another worktree.",
-                    action: .dismissOnly
-                )
-                return
-            }
-
-            self.isSwitchingGitBranch = true
-            defer { self.isSwitchingGitBranch = false }
-
-            let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
-            do {
-                let result = try await gitService.checkout(branch: branch)
-                currentGitBranch = result.currentBranch
-                if let status = result.status { applyGitRepoSync(status) }
-            } catch let error as GitActionsError {
-                gitSyncAlert = TurnGitSyncAlert(
-                    title: "Branch Switch Failed",
-                    message: error.errorDescription ?? "Could not switch branch.",
-                    action: .dismissOnly
-                )
-            } catch {
-                gitSyncAlert = TurnGitSyncAlert(
-                    title: "Branch Switch Failed",
-                    message: error.localizedDescription,
-                    action: .dismissOnly
-                )
-            }
-        }
-    }
-
-    func selectGitBaseBranch(_ branch: String) {
-        selectedGitBaseBranch = branch
-    }
-
-    func applyGitRepoSync(_ result: GitRepoSyncResult) {
-        gitRepoSync = result
-        if let branch = result.currentBranch, !branch.isEmpty {
-            currentGitBranch = branch
-        }
-    }
-
-    // Detects push-like repo transitions that happen outside the toolbar callback path.
-    private func applyObservedGitRepoSync(
-        _ result: GitRepoSyncResult,
-        codex: CodexService,
-        workingDirectory: String?,
-        threadID: String
-    ) {
-        let previousSync = gitRepoSync
-        applyGitRepoSync(result)
-
-        guard let previousSync else {
-            return
-        }
-
-        let branchStayedStable = previousSync.currentBranch == result.currentBranch
-        let didClearAheadQueue = previousSync.aheadCount > 0 && result.aheadCount == 0
-        guard branchStayedStable, didClearAheadQueue else {
-            return
-        }
-
-        codex.appendHiddenPushResetMarkers(
-            threadId: threadID,
-            workingDirectory: workingDirectory,
-            branch: result.currentBranch ?? "",
-            remote: trackingRemoteName(from: result.trackingBranch)
-        )
-    }
-
-    // Keeps repo totals fresh and resets the per-chat sidebar badge after a manual push.
-    private func handleSuccessfulPush(
-        _ result: GitPushResult,
-        codex: CodexService,
-        workingDirectory: String?,
-        threadID: String
-    ) {
-        if let status = result.status {
-            applyGitRepoSync(status)
-        }
-
-        codex.appendHiddenPushResetMarkers(
-            threadId: threadID,
-            workingDirectory: workingDirectory,
-            branch: result.branch,
-            remote: result.remote
-        )
-    }
-
-    private func trackingRemoteName(from trackingBranch: String?) -> String? {
-        guard let trackingBranch else {
-            return nil
-        }
-
-        let trimmed = trackingBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
-        }
-
-        return trimmed.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init)
-    }
-
-    func dismissGitSyncAlert() {
-        gitSyncAlert = nil
-    }
-
-    func confirmGitSyncAlertAction(
-        _ alertAction: TurnGitSyncAlertAction,
-        codex: CodexService,
-        workingDirectory: String?,
-        threadID: String,
-        activeTurnID: String?
-    ) {
-        gitSyncAlert = nil
-        guard alertAction == .pullRebase else { return }
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            guard activeTurnID == nil,
-                  !codex.runningThreadIDs.contains(threadID),
-                  !self.isRunningGitAction,
-                  !self.isSwitchingGitBranch else { return }
-
-            self.runningGitAction = .syncNow
-            defer { self.runningGitAction = nil }
-
-            let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
-            do {
-                let result = try await gitService.pull()
-                if let status = result.status { applyGitRepoSync(status) }
-            } catch {
-                gitSyncAlert = TurnGitSyncAlert(
-                    title: "Pull Failed",
                     message: error.localizedDescription,
                     action: .dismissOnly
                 )

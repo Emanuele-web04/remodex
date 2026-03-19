@@ -76,5 +76,6 @@ struct TrustedPairSummaryView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

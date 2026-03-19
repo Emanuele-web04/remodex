@@ -37,6 +37,11 @@ enum GitActionsError: LocalizedError {
         case "pull_conflict": return "Pull failed due to conflicts."
         case "branch_exists": return fallback ?? "Branch already exists."
         case "missing_branch", "missing_branch_name": return "Branch name is required."
+        case "missing_base_branch": return fallback ?? "Base branch is required."
+        case "branch_already_open_here":
+            return fallback ?? "This branch is already open in the current project."
+        case "branch_in_other_worktree":
+            return fallback ?? "This branch is already open in another worktree."
         case "confirmation_required": return "Confirmation is required for this action."
         case "stash_pop_conflict": return "Stash pop failed due to conflicts."
         case "missing_local_repo": return "Run `remodex up` from an existing local directory first."
@@ -95,6 +100,26 @@ final class GitActionsService {
     func branches() async throws -> GitBranchesResult {
         let json = try await request(method: "git/branches")
         return GitBranchesResult(from: json)
+    }
+
+    // Creates a local branch and checks it out in the bound repo.
+    func createBranch(name: String) async throws -> GitCreateBranchResult {
+        let json = try await request(method: "git/createBranch", params: ["name": .string(name)])
+        let result = GitCreateBranchResult(from: json)
+        rememberRepoRoot(from: result.status)
+        return result
+    }
+
+    // Creates or reuses a managed worktree rooted under CODEX_HOME/worktrees.
+    func createWorktree(name: String, baseBranch: String) async throws -> GitCreateWorktreeResult {
+        let json = try await request(
+            method: "git/createWorktree",
+            params: [
+                "name": .string(name),
+                "baseBranch": .string(baseBranch),
+            ]
+        )
+        return GitCreateWorktreeResult(from: json)
     }
 
     func checkout(branch: String) async throws -> GitCheckoutResult {

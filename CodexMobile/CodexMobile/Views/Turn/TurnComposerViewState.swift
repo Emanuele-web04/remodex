@@ -26,6 +26,7 @@ struct TurnComposerAutocompleteState {
 struct TurnComposerAccessoryState {
     let queuedDrafts: [QueuedTurnDraft]
     let canSteerQueuedDrafts: Bool
+    let canRestoreQueuedDrafts: Bool
     let steeringDraftID: String?
     let composerAttachments: [TurnComposerImageAttachment]
     let composerMentionedFiles: [TurnComposerMentionedFile]

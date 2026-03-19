@@ -23,8 +23,9 @@ struct SettingsView: View {
                 SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
                 runtimeDefaultsSection
-                connectionSection
                 SettingsAboutCard()
+                SettingsUsageCard()
+                connectionSection
             }
             .padding()
         }
@@ -328,6 +329,94 @@ struct SettingsButton: View {
 }
 
 // MARK: - Extracted independent section views
+
+private struct SettingsUsageCard: View {
+    @Environment(CodexService.self) private var codex
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var isRefreshing = false
+
+    var body: some View {
+        SettingsCard(title: "Usage") {
+            UsageStatusSummaryContent(
+                contextWindowUsage: activeThreadContextWindowUsage,
+                rateLimitBuckets: codex.rateLimitBuckets,
+                isLoadingRateLimits: codex.isLoadingRateLimits,
+                rateLimitsErrorMessage: codex.rateLimitsErrorMessage,
+                contextPlacement: .bottom,
+                refreshControl: UsageStatusRefreshControl(
+                    title: "Refresh",
+                    isRefreshing: isRefreshing,
+                    action: refreshStatus
+                )
+            )
+
+            if activeThreadID == nil {
+                Text("Open a chat to populate the current thread context window here.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task {
+            await refreshStatusIfNeeded()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                await refreshStatusIfNeeded()
+            }
+        }
+        .onChange(of: activeThreadID) { _, _ in
+            Task {
+                await refreshStatusIfNeeded()
+            }
+        }
+    }
+
+    private var activeThreadID: String? {
+        let trimmed = codex.activeThreadId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
+        return nil
+    }
+
+    private var activeThreadContextWindowUsage: ContextWindowUsage? {
+        guard let activeThreadID else { return nil }
+        return codex.contextWindowUsageByThread[activeThreadID]
+    }
+
+    private func refreshStatus() {
+        guard !isRefreshing else { return }
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        isRefreshing = true
+
+        Task {
+            await refreshStatusData()
+            await MainActor.run {
+                isRefreshing = false
+            }
+        }
+    }
+
+    private func refreshStatusIfNeeded() async {
+        guard !isRefreshing else { return }
+        guard codex.shouldAutoRefreshUsageStatus(threadId: activeThreadID) else { return }
+
+        await MainActor.run {
+            isRefreshing = true
+        }
+        await refreshStatusData()
+        await MainActor.run {
+            isRefreshing = false
+        }
+    }
+
+    // Loads account-wide windows globally and thread context from the active chat when available.
+    private func refreshStatusData() async {
+        await codex.refreshUsageStatus(threadId: activeThreadID)
+    }
+}
 
 private struct SettingsAppearanceCard: View {
     @Binding var appFontStyle: AppFont.Style

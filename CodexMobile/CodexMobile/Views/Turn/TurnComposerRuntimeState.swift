@@ -21,12 +21,8 @@ struct TurnComposerRuntimeState {
         selectedServiceTier != nil
     }
 
-    var usesAutomaticReasoning: Bool {
-        selectedReasoningEffort == nil
-    }
-
     func isSelectedReasoning(_ effort: String) -> Bool {
-        selectedReasoningEffort == effort
+        (selectedReasoningEffort ?? effectiveReasoningEffort) == effort
     }
 
     func isSelectedServiceTier(_ serviceTier: CodexServiceTier?) -> Bool {

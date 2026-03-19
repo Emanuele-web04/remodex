@@ -191,17 +191,6 @@ struct ComposerBottomBar: View {
     private var reasoningMenu: some View {
         Menu {
             Section("Reasoning") {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    runtimeActions.selectAutomaticReasoning()
-                } label: {
-                    if runtimeState.usesAutomaticReasoning {
-                        Label("Auto", systemImage: "checkmark")
-                    } else {
-                        Text("Auto")
-                    }
-                }
-
                 if runtimeState.reasoningDisplayOptions.isEmpty {
                     Text("No reasoning options")
                 } else {

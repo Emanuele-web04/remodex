@@ -619,7 +619,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(service.shouldAutoReconnectOnForeground)
     }
 
-    func testRepeatedTrustedReconnectDisconnectsEscalateToManualRePair() {
+    func testRepeatedTrustedReconnectDisconnectsPreserveSavedReconnectCandidate() {
         let service = makeService()
         let macDeviceID = "mac-\(UUID().uuidString)"
         let macPublicKey = "public-key-\(UUID().uuidString)"
@@ -627,10 +627,12 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         service.relaySessionId = "session-\(UUID().uuidString)"
         service.relayUrl = "wss://relay.test/relay"
         service.relayMacDeviceId = macDeviceID
+        service.lastTrustedMacDeviceId = macDeviceID
         service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
             macDeviceId: macDeviceID,
             macIdentityPublicKey: macPublicKey,
-            lastPairedAt: Date()
+            lastPairedAt: Date(),
+            relayURL: "wss://relay.test/relay"
         )
 
         for _ in 0..<3 {
@@ -641,11 +643,16 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.trustedReconnectFailureCount, 3)
         XCTAssertFalse(service.shouldAutoReconnectOnForeground)
         XCTAssertEqual(service.connectionRecoveryState, .idle)
-        XCTAssertEqual(service.secureConnectionState, .rePairRequired)
+        XCTAssertEqual(service.secureConnectionState, .liveSessionUnresolved)
+        XCTAssertNotNil(service.relaySessionId)
+        XCTAssertNotNil(service.relayUrl)
+        XCTAssertEqual(service.relayMacDeviceId, macDeviceID)
         XCTAssertEqual(
             service.lastErrorMessage,
-            "Secure reconnect could not be restored. Scan a new QR code to reconnect."
+            "Secure reconnect could not be restored from the saved session. Try reconnecting again."
         )
+        XCTAssertTrue(service.hasSavedRelaySession)
+        XCTAssertTrue(service.hasTrustedMacReconnectCandidate)
     }
 
     func testTrustedReconnectHandshakeFailureCounterResetsForFreshPairing() {

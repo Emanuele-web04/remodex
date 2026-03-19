@@ -36,7 +36,7 @@ struct SidebarView: View {
 
             SidebarSearchField(text: $searchText, isActive: $isSearchActive)
                 .padding(.horizontal, 16)
-                .padding(.top, 6)
+                .padding(.top, 8)
                 .padding(.bottom, 6)
 
             SidebarNewChatButton(
@@ -222,21 +222,12 @@ struct SidebarView: View {
 
     private func handleNewChatTap(preferredProjectPath: String?) {
         Task { @MainActor in
-            guard codex.isConnected else {
-                createThreadErrorMessage = "Connect to runtime first."
-                return
-            }
-            guard codex.isInitialized else {
-                createThreadErrorMessage = "Runtime is still initializing. Wait a moment and retry."
-                return
-            }
-
             createThreadErrorMessage = nil
             isCreatingThread = true
             defer { isCreatingThread = false }
 
             do {
-                let thread = try await codex.startThread(preferredProjectPath: preferredProjectPath)
+                let thread = try await codex.startThreadIfReady(preferredProjectPath: preferredProjectPath)
                 selectedThread = thread
                 onClose()
             } catch {
@@ -389,16 +380,21 @@ private struct SidebarNewChatProjectPickerSheet: View {
                         .listRowBackground(Color.clear)
                 }
 
-                Section("Projects") {
+                Section("Local") {
                     ForEach(choices) { choice in
                         Button {
                             dismiss()
                             onSelectProject(choice.projectPath)
                         } label: {
                             HStack(spacing: 12) {
-                                Image(systemName: choice.iconSystemName)
-                                    .font(AppFont.body(weight: .medium))
-                                    .foregroundStyle(.secondary)
+                                if choice.iconSystemName == "arrow.triangle.branch" {
+                                    CodexWorktreeIcon(pointSize: 16, weight: .medium)
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    Image(systemName: choice.iconSystemName)
+                                        .font(AppFont.body(weight: .medium))
+                                        .foregroundStyle(.secondary)
+                                }
 
                                 Text(choice.label)
                                     .font(AppFont.body(weight: .semibold))
@@ -416,17 +412,17 @@ private struct SidebarNewChatProjectPickerSheet: View {
                         onSelectWithoutProject()
                     } label: {
                         HStack(alignment: .top, spacing: 12) {
-                            Image(systemName: "plus.bubble")
+                            Image(systemName: "cloud")
                                 .font(AppFont.body(weight: .medium))
                                 .foregroundStyle(.secondary)
 
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("No Project")
+                                Text("Cloud")
                                     .font(AppFont.body(weight: .semibold))
                                     .foregroundStyle(.primary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                                Text("Start a chat without a working directory.")
+                                Text("Start a chat without a local working directory.")
                                     .font(AppFont.body())
                                     .foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -438,7 +434,7 @@ private struct SidebarNewChatProjectPickerSheet: View {
 
                 Section {
                     // Explains the existing scoping rule at the exact moment the user chooses it.
-                    Text("Chats started in a project stay scoped to that working directory. If you pick No Project, the chat is global.")
+                    Text("Chats started in a project stay scoped to that working directory. If you pick Cloud, the chat is global.")
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

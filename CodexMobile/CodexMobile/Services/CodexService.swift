@@ -379,6 +379,8 @@ final class CodexService {
     var recentActivityLineByThread: [String: CodexRecentActivityLine] = [:]
     var contextWindowUsageByThread: [String: ContextWindowUsage] = [:]
     var rateLimitBuckets: [CodexRateLimitBucket] = []
+    // Distinguishes "not loaded yet" from "loaded successfully, but no visible buckets exist".
+    var hasResolvedRateLimitsSnapshot = false
     var isLoadingRateLimits = false
     var rateLimitsErrorMessage: String?
     var threadIdByTurnID: [String: String] = [:]
