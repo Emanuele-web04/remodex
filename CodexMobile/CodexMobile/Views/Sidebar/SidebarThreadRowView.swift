@@ -96,7 +96,7 @@ struct SidebarThreadRowView: View {
 
             expansionToggleButton
 
-            threadStatusIcon(pointSize: 12)
+            threadStatusIconSlot(pointSize: 12)
 
             if let timingLabel {
                 Text(timingLabel)
@@ -132,7 +132,7 @@ struct SidebarThreadRowView: View {
         HStack(spacing: 4) {
             expansionToggleButton
 
-            threadStatusIcon(pointSize: 11)
+            threadStatusIconSlot(pointSize: 11)
 
             if let timingLabel {
                 Text(timingLabel)
@@ -174,6 +174,26 @@ struct SidebarThreadRowView: View {
             .buttonStyle(.plain)
             .accessibilityLabel(isSubagentExpanded ? "Collapse subagents" : "Expand subagents")
         }
+    }
+
+    // Keeps fork ancestry and worktree scope visually distinct in the single metadata icon slot.
+    private func threadStatusIconSlot(pointSize: CGFloat) -> some View {
+        Group {
+            threadStatusIcon(pointSize: pointSize)
+        }
+        .id(threadStatusIconIdentity)
+        .frame(width: pointSize + 2, alignment: .center)
+    }
+
+    // Gives SwiftUI an explicit diff key when the row flips between fork/worktree/no badge.
+    private var threadStatusIconIdentity: String {
+        if thread.isForkedThread {
+            return "fork"
+        }
+        if thread.isManagedWorktreeProject {
+            return "worktree"
+        }
+        return "none"
     }
 
     // Keeps fork ancestry and worktree scope visually distinct in the single metadata icon slot.
