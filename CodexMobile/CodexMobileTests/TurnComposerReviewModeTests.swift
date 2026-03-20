@@ -44,12 +44,17 @@ final class TurnComposerReviewModeTests: XCTestCase {
 
     func testTypingTextClearsConfirmedReviewSelection() {
         let viewModel = makeViewModel()
+        let codex = CodexService()
         viewModel.composerReviewSelection = TurnComposerReviewSelection(
             command: .codeReview,
             target: .uncommittedChanges
         )
 
-        viewModel.onInputChangedForSlashCommandAutocomplete("follow up", activeTurnID: nil)
+        viewModel.onInputChangedForSlashCommandAutocomplete(
+            "follow up",
+            codex: codex,
+            activeTurnID: nil
+        )
 
         XCTAssertNil(viewModel.composerReviewSelection)
         XCTAssertEqual(viewModel.slashCommandPanelState, .hidden)
@@ -103,11 +108,16 @@ final class TurnComposerReviewModeTests: XCTestCase {
 
     func testSelectingSubagentsKeepsSlashPickerClosedAfterInputObserverRuns() {
         let viewModel = makeViewModel()
+        let codex = CodexService()
         viewModel.input = "/sub"
         viewModel.slashCommandPanelState = .commands(query: "sub")
 
         viewModel.onSelectSlashCommand(.subagents)
-        viewModel.onInputChangedForSlashCommandAutocomplete(viewModel.input, activeTurnID: nil)
+        viewModel.onInputChangedForSlashCommandAutocomplete(
+            viewModel.input,
+            codex: codex,
+            activeTurnID: nil
+        )
 
         XCTAssertEqual(viewModel.input, "")
         XCTAssertTrue(viewModel.isSubagentsSelectionArmed)

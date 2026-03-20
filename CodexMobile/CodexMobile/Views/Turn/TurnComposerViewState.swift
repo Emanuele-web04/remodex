@@ -23,6 +23,9 @@ struct TurnComposerAutocompleteState {
     let isLoadingGitBranchTargets: Bool
     let selectedGitBaseBranch: String
     let gitDefaultBranch: String
+    let slashCommands: [CodexSlashCommand]
+    let isLoadingSlashCommands: Bool
+    let slashCommandsErrorMessage: String?
 }
 
 struct TurnComposerAccessoryState {

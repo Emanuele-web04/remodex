@@ -17,6 +17,7 @@ const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
 const { handleDesktopRequest } = require("./desktop-handler");
 const { handleGitRequest } = require("./git-handler");
+const { handleCommandsRequest } = require("./commands-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
@@ -301,6 +302,9 @@ function startBridge({
       return;
     }
     if (handleThreadContextRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
+    if (handleCommandsRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
     if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
