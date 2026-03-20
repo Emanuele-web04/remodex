@@ -98,7 +98,7 @@ This repo contains the local bridge, the iOS app target, and their tests:
 
 ## Install the Bridge
 
-<sub>Install from npm with `@latest` so you get the newest bridge fixes, including the `1.2.5` pairing-state recovery updates.</sub>
+<sub>Install from npm with `@latest` so you get the newest bridge fixes.</sub>
 
 ```sh
 npm install -g remodex@latest
@@ -188,6 +188,21 @@ Have the proxy strip `/remodex` before forwarding so the relay still receives `/
 
 If you point `REMODEX_RELAY` at your own self-hosted relay, managed push stays off unless you also set `REMODEX_PUSH_SERVICE_URL` on the bridge and explicitly enable push on the relay.
 
+## Publish to npm
+
+Published npm packages can embed default private relay settings at pack time via the `prepack` script.
+
+To publish the bridge with `relay.example.invalid` as the default relay:
+
+```sh
+cd phodex-bridge
+npm login
+REMODEX_PACKAGE_DEFAULT_RELAY_URL="wss://relay.example.invalid/relay" \
+npm publish
+```
+
+After publish, users can still override the packaged default at runtime with `REMODEX_RELAY`.
+
 You can also run the bridge from source:
 
 ```sh
@@ -241,7 +256,7 @@ Prints the installed Remodex CLI version.
 
 ```sh
 remodex --version
-# => 1.3.0
+# => 1.3.2
 ```
 
 ### `remodex reset-pairing`

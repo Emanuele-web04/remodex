@@ -4,14 +4,14 @@
     {
       "layers" : [
         {
-          "image-name" : "Group 110.png",
-          "name" : "Group 110",
+          "image-name" : "new-phodex.png",
+          "name" : "new-phodex",
           "position-specializations" : [
             {
               "value" : {
                 "scale" : 1,
                 "translation-in-points" : [
-                  -39.5,
+                  -41.84375,
                   0
                 ]
               }
@@ -19,9 +19,9 @@
             {
               "idiom" : "square",
               "value" : {
-                "scale" : 0.92,
+                "scale" : 1.04,
                 "translation-in-points" : [
-                  -29.28771270659354,
+                  -39.830391812912694,
                   0
                 ]
               }
