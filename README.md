@@ -100,6 +100,8 @@ This repo contains the local bridge, the iOS app target, and their tests:
 
 <sub>Install from npm with `@latest` so you get the newest bridge fixes, including the `1.2.5` pairing-state recovery updates.</sub>
 
+If you plan to use the macOS menu bar companion, `remodex` must be installed globally and available in your login-shell `PATH`.
+
 ```sh
 npm install -g remodex@latest
 ```

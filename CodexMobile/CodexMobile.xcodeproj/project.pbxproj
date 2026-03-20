@@ -8,11 +8,16 @@
 
 /* Begin PBXBuildFile section */
 		11A2B3C4D5E6F708192A3B4C /* TurnFileAutocompleteTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */; };
+		1BF7B512D49503A3C3290F00 /* BridgeMenuBarStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A1FC345ADD350213550F36C /* BridgeMenuBarStore.swift */; };
 		22B3C4D5E6F708192A3B4C5D /* CodexFuzzyFileSearchDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B3C4D5E6F708192A3B4C5E /* CodexFuzzyFileSearchDecodeTests.swift */; };
 		2A6D4B8C1E3F507192A4B6C8 /* CodexStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A6D4B8C1E3F507192A4B6C9 /* CodexStatusTests.swift */; };
+		45ECA26015C46B1F63E84A73 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A932BE773A84EFEA525DF684 /* Assets.xcassets */; };
 		4C0F0D55A5051D8301463C69 /* TurnComposerSendAvailabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */; };
 		4CCE0926DAD312571934343A /* TurnTimelineReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEB36EBEA2A475AC9B30B1F /* TurnTimelineReducerTests.swift */; };
 		516497899B5C9A82CD10D93F /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
+		536FE94CCA889CE20A57EC42 /* BridgeControlService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 357D589B8C179934A884F8CC /* BridgeControlService.swift */; };
+		5D0DB447AAE8F5B60D164223 /* BridgeMenuBarViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53C1E3E027CF4B98453962A0 /* BridgeMenuBarViews.swift */; };
+		653D2279D3E2FEE59237D854 /* BridgeControlModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9CD1EA13B728103A5654EEA /* BridgeControlModels.swift */; };
 		6F8E129A7BC34A12D45E6F70 /* CodexThreadStartProjectBindingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */; };
 		7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */; };
 		8B4A2F5E7D1C4B9AA1234567 /* TurnComposerAttachmentIntakePlanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B4A2F5E7D1C4B9AA1234568 /* TurnComposerAttachmentIntakePlanTests.swift */; };
@@ -33,6 +38,8 @@
 		C0DED3362F5E39DC0021A8E8 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = C0DED3352F5E39DC0021A8E8 /* Textual */; };
 		D27B9CA5F0B60ECA8AF38016 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */; };
+		DAAD0C0C717F9415C3E9D21A /* RemodexMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0B9CCCCC45E47616AB452FA /* RemodexMenuBarApp.swift */; };
+		DC6E023DD6E4FA68DF3D7FDE /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E5E1FA12CF5120C8C8A64111 /* Cocoa.framework */; };
 		E1A2B3C4D5E6F708192A3B4C /* QRScannerPairingValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */; };
 /* End PBXBuildFile section */
 
@@ -57,8 +64,12 @@
 		11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnFileAutocompleteTokenTests.swift; sourceTree = "<group>"; };
 		22B3C4D5E6F708192A3B4C5E /* CodexFuzzyFileSearchDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexFuzzyFileSearchDecodeTests.swift; sourceTree = "<group>"; };
 		2A6D4B8C1E3F507192A4B6C9 /* CodexStatusTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexStatusTests.swift; sourceTree = "<group>"; };
-		3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = BuildSupport/Base.xcconfig; sourceTree = SOURCE_ROOT; };
+		357D589B8C179934A884F8CC /* BridgeControlService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BridgeControlService.swift; sourceTree = "<group>"; };
+		3A1FC345ADD350213550F36C /* BridgeMenuBarStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BridgeMenuBarStore.swift; sourceTree = "<group>"; };
+		3B1A9C7D5E4F60718293A4B5 /* Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = BuildSupport/Base.xcconfig; sourceTree = SOURCE_ROOT; };
 		4EEB36EBEA2A475AC9B30B1F /* TurnTimelineReducerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnTimelineReducerTests.swift; sourceTree = "<group>"; };
+		53C1E3E027CF4B98453962A0 /* BridgeMenuBarViews.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BridgeMenuBarViews.swift; sourceTree = "<group>"; };
+		6880B31C08D19C3D55FC62F0 /* RemodexMenuBar-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "RemodexMenuBar-Info.plist"; sourceTree = "<group>"; };
 		6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadStartProjectBindingTests.swift; sourceTree = "<group>"; };
 		74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnComposerSendAvailabilityTests.swift; sourceTree = "<group>"; };
 		7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadRuntimeOverrideTests.swift; sourceTree = "<group>"; };
@@ -66,8 +77,10 @@
 		8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarRunBadgePerformanceTests.swift; sourceTree = "<group>"; };
 		8D1F2A3B4C5D6E7F8091A2B4 /* CodexServiceConnectionErrorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceConnectionErrorTests.swift; sourceTree = "<group>"; };
 		8F1A2B3C4D5E6F708192A3B5 /* CodexPushNotificationRegistrationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexPushNotificationRegistrationTests.swift; sourceTree = "<group>"; };
+		92DE4487B55C077AF7694484 /* RemodexMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemodexMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9A37794F4B32C1952A3770E0 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnViewModelQueueTests.swift; sourceTree = "<group>"; };
+		A932BE773A84EFEA525DF684 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = CodexMobile/CodexMobile/Assets.xcassets; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnSkillAutocompleteTokenTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexSkillsListDecodeTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A45 /* CodexTurnInputPayloadSkillTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexTurnInputPayloadSkillTests.swift; sourceTree = "<group>"; };
@@ -77,10 +90,13 @@
 		B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexPlanModeTests.swift; sourceTree = "<group>"; };
 		B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarThreadGroupingTests.swift; sourceTree = "<group>"; };
 		C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodexMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C0B9CCCCC45E47616AB452FA /* RemodexMenuBarApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexMenuBarApp.swift; sourceTree = "<group>"; };
 		C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingCommandExecutionTests.swift; sourceTree = "<group>"; };
+		C9CD1EA13B728103A5654EEA /* BridgeControlModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BridgeControlModels.swift; sourceTree = "<group>"; };
 		D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingRunIndicatorTests.swift; sourceTree = "<group>"; };
 		D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileUITests.swift; sourceTree = "<group>"; };
 		E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QRScannerPairingValidatorTests.swift; sourceTree = "<group>"; };
+		E5E1FA12CF5120C8C8A64111 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		F0EE6A924EE6B288E7D0DFE1 /* CodexMobileUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		FBC8EB1341C49A392A43BFB3 /* CodexMobileTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -88,6 +104,8 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		C09A76B02F4B8D7B003B3F3A /* CodexMobile */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = CodexMobile;
 			sourceTree = "<group>";
 		};
@@ -107,6 +125,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				516497899B5C9A82CD10D93F /* Foundation.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EF30E93BAEC4406148BDFC5B /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DC6E023DD6E4FA68DF3D7FDE /* Cocoa.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -151,10 +177,20 @@
 			path = CodexMobileTests;
 			sourceTree = "<group>";
 		};
+		6D1FC704B2547685ECB766D8 /* BuildSupport */ = {
+			isa = PBXGroup;
+			children = (
+				6880B31C08D19C3D55FC62F0 /* RemodexMenuBar-Info.plist */,
+			);
+			name = BuildSupport;
+			path = BuildSupport;
+			sourceTree = "<group>";
+		};
 		B593FCA030A810D9E56EC959 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
 				C1F310AC95AC9514C6883203 /* iOS */,
+				F132BC0A90D092E32B9D22C1 /* OS X */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -162,7 +198,7 @@
 		C07F2BEA2F63A38900DD8621 /* Recovered References */ = {
 			isa = PBXGroup;
 			children = (
-				3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */,
+				3B1A9C7D5E4F60718293A4B5 /* Base.xcconfig */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -176,6 +212,9 @@
 				208D6F189D9F04FCC137EE5A /* CodexMobileTests */,
 				E7FB7A37E42F80D70FF68438 /* CodexMobileUITests */,
 				C07F2BEA2F63A38900DD8621 /* Recovered References */,
+				FC9F41DCDCBEA0FE5CA8BFE9 /* RemodexMenuBar */,
+				6D1FC704B2547685ECB766D8 /* BuildSupport */,
+				C6F6B5CC789F6E8003AF0A88 /* SharedResources */,
 			);
 			sourceTree = "<group>";
 		};
@@ -185,6 +224,7 @@
 				C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */,
 				FBC8EB1341C49A392A43BFB3 /* CodexMobileTests.xctest */,
 				F0EE6A924EE6B288E7D0DFE1 /* CodexMobileUITests.xctest */,
+				92DE4487B55C077AF7694484 /* RemodexMenuBar.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -197,6 +237,14 @@
 			name = iOS;
 			sourceTree = "<group>";
 		};
+		C6F6B5CC789F6E8003AF0A88 /* SharedResources */ = {
+			isa = PBXGroup;
+			children = (
+				A932BE773A84EFEA525DF684 /* Assets.xcassets */,
+			);
+			name = SharedResources;
+			sourceTree = SOURCE_ROOT;
+		};
 		E7FB7A37E42F80D70FF68438 /* CodexMobileUITests */ = {
 			isa = PBXGroup;
 			children = (
@@ -204,6 +252,27 @@
 			);
 			path = CodexMobileUITests;
 			sourceTree = "<group>";
+		};
+		F132BC0A90D092E32B9D22C1 /* OS X */ = {
+			isa = PBXGroup;
+			children = (
+				E5E1FA12CF5120C8C8A64111 /* Cocoa.framework */,
+			);
+			name = "OS X";
+			sourceTree = "<group>";
+		};
+		FC9F41DCDCBEA0FE5CA8BFE9 /* RemodexMenuBar */ = {
+			isa = PBXGroup;
+			children = (
+				C0B9CCCCC45E47616AB452FA /* RemodexMenuBarApp.swift */,
+				C9CD1EA13B728103A5654EEA /* BridgeControlModels.swift */,
+				357D589B8C179934A884F8CC /* BridgeControlService.swift */,
+				3A1FC345ADD350213550F36C /* BridgeMenuBarStore.swift */,
+				53C1E3E027CF4B98453962A0 /* BridgeMenuBarViews.swift */,
+			);
+			name = RemodexMenuBar;
+			path = RemodexMenuBar;
+			sourceTree = SOURCE_ROOT;
 		};
 /* End PBXGroup section */
 
@@ -225,6 +294,23 @@
 			productName = CodexMobileUITests;
 			productReference = F0EE6A924EE6B288E7D0DFE1 /* CodexMobileUITests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		4FFD549D910217B7A40E28FF /* RemodexMenuBar */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C978CFA24307FCCEEA59F4AD /* Build configuration list for PBXNativeTarget "RemodexMenuBar" */;
+			buildPhases = (
+				2D7AA7FEA6A304C8C903D33E /* Sources */,
+				EF30E93BAEC4406148BDFC5B /* Frameworks */,
+				12E9F3EA573D6AC70E3A09EA /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RemodexMenuBar;
+			productName = RemodexMenuBar;
+			productReference = 92DE4487B55C077AF7694484 /* RemodexMenuBar.app */;
+			productType = "com.apple.product-type.application";
 		};
 		75087BFA4D34C41906650C95 /* CodexMobileTests */ = {
 			isa = PBXNativeTarget;
@@ -299,11 +385,20 @@
 				C09A76AD2F4B8D7B003B3F3A /* CodexMobile */,
 				75087BFA4D34C41906650C95 /* CodexMobileTests */,
 				4DA12F4370C3EC1B9280A66F /* CodexMobileUITests */,
+				4FFD549D910217B7A40E28FF /* RemodexMenuBar */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		12E9F3EA573D6AC70E3A09EA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				45ECA26015C46B1F63E84A73 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		5A5D7883E5CC7BCD3EAC431E /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -328,6 +423,18 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		2D7AA7FEA6A304C8C903D33E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DAAD0C0C717F9415C3E9D21A /* RemodexMenuBarApp.swift in Sources */,
+				653D2279D3E2FEE59237D854 /* BridgeControlModels.swift in Sources */,
+				536FE94CCA889CE20A57EC42 /* BridgeControlService.swift in Sources */,
+				1BF7B512D49503A3C3290F00 /* BridgeMenuBarStore.swift in Sources */,
+				5D0DB447AAE8F5B60D164223 /* BridgeMenuBarViews.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		328D9BFFDCB2BC75D1E050D5 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -590,7 +697,7 @@
 		};
 		C09A76BA2F4B8D7C003B3F3A /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* Base.xcconfig */;
 			buildSettings = {
 				APS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex;
@@ -637,7 +744,7 @@
 		};
 		C09A76BB2F4B8D7C003B3F3A /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* Base.xcconfig */;
 			buildSettings = {
 				APS_ENVIRONMENT = production;
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex;
@@ -682,6 +789,74 @@
 			};
 			name = Release;
 		};
+		F3FD411C7FC1B35EF716DE7C /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* Base.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HR24WHR326;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "BuildSupport/RemodexMenuBar-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Remodex Companion";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.RemodexMenuBar;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		FAEEA48258EA5647873C3AD6 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* Base.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HR24WHR326;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "BuildSupport/RemodexMenuBar-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Remodex Companion";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.RemodexMenuBar;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -717,6 +892,15 @@
 			buildConfigurations = (
 				C09A76BA2F4B8D7C003B3F3A /* Debug */,
 				C09A76BB2F4B8D7C003B3F3A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C978CFA24307FCCEEA59F4AD /* Build configuration list for PBXNativeTarget "RemodexMenuBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F3FD411C7FC1B35EF716DE7C /* Release */,
+				FAEEA48258EA5647873C3AD6 /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -6,6 +6,7 @@
 // Depends on: ../src
 
 const {
+  getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
   readBridgeConfig,
@@ -20,7 +21,7 @@ const {
 } = require("../src");
 const { version } = require("../package.json");
 
-const command = process.argv[2] || "up";
+const { command, jsonOutput, watchThreadId } = parseCliArgs(process.argv.slice(2));
 
 void main();
 
@@ -28,7 +29,7 @@ void main();
 
 async function main() {
   if (isVersionCommand(command)) {
-    console.log(version);
+    emitVersion();
     return;
   }
 
@@ -60,22 +61,37 @@ async function main() {
   if (command === "start") {
     assertMacOSCommand(command);
     readBridgeConfig();
-    await startMacOSBridgeService({
+    const result = await startMacOSBridgeService({
       waitForPairing: false,
     });
-    console.log("[remodex] macOS bridge service is running.");
+    emitResult({
+      ok: true,
+      currentVersion: version,
+      plistPath: result.plistPath,
+      pairingSession: result.pairingSession,
+    }, "[remodex] macOS bridge service is running.");
     return;
   }
 
   if (command === "stop") {
     assertMacOSCommand(command);
     stopMacOSBridgeService();
-    console.log("[remodex] macOS bridge service stopped.");
+    emitResult({
+      ok: true,
+      currentVersion: version,
+    }, "[remodex] macOS bridge service stopped.");
     return;
   }
 
   if (command === "status") {
     assertMacOSCommand(command);
+    if (jsonOutput) {
+      emitJson({
+        ...getMacOSBridgeServiceStatus(),
+        currentVersion: version,
+      });
+      return;
+    }
     printMacOSBridgeServiceStatus();
     return;
   }
@@ -84,10 +100,18 @@ async function main() {
     try {
       if (process.platform === "darwin") {
         resetMacOSBridgePairing();
-        console.log("[remodex] Stopped the macOS bridge service and cleared the saved pairing state. Run `remodex up` to pair again.");
+        emitResult({
+          ok: true,
+          currentVersion: version,
+          platform: "darwin",
+        }, "[remodex] Stopped the macOS bridge service and cleared the saved pairing state. Run `remodex up` to pair again.");
       } else {
         resetBridgePairing();
-        console.log("[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.");
+        emitResult({
+          ok: true,
+          currentVersion: version,
+          platform: process.platform,
+        }, "[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.");
       }
     } catch (error) {
       console.error(`[remodex] ${(error && error.message) || "Failed to clear the saved pairing state."}`);
@@ -99,9 +123,12 @@ async function main() {
   if (command === "resume") {
     try {
       const state = openLastActiveThread();
-      console.log(
-        `[remodex] Opened last active thread: ${state.threadId} (${state.source || "unknown"})`
-      );
+      emitResult({
+        ok: true,
+        currentVersion: version,
+        threadId: state.threadId,
+        source: state.source || "unknown",
+      }, `[remodex] Opened last active thread: ${state.threadId} (${state.source || "unknown"})`);
     } catch (error) {
       console.error(`[remodex] ${(error && error.message) || "Failed to reopen the last thread."}`);
       process.exit(1);
@@ -111,7 +138,7 @@ async function main() {
 
   if (command === "watch") {
     try {
-      watchThreadRollout(process.argv[3] || "");
+      watchThreadRollout(watchThreadId);
     } catch (error) {
       console.error(`[remodex] ${(error && error.message) || "Failed to watch the thread rollout."}`);
       process.exit(1);
@@ -122,9 +149,54 @@ async function main() {
   console.error(`Unknown command: ${command}`);
   console.error(
     "Usage: remodex up | remodex run | remodex start | remodex stop | remodex status | "
-    + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version"
+    + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
+    + "append --json to start/stop/status/reset-pairing/resume for machine-readable output"
   );
   process.exit(1);
+}
+
+function parseCliArgs(rawArgs) {
+  const positionals = [];
+  let jsonOutput = false;
+
+  for (const arg of rawArgs) {
+    if (arg === "--json") {
+      jsonOutput = true;
+      continue;
+    }
+
+    positionals.push(arg);
+  }
+
+  return {
+    command: positionals[0] || "up",
+    jsonOutput,
+    watchThreadId: positionals[1] || "",
+  };
+}
+
+function emitVersion() {
+  if (jsonOutput) {
+    emitJson({
+      currentVersion: version,
+    });
+    return;
+  }
+
+  console.log(version);
+}
+
+function emitResult(payload, message) {
+  if (jsonOutput) {
+    emitJson(payload);
+    return;
+  }
+
+  console.log(message);
+}
+
+function emitJson(payload) {
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function assertMacOSCommand(name) {

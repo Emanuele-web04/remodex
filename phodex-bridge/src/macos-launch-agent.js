@@ -167,6 +167,7 @@ function getMacOSBridgeServiceStatus({
     installed: fsImpl.existsSync(resolveLaunchAgentPlistPath({ env })),
     launchdLoaded: launchd.loaded,
     launchdPid: launchd.pid,
+    daemonConfig: readDaemonConfig({ env, fsImpl }),
     bridgeStatus: readBridgeStatus({ env, fsImpl }),
     pairingSession: readPairingSession({ env, fsImpl }),
     stdoutLogPath: resolveBridgeStdoutLogPath({ env }),
