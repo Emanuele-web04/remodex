@@ -1,5 +1,5 @@
 // FILE: TurnComposerHostView.swift
-// Purpose: Adapts TurnView state and callbacks into the large TurnComposerView API, including queued-draft actions.
+// Purpose: Adapts TurnView state and callbacks into the large TurnComposerView API, including slash-command routing.
 // Layer: View Component
 // Exports: TurnComposerHostView
 // Depends on: SwiftUI, TurnComposerView, TurnViewModel, CodexService
@@ -15,6 +15,7 @@ struct TurnComposerHostView: View {
     let isThreadRunning: Bool
     let isEmptyThread: Bool
     let isWorktreeProject: Bool
+    let canForkLocally: Bool
     let isInputFocused: Binding<Bool>
     let orderedModelOptions: [CodexModelOption]
     let selectedModelTitle: String
@@ -25,13 +26,32 @@ struct TurnComposerHostView: View {
     let onCreateGitBranch: (String) -> Void
     let onRefreshGitBranches: () -> Void
     let onStartCodeReviewThread: (TurnComposerReviewTarget) -> Void
+    let onStartForkThreadLocally: () -> Void
+    let onOpenForkWorktree: () -> Void
     let onOpenWorktreeHandoff: () -> Void
     let onShowStatus: () -> Void
     let onSend: () -> Void
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
+        let availableForkDestinations = TurnComposerForkDestination.availableDestinations(
+            canForkLocally: canForkLocally,
+            canCreateWorktree: showsGitControls && !isWorktreeProject && isGitBranchSelectorEnabled
+        )
         let autocompleteState = TurnComposerAutocompleteState(
+            availableSlashCommands: TurnComposerSlashCommand.availableCommands(
+                supportsThreadFork: codex.supportsThreadFork,
+                allowsForkCommand: TurnComposerCommandLogic.canOfferForkSlashCommand(
+                    in: viewModel.input,
+                    mentionedFileCount: viewModel.composerMentionedFiles.count,
+                    mentionedSkillCount: viewModel.composerMentionedSkills.count,
+                    attachmentCount: viewModel.composerAttachments.count,
+                    hasReviewSelection: viewModel.composerReviewSelection != nil,
+                    hasSubagentsSelection: viewModel.isSubagentsSelectionArmed,
+                    isPlanModeArmed: viewModel.isPlanModeArmed
+                )
+                    && !availableForkDestinations.isEmpty
+            ),
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,
             isFileAutocompleteLoading: viewModel.isFileAutocompleteLoading,
@@ -42,6 +62,7 @@ struct TurnComposerHostView: View {
             skillAutocompleteQuery: viewModel.skillAutocompleteQuery,
             slashCommandPanelState: viewModel.slashCommandPanelState,
             hasComposerContentConflictingWithReview: viewModel.hasComposerContentConflictingWithReview,
+            isThreadRunning: isThreadRunning,
             showsGitBranchSelector: showsGitControls,
             isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
@@ -151,6 +172,11 @@ struct TurnComposerHostView: View {
                 switch command {
                 case .codeReview:
                     viewModel.onSelectSlashCommand(command)
+                case .fork:
+                    viewModel.onSelectSlashCommand(
+                        command,
+                        availableForkDestinations: availableForkDestinations
+                    )
                 case .status:
                     viewModel.onSelectSlashCommand(command)
                     onShowStatus()
@@ -162,6 +188,16 @@ struct TurnComposerHostView: View {
                 viewModel.prepareForThreadRerouteFromSlashCommand()
                 onStartCodeReviewThread(target)
             },
+            onSelectForkDestination: { destination in
+                viewModel.onSelectForkDestination(destination)
+                switch destination {
+                case .local:
+                    onStartForkThreadLocally()
+                case .newWorktree:
+                    onOpenForkWorktree()
+                }
+            },
+            onCloseSlashCommandPanel: viewModel.closeSlashCommandPanel,
             onRemoveMentionedFile: viewModel.removeMentionedFile,
             onRemoveMentionedSkill: viewModel.removeMentionedSkill,
             onRemoveComposerReviewSelection: viewModel.clearComposerReviewSelection,

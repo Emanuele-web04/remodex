@@ -1,11 +1,23 @@
 // FILE: CodexWorktreeIcon.swift
-// Purpose: Shared rotated worktree icon so every worktree affordance stays visually aligned.
+// Purpose: Shared fork + worktree icons so branching affordances stay visually aligned across the app.
 // Layer: View Component
-// Exports: CodexWorktreeIcon
+// Exports: CodexForkIcon, CodexWorktreeIcon, CodexWorktreeMenuLabelRow
 // Depends on: SwiftUI, AppFont
 
 import SwiftUI
 import UIKit
+
+struct CodexForkIcon: View {
+    var pointSize: CGFloat = 13
+
+    var body: some View {
+        Image("git-branch")
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .frame(width: pointSize, height: pointSize)
+    }
+}
 
 struct CodexWorktreeIcon: View {
     var pointSize: CGFloat = 13

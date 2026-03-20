@@ -27,4 +27,53 @@ final class TurnSlashCommandTokenTests: XCTestCase {
         let updated = TurnViewModel.removingTrailingSlashCommandToken(in: "compare /first and /rev")
         XCTAssertEqual(updated, "compare /first and")
     }
+
+    func testForkCommandIsAllowedWhenSlashTokenIsTheOnlyDraftContent() {
+        XCTAssertTrue(TurnComposerCommandLogic.canOfferForkSlashCommand(in: "/fo"))
+        XCTAssertFalse(TurnComposerCommandLogic.canOfferForkSlashCommand(in: "   /fo"))
+    }
+
+    func testForkCommandIsHiddenWhenDraftAlreadyContainsText() {
+        XCTAssertFalse(TurnComposerCommandLogic.canOfferForkSlashCommand(in: "continue /fo"))
+        XCTAssertFalse(TurnComposerCommandLogic.canOfferForkSlashCommand(in: "hello\n/fo"))
+    }
+
+    func testForkCommandIsHiddenWhenComposerHasNonTextState() {
+        XCTAssertFalse(
+            TurnComposerCommandLogic.canOfferForkSlashCommand(
+                in: "/fo",
+                attachmentCount: 1
+            )
+        )
+        XCTAssertFalse(
+            TurnComposerCommandLogic.canOfferForkSlashCommand(
+                in: "/fo",
+                mentionedFileCount: 1
+            )
+        )
+        XCTAssertFalse(
+            TurnComposerCommandLogic.canOfferForkSlashCommand(
+                in: "/fo",
+                mentionedSkillCount: 1
+            )
+        )
+        XCTAssertFalse(
+            TurnComposerCommandLogic.canOfferForkSlashCommand(
+                in: "/fo",
+                hasReviewSelection: true
+            )
+        )
+        XCTAssertFalse(
+            TurnComposerCommandLogic.canOfferForkSlashCommand(
+                in: "/fo",
+                hasSubagentsSelection: true
+            )
+        )
+        XCTAssertFalse(
+            TurnComposerCommandLogic.canOfferForkSlashCommand(
+                in: "/fo",
+                isPlanModeArmed: true
+            )
+        )
+    }
 }

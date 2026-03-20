@@ -19,17 +19,6 @@ let hasLoggedKeychainMismatch = false;
 // Loads the canonical bridge state or bootstraps a fresh one when no trusted state exists yet.
 function loadOrCreateBridgeDeviceState() {
   const fileRecord = readCanonicalFileStateRecord();
-  if (fileRecord.error) {
-    warnOnce(
-      "[remodex] Ignoring unreadable canonical device-state.json; creating a fresh bridge state automatically."
-    );
-    deleteCanonicalFileState();
-    deleteKeychainStateString();
-    const nextState = createBridgeDeviceState();
-    writeBridgeDeviceState(nextState);
-    return nextState;
-  }
-
   const keychainRecord = readKeychainStateRecord();
 
   if (fileRecord.state) {
@@ -37,13 +26,19 @@ function loadOrCreateBridgeDeviceState() {
     return fileRecord.state;
   }
 
+  if (fileRecord.error) {
+    if (keychainRecord.state) {
+      warnOnce(
+        "[remodex] Recovering the canonical device-state.json from the legacy Keychain pairing mirror."
+      );
+      writeBridgeDeviceState(keychainRecord.state);
+      return keychainRecord.state;
+    }
+    throw corruptedStateError("device-state.json", fileRecord.error);
+  }
+
   if (keychainRecord.error) {
-    warnOnce(
-      "[remodex] Ignoring unreadable legacy Keychain pairing mirror; creating a fresh canonical bridge state."
-    );
-    const nextState = createBridgeDeviceState();
-    writeBridgeDeviceState(nextState);
-    return nextState;
+    throw corruptedStateError("legacy Keychain bridge state", keychainRecord.error);
   }
 
   if (keychainRecord.state) {
@@ -363,6 +358,16 @@ function normalizeNonEmptyString(value) {
   }
   return value.trim();
 }
+
+function corruptedStateError(source, error) {
+  const detail = normalizeNonEmptyString(error?.message);
+  return new Error(
+    `The saved Remodex pairing state in ${source} is unreadable. `
+      + "Run `remodex reset-pairing` to start fresh."
+      + (detail ? ` (${detail})` : "")
+  );
+}
+
 function warnOnce(message) {
   if (hasLoggedKeychainMismatch) {
     return;

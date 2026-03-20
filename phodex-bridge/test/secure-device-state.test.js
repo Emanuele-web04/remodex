@@ -74,33 +74,45 @@ test("loadOrCreateBridgeDeviceState migrates a valid Keychain mirror into the ca
   });
 });
 
-test("loadOrCreateBridgeDeviceState ignores a corrupted legacy Keychain mirror and creates a fresh canonical state", () => {
+test("loadOrCreateBridgeDeviceState throws when only the legacy Keychain mirror is corrupted", () => {
   withTempDeviceStateEnv(({ keychainMirrorFile, canonicalStateFile }) => {
     fs.writeFileSync(keychainMirrorFile, "{ definitely-not-json", "utf8");
 
-    const loadedState = loadOrCreateBridgeDeviceState();
-
-    assert.equal(loadedState.macDeviceId.length > 0, true);
-    assert.equal(loadedState.macIdentityPublicKey.length > 0, true);
-    assert.equal(loadedState.macIdentityPrivateKey.length > 0, true);
-    assert.deepEqual(loadedState.trustedPhones, {});
-    assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(loadedState));
-    assert.equal(fs.existsSync(canonicalStateFile), true);
+    assert.throws(
+      () => loadOrCreateBridgeDeviceState(),
+      /saved Remodex pairing state in legacy Keychain bridge state is unreadable/i
+    );
+    assert.equal(fs.existsSync(canonicalStateFile), false);
   });
 });
 
-test("loadOrCreateBridgeDeviceState replaces a corrupted canonical file automatically", () => {
+test("loadOrCreateBridgeDeviceState recovers a corrupted canonical file from a valid Keychain mirror", () => {
+  withTempDeviceStateEnv(({ canonicalStateFile, keychainMirrorFile }) => {
+    const mirroredState = makeDeviceState({
+      trustedPhones: {
+        "phone-7": "phone-public-key-7",
+      },
+    });
+    fs.mkdirSync(path.dirname(canonicalStateFile), { recursive: true });
+    fs.writeFileSync(canonicalStateFile, "{ definitely-not-json", "utf8");
+    fs.writeFileSync(keychainMirrorFile, JSON.stringify(mirroredState, null, 2));
+
+    const loadedState = loadOrCreateBridgeDeviceState();
+
+    assert.deepEqual(loadedState, mirroredState);
+    assert.deepEqual(readCanonicalStateFromDisk(), mirroredState);
+  });
+});
+
+test("loadOrCreateBridgeDeviceState throws when the canonical file is corrupted and no fallback exists", () => {
   withTempDeviceStateEnv(({ canonicalStateFile }) => {
     fs.mkdirSync(path.dirname(canonicalStateFile), { recursive: true });
     fs.writeFileSync(canonicalStateFile, "{ definitely-not-json", "utf8");
 
-    const loadedState = loadOrCreateBridgeDeviceState();
-
-    assert.equal(loadedState.macDeviceId.length > 0, true);
-    assert.equal(loadedState.macIdentityPublicKey.length > 0, true);
-    assert.equal(loadedState.macIdentityPrivateKey.length > 0, true);
-    assert.deepEqual(loadedState.trustedPhones, {});
-    assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(loadedState));
+    assert.throws(
+      () => loadOrCreateBridgeDeviceState(),
+      /saved Remodex pairing state in device-state\.json is unreadable/i
+    );
   });
 });
 

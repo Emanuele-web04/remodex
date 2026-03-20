@@ -83,6 +83,8 @@ async function handleGitMethod(method, params) {
       return gitCreateBranch(cwd, params);
     case "git/createWorktree":
       return gitCreateWorktree(cwd, params);
+    case "git/removeWorktree":
+      return gitRemoveWorktree(cwd, params);
     case "git/stash":
       return gitStash(cwd);
     case "git/stashPop":
@@ -247,12 +249,14 @@ async function gitPull(cwd) {
 // ─── Git Branches ─────────────────────────────────────────────
 
 async function gitBranches(cwd) {
-  const [output, repoRoot] = await Promise.all([
+  const [output, repoRoot, localCheckoutRoot] = await Promise.all([
     git(cwd, "branch", "--no-color"),
     resolveRepoRoot(cwd).catch(() => null),
+    resolveLocalCheckoutRoot(cwd).catch(() => null),
   ]);
   const projectRelativePath = resolveProjectRelativePath(cwd, repoRoot);
   const worktreePathByBranch = await gitWorktreePathByBranch(cwd, { projectRelativePath }).catch(() => ({}));
+  const localCheckoutPath = scopedLocalCheckoutPath(localCheckoutRoot || repoRoot, projectRelativePath);
   const lines = output
     .trim()
     .split("\n")
@@ -290,6 +294,7 @@ async function gitBranches(cwd) {
     branches,
     branchesCheckedOutElsewhere: [...branchesCheckedOutElsewhere].sort(),
     worktreePathByBranch,
+    localCheckoutPath,
     current,
     default: defaultBranch,
   };
@@ -359,6 +364,7 @@ async function gitCreateBranch(cwd, params) {
   if (!name) {
     throw gitError("missing_branch_name", "Branch name is required.");
   }
+  await assertValidCreatedBranchName(cwd, name);
 
   // Keep create-branch local-first so we never fork history under a remote-only name.
   if (!(await localBranchExists(cwd, name)) && await remoteBranchExists(cwd, name)) {
@@ -386,12 +392,14 @@ async function gitCreateWorktree(cwd, params) {
   if (!branch) {
     throw gitError("missing_branch_name", "Branch name is required.");
   }
+  await assertValidCreatedBranchName(cwd, branch);
 
   const branchResult = await gitBranches(cwd);
   const repoRoot = await resolveRepoRoot(cwd);
   const status = await gitStatus(cwd);
   const projectRelativePath = resolveProjectRelativePath(cwd, repoRoot);
   const baseBranch = resolveBaseBranchName(params.baseBranch, branchResult.defaultBranch);
+  const changeTransfer = resolveWorktreeChangeTransfer(params.changeTransfer);
   if (!baseBranch) {
     throw gitError("missing_base_branch", "Base branch is required.");
   }
@@ -406,9 +414,10 @@ async function gitCreateWorktree(cwd, params) {
   const canCarryLocalChanges = status.dirty && !!currentBranch && currentBranch === baseBranch;
   if (status.dirty && !canCarryLocalChanges) {
     const currentBranchLabel = currentBranch || "the current branch";
+    const transferVerb = changeTransfer === "copy" ? "copy" : "move";
     throw gitError(
       "dirty_worktree_base_mismatch",
-      `Uncommitted changes can move into a new worktree only from ${currentBranchLabel}. Switch the base branch to match or clean up local changes first.`
+      `Uncommitted changes can ${transferVerb} into a new worktree only from ${currentBranchLabel}. Switch the base branch to match or clean up local changes first.`
     );
   }
 
@@ -438,11 +447,16 @@ async function gitCreateWorktree(cwd, params) {
 
   const worktreeRootPath = allocateManagedWorktreePath(repoRoot);
   let handoffStashRef = null;
+  let copiedLocalChangesPatch = "";
   let didCreateWorktree = false;
 
   try {
     if (canCarryLocalChanges) {
-      handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot);
+      if (changeTransfer === "copy") {
+        copiedLocalChangesPatch = await captureLocalChangesPatch(repoRoot);
+      } else {
+        handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot);
+      }
     }
 
     await git(repoRoot, "worktree", "add", "-b", branch, worktreeRootPath, baseBranch);
@@ -451,9 +465,12 @@ async function gitCreateWorktree(cwd, params) {
     if (handoffStashRef) {
       await applyWorktreeHandoffStash(worktreeRootPath, handoffStashRef);
     }
+    if (copiedLocalChangesPatch) {
+      await applyCopiedLocalChangesToWorktree(worktreeRootPath, copiedLocalChangesPatch);
+    }
   } catch (err) {
     if (didCreateWorktree) {
-      await cleanupManagedWorktree(repoRoot, worktreeRootPath);
+      await cleanupManagedWorktree(repoRoot, worktreeRootPath, branch);
     } else {
       fs.rmSync(path.dirname(worktreeRootPath), { recursive: true, force: true });
     }
@@ -483,6 +500,31 @@ async function gitCreateWorktree(cwd, params) {
     worktreePath,
     alreadyExisted: false,
   };
+}
+
+async function gitRemoveWorktree(cwd, params) {
+  const worktreeRootPath = await resolveRepoRoot(cwd).catch(() => null);
+  const localCheckoutRoot = await resolveLocalCheckoutRoot(cwd).catch(() => null);
+  const branch = typeof params.branch === "string" ? params.branch.trim() : "";
+
+  if (!worktreeRootPath || !localCheckoutRoot) {
+    throw gitError("missing_working_directory", "Could not resolve the worktree roots for cleanup.");
+  }
+  if (sameFilePath(worktreeRootPath, localCheckoutRoot)) {
+    throw gitError("cannot_remove_local_checkout", "Cannot remove the main local checkout.");
+  }
+  if (!isManagedWorktreePath(worktreeRootPath)) {
+    throw gitError("unmanaged_worktree", "Only managed worktrees can be removed automatically.");
+  }
+
+  await cleanupManagedWorktree(localCheckoutRoot, worktreeRootPath, branch || null);
+  if (branch && await localBranchExists(localCheckoutRoot, branch)) {
+    throw gitError(
+      "worktree_cleanup_failed",
+      `The temporary worktree was removed, but branch '${branch}' could not be deleted automatically.`
+    );
+  }
+  return { success: true };
 }
 
 // ─── Git Stash ────────────────────────────────────────────────
@@ -576,6 +618,22 @@ async function stashChangesForWorktreeHandoff(cwd) {
   return stashRef;
 }
 
+async function captureLocalChangesPatch(cwd) {
+  const trackedPatch = await git(cwd, "diff", "--binary", "--find-renames", "HEAD");
+  const porcelain = await git(cwd, "status", "--porcelain=v1");
+  const untrackedPaths = porcelain
+    .trim()
+    .split("\n")
+    .filter((line) => line.startsWith("?? "))
+    .map((line) => line.substring(3).trim())
+    .filter(Boolean);
+  const untrackedPatch = await diffPatchForUntrackedFiles(cwd, untrackedPaths);
+  return [trackedPatch, untrackedPatch]
+    .filter((patch) => typeof patch === "string" && patch.trim())
+    .map(ensureTrailingNewline)
+    .join("\n");
+}
+
 async function findStashRefByLabel(cwd, stashLabel) {
   const output = await git(cwd, "stash", "list", "--format=%gd%x00%s");
   const records = output
@@ -605,6 +663,26 @@ async function applyWorktreeHandoffStash(cwd, stashRef) {
   }
 }
 
+async function applyCopiedLocalChangesToWorktree(cwd, patch) {
+  if (!patch.trim()) {
+    return;
+  }
+
+  const patchFilePath = path.join(os.tmpdir(), `remodex-worktree-copy-${randomBytes(6).toString("hex")}.patch`);
+  fs.writeFileSync(patchFilePath, ensureTrailingNewline(patch), "utf8");
+
+  try {
+    await git(cwd, "apply", "--binary", "--whitespace=nowarn", patchFilePath);
+  } catch (err) {
+    throw gitError(
+      "create_worktree_failed",
+      err.message || "Could not copy local changes into the new worktree."
+    );
+  } finally {
+    fs.rmSync(patchFilePath, { force: true });
+  }
+}
+
 async function restoreWorktreeHandoffStash(cwd, stashRef) {
   try {
     await git(cwd, "stash", "pop", stashRef);
@@ -613,11 +691,19 @@ async function restoreWorktreeHandoffStash(cwd, stashRef) {
   }
 }
 
-async function cleanupManagedWorktree(repoRoot, worktreeRootPath) {
+async function cleanupManagedWorktree(repoRoot, worktreeRootPath, branchName = null) {
   try {
     await git(repoRoot, "worktree", "remove", "--force", worktreeRootPath);
   } catch {
     // Fall back to directory cleanup below.
+  }
+
+  if (branchName) {
+    try {
+      await git(repoRoot, "branch", "-D", branchName);
+    } catch {
+      // Best effort: leave the branch around if Git refuses deletion for any reason.
+    }
   }
 
   fs.rmSync(path.dirname(worktreeRootPath), { recursive: true, force: true });
@@ -688,10 +774,17 @@ function normalizeCreatedBranchName(rawName) {
   if (!trimmed) {
     return "";
   }
-  if (trimmed.startsWith("remodex/")) {
-    return trimmed;
+
+  // Keep slash-separated branch groups, but normalize user-entered whitespace into Git-friendly dashes.
+  const normalized = trimmed
+    .split("/")
+    .map((segment) => segment.trim().replace(/\s+/g, "-"))
+    .join("/");
+
+  if (normalized.startsWith("remodex/")) {
+    return normalized;
   }
-  return `remodex/${trimmed}`;
+  return `remodex/${normalized}`;
 }
 
 function resolveBaseBranchName(rawBaseBranch, fallbackBranch) {
@@ -733,6 +826,14 @@ async function localBranchExists(cwd, branchName) {
   }
 }
 
+async function assertValidCreatedBranchName(cwd, branchName) {
+  try {
+    await git(cwd, "check-ref-format", "--branch", branchName);
+  } catch {
+    throw gitError("invalid_branch_name", `Branch '${branchName}' is not a valid Git branch name.`);
+  }
+}
+
 // Keeps branch creation local-only even when a same-named ref exists on origin.
 async function remoteBranchExists(cwd, branchName) {
   try {
@@ -766,6 +867,22 @@ function normalizeExistingPath(candidatePath) {
   }
 }
 
+function managedWorktreesRoot() {
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  return normalizeExistingPath(path.join(codexHome, "worktrees"));
+}
+
+function isManagedWorktreePath(candidatePath) {
+  const normalizedCandidate = normalizeExistingPath(candidatePath);
+  const normalizedRoot = managedWorktreesRoot();
+  if (!normalizedCandidate || !normalizedRoot) {
+    return false;
+  }
+
+  const relativePath = path.relative(normalizedRoot, normalizedCandidate);
+  return !!relativePath && relativePath !== "." && !relativePath.startsWith("..") && !path.isAbsolute(relativePath);
+}
+
 function resolveProjectRelativePath(cwd, repoRoot) {
   const normalizedCwd = normalizeExistingPath(cwd);
   const normalizedRepoRoot = normalizeExistingPath(repoRoot);
@@ -793,6 +910,20 @@ function scopedWorktreePath(worktreeRootPath, projectRelativePath) {
 
   const candidatePath = path.join(normalizedWorktreeRootPath, projectRelativePath);
   return isExistingDirectory(candidatePath) ? normalizeExistingPath(candidatePath) ?? candidatePath : normalizedWorktreeRootPath;
+}
+
+// Resolves a Local checkout path only when the matching subpath actually exists there.
+function scopedLocalCheckoutPath(checkoutRootPath, projectRelativePath) {
+  const normalizedCheckoutRootPath = normalizeExistingPath(checkoutRootPath);
+  if (!normalizedCheckoutRootPath) {
+    return null;
+  }
+  if (!projectRelativePath) {
+    return normalizedCheckoutRootPath;
+  }
+
+  const candidatePath = path.join(normalizedCheckoutRootPath, projectRelativePath);
+  return isExistingDirectory(candidatePath) ? normalizeExistingPath(candidatePath) ?? candidatePath : null;
 }
 
 // Computes the local repo delta that still exists on this machine and is not on the remote.
@@ -913,6 +1044,15 @@ function parseNumstatTotals(output) {
       },
       { additions: 0, deletions: 0, binaryFiles: 0 }
     );
+}
+
+function resolveWorktreeChangeTransfer(rawValue) {
+  const normalizedValue = typeof rawValue === "string" ? rawValue.trim().toLowerCase() : "";
+  return normalizedValue === "copy" ? "copy" : "move";
+}
+
+function ensureTrailingNewline(value) {
+  return value.endsWith("\n") ? value : `${value}\n`;
 }
 
 async function gitDiffNoIndexNumstat(cwd, filePath) {
@@ -1084,6 +1224,26 @@ async function resolveRepoRoot(cwd) {
   return repoRoot || null;
 }
 
+async function resolveLocalCheckoutRoot(cwd) {
+  const output = await git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir");
+  const commonDir = output.trim();
+  if (!commonDir) {
+    return null;
+  }
+
+  const normalizedCommonDir = normalizeExistingPath(commonDir);
+  if (!normalizedCommonDir) {
+    return null;
+  }
+
+  if (path.basename(normalizedCommonDir) !== ".git") {
+    return await resolveRepoRoot(cwd);
+  }
+
+  const checkoutRoot = normalizeExistingPath(path.dirname(normalizedCommonDir));
+  return checkoutRoot || null;
+}
+
 module.exports = {
   handleGitRequest,
   gitStatus,
@@ -1092,9 +1252,15 @@ module.exports = {
     gitCreateBranch,
     gitCreateWorktree,
     gitCheckout,
+    gitRemoveWorktree,
+    isManagedWorktreePath,
     normalizeBranchListEntry,
     normalizeCreatedBranchName,
     parseWorktreePathByBranch,
+    ensureTrailingNewline,
+    resolveWorktreeChangeTransfer,
+    resolveLocalCheckoutRoot,
+    scopedLocalCheckoutPath,
     scopedWorktreePath,
     resolveBaseBranchName,
   },

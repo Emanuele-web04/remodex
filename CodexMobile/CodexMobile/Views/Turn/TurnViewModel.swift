@@ -99,7 +99,11 @@ final class TurnViewModel {
     enum GitBranchUserOperation: Equatable {
         case create(String)
         case switchTo(String)
-        case createWorktree(branchName: String, baseBranch: String)
+        case createWorktree(
+            branchName: String,
+            baseBranch: String,
+            changeTransfer: GitWorktreeChangeTransferMode
+        )
     }
 
     // Preserves the exact composer payload + raw chips so stale-busy recovery can retry cleanly.
@@ -159,6 +163,7 @@ final class TurnViewModel {
     var availableGitBranchTargets: [String] = []
     var gitBranchesCheckedOutElsewhere: Set<String> = []
     var gitWorktreePathsByBranch: [String: String] = [:]
+    var gitLocalCheckoutPath: String?
     var gitDefaultBranch = ""
     var gitRepoSync: GitRepoSyncResult? = nil
     var gitSyncState: String? { gitRepoSync?.state }
@@ -222,7 +227,7 @@ final class TurnViewModel {
     @ObservationIgnored var skillAutocompleteDebounceTask: Task<Void, Never>?
     @ObservationIgnored var gitStatusRefreshTask: Task<Void, Never>?
     @ObservationIgnored var pendingGitBranchOperation: GitBranchUserOperation?
-    @ObservationIgnored var pendingGitWorktreeOpenHandler: ((String, String) -> Void)?
+    @ObservationIgnored var pendingGitWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?
     @ObservationIgnored private var cachedSkillSearchIndexByRoot: [String: [TurnSkillSearchIndexEntry]] = [:]
     @ObservationIgnored var unsupportedSkillsAutocompleteRoots: Set<String> = []
 
@@ -420,6 +425,11 @@ final class TurnViewModel {
     func clearComposerAutocomplete() {
         resetFileAutocompleteState()
         resetSkillAutocompleteState()
+        resetSlashCommandState(clearPendingSelection: true)
+    }
+
+    // Dismisses only the transient slash-command picker without touching confirmed composer chips.
+    func closeSlashCommandPanel() {
         resetSlashCommandState(clearPendingSelection: true)
     }
 
@@ -678,8 +688,11 @@ final class TurnViewModel {
             return
         }
 
-        if case .codeReviewTargets = slashCommandPanelState {
+        switch slashCommandPanelState {
+        case .codeReviewTargets, .forkDestinations:
             return
+        case .hidden, .commands:
+            break
         }
 
         guard let token = Self.trailingSlashCommandToken(in: text) else {
@@ -695,11 +708,16 @@ final class TurnViewModel {
     }
 
     // Turns the selected slash command into the matching inline composer behavior.
-    func onSelectSlashCommand(_ command: TurnComposerSlashCommand) {
+    func onSelectSlashCommand(
+        _ command: TurnComposerSlashCommand,
+        availableForkDestinations: [TurnComposerForkDestination] = [.local]
+    ) {
         switch command {
         case .codeReview:
             removeTrailingSlashCommandTokenFromInputIfNeeded()
             armCodeReviewSelection(command: command, target: nil)
+        case .fork:
+            slashCommandPanelState = .forkDestinations(availableForkDestinations)
         case .status:
             removeTrailingSlashCommandTokenFromInputIfNeeded()
             resetSlashCommandState(clearPendingSelection: true)
@@ -711,6 +729,11 @@ final class TurnViewModel {
     func onSelectCodeReviewTarget(_ target: TurnComposerReviewTarget) {
         removeTrailingSlashCommandTokenFromInputIfNeeded()
         armCodeReviewSelection(command: .codeReview, target: target)
+    }
+
+    // Keeps slash token cleanup and submenu dismissal consistent before a fork flow reroutes threads.
+    func onSelectForkDestination(_ destination: TurnComposerForkDestination) {
+        prepareForThreadRerouteFromSlashCommand()
     }
 
     func clearComposerReviewSelection() {

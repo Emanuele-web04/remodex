@@ -22,9 +22,11 @@ struct TurnView: View {
     @State private var alertApprovalRequest: CodexApprovalRequest?
     @State private var isShowingMacHandoffConfirm = false
     @State private var isShowingWorktreeHandoff = false
+    @State private var isShowingForkWorktree = false
     @State private var macHandoffErrorMessage: String?
     @State private var isHandingOffToMac = false
     @State private var isStartingSiblingChat = false
+    @State private var isForkingThread = false
     @State private var checkedOutElsewhereAlert: CheckedOutElsewhereAlert?
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -143,12 +145,32 @@ struct TurnView: View {
         .overlay {
             if isShowingWorktreeHandoff {
                 TurnWorktreeHandoffOverlay(
+                    mode: .handoff,
                     preferredBaseBranch: preferredWorktreeBaseBranch,
                     isHandoffAvailable: isWorktreeHandoffAvailable,
                     isSubmitting: viewModel.isCreatingGitWorktree,
                     onClose: { isShowingWorktreeHandoff = false },
                     onSubmit: { branchName, baseBranch in
                         submitWorktreeHandoff(
+                            branchName: branchName,
+                            baseBranch: baseBranch,
+                            gitWorkingDirectory: gitWorkingDirectory,
+                            activeTurnID: activeTurnID
+                        )
+                    }
+                )
+                .transition(.opacity)
+            }
+
+            if isShowingForkWorktree {
+                TurnWorktreeHandoffOverlay(
+                    mode: .fork,
+                    preferredBaseBranch: preferredWorktreeBaseBranch,
+                    isHandoffAvailable: isWorktreeHandoffAvailable,
+                    isSubmitting: viewModel.isCreatingGitWorktree || isForkingThread,
+                    onClose: { isShowingForkWorktree = false },
+                    onSubmit: { branchName, baseBranch in
+                        submitForkIntoNewWorktree(
                             branchName: branchName,
                             baseBranch: baseBranch,
                             gitWorkingDirectory: gitWorkingDirectory,
@@ -649,19 +671,119 @@ struct TurnView: View {
         viewModel.requestCreateGitWorktree(
             named: branchName,
             fromBaseBranch: baseBranch,
+            changeTransfer: .move,
             codex: codex,
             workingDirectory: gitWorkingDirectory,
             threadID: thread.id,
             activeTurnID: activeTurnID,
-            onOpenWorktree: { worktreePath, branch in
+            onOpenWorktree: { result in
                 isShowingWorktreeHandoff = false
                 TurnViewWorktreeActions.handoffCurrentThreadToWorktree(
-                    projectPath: worktreePath,
-                    branch: branch,
+                    projectPath: result.worktreePath,
+                    branch: result.branch,
                     codex: codex,
                     viewModel: viewModel,
                     threadID: thread.id
                 )
+            }
+        )
+    }
+
+    // Forks the current conversation into the Local checkout when possible, or keeps it on the current cwd.
+    private func startLocalFork() {
+        Task { @MainActor in
+            guard !isForkingThread else { return }
+            let sourceThread = currentResolvedThread
+            guard let targetProjectPath = TurnThreadForkCoordinator.localForkProjectPath(
+                for: sourceThread,
+                localCheckoutPath: viewModel.gitLocalCheckoutPath
+            ) else {
+                viewModel.gitSyncAlert = TurnThreadForkCoordinator.localForkUnavailableAlert(for: sourceThread)
+                return
+            }
+            isForkingThread = true
+            defer { isForkingThread = false }
+
+            do {
+                let forkedThread = try await codex.forkThreadIfReady(
+                    from: thread.id,
+                    target: .projectPath(targetProjectPath)
+                )
+                openThread(forkedThread.id)
+            } catch {
+                if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                    codex.lastErrorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    // Creates a fresh worktree first, then forks the conversation into that checkout as a new thread.
+    private func submitForkIntoNewWorktree(
+        branchName: String,
+        baseBranch: String,
+        gitWorkingDirectory: String?,
+        activeTurnID: String?
+    ) {
+        viewModel.requestCreateGitWorktree(
+            named: branchName,
+            fromBaseBranch: baseBranch,
+            changeTransfer: .copy,
+            codex: codex,
+            workingDirectory: gitWorkingDirectory,
+            threadID: thread.id,
+            activeTurnID: activeTurnID,
+            onOpenWorktree: { result in
+                guard !result.alreadyExisted else {
+                    viewModel.gitSyncAlert = TurnGitSyncAlert(
+                        title: "Pick a Different Branch Name",
+                        message: "A managed worktree for '\(result.branch)' already exists. Choose a different branch name to create a fresh forked workspace.",
+                        action: .dismissOnly
+                    )
+                    return
+                }
+
+                guard let normalizedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(result.worktreePath) else {
+                    viewModel.gitSyncAlert = TurnGitSyncAlert(
+                        title: "Worktree Fork Failed",
+                        message: "Could not resolve the new worktree path for '\(result.branch)'.",
+                        action: .dismissOnly
+                    )
+                    return
+                }
+
+                isForkingThread = true
+                Task { @MainActor in
+                    defer { isForkingThread = false }
+
+                    do {
+                        let forkedThread = try await TurnThreadForkCoordinator.forkThreadIntoPreparedWorktree(
+                            codex: codex,
+                            sourceThreadId: thread.id,
+                            projectPath: normalizedProjectPath
+                        )
+                        isShowingForkWorktree = false
+                        openThread(forkedThread.id)
+                    } catch {
+                        let cleanupResult = await TurnThreadForkCoordinator.cleanupResultForFailedWorktreeFork(
+                            result,
+                            sourceWorkingDirectory: gitWorkingDirectory,
+                            error: error,
+                            codex: codex,
+                            viewModel: viewModel,
+                            threadID: thread.id
+                        )
+                        viewModel.gitSyncAlert = TurnGitSyncAlert(
+                            title: "Worktree Fork Failed",
+                            message: TurnThreadForkCoordinator.failedWorktreeForkMessage(
+                                for: error,
+                                branch: result.branch,
+                                cleanupResult: cleanupResult
+                            ),
+                            action: .dismissOnly
+                        )
+                    }
+                }
             }
         )
     }
@@ -797,6 +919,12 @@ struct TurnView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+            if isForkingThread {
+                forkLoadingNotice
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             TurnComposerHostView(
                 viewModel: viewModel,
                 codex: codex,
@@ -805,6 +933,10 @@ struct TurnView: View {
                 isThreadRunning: isThreadRunning,
                 isEmptyThread: isEmptyThread,
                 isWorktreeProject: isWorktreeProject,
+                canForkLocally: TurnThreadForkCoordinator.localForkProjectPath(
+                    for: currentThread,
+                    localCheckoutPath: viewModel.gitLocalCheckoutPath
+                ) != nil,
                 isInputFocused: $isInputFocused,
                 orderedModelOptions: orderedModelOptions,
                 selectedModelTitle: selectedModelTitle,
@@ -872,6 +1004,10 @@ struct TurnView: View {
                     )
                 },
                 onStartCodeReviewThread: startCodeReviewThread,
+                onStartForkThreadLocally: startLocalFork,
+                onOpenForkWorktree: {
+                    isShowingForkWorktree = true
+                },
                 onOpenWorktreeHandoff: {
                     isShowingWorktreeHandoff = true
                 },
@@ -879,6 +1015,26 @@ struct TurnView: View {
                 onSend: handleSend
             )
         }
+    }
+
+    private var forkLoadingNotice: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .controlSize(.small)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Creating fork...")
+                    .font(AppFont.subheadline(weight: .semibold))
+                Text("Opening the new chat")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private func openThread(_ threadId: String) {

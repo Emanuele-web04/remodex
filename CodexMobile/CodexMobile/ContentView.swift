@@ -5,6 +5,7 @@
 // Depends on: SidebarView, TurnView, SettingsView, CodexService, ContentViewModel
 
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
@@ -381,18 +382,13 @@ struct ContentView: View {
 
     private func toggleSidebar() {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-        withAnimation(Self.sidebarSpring) {
-            isSidebarOpen.toggle()
-            sidebarDragOffset = 0
-        }
+        let shouldOpenSidebar = !isSidebarOpen
+        setSidebar(open: shouldOpenSidebar)
     }
 
     private func closeSidebar() {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
-        withAnimation(Self.sidebarSpring) {
-            isSidebarOpen = false
-            sidebarDragOffset = 0
-        }
+        setSidebar(open: false)
     }
 
     // Keeps first-run installs in the scanner by default, while still letting users back out later.
@@ -454,10 +450,23 @@ struct ContentView: View {
 
     private func finishGesture(open: Bool) {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        setSidebar(open: open)
+    }
+
+    // Forces UIKit-backed inputs like the composer text view to resign before the drawer settles open.
+    private func setSidebar(open: Bool) {
+        if open {
+            dismissActiveKeyboard()
+        }
         withAnimation(Self.sidebarSpring) {
             isSidebarOpen = open
             sidebarDragOffset = 0
         }
+    }
+
+    // Uses the responder chain instead of per-view bindings so mixed SwiftUI/UIKit inputs all close together.
+    private func dismissActiveKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
     private var bridgeUpdatePromptBinding: Binding<CodexBridgeUpdatePrompt?> {

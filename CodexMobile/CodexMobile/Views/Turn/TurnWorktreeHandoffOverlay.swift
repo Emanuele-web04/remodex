@@ -1,12 +1,45 @@
 // FILE: TurnWorktreeHandoffOverlay.swift
-// Purpose: Presents the Codex-style worktree handoff dialog from both the toolbar and composer.
+// Purpose: Presents the shared worktree-creation dialog used by handoff and fork flows.
 // Layer: View Component
 // Exports: TurnWorktreeHandoffOverlay
 // Depends on: SwiftUI, CodexWorktreeIcon
 
 import SwiftUI
 
+enum TurnWorktreeOverlayMode {
+    case handoff
+    case fork
+
+    var title: String {
+        switch self {
+        case .handoff:
+            return "Hand off thread to worktree"
+        case .fork:
+            return "Fork thread into new worktree"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .handoff:
+            return "Create and check out a branch in a new worktree to continue working in parallel. Tracked local changes move there too, while ignored files stay in Local."
+        case .fork:
+            return "Create and check out a branch in a new worktree, then fork this conversation into the new checkout. Tracked local changes are copied there too, while the current thread and Local checkout stay exactly where they are."
+        }
+    }
+
+    var submitLabel: String {
+        switch self {
+        case .handoff:
+            return "Hand off"
+        case .fork:
+            return "Fork"
+        }
+    }
+}
+
 struct TurnWorktreeHandoffOverlay: View {
+    let mode: TurnWorktreeOverlayMode
     let preferredBaseBranch: String
     let isHandoffAvailable: Bool
     let isSubmitting: Bool
@@ -78,11 +111,11 @@ struct TurnWorktreeHandoffOverlay: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Hand off thread to worktree")
+                Text(mode.title)
                     .font(AppFont.title2(weight: .semibold))
                     .foregroundStyle(.primary)
 
-                Text("Create and check out a branch in a new worktree to continue working in parallel. Tracked local changes move there too, while ignored files stay in Local.")
+                Text(mode.message)
                     .font(AppFont.body())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -128,7 +161,7 @@ struct TurnWorktreeHandoffOverlay: View {
                     ProgressView()
                         .tint(.black)
                 } else {
-                    Text("Hand off")
+                    Text(mode.submitLabel)
                         .font(AppFont.body(weight: .semibold))
                         .foregroundStyle(.black)
                 }

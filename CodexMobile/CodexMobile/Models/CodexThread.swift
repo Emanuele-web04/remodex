@@ -21,6 +21,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     var updatedAt: Date?
     var cwd: String?
     var metadata: [String: JSONValue]?
+    var forkedFromThreadId: String?
     var parentThreadId: String?
     var agentId: String?
     var agentNickname: String?
@@ -40,6 +41,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         updatedAt: Date? = nil,
         cwd: String? = nil,
         metadata: [String: JSONValue]? = nil,
+        forkedFromThreadId: String? = nil,
         parentThreadId: String? = nil,
         agentId: String? = nil,
         agentNickname: String? = nil,
@@ -56,6 +58,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         self.updatedAt = updatedAt
         self.cwd = Self.normalizeProjectPath(cwd)
         self.metadata = metadata
+        self.forkedFromThreadId = Self.normalizeIdentifier(forkedFromThreadId)
         self.parentThreadId = Self.normalizeIdentifier(parentThreadId)
         self.agentId = Self.normalizeIdentifier(agentId)
         self.agentNickname = Self.normalizeIdentifier(agentNickname)
@@ -80,6 +83,10 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         case cwdSnake = "current_working_directory"
         case cwdWorkingDirectory = "working_directory"
         case metadata
+        case forkedFromThreadId
+        case forkedFromId = "forkedFromId"
+        case forkedFromThreadIdSnake = "forked_from_thread_id"
+        case forkedFromIdSnake = "forked_from_id"
         case parentThreadId
         case parentThreadIdSnake = "parent_thread_id"
         case agentId
@@ -107,6 +114,12 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         updatedAt = try Self.decodeDateIfPresent(from: container, keys: [.updatedAt, .updatedAtSnake])
         cwd = Self.decodeStringIfPresent(from: container, keys: [.cwd, .cwdSnake, .cwdWorkingDirectory])
         metadata = try container.decodeIfPresent([String: JSONValue].self, forKey: .metadata)
+        forkedFromThreadId = Self.decodeThreadIdentity(
+            from: container,
+            metadata: metadata,
+            keys: [.forkedFromThreadId, .forkedFromId, .forkedFromThreadIdSnake, .forkedFromIdSnake],
+            metadataKeys: ["forkedFromThreadId", "forked_from_thread_id", "forkedFromId", "forked_from_id"]
+        )
         parentThreadId = Self.decodeThreadIdentity(
             from: container,
             metadata: metadata,
@@ -159,6 +172,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(Self.normalizeProjectPath(cwd), forKey: .cwd)
         try container.encodeIfPresent(metadata, forKey: .metadata)
+        try container.encodeIfPresent(Self.normalizeIdentifier(forkedFromThreadId), forKey: .forkedFromThreadId)
         try container.encodeIfPresent(Self.normalizeIdentifier(parentThreadId), forKey: .parentThreadId)
         try container.encodeIfPresent(Self.normalizeIdentifier(agentId), forKey: .agentId)
         try container.encodeIfPresent(Self.normalizeIdentifier(agentNickname), forKey: .agentNickname)
@@ -204,6 +218,11 @@ extension CodexThread {
 
     var isSubagent: Bool {
         parentThreadId != nil
+    }
+
+    // Fork badges use ancestry rather than cwd heuristics so local/worktree routing stays independent.
+    var isForkedThread: Bool {
+        forkedFromThreadId != nil
     }
 
     var preferredSubagentLabel: String? {

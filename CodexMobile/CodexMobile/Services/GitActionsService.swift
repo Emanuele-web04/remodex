@@ -36,6 +36,7 @@ enum GitActionsError: LocalizedError {
             return "Cannot switch branches: this branch is already open in another worktree."
         case "pull_conflict": return "Pull failed due to conflicts."
         case "branch_exists": return fallback ?? "Branch already exists."
+        case "invalid_branch_name": return fallback ?? "Branch name is not valid for Git."
         case "missing_branch", "missing_branch_name": return "Branch name is required."
         case "missing_base_branch": return fallback ?? "Base branch is required."
         case "branch_already_open_here":
@@ -47,6 +48,12 @@ enum GitActionsError: LocalizedError {
         case "missing_local_repo": return "Run `remodex up` from an existing local directory first."
         case "missing_working_directory":
             return fallback ?? "The selected local folder is not available on this Mac."
+        case "cannot_remove_local_checkout":
+            return fallback ?? "Cannot remove the main local checkout."
+        case "unmanaged_worktree":
+            return fallback ?? "Only managed worktrees can be cleaned up automatically."
+        case "worktree_cleanup_failed":
+            return fallback ?? "We could not clean up the temporary worktree automatically."
         default: return fallback ?? "Git operation failed."
         }
     }
@@ -111,15 +118,28 @@ final class GitActionsService {
     }
 
     // Creates or reuses a managed worktree rooted under CODEX_HOME/worktrees.
-    func createWorktree(name: String, baseBranch: String) async throws -> GitCreateWorktreeResult {
+    func createWorktree(
+        name: String,
+        baseBranch: String,
+        changeTransfer: GitWorktreeChangeTransferMode = .move
+    ) async throws -> GitCreateWorktreeResult {
         let json = try await request(
             method: "git/createWorktree",
             params: [
                 "name": .string(name),
                 "baseBranch": .string(baseBranch),
+                "changeTransfer": .string(changeTransfer.rawValue),
             ]
         )
         return GitCreateWorktreeResult(from: json)
+    }
+
+    func removeManagedWorktree(branch: String?) async throws {
+        var params: [String: JSONValue] = [:]
+        if let branch, !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["branch"] = .string(branch)
+        }
+        _ = try await request(method: "git/removeWorktree", params: params)
     }
 
     func checkout(branch: String) async throws -> GitCheckoutResult {

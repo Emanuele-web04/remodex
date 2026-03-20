@@ -435,13 +435,15 @@ final class SidebarThreadGroupingTests: XCTestCase {
         updatedAt: Date,
         cwd: String?,
         syncState: CodexThreadSyncState = .live,
-        parentThreadId: String? = nil
+        parentThreadId: String? = nil,
+        forkedFromThreadId: String? = nil
     ) -> CodexThread {
         CodexThread(
             id: id,
             title: id,
             updatedAt: updatedAt,
             cwd: cwd,
+            forkedFromThreadId: forkedFromThreadId,
             parentThreadId: parentThreadId,
             syncState: syncState
         )

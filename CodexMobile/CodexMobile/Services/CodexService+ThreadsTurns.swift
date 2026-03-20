@@ -601,7 +601,12 @@ extension CodexService {
     }
 
     @discardableResult
-    func ensureThreadResumed(threadId: String, force: Bool = false) async throws -> CodexThread? {
+    func ensureThreadResumed(
+        threadId: String,
+        force: Bool = false,
+        preferredProjectPath: String? = nil,
+        modelIdentifierOverride: String? = nil
+    ) async throws -> CodexThread? {
         guard !threadId.isEmpty else {
             return nil
         }
@@ -613,10 +618,12 @@ extension CodexService {
         var params: RPCObject = [
             "threadId": .string(threadId),
         ]
-        if let workingDirectory = thread(for: threadId)?.gitWorkingDirectory {
+        let resolvedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
+            ?? thread(for: threadId)?.gitWorkingDirectory
+        if let workingDirectory = resolvedProjectPath {
             params["cwd"] = .string(workingDirectory)
         }
-        if let modelIdentifier = runtimeModelIdentifierForTurn() {
+        if let modelIdentifier = modelIdentifierOverride ?? runtimeModelIdentifierForTurn() {
             params["model"] = .string(modelIdentifier)
         }
         let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)

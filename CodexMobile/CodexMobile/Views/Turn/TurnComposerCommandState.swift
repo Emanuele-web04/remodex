@@ -1,17 +1,18 @@
 // FILE: TurnComposerCommandState.swift
-// Purpose: Owns slash-command/review-mode state types and pure parsing helpers used by the composer.
+// Purpose: Owns slash-command/review/fork state types and pure parsing helpers used by the composer.
 // Layer: View Support
-// Exports: TurnComposerSlashCommand, TurnComposerReviewTarget, TurnComposerReviewSelection, TurnComposerSlashCommandPanelState, TurnTrailingSlashCommandToken, TurnComposerCommandLogic
+// Exports: TurnComposerSlashCommand, TurnComposerForkDestination, TurnComposerReviewTarget, TurnComposerReviewSelection, TurnComposerSlashCommandPanelState, TurnTrailingSlashCommandToken, TurnComposerCommandLogic
 // Depends on: Foundation, CodexReviewTarget
 
 import Foundation
 
 enum TurnComposerSlashCommand: String, Identifiable, Equatable {
     case codeReview
+    case fork
     case status
     case subagents
 
-    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .status, .subagents]
+    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .fork, .status, .subagents]
 
     var id: String { rawValue }
 
@@ -19,6 +20,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "Code Review"
+        case .fork:
+            return "Fork"
         case .status:
             return "Status"
         case .subagents:
@@ -30,6 +33,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "Run the reviewer on your local changes"
+        case .fork:
+            return "Fork this thread into local or a new worktree"
         case .status:
             return "Show context usage and rate limits"
         case .subagents:
@@ -41,10 +46,12 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "ladybug"
+        case .fork:
+            return "arrow.triangle.branch"
         case .status:
             return "speedometer"
         case .subagents:
-            return "person.3"
+            return "person.crop.circle"
         }
     }
 
@@ -52,6 +59,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "/review"
+        case .fork:
+            return "/fork"
         case .status:
             return "/status"
         case .subagents:
@@ -64,7 +73,7 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .subagents:
             return "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results."
-        case .codeReview, .status:
+        case .codeReview, .fork, .status:
             return nil
         }
     }
@@ -73,12 +82,79 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         "\(title) \(subtitle) \(commandToken)".lowercased()
     }
 
-    static func filtered(matching query: String) -> [TurnComposerSlashCommand] {
+    static func filtered(
+        matching query: String,
+        within commands: [TurnComposerSlashCommand] = allCommands
+    ) -> [TurnComposerSlashCommand] {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !trimmedQuery.isEmpty else {
-            return allCommands
+            return commands
         }
-        return allCommands.filter { $0.searchBlob.contains(trimmedQuery) }
+        return commands.filter { $0.searchBlob.contains(trimmedQuery) }
+    }
+
+    // Hides slash commands that the connected runtime cannot fulfill for this session.
+    static func availableCommands(
+        supportsThreadFork: Bool,
+        allowsForkCommand: Bool
+    ) -> [TurnComposerSlashCommand] {
+        allCommands.filter { command in
+            switch command {
+            case .fork:
+                return supportsThreadFork && allowsForkCommand
+            case .codeReview, .status, .subagents:
+                return true
+            }
+        }
+    }
+}
+
+enum TurnComposerForkDestination: String, Identifiable, Equatable {
+    case local
+    case newWorktree
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .local:
+            return "Fork into local"
+        case .newWorktree:
+            return "Fork into new worktree"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .local:
+            return "Continue in a new local thread"
+        case .newWorktree:
+            return "Continue in a new worktree"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .local:
+            return "laptopcomputer"
+        case .newWorktree:
+            return "arrow.up.right.square"
+        }
+    }
+
+    // V1 keeps worktree-to-worktree branching out of scope so fork stays predictable.
+    static func availableDestinations(
+        canForkLocally: Bool,
+        canCreateWorktree: Bool
+    ) -> [TurnComposerForkDestination] {
+        var destinations: [TurnComposerForkDestination] = []
+        if canCreateWorktree {
+            destinations.append(.newWorktree)
+        }
+        if canForkLocally {
+            destinations.append(.local)
+        }
+        return destinations
     }
 }
 
@@ -114,6 +190,7 @@ enum TurnComposerSlashCommandPanelState: Equatable {
     case hidden
     case commands(query: String)
     case codeReviewTargets
+    case forkDestinations([TurnComposerForkDestination])
 }
 
 struct TurnTrailingSlashCommandToken: Equatable {
@@ -187,5 +264,32 @@ enum TurnComposerCommandLogic {
         var updated = text
         updated.replaceSubrange(token.tokenRange, with: trimmedReplacement)
         return updated
+    }
+
+    // Fork is only valid as the first slash action in an otherwise empty draft.
+    static func canOfferForkSlashCommand(
+        in text: String,
+        mentionedFileCount: Int = 0,
+        mentionedSkillCount: Int = 0,
+        attachmentCount: Int = 0,
+        hasReviewSelection: Bool = false,
+        hasSubagentsSelection: Bool = false,
+        isPlanModeArmed: Bool = false
+    ) -> Bool {
+        guard let token = trailingSlashCommandToken(in: text) else {
+            return false
+        }
+
+        var remainingDraft = text
+        remainingDraft.replaceSubrange(token.tokenRange, with: "")
+        let trimmedRemainingDraft = remainingDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return trimmedRemainingDraft.isEmpty
+            && mentionedFileCount == 0
+            && mentionedSkillCount == 0
+            && attachmentCount == 0
+            && !hasReviewSelection
+            && !hasSubagentsSelection
+            && !isPlanModeArmed
     }
 }

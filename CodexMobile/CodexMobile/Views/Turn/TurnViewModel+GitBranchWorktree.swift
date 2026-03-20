@@ -181,17 +181,22 @@ extension TurnViewModel {
     func requestCreateGitWorktree(
         named rawName: String,
         fromBaseBranch rawBaseBranch: String,
+        changeTransfer: GitWorktreeChangeTransferMode = .move,
         codex: CodexService,
         workingDirectory: String?,
         threadID: String,
         activeTurnID: String?,
-        onOpenWorktree: @escaping (String, String) -> Void
+        onOpenWorktree: @escaping (GitCreateWorktreeResult) -> Void
     ) {
         let branchName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         let baseBranch = rawBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !branchName.isEmpty, !baseBranch.isEmpty else { return }
 
-        let operation = GitBranchUserOperation.createWorktree(branchName: branchName, baseBranch: baseBranch)
+        let operation = GitBranchUserOperation.createWorktree(
+            branchName: branchName,
+            baseBranch: baseBranch,
+            changeTransfer: changeTransfer
+        )
         if let alert = gitBranchAlert(for: operation) {
             pendingGitBranchOperation = operation
             pendingGitWorktreeOpenHandler = onOpenWorktree
@@ -202,6 +207,7 @@ extension TurnViewModel {
         createGitWorktree(
             named: branchName,
             fromBaseBranch: baseBranch,
+            changeTransfer: changeTransfer,
             codex: codex,
             workingDirectory: workingDirectory,
             threadID: threadID,
@@ -267,11 +273,12 @@ extension TurnViewModel {
     func createGitWorktree(
         named rawName: String,
         fromBaseBranch rawBaseBranch: String,
+        changeTransfer: GitWorktreeChangeTransferMode = .move,
         codex: CodexService,
         workingDirectory: String?,
         threadID: String,
         activeTurnID: String?,
-        onOpenWorktree: @escaping (String, String) -> Void
+        onOpenWorktree: @escaping (GitCreateWorktreeResult) -> Void
     ) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -290,7 +297,11 @@ extension TurnViewModel {
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
             do {
-                let result = try await gitService.createWorktree(name: branchName, baseBranch: baseBranch)
+                let result = try await gitService.createWorktree(
+                    name: branchName,
+                    baseBranch: baseBranch,
+                    changeTransfer: changeTransfer
+                )
                 let resolvedBranch = result.branch.trimmingCharacters(in: .whitespacesAndNewlines)
                 let resolvedWorktreePath = result.worktreePath.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !resolvedBranch.isEmpty, !resolvedWorktreePath.isEmpty else {
@@ -300,7 +311,7 @@ extension TurnViewModel {
                 availableGitBranchTargets = Array(Set(availableGitBranchTargets + [resolvedBranch])).sorted()
                 gitWorktreePathsByBranch[resolvedBranch] = resolvedWorktreePath
                 gitBranchesCheckedOutElsewhere.insert(resolvedBranch)
-                onOpenWorktree(resolvedWorktreePath, resolvedBranch)
+                onOpenWorktree(result)
             } catch let error as GitActionsError {
                 gitSyncAlert = TurnGitSyncAlert(
                     title: "Worktree Creation Failed",
@@ -325,6 +336,26 @@ extension TurnViewModel {
         }
 
         return gitWorktreePathsByBranch[trimmedBranch]
+    }
+
+    // Removes a failed managed worktree from the optimistic local branch cache until the next refresh arrives.
+    func forgetGitWorktree(branch: String, worktreePath: String?) {
+        let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedBranch.isEmpty else { return }
+
+        availableGitBranchTargets.removeAll { $0 == trimmedBranch }
+        gitBranchesCheckedOutElsewhere.remove(trimmedBranch)
+
+        let trimmedPath = worktreePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedPath, !trimmedPath.isEmpty {
+            let normalizedPath = TurnWorktreeRouting.comparableProjectPath(trimmedPath)
+            if let existingPath = gitWorktreePathsByBranch[trimmedBranch],
+               TurnWorktreeRouting.comparableProjectPath(existingPath) != normalizedPath {
+                return
+            }
+        }
+
+        gitWorktreePathsByBranch.removeValue(forKey: trimmedBranch)
     }
 
     func applyGitRepoSync(_ result: GitRepoSyncResult) {
@@ -526,11 +557,12 @@ extension TurnViewModel {
 
             return nil
 
-        case .createWorktree(let branchName, let baseBranch):
+        case .createWorktree(let branchName, let baseBranch, let changeTransfer):
             if isDirty && currentBranch != baseBranch {
+                let transferVerb = changeTransfer == .move ? "move" : "copy"
                 return TurnGitSyncAlert(
-                    title: "Move local changes from the current branch",
-                    message: "Worktree handoff can move tracked local changes only from the current branch. Switch the base branch to '\(currentBranch)' or clean up local changes before creating '\(branchName)'.",
+                    title: "\(transferVerb.capitalized) local changes from the current branch",
+                    message: "Creating '\(branchName)' can \(transferVerb) tracked local changes only from the current branch. Switch the base branch to '\(currentBranch)' or clean up local changes before creating the worktree.",
                     action: .dismissOnly
                 )
             }
@@ -538,7 +570,9 @@ extension TurnViewModel {
             if onDefaultBranch && currentBranch == baseBranch && localOnlyCommitCount > 0 {
                 let commitLabel = localOnlyCommitCount == 1 ? "1 local commit" : "\(localOnlyCommitCount) local commits"
                 let dirtySuffix = isDirty
-                    ? " Tracked local changes will move into the new worktree; ignored files stay here."
+                    ? (changeTransfer == .move
+                        ? " Tracked local changes will move into the new worktree; ignored files stay here."
+                        : " Tracked local changes will also be copied into the new worktree; ignored files stay here.")
                     : ""
                 return TurnGitSyncAlert(
                     title: "Local commits stay on \(defaultBranch)",
@@ -602,6 +636,7 @@ private extension TurnViewModel {
         availableGitBranchTargets = result.branches
         gitBranchesCheckedOutElsewhere = result.branchesCheckedOutElsewhere
         gitWorktreePathsByBranch = result.worktreePathByBranch
+        gitLocalCheckoutPath = CodexThreadStartProjectBinding.normalizedProjectPath(result.localCheckoutPath)
         if let current = result.currentBranch, !current.isEmpty {
             currentGitBranch = current
         }
@@ -623,7 +658,7 @@ private extension TurnViewModel {
     // Runs the deferred branch/worktree action after an alert-confirmed preflight step.
     func continueGitBranchOperation(
         _ pendingBranchOperation: GitBranchUserOperation?,
-        pendingWorktreeOpenHandler: ((String, String) -> Void)?,
+        pendingWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?,
         codex: CodexService,
         workingDirectory: String?,
         threadID: String,
@@ -648,11 +683,12 @@ private extension TurnViewModel {
                 threadID: threadID,
                 activeTurnID: activeTurnID
             )
-        case .createWorktree(let branchName, let baseBranch):
+        case .createWorktree(let branchName, let baseBranch, let changeTransfer):
             guard let pendingWorktreeOpenHandler else { return }
             createGitWorktree(
                 named: branchName,
                 fromBaseBranch: baseBranch,
+                changeTransfer: changeTransfer,
                 codex: codex,
                 workingDirectory: workingDirectory,
                 threadID: threadID,

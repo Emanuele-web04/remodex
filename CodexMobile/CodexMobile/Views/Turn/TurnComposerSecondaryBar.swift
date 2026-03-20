@@ -91,9 +91,9 @@ struct TurnComposerSecondaryBar: View {
                     onSelectAccessMode(mode)
                 } label: {
                     if selectedAccessMode == mode {
-                        Label(mode.displayName, systemImage: "checkmark")
+                        Label(mode.menuTitle, systemImage: "checkmark")
                     } else {
-                        Text(mode.displayName)
+                        Text(mode.menuTitle)
                     }
                 }
             }
@@ -104,15 +104,10 @@ struct TurnComposerSecondaryBar: View {
                       : "checkmark.shield")
                     .font(branchTextFont)
 
-                Text(selectedAccessMode.displayName)
-                    .font(branchTextFont)
-                    .fontWeight(.regular)
-                    .lineLimit(1)
-
                 Image(systemName: "chevron.down")
                     .font(branchChevronFont)
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .adaptiveGlass(.regular, in: Capsule())
             .foregroundStyle(selectedAccessMode == .fullAccess ? .orange : branchLabelColor)

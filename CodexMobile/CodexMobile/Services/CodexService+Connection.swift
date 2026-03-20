@@ -145,6 +145,8 @@ extension CodexService {
         assistantRevertStateRevision = 0
         supportsServiceTier = true
         hasPresentedServiceTierBridgeUpdatePrompt = false
+        supportsThreadFork = true
+        hasPresentedThreadForkBridgeUpdatePrompt = false
         clearAllRunningState()
         readyThreadIDs.removeAll()
         failedThreadIDs.removeAll()
@@ -380,6 +382,8 @@ extension CodexService {
         assistantRevertStateRevision = 0
         supportsServiceTier = true
         hasPresentedServiceTierBridgeUpdatePrompt = false
+        supportsThreadFork = true
+        hasPresentedThreadForkBridgeUpdatePrompt = false
         clearAllRunningState()
         readyThreadIDs.removeAll()
         failedThreadIDs.removeAll()

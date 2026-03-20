@@ -338,13 +338,15 @@ extension CodexService {
     }
 
     func renameThread(_ threadId: String, name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         // Optimistic local update.
         if let index = threadIndex(for: threadId) {
-            threads[index].name = name
-            threads[index].title = name
+            threads[index].name = trimmedName
+            threads[index].title = trimmedName
         }
-        debugSyncLog("thread renamed by user: \(threadId) → \(name)")
-        sendThreadNameSetRPC(threadId: threadId, name: name)
+        persistThreadRename(trimmedName, for: threadId)
+        debugSyncLog("thread renamed by user: \(threadId) → \(trimmedName)")
+        sendThreadNameSetRPC(threadId: threadId, name: trimmedName)
     }
 
     private func sendThreadNameSetRPC(threadId: String, name: String) {
@@ -447,6 +449,7 @@ extension CodexService {
         clearRunningState(for: threadId)
         removeThreadTimelineState(for: threadId)
         clearOutcomeBadge(for: threadId)
+        persistThreadRename(nil, for: threadId)
 
         // Drop local-only runtime overrides once a chat is fully removed from the device.
         clearThreadReasoningEffortOverride(for: threadId)

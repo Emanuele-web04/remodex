@@ -200,6 +200,11 @@ enum CodexPendingThreadComposerAction: Equatable, Sendable {
     case codeReview(target: CodexPendingCodeReviewTarget)
 }
 
+enum CodexThreadForkTarget: Equatable, Sendable {
+    case currentProject
+    case projectPath(String)
+}
+
 enum CodexPendingCodeReviewTarget: Equatable, Sendable {
     case uncommittedChanges
     case baseBranch
@@ -324,6 +329,8 @@ final class CodexService {
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
+    // Runtime compatibility flag for native `thread/fork` conversation branching.
+    var supportsThreadFork = true
     // Seeds brand-new chats with one-shot composer actions like code review.
     var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
     // In-memory identity directory for subagents, keyed by thread id and agent id.
@@ -345,6 +352,7 @@ final class CodexService {
     // Keeps the bridge-update UX visible even if connection cleanup resets secure transport state.
     var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
     var hasPresentedServiceTierBridgeUpdatePrompt = false
+    var hasPresentedThreadForkBridgeUpdatePrompt = false
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.
@@ -431,6 +439,8 @@ final class CodexService {
     var knownRepoRoots: Set<String> = []
     // Service-owned per-thread UI state keeps the active chat isolated from unrelated thread mutations.
     @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
+    @ObservationIgnored var forkedFromThreadIDByThreadID: [String: String] = [:]
+    @ObservationIgnored var renamedThreadNameByThreadID: [String: String] = [:]
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
     // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
     @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]
@@ -455,6 +465,8 @@ final class CodexService {
     static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
+    static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
+    static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
 
     init(
@@ -513,6 +525,20 @@ final class CodexService {
             self.threadRuntimeOverridesByThreadID = decodedThreadRuntimeOverrides
         } else {
             self.threadRuntimeOverridesByThreadID = [:]
+        }
+
+        if let savedForkOrigins = defaults.data(forKey: Self.forkedThreadOriginsDefaultsKey),
+           let decodedForkOrigins = try? decoder.decode([String: String].self, from: savedForkOrigins) {
+            self.forkedFromThreadIDByThreadID = decodedForkOrigins
+        } else {
+            self.forkedFromThreadIDByThreadID = [:]
+        }
+
+        if let savedRenamedThreadNames = defaults.data(forKey: Self.renamedThreadNamesDefaultsKey),
+           let decodedRenamedThreadNames = try? decoder.decode([String: String].self, from: savedRenamedThreadNames) {
+            self.renamedThreadNameByThreadID = decodedRenamedThreadNames
+        } else {
+            self.renamedThreadNameByThreadID = [:]
         }
 
         let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?

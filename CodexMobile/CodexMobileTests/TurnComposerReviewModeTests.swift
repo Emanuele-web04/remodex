@@ -116,8 +116,77 @@ final class TurnComposerReviewModeTests: XCTestCase {
 
     func testEmptySlashQueryStillIncludesSubagentsCommand() {
         XCTAssertEqual(
-            TurnComposerSlashCommand.filtered(matching: "").map(\.commandToken),
+            TurnComposerSlashCommand.filtered(
+                matching: "",
+                within: TurnComposerSlashCommand.availableCommands(
+                    supportsThreadFork: true,
+                    allowsForkCommand: true
+                )
+            ).map(\.commandToken),
+            ["/review", "/fork", "/status", "/subagents"]
+        )
+    }
+
+    func testForkCommandDisappearsWhenDraftAlreadyContainsText() {
+        XCTAssertEqual(
+            TurnComposerSlashCommand.availableCommands(
+                supportsThreadFork: true,
+                allowsForkCommand: false
+            ).map(\.commandToken),
             ["/review", "/status", "/subagents"]
+        )
+    }
+
+    func testSelectingForkShowsDestinationList() {
+        let viewModel = makeViewModel()
+
+        viewModel.onSelectSlashCommand(.fork, availableForkDestinations: [.newWorktree, .local])
+
+        XCTAssertEqual(
+            viewModel.slashCommandPanelState,
+            .forkDestinations([.newWorktree, .local])
+        )
+    }
+
+    func testSelectingForkDestinationClearsSlashTokenAndClosesPanel() {
+        let viewModel = makeViewModel()
+        viewModel.input = "/fo"
+        viewModel.slashCommandPanelState = .forkDestinations([.local])
+
+        viewModel.onSelectForkDestination(.local)
+
+        XCTAssertEqual(viewModel.input, "")
+        XCTAssertEqual(viewModel.slashCommandPanelState, .hidden)
+    }
+
+    func testForkDestinationsCollapseToLocalForManagedWorktreeThreads() {
+        XCTAssertEqual(
+            TurnComposerForkDestination.availableDestinations(
+                canForkLocally: true,
+                canCreateWorktree: false
+            ),
+            [.local]
+        )
+        XCTAssertEqual(
+            TurnComposerForkDestination.availableDestinations(
+                canForkLocally: true,
+                canCreateWorktree: true
+            ),
+            [.newWorktree, .local]
+        )
+        XCTAssertEqual(
+            TurnComposerForkDestination.availableDestinations(
+                canForkLocally: false,
+                canCreateWorktree: true
+            ),
+            [.newWorktree]
+        )
+        XCTAssertEqual(
+            TurnComposerForkDestination.availableDestinations(
+                canForkLocally: false,
+                canCreateWorktree: false
+            ),
+            []
         )
     }
 

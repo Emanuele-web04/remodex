@@ -7,6 +7,7 @@
 import SwiftUI
 
 struct TurnComposerAutocompleteState {
+    let availableSlashCommands: [TurnComposerSlashCommand]
     let fileAutocompleteItems: [CodexFuzzyFileMatch]
     let isFileAutocompleteVisible: Bool
     let isFileAutocompleteLoading: Bool
@@ -17,6 +18,7 @@ struct TurnComposerAutocompleteState {
     let skillAutocompleteQuery: String
     let slashCommandPanelState: TurnComposerSlashCommandPanelState
     let hasComposerContentConflictingWithReview: Bool
+    let isThreadRunning: Bool
     let showsGitBranchSelector: Bool
     let isLoadingGitBranchTargets: Bool
     let selectedGitBaseBranch: String

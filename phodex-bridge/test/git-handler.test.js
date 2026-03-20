@@ -104,6 +104,58 @@ test("gitBranches scopes worktree paths to the current project subdirectory", as
   }
 });
 
+test("gitBranches exposes the true local checkout path even when called from a worktree", async () => {
+  const repoDir = makeTempRepo();
+  const siblingWorktree = path.join(path.dirname(repoDir), `${path.basename(repoDir)}-wt-feature`);
+
+  try {
+    git(repoDir, "worktree", "add", siblingWorktree, "feature/clean-switch");
+
+    const result = await __test.gitBranches(siblingWorktree);
+
+    assert.equal(result.localCheckoutPath, canonicalPath(repoDir));
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(siblingWorktree, { recursive: true, force: true });
+  }
+});
+
+test("gitBranches scopes local checkout path for subdirectory worktrees", async () => {
+  const repoDir = makeTempRepo();
+  const localProjectDir = path.join(repoDir, "phodex-bridge");
+  const siblingWorktree = path.join(path.dirname(repoDir), `${path.basename(repoDir)}-wt-feature`);
+  const siblingProjectDir = path.join(siblingWorktree, "phodex-bridge");
+
+  try {
+    git(repoDir, "worktree", "add", siblingWorktree, "feature/clean-switch");
+
+    const result = await __test.gitBranches(siblingProjectDir);
+
+    assert.equal(result.localCheckoutPath, canonicalPath(localProjectDir));
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(siblingWorktree, { recursive: true, force: true });
+  }
+});
+
+test("gitBranches leaves local checkout path empty when the matching local subdirectory is missing", async () => {
+  const repoDir = makeTempRepo();
+  const siblingWorktree = path.join(path.dirname(repoDir), `${path.basename(repoDir)}-wt-feature`);
+  const siblingProjectDir = path.join(siblingWorktree, "packages", "newpkg");
+
+  try {
+    git(repoDir, "worktree", "add", siblingWorktree, "feature/clean-switch");
+    fs.mkdirSync(siblingProjectDir, { recursive: true });
+
+    const result = await __test.gitBranches(siblingProjectDir);
+
+    assert.equal(result.localCheckoutPath, null);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(siblingWorktree, { recursive: true, force: true });
+  }
+});
+
 test("gitCheckout switches to the requested branch instead of treating it like a path", async () => {
   const repoDir = makeTempRepo();
 
@@ -153,7 +205,24 @@ test("gitCreateBranch normalizes bare names into remodex/* and checks out the ne
 test("normalizeCreatedBranchName avoids double-prefixing remodex branches", () => {
   assert.equal(__test.normalizeCreatedBranchName("feature/foo"), "remodex/feature/foo");
   assert.equal(__test.normalizeCreatedBranchName("remodex/feature/foo"), "remodex/feature/foo");
+  assert.equal(__test.normalizeCreatedBranchName("my new branch"), "remodex/my-new-branch");
+  assert.equal(__test.normalizeCreatedBranchName("feature / login page"), "remodex/feature/login-page");
   assert.equal(__test.normalizeCreatedBranchName("   "), "");
+});
+
+test("gitCreateBranch rejects invalid Git branch names before checkout", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    await assert.rejects(
+      __test.gitCreateBranch(repoDir, { name: "feature..oops" }),
+      (error) =>
+        error?.errorCode === "invalid_branch_name"
+          && error?.userMessage === "Branch 'remodex/feature..oops' is not a valid Git branch name."
+    );
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
 });
 
 test("gitStatus reports local-only commits when remotes exist but upstream is missing", async () => {
@@ -363,6 +432,26 @@ test("gitCreateWorktree rejects a reused local branch name before ignoring the c
   }
 });
 
+test("gitCreateWorktree rejects invalid Git branch names before creating a worktree", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+
+  try {
+    await assert.rejects(
+      __test.gitCreateWorktree(projectDir, {
+        name: "feature..oops",
+        baseBranch: "main",
+        changeTransfer: "copy",
+      }),
+      (error) =>
+        error?.errorCode === "invalid_branch_name"
+          && error?.userMessage === "Branch 'remodex/feature..oops' is not a valid Git branch name."
+    );
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
 test("gitCreateWorktree rejects remote-only base branches because worktrees start from local refs", async () => {
   const repoDir = makeTempRepo();
   const remoteDir = makeBareRemote();
@@ -425,6 +514,50 @@ test("gitCreateWorktree carries tracked and untracked changes into the new workt
   }
 });
 
+test("gitCreateWorktree can copy tracked and untracked changes into the new worktree without cleaning local", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\ncopied\n");
+    fs.writeFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "keep me too\n");
+
+    const result = await __test.gitCreateWorktree(projectDir, {
+      name: "copied-worktree",
+      baseBranch: "main",
+      changeTransfer: "copy",
+    });
+
+    assert.equal(
+      fs.readFileSync(path.join(result.worktreePath, "..", "README.md"), "utf8"),
+      "# Test\ncopied\n"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(result.worktreePath, "scratch.txt"), "utf8"),
+      "keep me too\n"
+    );
+    assert.match(git(repoDir, "status", "--short"), /README\.md/);
+    assert.equal(
+      fs.readFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "utf8"),
+      "keep me too\n"
+    );
+
+    git(repoDir, "worktree", "remove", "--force", path.dirname(result.worktreePath));
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test("gitCreateWorktree leaves ignored files in the local checkout during handoff", async () => {
   const repoDir = makeTempRepo();
   const projectDir = path.join(repoDir, "phodex-bridge");
@@ -449,6 +582,73 @@ test("gitCreateWorktree leaves ignored files in the local checkout during handof
     assert.equal(fs.existsSync(path.join(path.dirname(result.worktreePath), "ignored.log")), false);
 
     git(repoDir, "worktree", "remove", "--force", path.dirname(result.worktreePath));
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateWorktree leaves ignored files only in Local when copying changes for a fork", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), "ignored.log\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "Add ignore rule");
+    fs.writeFileSync(path.join(repoDir, "ignored.log"), "stay local\n");
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\ncopied\n");
+
+    const result = await __test.gitCreateWorktree(projectDir, {
+      name: "ignored-copy",
+      baseBranch: "main",
+      changeTransfer: "copy",
+    });
+
+    assert.equal(fs.existsSync(path.join(repoDir, "ignored.log")), true);
+    assert.equal(fs.existsSync(path.join(path.dirname(result.worktreePath), "ignored.log")), false);
+    assert.match(git(repoDir, "status", "--short"), /README\.md/);
+
+    git(repoDir, "worktree", "remove", "--force", path.dirname(result.worktreePath));
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitRemoveWorktree removes a managed worktree and its freshly created branch", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const result = await __test.gitCreateWorktree(projectDir, {
+      name: "cleanup-me",
+      baseBranch: "main",
+      changeTransfer: "copy",
+    });
+
+    await __test.gitRemoveWorktree(result.worktreePath, { branch: result.branch });
+
+    assert.equal(fs.existsSync(path.dirname(result.worktreePath)), false);
+    assert.equal(git(repoDir, "branch", "--list", result.branch), "");
   } finally {
     if (previousCodexHome === undefined) {
       delete process.env.CODEX_HOME;

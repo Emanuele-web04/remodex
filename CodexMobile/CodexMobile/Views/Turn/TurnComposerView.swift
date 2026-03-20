@@ -70,6 +70,8 @@ struct TurnComposerView: View {
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
+    let onSelectForkDestination: (TurnComposerForkDestination) -> Void
+    let onCloseSlashCommandPanel: () -> Void
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
@@ -173,7 +175,8 @@ struct TurnComposerView: View {
                             onSelectSkillAutocomplete: onSelectSkillAutocomplete,
                             onSelectSlashCommand: onSelectSlashCommand,
                             onSelectCodeReviewTarget: onSelectCodeReviewTarget,
-                            onRemoveComposerReviewSelection: onRemoveComposerReviewSelection
+                            onSelectForkDestination: onSelectForkDestination,
+                            onCloseSlashCommandPanel: onCloseSlashCommandPanel
                         )
                     }
                     .offset(y: -8)
@@ -227,7 +230,8 @@ private struct TurnComposerAutocompletePanels: View {
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
-    let onRemoveComposerReviewSelection: () -> Void
+    let onSelectForkDestination: (TurnComposerForkDestination) -> Void
+    let onCloseSlashCommandPanel: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -252,14 +256,17 @@ private struct TurnComposerAutocompletePanels: View {
             if state.slashCommandPanelState != .hidden {
                 SlashCommandAutocompletePanel(
                     state: state.slashCommandPanelState,
+                    availableCommands: state.availableSlashCommands,
                     hasComposerContentConflictingWithReview: state.hasComposerContentConflictingWithReview,
+                    isThreadRunning: state.isThreadRunning,
                     showsGitBranchSelector: state.showsGitBranchSelector,
                     isLoadingGitBranchTargets: state.isLoadingGitBranchTargets,
                     selectedGitBaseBranch: state.selectedGitBaseBranch,
                     gitDefaultBranch: state.gitDefaultBranch,
                     onSelectCommand: onSelectSlashCommand,
                     onSelectReviewTarget: onSelectCodeReviewTarget,
-                    onClose: onRemoveComposerReviewSelection
+                    onSelectForkDestination: onSelectForkDestination,
+                    onClose: onCloseSlashCommandPanel
                 )
             }
         }
@@ -362,7 +369,7 @@ private struct TurnComposerAccessorySection: View {
                     HStack(spacing: 6) {
                         ComposerActionChip(
                             title: "Subagents",
-                            symbolName: "person.3",
+                            symbolName: "person.crop.circle",
                             tintColor: .teal,
                             removeAccessibilityLabel: "Remove subagents"
                         ) {
@@ -430,6 +437,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     isSubagentsSelectionArmed: true
                 ),
                 autocompleteState: TurnComposerAutocompleteState(
+                    availableSlashCommands: TurnComposerSlashCommand.allCommands,
                     fileAutocompleteItems: [],
                     isFileAutocompleteVisible: false,
                     isFileAutocompleteLoading: false,
@@ -440,6 +448,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     skillAutocompleteQuery: "",
                     slashCommandPanelState: .hidden,
                     hasComposerContentConflictingWithReview: false,
+                    isThreadRunning: true,
                     showsGitBranchSelector: false,
                     isLoadingGitBranchTargets: false,
                     selectedGitBaseBranch: "",
@@ -509,6 +518,8 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 onSelectSkillAutocomplete: { _ in },
                 onSelectSlashCommand: { _ in },
                 onSelectCodeReviewTarget: { _ in },
+                onSelectForkDestination: { _ in },
+                onCloseSlashCommandPanel: {},
                 onRemoveMentionedFile: { _ in },
                 onRemoveMentionedSkill: { _ in },
                 onRemoveComposerReviewSelection: {},

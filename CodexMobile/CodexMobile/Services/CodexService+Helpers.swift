@@ -48,7 +48,12 @@ extension CodexService {
     }
 
     func upsertThread(_ incomingThread: CodexThread) {
-        let resolvedThread = mergedThread(incomingThread, with: self.thread(for: incomingThread.id))
+        var resolvedThread = mergedThread(incomingThread, with: self.thread(for: incomingThread.id))
+        if resolvedThread.forkedFromThreadId == nil {
+            resolvedThread.forkedFromThreadId = persistedForkOrigin(for: resolvedThread.id)
+        }
+        applyPersistedThreadRename(to: &resolvedThread)
+        rememberForkOriginIfNeeded(sourceThreadId: resolvedThread.forkedFromThreadId, forkedThreadId: resolvedThread.id)
         let derivedIdentity = resolvedThread.derivedSubagentIdentity
         upsertSubagentIdentity(
             threadId: resolvedThread.id,
@@ -83,6 +88,7 @@ extension CodexService {
             serverMetadata: merged.metadata,
             localMetadata: existing.metadata
         )
+        if merged.forkedFromThreadId == nil { merged.forkedFromThreadId = existing.forkedFromThreadId }
         if merged.parentThreadId == nil { merged.parentThreadId = existing.parentThreadId }
         if merged.agentId == nil { merged.agentId = existing.agentId }
         if merged.agentNickname == nil { merged.agentNickname = existing.agentNickname }
@@ -90,6 +96,92 @@ extension CodexService {
         if merged.model == nil { merged.model = existing.model }
         if merged.modelProvider == nil { merged.modelProvider = existing.modelProvider }
         return merged
+    }
+
+    // Persists fork ancestry outside transient thread payloads so sidebar badges survive reconnects.
+    func rememberForkOriginIfNeeded(sourceThreadId: String?, forkedThreadId: String) {
+        guard let normalizedSourceThreadId = normalizedForkThreadID(sourceThreadId),
+              let normalizedForkedThreadId = normalizedForkThreadID(forkedThreadId) else {
+            return
+        }
+
+        guard forkedFromThreadIDByThreadID[normalizedForkedThreadId] != normalizedSourceThreadId else {
+            return
+        }
+
+        forkedFromThreadIDByThreadID[normalizedForkedThreadId] = normalizedSourceThreadId
+        persistForkOrigins()
+    }
+
+    func persistedForkOrigin(for threadId: String?) -> String? {
+        guard let normalizedThreadId = normalizedForkThreadID(threadId) else {
+            return nil
+        }
+
+        return normalizedForkThreadID(forkedFromThreadIDByThreadID[normalizedThreadId])
+    }
+
+    private func persistForkOrigins() {
+        guard let encoded = try? encoder.encode(forkedFromThreadIDByThreadID) else {
+            return
+        }
+
+        defaults.set(encoded, forKey: Self.forkedThreadOriginsDefaultsKey)
+    }
+
+    // Keeps user-renamed thread titles durable even when thread/list returns only the server fallback title.
+    func persistThreadRename(_ name: String?, for threadId: String) {
+        guard let normalizedThreadId = normalizedForkThreadID(threadId) else {
+            return
+        }
+
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmedName.isEmpty {
+            renamedThreadNameByThreadID.removeValue(forKey: normalizedThreadId)
+        } else {
+            renamedThreadNameByThreadID[normalizedThreadId] = trimmedName
+        }
+
+        guard let encoded = try? encoder.encode(renamedThreadNameByThreadID) else {
+            return
+        }
+
+        defaults.set(encoded, forKey: Self.renamedThreadNamesDefaultsKey)
+    }
+
+    func persistedThreadRename(for threadId: String?) -> String? {
+        guard let normalizedThreadId = normalizedForkThreadID(threadId) else {
+            return nil
+        }
+
+        return normalizedPersistedThreadName(renamedThreadNameByThreadID[normalizedThreadId])
+    }
+
+    private func applyPersistedThreadRename(to thread: inout CodexThread) {
+        guard let persistedName = persistedThreadRename(for: thread.id) else {
+            return
+        }
+
+        thread.name = persistedName
+        thread.title = persistedName
+    }
+
+    private func normalizedForkThreadID(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func normalizedPersistedThreadName(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // Promotes subagents to first-class child threads so selection, sync, and sidebar rendering stay native.

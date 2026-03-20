@@ -8,6 +8,11 @@ import Foundation
 
 // MARK: - Result types
 
+enum GitWorktreeChangeTransferMode: String, Equatable, Sendable {
+    case move
+    case copy
+}
+
 struct GitDiffTotals: Equatable, Sendable {
     let additions: Int
     let deletions: Int
@@ -128,6 +133,7 @@ struct GitBranchesResult: Sendable {
     let branches: [String]
     let branchesCheckedOutElsewhere: Set<String>
     let worktreePathByBranch: [String: String]
+    let localCheckoutPath: String?
     let currentBranch: String?
     let defaultBranch: String?
 
@@ -137,6 +143,7 @@ struct GitBranchesResult: Sendable {
             json["branchesCheckedOutElsewhere"]?.arrayValue?.compactMap(\.stringValue) ?? []
         )
         self.worktreePathByBranch = Self.stringDictionary(from: json["worktreePathByBranch"]?.objectValue)
+        self.localCheckoutPath = json["localCheckoutPath"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.currentBranch = json["current"]?.stringValue
         self.defaultBranch = json["default"]?.stringValue
     }
@@ -226,6 +233,7 @@ struct GitBranchesWithStatusResult: Sendable {
     let branches: [String]
     let branchesCheckedOutElsewhere: Set<String>
     let worktreePathByBranch: [String: String]
+    let localCheckoutPath: String?
     let currentBranch: String?
     let defaultBranch: String?
     let status: GitRepoSyncResult?
@@ -236,6 +244,7 @@ struct GitBranchesWithStatusResult: Sendable {
             json["branchesCheckedOutElsewhere"]?.arrayValue?.compactMap(\.stringValue) ?? []
         )
         self.worktreePathByBranch = Self.stringDictionary(from: json["worktreePathByBranch"]?.objectValue)
+        self.localCheckoutPath = json["localCheckoutPath"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.currentBranch = json["current"]?.stringValue
         self.defaultBranch = json["default"]?.stringValue
         if let statusObj = json["status"]?.objectValue {

@@ -24,4 +24,22 @@ final class TurnViewModelGitBranchWorktreeTests: XCTestCase {
         XCTAssertNil(viewModel.worktreePathForCheckedOutElsewhereBranch("main"))
         XCTAssertNil(viewModel.worktreePathForCheckedOutElsewhereBranch("remodex/missing"))
     }
+
+    func testApplyGitBranchTargetsStoresTrueLocalCheckoutPath() {
+        let viewModel = TurnViewModel()
+        let result = GitBranchesWithStatusResult(
+            from: [
+                "branches": .array([.string("main")]),
+                "branchesCheckedOutElsewhere": .array([]),
+                "worktreePathByBranch": .object([:]),
+                "localCheckoutPath": .string("/tmp/remodex-local/phodex-bridge"),
+                "current": .string("main"),
+                "default": .string("main"),
+            ]
+        )
+
+        viewModel.applyGitBranchTargets(result)
+
+        XCTAssertEqual(viewModel.gitLocalCheckoutPath, "/tmp/remodex-local/phodex-bridge")
+    }
 }

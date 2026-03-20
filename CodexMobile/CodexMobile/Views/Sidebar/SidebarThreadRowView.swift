@@ -96,10 +96,7 @@ struct SidebarThreadRowView: View {
 
             expansionToggleButton
 
-            if thread.isManagedWorktreeProject {
-                CodexWorktreeIcon(pointSize: 12, weight: .medium)
-                    .foregroundStyle(.secondary)
-            }
+            threadStatusIcon(pointSize: 12)
 
             if let timingLabel {
                 Text(timingLabel)
@@ -135,10 +132,7 @@ struct SidebarThreadRowView: View {
         HStack(spacing: 4) {
             expansionToggleButton
 
-            if thread.isManagedWorktreeProject {
-                CodexWorktreeIcon(pointSize: 11, weight: .medium)
-                    .foregroundStyle(.secondary)
-            }
+            threadStatusIcon(pointSize: 11)
 
             if let timingLabel {
                 Text(timingLabel)
@@ -179,6 +173,18 @@ struct SidebarThreadRowView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(isSubagentExpanded ? "Collapse subagents" : "Expand subagents")
+        }
+    }
+
+    // Keeps fork ancestry and worktree scope visually distinct in the single metadata icon slot.
+    @ViewBuilder
+    private func threadStatusIcon(pointSize: CGFloat) -> some View {
+        if thread.isForkedThread {
+            CodexForkIcon(pointSize: pointSize)
+                .foregroundStyle(.secondary)
+        } else if thread.isManagedWorktreeProject {
+            CodexWorktreeIcon(pointSize: pointSize, weight: .medium)
+                .foregroundStyle(.secondary)
         }
     }
 
