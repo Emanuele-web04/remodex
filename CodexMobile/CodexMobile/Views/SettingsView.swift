@@ -22,6 +22,7 @@ struct SettingsView: View {
                 SettingsArchivedChatsCard()
                 SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
+                SettingsGPTAccountCard()
                 runtimeDefaultsSection
                 SettingsAboutCard()
                 SettingsUsageCard()
@@ -516,6 +517,182 @@ private struct SettingsNotificationsCard: View {
         case .ephemeral: "Ephemeral"
         case .notDetermined: "Not requested"
         @unknown default: "Unknown"
+        }
+    }
+}
+
+private struct SettingsGPTAccountCard: View {
+    @Environment(CodexService.self) private var codex
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isOpeningLogin = false
+    @State private var isCancellingLogin = false
+    @State private var isLoggingOut = false
+
+    var body: some View {
+        let snapshot = codex.gptAccountSnapshot
+
+        SettingsCard(title: "ChatGPT") {
+            HStack(spacing: 10) {
+                Image(systemName: statusIconName(for: snapshot))
+                    .foregroundStyle(statusIconColor(for: snapshot))
+                Text("Status")
+                Spacer()
+                SettingsStatusPill(label: snapshot.statusLabel)
+            }
+
+            if let detail = snapshot.detailText {
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let hint = hintText(for: snapshot) {
+                Text(hint)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let errorMessage = codex.gptAccountErrorMessage,
+               !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(errorMessage)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
+            }
+
+            if !snapshot.isAuthenticated {
+                SettingsButton(
+                    loginButtonTitle(for: snapshot),
+                    isLoading: isOpeningLogin
+                ) {
+                    startLogin()
+                }
+                .opacity(canStartLogin ? 1 : 0.55)
+                .disabled(!canStartLogin)
+            }
+
+            if snapshot.hasActiveLogin {
+                SettingsButton("Cancel login", role: .cancel, isLoading: isCancellingLogin) {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    cancelPendingLogin()
+                }
+            }
+
+            if snapshot.canLogout {
+                SettingsButton("Log out", role: .destructive, isLoading: isLoggingOut) {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    logout()
+                }
+            }
+        }
+        .task {
+            await codex.refreshGPTAccountState()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                await codex.refreshGPTAccountState()
+            }
+        }
+    }
+
+    private func hintText(for snapshot: CodexGPTAccountSnapshot) -> String? {
+        if snapshot.needsReauth { return "Voice on this bridge needs a fresh ChatGPT sign-in." }
+        if snapshot.isAuthenticated && snapshot.isVoiceTokenReady { return nil }
+        if snapshot.isAuthenticated { return "Waiting for voice sync..." }
+        if snapshot.hasActiveLogin && codex.isConnected { return "Complete sign-in in the browser on this iPhone." }
+        if snapshot.hasActiveLogin { return "Reconnect to your bridge to finish sign-in." }
+        if !codex.isConnected { return "Connect to your bridge first." }
+        return nil
+    }
+
+    private func loginButtonTitle(for snapshot: CodexGPTAccountSnapshot) -> String {
+        if snapshot.hasActiveLogin {
+            return "Open On iPhone Again"
+        }
+        if snapshot.needsReauth || snapshot.status == .expired {
+            return "Sign In on iPhone Again"
+        }
+        return "Log In on iPhone"
+    }
+
+    private func statusIconName(for snapshot: CodexGPTAccountSnapshot) -> String {
+        switch snapshot.status {
+        case .authenticated:
+            return snapshot.needsReauth ? "exclamationmark.triangle.fill" : "checkmark.shield.fill"
+        case .loginPending:
+            return "arrow.up.forward.app.fill"
+        case .expired:
+            return "exclamationmark.triangle.fill"
+        case .notLoggedIn, .unknown:
+            return "person.crop.circle.badge.plus"
+        case .unavailable:
+            return "wifi.slash"
+        }
+    }
+
+    private func statusIconColor(for snapshot: CodexGPTAccountSnapshot) -> Color {
+        switch snapshot.status {
+        case .authenticated:
+            return snapshot.needsReauth ? .orange : .green
+        case .loginPending:
+            return .orange
+        case .expired:
+            return .red
+        case .notLoggedIn, .unknown, .unavailable:
+            return .secondary
+        }
+    }
+
+    private var canStartLogin: Bool {
+        codex.isConnected
+    }
+
+    private func startLogin() {
+        guard !isOpeningLogin else { return }
+        HapticFeedback.shared.triggerImpactFeedback()
+        guard canStartLogin else {
+            codex.gptAccountErrorMessage = "Connect to your bridge before opening ChatGPT sign-in."
+            return
+        }
+
+        isOpeningLogin = true
+        codex.gptAccountErrorMessage = nil
+
+        Task { @MainActor in
+            defer {
+                isOpeningLogin = false
+            }
+
+            do {
+                let authURL = try await codex.startOrResumeGPTLoginOnPhone()
+                await UIApplication.shared.open(authURL)
+            } catch {
+                codex.gptAccountErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelPendingLogin() {
+        guard !isCancellingLogin else { return }
+        isCancellingLogin = true
+        codex.gptAccountErrorMessage = nil
+
+        Task { @MainActor in
+            await codex.cancelGPTLogin()
+            await codex.refreshGPTAccountState()
+            isCancellingLogin = false
+        }
+    }
+
+    private func logout() {
+        guard !isLoggingOut else { return }
+        isLoggingOut = true
+        codex.gptAccountErrorMessage = nil
+
+        Task { @MainActor in
+            await codex.logoutGPTAccount()
+            await codex.refreshGPTAccountState()
+            isLoggingOut = false
         }
     }
 }

@@ -112,6 +112,10 @@ extension CodexService {
             if performInitialSync {
                 schedulePostConnectSyncPass()
             }
+            Task { @MainActor [weak self] in
+                await self?.refreshGPTAccountState()
+                self?.startGPTLoginSyncIfNeeded()
+            }
         } catch {
             let shouldResetSavedSession = recordTrustedReconnectFailureIfNeeded(
                 isTrustedReconnectAttempt: isTrustedReconnectAttempt
@@ -449,7 +453,7 @@ extension CodexService {
 
         guard needsTransportReset else {
             // A dead socket can still leave secure-handshake buffers behind; clear only transport-volatiles here.
-            resetSecureTransportState()
+            resetSecureTransportState(preservePendingQRBootstrapState: shouldForceQRBootstrapOnNextHandshake)
             return
         }
 
@@ -486,10 +490,14 @@ extension CodexService {
         return true
     }
 
-    // Keeps both the trusted Mac and the last saved relay session available after repeated
-    // reconnect failures so a manual reconnect can still try the existing session first.
+    // Drops only the stale saved relay session after repeated secure reconnect failures.
+    // This preserves the trusted Mac record, but stops looping on a dead session id forever.
     func recoverTrustedReconnectCandidate() {
-        secureConnectionState = .liveSessionUnresolved
+        if hasSavedRelaySession {
+            clearSavedRelaySession()
+        } else {
+            secureConnectionState = .liveSessionUnresolved
+        }
         lastErrorMessage = Self.trustedReconnectRecoveryMessage
     }
 
@@ -941,6 +949,20 @@ extension CodexService {
             || isLocalIPv6Host(host)
     }
 
+    // Chooses the most direct relay transport for LAN-style hosts plus private overlays like Tailscale.
+    // Tailscale's 100.64.0.0/10 range should bypass the WebSocket URL path that iOS may proxy.
+    func prefersDirectRelayTransport(for url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else {
+            return false
+        }
+
+        return host.hasSuffix(".local")
+            || isPrivateIPv4Host(host)
+            || isCarrierGradePrivateIPv4Host(host)
+            || isTailscaleMagicDNSHost(host)
+            || isLocalIPv6Host(host)
+    }
+
     private func isPrivateIPv4Host(_ host: String) -> Bool {
         let octets = host.split(separator: ".").compactMap { Int($0) }
         guard octets.count == 4 else {
@@ -959,6 +981,21 @@ extension CodexService {
         default:
             return false
         }
+    }
+
+    // Covers CGNAT/private-overlay ranges like Tailscale's default 100.x addresses.
+    private func isCarrierGradePrivateIPv4Host(_ host: String) -> Bool {
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4 else {
+            return false
+        }
+
+        return octets[0] == 100 && (64...127).contains(octets[1])
+    }
+
+    // Covers Tailscale hostnames that still resolve to the local/private overlay even without a raw 100.x QR URL.
+    private func isTailscaleMagicDNSHost(_ host: String) -> Bool {
+        host.hasSuffix(".ts.net") || host.hasSuffix(".beta.tailscale.net")
     }
 
     private func isLocalIPv6Host(_ host: String) -> Bool {

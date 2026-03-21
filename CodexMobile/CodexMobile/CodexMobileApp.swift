@@ -24,6 +24,14 @@ struct CodexMobileApp: App {
                 .task {
                     await codexService.requestNotificationPermissionOnFirstLaunchIfNeeded()
                 }
+                .onOpenURL { url in
+                    Task { @MainActor in
+                        guard CodexService.legacyGPTLoginCallbackEnabled else {
+                            return
+                        }
+                        await codexService.handleGPTLoginCallbackURL(url)
+                    }
+                }
         }
     }
 }

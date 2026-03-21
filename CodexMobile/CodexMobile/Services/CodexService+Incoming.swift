@@ -249,6 +249,12 @@ extension CodexService {
         case "thread/tokenUsage/updated":
             handleThreadTokenUsageUpdated(paramsObject)
 
+        case "account/updated":
+            handleGPTAccountUpdated(paramsObject)
+
+        case "account/login/completed":
+            handleGPTLoginCompletedNotification(paramsObject)
+
         case "account/rateLimits/updated":
             handleRateLimitsUpdated(paramsObject)
 

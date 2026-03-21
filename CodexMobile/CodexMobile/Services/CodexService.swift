@@ -320,6 +320,14 @@ final class CodexService {
     // Per-chat runtime overrides let the composer diverge from app-wide defaults.
     var threadRuntimeOverridesByThreadID: [String: CodexThreadRuntimeOverride] = [:]
     var selectedAccessMode: CodexAccessMode = .onRequest
+    // Bridge-owned ChatGPT auth snapshot used by Settings and voice gating.
+    var gptAccountSnapshot: CodexGPTAccountSnapshot = codexGPTAccountInitialSnapshot() {
+        didSet {
+            persistGPTAccountSnapshot(gptAccountSnapshot)
+        }
+    }
+    // Holds the most recent account-specific error without colliding with transport-level failures.
+    var gptAccountErrorMessage: String?
     var isLoadingModels = false
     var modelsErrorMessage: String?
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -401,6 +409,8 @@ final class CodexService {
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
     var postConnectSyncTask: Task<Void, Never>?
+    // Keeps the phone-side account UI in sync while ChatGPT login is being completed on the Mac.
+    var gptAccountLoginSyncTask: Task<Void, Never>?
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
@@ -557,6 +567,30 @@ final class CodexService {
             self.selectedAccessMode = parsedAccessMode
         } else {
             self.selectedAccessMode = .onRequest
+        }
+
+        if let persistedGPTAccountSnapshot = loadPersistedGPTAccountSnapshot() {
+            self.gptAccountSnapshot = persistedGPTAccountSnapshot
+        } else {
+            self.gptAccountSnapshot = codexGPTAccountInitialSnapshot()
+        }
+
+        if let pendingLogin = gptPendingLoginState,
+           !self.gptAccountSnapshot.isAuthenticated,
+           self.gptAccountSnapshot.status != .loginPending {
+            self.gptAccountSnapshot = CodexGPTAccountSnapshot(
+                status: .loginPending,
+                authMethod: .chatgpt,
+                email: nil,
+                displayName: nil,
+                planType: nil,
+                loginInFlight: true,
+                needsReauth: false,
+                expiresAt: pendingLogin.expiresAt,
+                tokenReady: false,
+                tokenUnavailableSince: nil,
+                updatedAt: .now
+            )
         }
 
         // Restore relay session from Keychain

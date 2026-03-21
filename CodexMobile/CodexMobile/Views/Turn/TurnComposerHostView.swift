@@ -30,6 +30,8 @@ struct TurnComposerHostView: View {
     let onOpenForkWorktree: () -> Void
     let onOpenWorktreeHandoff: () -> Void
     let onShowStatus: () -> Void
+    let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
+    let onTapVoice: () -> Void
     let onSend: () -> Void
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -106,6 +108,7 @@ struct TurnComposerHostView: View {
             isLoadingModels: codex.isLoadingModels,
             runtimeState: runtimeState,
             runtimeActions: runtimeActions,
+            voiceButtonPresentation: voiceButtonPresentation,
             selectedAccessMode: codex.selectedAccessMode,
             contextWindowUsage: codex.contextWindowUsageByThread[thread.id],
             rateLimitBuckets: codex.rateLimitBuckets,
@@ -138,6 +141,7 @@ struct TurnComposerHostView: View {
                 && !viewModel.isCreatingGitWorktree,
             onTapAddImage: { viewModel.openPhotoLibraryPicker(codex: codex) },
             onTapTakePhoto: { viewModel.openCamera(codex: codex) },
+            onTapVoice: onTapVoice,
             onTapCreateWorktree: onOpenWorktreeHandoff,
             onSetPlanModeArmed: viewModel.setPlanModeArmed,
             onRemoveAttachment: viewModel.removeComposerAttachment,

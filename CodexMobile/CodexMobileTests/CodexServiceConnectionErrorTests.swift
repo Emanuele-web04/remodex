@@ -137,6 +137,62 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testLanAddressStillRequiresLocalNetworkAuthorization() {
+        let service = CodexService()
+        let url = URL(string: "ws://192.168.1.31:9000/relay/session")!
+
+        XCTAssertTrue(service.requiresLocalNetworkAuthorization(for: url))
+        XCTAssertTrue(service.prefersDirectRelayTransport(for: url))
+    }
+
+    func testTailscaleAddressPrefersDirectRelayTransportWithoutLocalNetworkPrompt() {
+        let service = CodexService()
+        let url = URL(string: "ws://100.122.27.82:9000/relay/session")!
+
+        XCTAssertTrue(service.prefersDirectRelayTransport(for: url))
+        XCTAssertFalse(service.requiresLocalNetworkAuthorization(for: url))
+    }
+
+    func testTailscaleMagicDNSHostPrefersDirectRelayTransportWithoutLocalNetworkPrompt() {
+        let service = CodexService()
+        let url = URL(string: "ws://my-mac.tail-scale.ts.net:9000/relay/session")!
+
+        XCTAssertTrue(service.prefersDirectRelayTransport(for: url))
+        XCTAssertFalse(service.requiresLocalNetworkAuthorization(for: url))
+    }
+
+    func testDirectRelaySocketTimeoutRemainsRetryable() {
+        let service = CodexService()
+        let error = CodexServiceError.invalidInput(
+            "Connection timed out after 12s while opening the direct relay socket."
+        )
+
+        XCTAssertTrue(service.isRecoverableTransientConnectionError(error))
+        XCTAssertEqual(
+            service.userFacingConnectFailureMessage(error),
+            "Connection timed out. Check server/network."
+        )
+    }
+
+    func testPrepareForConnectionAttemptPreservesFreshQRHandshakeState() async {
+        let service = CodexService()
+        let payload = CodexPairingQRPayload(
+            v: codexPairingQRVersion,
+            relay: "ws://100.122.27.82:9000/relay",
+            sessionId: "session-123",
+            macDeviceId: "mac-123",
+            macIdentityPublicKey: Data(repeating: 1, count: 32).base64EncodedString(),
+            expiresAt: 1_800_000_000_000
+        )
+
+        service.rememberRelayPairing(payload)
+        XCTAssertEqual(service.secureConnectionState, .handshaking)
+
+        await service.prepareForConnectionAttempt(preserveReconnectIntent: true)
+
+        XCTAssertEqual(service.secureConnectionState, .handshaking)
+    }
+
     func testPrepareForConnectionAttemptKeepsThreadStateWhenSocketAlreadyDropped() async {
         let service = CodexService()
         let threadID = "thread-\(UUID().uuidString)"

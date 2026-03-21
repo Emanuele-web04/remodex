@@ -410,6 +410,25 @@ final class TurnViewModel {
         composerMentionedSkills.removeAll()
     }
 
+    // Appends spoken text into the composer without sending it automatically.
+    func appendVoiceTranscript(_ transcript: String) {
+        let normalizedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTranscript.isEmpty else {
+            return
+        }
+
+        if input.isEmpty {
+            input = normalizedTranscript
+            return
+        }
+
+        if input.last?.isWhitespace == true {
+            input += normalizedTranscript
+        } else {
+            input += " \(normalizedTranscript)"
+        }
+    }
+
     func setPlanModeArmed(_ isArmed: Bool) {
         isPlanModeArmed = isArmed
     }

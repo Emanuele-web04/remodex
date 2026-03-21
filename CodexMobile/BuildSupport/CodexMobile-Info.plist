@@ -50,6 +50,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>CodexMobile needs local network access to connect to your Codex app-server running on your Mac.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Remodex needs microphone access to record voice notes for ChatGPT transcription.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_remodex-permission._tcp</string>
