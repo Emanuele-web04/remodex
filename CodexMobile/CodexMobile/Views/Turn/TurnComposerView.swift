@@ -71,6 +71,7 @@ struct TurnComposerView: View {
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
+    let onSelectCustomSlashCommand: (CodexSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
@@ -178,6 +179,7 @@ struct TurnComposerView: View {
                             onSelectFileAutocomplete: onSelectFileAutocomplete,
                             onSelectSkillAutocomplete: onSelectSkillAutocomplete,
                             onSelectSlashCommand: onSelectSlashCommand,
+                            onSelectCustomSlashCommand: onSelectCustomSlashCommand,
                             onSelectCodeReviewTarget: onSelectCodeReviewTarget,
                             onSelectForkDestination: onSelectForkDestination,
                             onCloseSlashCommandPanel: onCloseSlashCommandPanel
@@ -233,6 +235,7 @@ private struct TurnComposerAutocompletePanels: View {
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
+    let onSelectCustomSlashCommand: (CodexSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
@@ -267,7 +270,11 @@ private struct TurnComposerAutocompletePanels: View {
                     isLoadingGitBranchTargets: state.isLoadingGitBranchTargets,
                     selectedGitBaseBranch: state.selectedGitBaseBranch,
                     gitDefaultBranch: state.gitDefaultBranch,
+                    customCommands: state.slashCommands,
+                    isLoadingCustomCommands: state.isLoadingSlashCommands,
+                    customCommandsErrorMessage: state.slashCommandsErrorMessage,
                     onSelectCommand: onSelectSlashCommand,
+                    onSelectCustomCommand: onSelectCustomSlashCommand,
                     onSelectReviewTarget: onSelectCodeReviewTarget,
                     onSelectForkDestination: onSelectForkDestination,
                     onClose: onCloseSlashCommandPanel
@@ -456,7 +463,10 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     showsGitBranchSelector: false,
                     isLoadingGitBranchTargets: false,
                     selectedGitBaseBranch: "",
-                    gitDefaultBranch: "main"
+                    gitDefaultBranch: "main",
+                    slashCommands: [],
+                    isLoadingSlashCommands: false,
+                    slashCommandsErrorMessage: nil
                 ),
                 remainingAttachmentSlots: 4,
                 isComposerInteractionLocked: false,
@@ -530,6 +540,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 onSelectFileAutocomplete: { _ in },
                 onSelectSkillAutocomplete: { _ in },
                 onSelectSlashCommand: { _ in },
+                onSelectCustomSlashCommand: { _ in },
                 onSelectCodeReviewTarget: { _ in },
                 onSelectForkDestination: { _ in },
                 onCloseSlashCommandPanel: {},

@@ -399,6 +399,10 @@ final class CodexService {
     var hasResolvedRateLimitsSnapshot = false
     var isLoadingRateLimits = false
     var rateLimitsErrorMessage: String?
+    var slashCommands: [CodexSlashCommand] = []
+    var isLoadingSlashCommands = false
+    var slashCommandsErrorMessage: String?
+    var lastSlashCommandsRefreshAt: Date?
     var threadIdByTurnID: [String: String] = [:]
     var hydratedThreadIDs: Set<String> = []
     var loadingThreadIDs: Set<String> = []

@@ -68,7 +68,10 @@ struct TurnComposerHostView: View {
             showsGitBranchSelector: showsGitControls,
             isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
-            gitDefaultBranch: viewModel.gitDefaultBranch
+            gitDefaultBranch: viewModel.gitDefaultBranch,
+            slashCommands: codex.slashCommands,
+            isLoadingSlashCommands: codex.isLoadingSlashCommands,
+            slashCommandsErrorMessage: codex.slashCommandsErrorMessage
         )
         let accessoryState = TurnComposerAccessoryState(
             queuedDrafts: viewModel.queuedDraftsList(codex: codex, threadID: thread.id),
@@ -167,6 +170,7 @@ struct TurnComposerHostView: View {
             onInputChangedForSlashCommandAutocomplete: { text in
                 viewModel.onInputChangedForSlashCommandAutocomplete(
                     text,
+                    codex: codex,
                     activeTurnID: activeTurnID
                 )
             },
@@ -188,6 +192,7 @@ struct TurnComposerHostView: View {
                     viewModel.onSelectSlashCommand(command)
                 }
             },
+            onSelectCustomSlashCommand: viewModel.onSelectCustomSlashCommand,
             onSelectCodeReviewTarget: { target in
                 viewModel.prepareForThreadRerouteFromSlashCommand()
                 onStartCodeReviewThread(target)

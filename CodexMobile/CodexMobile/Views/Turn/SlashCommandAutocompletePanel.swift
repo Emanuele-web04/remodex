@@ -15,7 +15,11 @@ struct SlashCommandAutocompletePanel: View {
     let isLoadingGitBranchTargets: Bool
     let selectedGitBaseBranch: String
     let gitDefaultBranch: String
+    let customCommands: [CodexSlashCommand]
+    let isLoadingCustomCommands: Bool
+    let customCommandsErrorMessage: String?
     let onSelectCommand: (TurnComposerSlashCommand) -> Void
+    let onSelectCustomCommand: (CodexSlashCommand) -> Void
     let onSelectReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onClose: () -> Void
@@ -53,13 +57,28 @@ struct SlashCommandAutocompletePanel: View {
     @ViewBuilder
     private func commandList(query: String) -> some View {
         let items = TurnComposerSlashCommand.filtered(matching: query, within: availableCommands)
+        let customItems = filteredCustomCommands(matching: query)
 
-        if items.isEmpty {
-            Text("No commands for /\(query)")
-                .font(AppFont.footnote())
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+        if items.isEmpty && customItems.isEmpty {
+            if isLoadingCustomCommands {
+                Text("Loading commands...")
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            } else if let customCommandsErrorMessage, !customCommandsErrorMessage.isEmpty {
+                Text(customCommandsErrorMessage)
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            } else {
+                Text("No commands for /\(query)")
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            }
         } else {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -100,11 +119,57 @@ struct SlashCommandAutocompletePanel: View {
                         .buttonStyle(AutocompleteRowButtonStyle())
                         .disabled(!isEnabled)
                     }
+
+                    if !customItems.isEmpty {
+                        Divider()
+                            .padding(.horizontal, 12)
+
+                        ForEach(customItems) { item in
+                            Button {
+                                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                                onSelectCustomCommand(item)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: item.symbolName?.isEmpty == false ? item.symbolName! : "terminal")
+                                        .font(AppFont.system(size: 15, weight: .semibold))
+                                        .foregroundStyle(.primary)
+                                        .frame(width: 22)
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(item.title)
+                                            .font(AppFont.subheadline(weight: .semibold))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+
+                                        if let subtitle = item.subtitle, !subtitle.isEmpty {
+                                            Text(subtitle)
+                                                .font(AppFont.caption2())
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                    }
+
+                                    Spacer(minLength: 8)
+
+                                    Text(item.normalizedToken)
+                                        .font(AppFont.footnote())
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(height: Self.rowHeight)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(AutocompleteRowButtonStyle())
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .scrollIndicators(.visible)
-            .frame(height: Self.visibleListHeight(for: items.count))
+            .frame(height: Self.visibleListHeight(for: items.count + customItems.count))
         }
     }
 
@@ -348,5 +413,23 @@ struct SlashCommandAutocompletePanel: View {
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .padding(.bottom, 6)
+    }
+
+    private func filteredCustomCommands(matching query: String) -> [CodexSlashCommand] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmedQuery.isEmpty else {
+            return customCommands
+        }
+
+        return customCommands.filter { command in
+            let blob = [
+                command.title,
+                command.subtitle ?? "",
+                command.normalizedToken,
+            ]
+            .joined(separator: " ")
+            .lowercased()
+            return blob.contains(trimmedQuery)
+        }
     }
 }

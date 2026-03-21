@@ -698,6 +698,7 @@ final class TurnViewModel {
     // Keeps `/` command discovery separate from @/$ autocomplete while supporting a bare trailing slash.
     func onInputChangedForSlashCommandAutocomplete(
         _ text: String,
+        codex: CodexService,
         activeTurnID: String?
     ) {
         clearComposerReviewSelectionIfNeededForInput(text)
@@ -724,6 +725,7 @@ final class TurnViewModel {
         resetFileAutocompleteState()
         resetSkillAutocompleteState()
         slashCommandPanelState = .commands(query: token.query)
+        codex.refreshSlashCommandsIfNeeded()
     }
 
     // Turns the selected slash command into the matching inline composer behavior.
@@ -748,6 +750,25 @@ final class TurnViewModel {
     func onSelectCodeReviewTarget(_ target: TurnComposerReviewTarget) {
         removeTrailingSlashCommandTokenFromInputIfNeeded()
         armCodeReviewSelection(command: .codeReview, target: target)
+    }
+
+    func onSelectCustomSlashCommand(_ command: CodexSlashCommand) {
+        let normalizedToken = command.normalizedToken
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedToken.isEmpty else {
+            resetSlashCommandState(clearPendingSelection: true)
+            return
+        }
+
+        if let updatedInput = Self.replacingTrailingSlashCommandToken(in: input, with: normalizedToken) {
+            input = updatedInput
+        } else if input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            input = normalizedToken
+        } else {
+            input = "\(input) \(normalizedToken)"
+        }
+
+        resetSlashCommandState(clearPendingSelection: true)
     }
 
     // Keeps slash token cleanup and submenu dismissal consistent before a fork flow reroutes threads.
@@ -893,7 +914,10 @@ final class TurnViewModel {
 
     // Sends a composer payload, queueing follow-ups while the current run is still active.
     func sendTurn(codex: CodexService, threadID: String) {
-        let payload = buildPayloadWithMentions()
+        let payload = expandSlashCommandsIfNeeded(
+            in: buildPayloadWithMentions(),
+            codex: codex
+        )
         let attachments = readyComposerAttachments
         let skillMentions = composerMentionedSkills.map {
             CodexTurnSkillMention(id: $0.name, name: $0.name, path: $0.path)
@@ -1804,6 +1828,41 @@ final class TurnViewModel {
         }
 
         return "\(cannedPrompt)\n\n\(trimmed)"
+    }
+
+    private func expandSlashCommandsIfNeeded(
+        in payload: String,
+        codex: CodexService
+    ) -> String {
+        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else {
+            return payload
+        }
+
+        let parts = trimmed.split(whereSeparator: { $0.isWhitespace })
+        guard let rawToken = parts.first else {
+            return payload
+        }
+
+        let token = String(rawToken)
+        guard let command = codex.slashCommands.first(where: {
+            $0.normalizedToken.caseInsensitiveCompare(token) == .orderedSame
+        }) else {
+            return payload
+        }
+
+        guard let content = command.content?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !content.isEmpty else {
+            return payload
+        }
+
+        let args = trimmed.dropFirst(token.count)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if args.isEmpty {
+            return content
+        }
+
+        return "\(content)\n\nInput: \(args)"
     }
 
     // Replaces inline `@filename` with `@fullpath` for each mentioned file.
