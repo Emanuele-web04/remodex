@@ -30,6 +30,7 @@ struct TurnComposerView: View {
 
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
+    let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
 
     let selectedAccessMode: CodexAccessMode
     let contextWindowUsage: ContextWindowUsage?
@@ -59,6 +60,7 @@ struct TurnComposerView: View {
     let canHandOffToWorktree: Bool
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
+    let onTapVoice: () -> Void
     let onTapCreateWorktree: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
     let onRemoveAttachment: (String) -> Void
@@ -155,8 +157,10 @@ struct TurnComposerView: View {
                     isQueuePaused: isQueuePaused,
                     activeTurnID: activeTurnID,
                     isThreadRunning: isThreadRunning,
+                    voiceButtonPresentation: voiceButtonPresentation,
                     onTapAddImage: onTapAddImage,
                     onTapTakePhoto: onTapTakePhoto,
+                    onTapVoice: onTapVoice,
                     onSetPlanModeArmed: onSetPlanModeArmed,
                     onResumeQueue: onResumeQueue,
                     onStopTurn: onStopTurn,
@@ -481,6 +485,14 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     selectReasoning: { _ in },
                     selectServiceTier: { _ in }
                 ),
+                voiceButtonPresentation: TurnComposerVoiceButtonPresentation(
+                    systemImageName: "mic.fill",
+                    foregroundColor: .white,
+                    backgroundColor: .black,
+                    accessibilityLabel: "Start voice transcription",
+                    isDisabled: false,
+                    showsProgress: false
+                ),
                 selectedAccessMode: .onRequest,
                 contextWindowUsage: nil,
                 rateLimitBuckets: [],
@@ -507,6 +519,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 canHandOffToWorktree: false,
                 onTapAddImage: {},
                 onTapTakePhoto: {},
+                onTapVoice: {},
                 onTapCreateWorktree: {},
                 onSetPlanModeArmed: { _ in },
                 onRemoveAttachment: { _ in },

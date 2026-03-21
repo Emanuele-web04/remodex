@@ -24,8 +24,10 @@ struct ComposerBottomBar: View {
     let isQueuePaused: Bool
     let activeTurnID: String?
     let isThreadRunning: Bool
+    let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
+    let onTapVoice: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
     let onResumeQueue: () -> Void
     let onStopTurn: (String?) -> Void
@@ -97,6 +99,15 @@ struct ComposerBottomBar: View {
 
             Button {
                 HapticFeedback.shared.triggerImpactFeedback()
+                onTapVoice()
+            } label: {
+                voiceButtonLabel
+            }
+            .disabled(voiceButtonPresentation.isDisabled)
+            .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback()
                 onSend()
             } label: {
                 Image(systemName: "arrow.up")
@@ -116,6 +127,21 @@ struct ComposerBottomBar: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 10)
         .padding(.top, 10)
+    }
+
+    private var voiceButtonLabel: some View {
+        Group {
+            if voiceButtonPresentation.showsProgress {
+                ProgressView()
+                    .tint(voiceButtonPresentation.foregroundColor)
+            } else {
+                Image(systemName: voiceButtonPresentation.systemImageName)
+                    .font(AppFont.system(size: 12, weight: .bold))
+                    .foregroundStyle(voiceButtonPresentation.foregroundColor)
+            }
+        }
+        .frame(width: 32, height: 32)
+        .background(voiceButtonPresentation.backgroundColor, in: Circle())
     }
 
     // MARK: - Menus
@@ -313,4 +339,14 @@ struct ComposerBottomBar: View {
         .foregroundStyle(metaLabelColor)
         .contentShape(Rectangle())
     }
+}
+
+// Keeps the mic button state and styling decisions outside the layout code.
+struct TurnComposerVoiceButtonPresentation {
+    let systemImageName: String
+    let foregroundColor: Color
+    let backgroundColor: Color
+    let accessibilityLabel: String
+    let isDisabled: Bool
+    let showsProgress: Bool
 }

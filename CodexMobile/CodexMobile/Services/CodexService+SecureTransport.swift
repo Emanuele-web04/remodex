@@ -277,7 +277,7 @@ extension CodexService {
     }
 
     // Resets volatile secure state while preserving the trusted-device registry.
-    func resetSecureTransportState() {
+    func resetSecureTransportState(preservePendingQRBootstrapState: Bool = false) {
         secureSession = nil
         pendingHandshake = nil
         let continuations = pendingSecureControlContinuations
@@ -295,7 +295,13 @@ extension CodexService {
         }
 
         if shouldForceQRBootstrapOnNextHandshake, normalizedRelaySessionId != nil {
-            secureConnectionState = trustedMacRegistry.records[relayMacDeviceId ?? ""] == nil ? .handshaking : .trustedMac
+            // Fresh scans should stay visually "in progress" while the connect path is spinning up,
+            // but real disconnects still fall back to a stable saved-pair/not-paired presentation.
+            if preservePendingQRBootstrapState {
+                secureConnectionState = trustedMacRegistry.records[relayMacDeviceId ?? ""] == nil ? .handshaking : .trustedMac
+            } else {
+                secureConnectionState = trustedMacRegistry.records[relayMacDeviceId ?? ""] == nil ? .notPaired : .trustedMac
+            }
             secureMacFingerprint = normalizedRelayMacIdentityPublicKey.map { codexSecureFingerprint(for: $0) }
             return
         }
@@ -556,10 +562,13 @@ private extension CodexService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(requestBody)
 
+        let session = trustedSessionResolveURLSession(for: resolveURL)
+        defer { session.invalidateAndCancel() }
+
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             throw CodexTrustedSessionResolveError.network("Could not reach the trusted Mac relay. Check your connection and try again.")
         }
@@ -651,6 +660,22 @@ private extension CodexService {
         }
 
         return components.url
+    }
+
+    // Uses a non-proxying URLSession for local/private-overlay relays so trusted reconnect
+    // avoids the same iOS proxy path that can break direct websocket pairing.
+    private func trustedSessionResolveURLSession(for url: URL) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.allowsCellularAccess = true
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
+
+        if prefersDirectRelayTransport(for: url) {
+            configuration.connectionProxyDictionary = [:]
+        }
+
+        return URLSession(configuration: configuration)
     }
 
     /// Waits for a serverHello whose echoed clientNonce matches the one we sent.

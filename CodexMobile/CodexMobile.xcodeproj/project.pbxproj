@@ -34,6 +34,7 @@
 		D27B9CA5F0B60ECA8AF38016 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */; };
 		E1A2B3C4D5E6F708192A3B4C /* QRScannerPairingValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */; };
+		F1B2C3D4E5F60718293A4B10 /* CodexGPTAccountTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -82,6 +83,7 @@
 		D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileUITests.swift; sourceTree = "<group>"; };
 		E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QRScannerPairingValidatorTests.swift; sourceTree = "<group>"; };
 		F0EE6A924EE6B288E7D0DFE1 /* CodexMobileUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexGPTAccountTests.swift; sourceTree = "<group>"; };
 		FBC8EB1341C49A392A43BFB3 /* CodexMobileTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -132,6 +134,7 @@
 				E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */,
 				2A6D4B8C1E3F507192A4B6C9 /* CodexStatusTests.swift */,
 				6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */,
+				F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */,
 				7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */,
 				B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */,
 				8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */,
@@ -355,6 +358,7 @@
 				E1A2B3C4D5E6F708192A3B4C /* QRScannerPairingValidatorTests.swift in Sources */,
 				2A6D4B8C1E3F507192A4B6C8 /* CodexStatusTests.swift in Sources */,
 				6F8E129A7BC34A12D45E6F70 /* CodexThreadStartProjectBindingTests.swift in Sources */,
+				F1B2C3D4E5F60718293A4B10 /* CodexGPTAccountTests.swift in Sources */,
 				7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */,
 				B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */,
 				8CE11223A4B5C6D7E8F90123 /* SidebarRunBadgePerformanceTests.swift in Sources */,
@@ -599,7 +603,7 @@
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 104;
+				CURRENT_PROJECT_VERSION = 112;
 				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -646,7 +650,7 @@
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 104;
+				CURRENT_PROJECT_VERSION = 112;
 				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;

@@ -14,6 +14,36 @@ import Security
 // reopening a chat, so the limit needs enough headroom for background `thread/read` catches too.
 let codexWebSocketMaximumMessageSizeBytes = 16 * 1024 * 1024
 
+private enum CodexRelayTransportPreference {
+    case manualTCP
+    case networkWebSocket
+
+    var logLabel: String {
+        switch self {
+        case .manualTCP:
+            return "manual TCP websocket"
+        case .networkWebSocket:
+            return "NWConnection websocket"
+        }
+    }
+}
+
+private struct CodexConnectionReadyWaitConfiguration {
+    let logLabel: String
+    let timeoutNanoseconds: UInt64
+    let timeoutMessage: String
+}
+
+private struct CodexManualWebSocketEndpoint {
+    let host: String
+    let port: NWEndpoint.Port
+    let scheme: String
+}
+
+private func codexLogPairingTransport(_ message: String) {
+    print("[PAIRING] \(message)")
+}
+
 extension CodexService {
     // Rejects oversized relay frames before Network.framework turns them into a raw EMSGSIZE failure.
     func validateOutgoingWebSocketMessageSize(_ text: String) throws {
@@ -279,53 +309,41 @@ extension CodexService {
             throw CodexServiceError.invalidServerURL(url.absoluteString)
         }
 
-        if requiresLocalNetworkAuthorization(for: url) {
-            do {
-                return try await establishURLSessionWebSocketConnection(url: url, token: token, role: role)
-            } catch {
-                let nsError = error as NSError
-                if nsError.domain == NSURLErrorDomain,
-                   nsError.code == NSURLErrorNotConnectedToInternet {
-                    print("[PAIRING] URLSession local websocket reported offline; retrying with manual TCP websocket fallback")
-                    return try await establishManualTCPWebSocketConnection(url: url, token: token, role: role)
-                }
-                throw error
-            }
-        }
+        let preference = relayTransportPreference(for: url)
+        codexLogPairingTransport("using \(preference.logLabel) for \(url.host ?? "unknown-host")")
 
-        return try await establishNWWebSocketConnection(url: url, token: token, role: role)
+        switch preference {
+        case .manualTCP:
+            return try await establishManualTCPWebSocketConnection(url: url, token: token, role: role)
+        case .networkWebSocket:
+            return try await establishNWWebSocketConnection(url: url, token: token, role: role)
+        }
     }
 
-    // Mirrors litter's raw TCP websocket client so LAN pairing can bypass iOS URL loading policy bugs.
+    // Mirrors litter's raw TCP websocket client so LAN/private-overlay pairing can bypass iOS proxy/WebSocket API bugs.
     func establishManualTCPWebSocketConnection(
         url: URL,
         token: String,
         role: String? = nil
     ) async throws -> CodexWebSocketTransport {
-        guard let host = url.host else {
-            throw CodexServiceError.invalidServerURL(url.absoluteString)
-        }
-        let scheme = (url.scheme ?? "ws").lowercased()
-        let defaultPort: UInt16 = (scheme == "wss") ? 443 : 80
-        guard let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? Int(defaultPort))) else {
-            throw CodexServiceError.invalidServerURL(url.absoluteString)
-        }
+        let endpoint = try manualWebSocketEndpoint(from: url)
 
         let parameters = NWParameters(
-            tls: (scheme == "wss") ? NWProtocolTLS.Options() : nil,
+            tls: (endpoint.scheme == "wss") ? NWProtocolTLS.Options() : nil,
             tcp: NWProtocolTCP.Options()
         )
-        let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
-        let connectionTimeoutNanoseconds: UInt64 = 12_000_000_000
-
-        print("[PAIRING] opening manual TCP websocket to \(url.absoluteString)")
-        try await waitUntilManualConnectionReady(
-            connection,
-            timeoutNanoseconds: connectionTimeoutNanoseconds
+        let connection = NWConnection(host: NWEndpoint.Host(endpoint.host), port: endpoint.port, using: parameters)
+        let waitConfiguration = CodexConnectionReadyWaitConfiguration(
+            logLabel: "manual TCP websocket",
+            timeoutNanoseconds: 12_000_000_000,
+            timeoutMessage: "Connection timed out after 12s while opening the direct relay socket."
         )
+
+        codexLogPairingTransport("opening manual TCP websocket to \(url.absoluteString)")
+        try await waitUntilManualConnectionReady(connection, configuration: waitConfiguration)
         do {
             try await performManualWebSocketHandshake(on: connection, url: url, token: token, role: role)
-            print("[PAIRING] manual TCP websocket connected")
+            codexLogPairingTransport("manual TCP websocket connected")
         } catch {
             connection.cancel()
             throw error
@@ -379,50 +397,15 @@ extension CodexService {
         let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
         parameters.defaultProtocolStack.applicationProtocols.insert(webSocketOptions, at: 0)
 
-        print("[PAIRING] opening NWConnection to \(url.absoluteString)")
+        codexLogPairingTransport("opening NWConnection websocket to \(url.absoluteString)")
         let connection = NWConnection(to: .url(url), using: parameters)
-        let connectionTimeoutNanoseconds: UInt64 = 12_000_000_000
+        let waitConfiguration = CodexConnectionReadyWaitConfiguration(
+            logLabel: "NWConnection websocket",
+            timeoutNanoseconds: 12_000_000_000,
+            timeoutMessage: "Connection timed out after 12s while opening the relay websocket."
+        )
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let lock = NSLock()
-            var didFinish = false
-            var timeoutTask: Task<Void, Never>?
-
-            func finish(_ result: Result<Void, Error>) {
-                lock.lock()
-                defer { lock.unlock() }
-                guard !didFinish else { return }
-                didFinish = true
-                timeoutTask?.cancel()
-                continuation.resume(with: result)
-                // Ignore future state transitions after first completion.
-                connection.stateUpdateHandler = { _ in }
-            }
-
-            connection.stateUpdateHandler = { state in
-                print("[PAIRING] NWConnection state: \(state)")
-                switch state {
-                case .ready:
-                    finish(.success(()))
-                case .failed(let error):
-                    print("[PAIRING] NWConnection failed: \(error)")
-                    finish(.failure(error))
-                case .cancelled:
-                    finish(.failure(CodexServiceError.disconnected))
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: webSocketQueue)
-
-            timeoutTask = Task { [weak connection] in
-                try? await Task.sleep(nanoseconds: connectionTimeoutNanoseconds)
-                guard !Task.isCancelled else { return }
-                connection?.cancel()
-                finish(.failure(CodexServiceError.invalidInput("Connection timed out after 12s")))
-            }
-        }
+        try await waitUntilConnectionReady(connection, configuration: waitConfiguration)
 
         connection.stateUpdateHandler = { [weak self] state in
             Task { @MainActor [weak self] in
@@ -472,7 +455,7 @@ extension CodexService {
         task.maximumMessageSize = codexWebSocketMaximumMessageSizeBytes
         let connectionTimeoutNanoseconds: UInt64 = 12_000_000_000
 
-        print("[PAIRING] opening URLSessionWebSocketTask to \(url.absoluteString)")
+        codexLogPairingTransport("opening URLSessionWebSocketTask to \(url.absoluteString)")
         task.resume()
         webSocketSessionDelegate = delegate
 
@@ -488,9 +471,9 @@ extension CodexService {
 
         do {
             try await delegate.waitForOpen()
-            print("[PAIRING] URLSessionWebSocketTask connected")
+            codexLogPairingTransport("URLSessionWebSocketTask connected")
         } catch {
-            print("[PAIRING] URLSessionWebSocketTask failed: \(urlSessionWebSocketDebugDescription(for: error))")
+            codexLogPairingTransport("URLSessionWebSocketTask failed: \(urlSessionWebSocketDebugDescription(for: error))")
             task.cancel(with: .goingAway, reason: nil)
             session.invalidateAndCancel()
             webSocketSessionDelegate = nil
@@ -558,14 +541,24 @@ extension CodexService {
     }
 
     // Waits for plain TCP readiness before sending the manual websocket upgrade request.
-    func waitUntilManualConnectionReady(
+    private func waitUntilManualConnectionReady(
         _ connection: NWConnection,
-        timeoutNanoseconds: UInt64
+        configuration: CodexConnectionReadyWaitConfiguration
+    ) async throws {
+        try await waitUntilConnectionReady(connection, configuration: configuration)
+    }
+
+    // Normalizes the one-shot NWConnection wait flow so timeout/cancel races surface a useful cause.
+    private func waitUntilConnectionReady(
+        _ connection: NWConnection,
+        configuration: CodexConnectionReadyWaitConfiguration
     ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let lock = NSLock()
             var didFinish = false
             var timeoutTask: Task<Void, Never>?
+            var lastObservedStateDescription = "setup"
+            var lastWaitingErrorDescription: String?
 
             func finish(_ result: Result<Void, Error>) {
                 lock.lock()
@@ -574,14 +567,20 @@ extension CodexService {
                 didFinish = true
                 timeoutTask?.cancel()
                 continuation.resume(with: result)
+                // Ignore future state transitions after first completion.
+                connection.stateUpdateHandler = { _ in }
             }
 
             connection.stateUpdateHandler = { state in
-                print("[PAIRING] manual TCP state: \(state)")
+                lastObservedStateDescription = String(describing: state)
+                codexLogPairingTransport("\(configuration.logLabel) state: \(state)")
                 switch state {
                 case .ready:
                     finish(.success(()))
+                case .waiting(let error):
+                    lastWaitingErrorDescription = String(describing: error)
                 case .failed(let error):
+                    codexLogPairingTransport("\(configuration.logLabel) failed: \(error)")
                     finish(.failure(error))
                 case .cancelled:
                     finish(.failure(CodexServiceError.disconnected))
@@ -592,10 +591,16 @@ extension CodexService {
 
             connection.start(queue: webSocketQueue)
             timeoutTask = Task { [weak connection] in
-                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                try? await Task.sleep(nanoseconds: configuration.timeoutNanoseconds)
                 guard !Task.isCancelled else { return }
+                let timeoutError = CodexServiceError.invalidInput(configuration.timeoutMessage)
+                var timeoutLog = "\(configuration.logLabel) timed out while state=\(lastObservedStateDescription)"
+                if let lastWaitingErrorDescription {
+                    timeoutLog += " waitingError=\(lastWaitingErrorDescription)"
+                }
+                codexLogPairingTransport(timeoutLog)
+                finish(.failure(timeoutError))
                 connection?.cancel()
-                finish(.failure(CodexServiceError.invalidInput("Connection timed out after 12s")))
             }
         }
     }
@@ -625,6 +630,7 @@ extension CodexService {
         }
         requestLines.append(contentsOf: ["", ""])
 
+        codexLogPairingTransport("manual TCP websocket sending upgrade request for path=\(path)")
         try await sendRaw(Data(requestLines.joined(separator: "\r\n").utf8), on: connection)
 
         var headerBytes = Data()
@@ -633,6 +639,7 @@ extension CodexService {
                 let headerData = Data(headerBytes[..<range.upperBound])
                 manualWebSocketReadBuffer = Data(headerBytes[range.upperBound...])
                 try validateManualWebSocketHandshakeResponse(headerData: headerData, key: key)
+                codexLogPairingTransport("manual TCP websocket upgrade accepted")
                 return
             }
             guard let chunk = try await receiveRaw(on: connection) else {
@@ -643,6 +650,24 @@ extension CodexService {
                 throw CodexServiceError.invalidInput("Relay handshake response was too large")
             }
         }
+    }
+
+    private func relayTransportPreference(for url: URL) -> CodexRelayTransportPreference {
+        prefersDirectRelayTransport(for: url) ? .manualTCP : .networkWebSocket
+    }
+
+    private func manualWebSocketEndpoint(from url: URL) throws -> CodexManualWebSocketEndpoint {
+        guard let host = url.host else {
+            throw CodexServiceError.invalidServerURL(url.absoluteString)
+        }
+
+        let scheme = (url.scheme ?? "ws").lowercased()
+        let defaultPort: UInt16 = (scheme == "wss") ? 443 : 80
+        guard let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? Int(defaultPort))) else {
+            throw CodexServiceError.invalidServerURL(url.absoluteString)
+        }
+
+        return CodexManualWebSocketEndpoint(host: host, port: port, scheme: scheme)
     }
 
     func manualWebSocketPath(from url: URL) -> String {
