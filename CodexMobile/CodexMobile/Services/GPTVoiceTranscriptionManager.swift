@@ -56,7 +56,8 @@ enum GPTVoiceTranscriptionError: LocalizedError {
 final class GPTVoiceTranscriptionManager: ObservableObject {
     private let audioSession = AVAudioSession.sharedInstance()
     private static let targetSampleRate: Double = 24_000
-    private static let maxAudioLevels = 60
+    // Keeps enough metering history for the capsule to resample across the full composer width.
+    private static let maxAudioLevels = 240
 
     private var engine: AVAudioEngine?
     private let collector = AudioBufferCollector()

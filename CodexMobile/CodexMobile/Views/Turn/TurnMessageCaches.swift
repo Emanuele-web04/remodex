@@ -94,6 +94,7 @@ struct MessageRowRenderModel {
     let fileChangeGroups: [FileChangeGroup]
     let thinkingContent: ThinkingDisclosureContent?
     let thinkingText: String?
+    let thinkingActivityPreview: String?
     let commandStatus: CommandExecutionStatusModel?
 
     static let empty = MessageRowRenderModel(
@@ -103,6 +104,7 @@ struct MessageRowRenderModel {
         fileChangeGroups: [],
         thinkingContent: nil,
         thinkingText: nil,
+        thinkingActivityPreview: nil,
         commandStatus: nil
     )
 }
@@ -136,6 +138,7 @@ enum MessageRowRenderModelCache {
                 fileChangeGroups: [],
                 thinkingContent: nil,
                 thinkingText: nil,
+                thinkingActivityPreview: nil,
                 commandStatus: nil
             )
         case .user:
@@ -144,6 +147,9 @@ enum MessageRowRenderModelCache {
             switch message.kind {
             case .thinking:
                 let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(from: message.text)
+                let thinkingActivityPreview = thinkingText.isEmpty
+                    ? nil
+                    : ThinkingDisclosureParser.compactActivityPreview(fromNormalizedText: thinkingText)
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
                     mermaidContent: nil,
@@ -153,6 +159,7 @@ enum MessageRowRenderModelCache {
                         ? ThinkingDisclosureContent(sections: [], fallbackText: "")
                         : ThinkingDisclosureContentCache.content(messageID: message.id, text: thinkingText),
                     thinkingText: thinkingText,
+                    thinkingActivityPreview: thinkingActivityPreview,
                     commandStatus: nil
                 )
             case .fileChange:
@@ -169,8 +176,11 @@ enum MessageRowRenderModelCache {
                     fileChangeGroups: FileChangeGroupingCache.grouped(messageID: message.id, entries: allEntries),
                     thinkingContent: nil,
                     thinkingText: nil,
+                    thinkingActivityPreview: nil,
                     commandStatus: nil
                 )
+            case .toolActivity:
+                return .empty
             case .commandExecution:
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
@@ -179,6 +189,7 @@ enum MessageRowRenderModelCache {
                     fileChangeGroups: [],
                     thinkingContent: nil,
                     thinkingText: nil,
+                    thinkingActivityPreview: nil,
                     commandStatus: CommandExecutionStatusCache.status(messageID: message.id, text: displayText)
                 )
             case .subagentAction, .plan, .userInputPrompt, .chat:

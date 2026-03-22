@@ -14,6 +14,10 @@ final class ContentViewModel {
     private var lastSidebarOpenSyncAt: Date = .distantPast
     private let autoReconnectBackoffNanoseconds: [UInt64] = [1_000_000_000, 3_000_000_000]
     private(set) var isRunningAutoReconnect = false
+    // Test hooks keep reconnect verification fast without changing production retry behavior.
+    @ObservationIgnored var reconnectAttemptLimitOverride: Int?
+    @ObservationIgnored var connectOverride: ((CodexService, String) async throws -> Void)?
+    @ObservationIgnored var reconnectSleepOverride: ((UInt64) async -> Void)?
 
     var isAttemptingAutoReconnect: Bool {
         isRunningAutoReconnect
@@ -139,11 +143,12 @@ final class ContentViewModel {
         defer { isRunningAutoReconnect = false }
 
         var attempt = 0
-        let maxAttempts = 20
 
-        // Keep trying while the relay pairing is still valid.
-        // This lets network changes recover on their own instead of dropping back to a manual reconnect button.
+        let maxAttempts = reconnectAttemptLimitOverride ?? 50
+
+        // Keep retryable reconnects alive until the socket recovers or the pairing becomes invalid.
         while codex.shouldAutoReconnectOnForeground, attempt < maxAttempts {
+
             guard let fullURL = await preferredReconnectURL(codex: codex) else {
                 codex.shouldAutoReconnectOnForeground = false
                 codex.connectionRecoveryState = .idle
@@ -158,7 +163,7 @@ final class ContentViewModel {
             }
 
             if codex.isConnecting {
-                try? await Task.sleep(nanoseconds: 300_000_000)
+                await sleepForReconnectBackoff(300_000_000)
                 continue
             }
             do {
@@ -201,7 +206,7 @@ final class ContentViewModel {
                 let backoffIndex = min(attempt, autoReconnectBackoffNanoseconds.count - 1)
                 let backoff = autoReconnectBackoffNanoseconds[backoffIndex]
                 attempt += 1
-                try? await Task.sleep(nanoseconds: backoff)
+                await sleepForReconnectBackoff(backoff)
             }
         }
 
@@ -222,6 +227,11 @@ extension ContentViewModel {
     }
 
     func connect(codex: CodexService, serverURL: String) async throws {
+        if let connectOverride {
+            try await connectOverride(codex, serverURL)
+            return
+        }
+
         try await codex.connect(
             serverURL: serverURL,
             token: "",
@@ -384,5 +394,15 @@ extension ContentViewModel {
             return nil
         }
         return "\(relayURL)/\(sessionId)"
+    }
+
+    // Centralizes reconnect sleeps so tests can skip real-time waits while preserving backoff logic.
+    private func sleepForReconnectBackoff(_ nanoseconds: UInt64) async {
+        if let reconnectSleepOverride {
+            await reconnectSleepOverride(nanoseconds)
+            return
+        }
+
+        try? await Task.sleep(nanoseconds: nanoseconds)
     }
 }

@@ -403,6 +403,47 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(messages[0].planState?.steps.last?.status, .inProgress)
     }
 
+    func testCompletedPlanDoesNotStayPinnedInConversationAccessory() {
+        let completedPlan = CodexMessage(
+            threadId: "thread-\(UUID().uuidString)",
+            role: .system,
+            kind: .plan,
+            text: "All steps are done.",
+            isStreaming: false,
+            planState: CodexPlanState(
+                explanation: "The plan finished successfully.",
+                steps: [
+                    CodexPlanStep(step: "Inspect the current behavior", status: .completed),
+                    CodexPlanStep(step: "Implement the fix", status: .completed),
+                    CodexPlanStep(step: "Verify the result", status: .completed),
+                ]
+            )
+        )
+
+        XCTAssertTrue(completedPlan.isPlanSystemMessage)
+        XCTAssertFalse(completedPlan.shouldDisplayPinnedPlanAccessory)
+    }
+
+    func testIncompletePlanRemainsPinnedInConversationAccessory() {
+        let activePlan = CodexMessage(
+            threadId: "thread-\(UUID().uuidString)",
+            role: .system,
+            kind: .plan,
+            text: "Working through the plan.",
+            isStreaming: false,
+            planState: CodexPlanState(
+                explanation: "The plan is still active.",
+                steps: [
+                    CodexPlanStep(step: "Inspect the current behavior", status: .completed),
+                    CodexPlanStep(step: "Implement the fix", status: .inProgress),
+                    CodexPlanStep(step: "Verify the result", status: .pending),
+                ]
+            )
+        )
+
+        XCTAssertTrue(activePlan.shouldDisplayPinnedPlanAccessory)
+    }
+
     private func makeService(
         suiteName: String = "CodexPlanModeTests.\(UUID().uuidString)",
         reset: Bool = true

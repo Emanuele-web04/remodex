@@ -64,6 +64,6 @@ struct TurnComposerAccessoryState {
     }
 
     var topInputPadding: CGFloat {
-        showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || showsSubagentsSelection || showsVoiceRecordingCapsule || reviewTarget != nil ? 8 : 14
+        showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || showsSubagentsSelection || showsVoiceRecordingCapsule || reviewTarget != nil ? 6 : 10
     }
 }

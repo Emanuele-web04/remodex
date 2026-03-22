@@ -47,76 +47,6 @@ private struct FileChangeInlineActionRow: View {
     }
 }
 
-// ─── File-Change Action Buttons ─────────────────────────────────────
-
-// MARK: - FileChangeActionButtons
-// Pill button below file rows: "Diff +N -M" (opens sheet).
-// Owns @State isShowingDiffSheet so MessageRow's Equatable short-circuit stays effective.
-private struct FileChangeActionButtons: View {
-    let entries: [TurnFileChangeSummaryEntry]
-    let bodyText: String
-    let messageID: String
-    var showInlineCommit: Bool = false
-
-    @Environment(\.inlineCommitAndPushAction) private var commitAction
-    @State private var isShowingDiffSheet = false
-
-    var body: some View {
-        let totalAdditions = entries.reduce(0) { $0 + $1.additions }
-        let totalDeletions = entries.reduce(0) { $0 + $1.deletions }
-
-        HStack(spacing: 10) {
-            if !bodyText.isEmpty {
-                Button {
-                    isShowingDiffSheet = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(AppFont.system(size: 10, weight: .medium))
-                        Text("Diff")
-                        DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
-                    }
-                    .font(AppFont.mono(.body))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            if showInlineCommit, let action = commitAction {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    action()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image("cloud-upload")
-                            .renderingMode(.template)
-                            // Keep the inline commit CTA visually balanced with the Diff pill beside it.
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 18, height: 18)
-                        Text("Commit & Push")
-                    }
-                    .font(AppFont.mono(.body))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .sheet(isPresented: $isShowingDiffSheet) {
-            TurnDiffSheet(
-                title: "Changes",
-                entries: entries,
-                bodyText: bodyText,
-                messageID: messageID
-            )
-        }
-    }
-}
-
 struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
@@ -501,7 +431,7 @@ enum MarkdownTextFormatter {
         if CharacterSet.alphanumerics.contains(scalar) {
             return true
         }
-        return scalar == "."
+        return scalar == UnicodeScalar(".")
     }
 }
 
@@ -603,11 +533,8 @@ struct MessageRow: View, Equatable {
     let message: CodexMessage
     let isRetryAvailable: Bool
     let onRetryUserMessage: (String) -> Void
-    var assistantRevertPresentation: AssistantRevertPresentation? = nil
-    /// When non-nil, this message is the last in an assistant block and
-    /// a copy button should be shown. The string is the aggregated block text.
-    var copyBlockText: String? = nil
-    var showInlineCommit: Bool = false
+    // Keeps the end-of-block accessory aligned with the active assistant turn.
+    var assistantBlockAccessoryState: AssistantBlockAccessoryState? = nil
     // Disables timer-driven adornments while the user reads older content.
     var showsStreamingAnimations: Bool = true
     @Environment(\.assistantRevertAction) private var assistantRevertAction
@@ -618,9 +545,7 @@ struct MessageRow: View, Equatable {
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
         lhs.message == rhs.message
             && lhs.isRetryAvailable == rhs.isRetryAvailable
-            && lhs.assistantRevertPresentation == rhs.assistantRevertPresentation
-            && lhs.copyBlockText == rhs.copyBlockText
-            && lhs.showInlineCommit == rhs.showInlineCommit
+            && lhs.assistantBlockAccessoryState == rhs.assistantBlockAccessoryState
             && lhs.showsStreamingAnimations == rhs.showsStreamingAnimations
     }
 
@@ -656,8 +581,14 @@ struct MessageRow: View, Equatable {
             case .system:
                 VStack(alignment: .leading, spacing: 8) {
                     systemView(text: text, renderModel: renderModel)
-                    if let blockText = copyBlockText {
-                        CopyBlockButton(text: blockText)
+                    if hasTurnEndActions {
+                        turnEndActionButtons
+                    }
+                    if let assistantBlockAccessoryState {
+                        CopyBlockButton(
+                            text: assistantBlockAccessoryState.copyText,
+                            isRunning: assistantBlockAccessoryState.showsRunningIndicator
+                        )
                     }
                 }
             }
@@ -843,12 +774,15 @@ struct MessageRow: View, Equatable {
                 TypingIndicator()
             }
 
-            if let assistantRevertPresentation {
-                assistantRevertButton(presentation: assistantRevertPresentation)
+            if hasTurnEndActions {
+                turnEndActionButtons
             }
 
-            if let blockText = copyBlockText {
-                CopyBlockButton(text: blockText)
+            if let assistantBlockAccessoryState {
+                CopyBlockButton(
+                    text: assistantBlockAccessoryState.copyText,
+                    isRunning: assistantBlockAccessoryState.showsRunningIndicator
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -862,6 +796,8 @@ struct MessageRow: View, Equatable {
         switch message.kind {
         case .thinking:
             thinkingSystemView(renderModel: renderModel)
+        case .toolActivity:
+            toolActivitySystemView(text: text)
         case .fileChange:
             fileChangeSystemView(text: text, renderModel: renderModel)
         case .commandExecution:
@@ -884,50 +820,37 @@ struct MessageRow: View, Equatable {
 
     @ViewBuilder
     private func thinkingSystemView(renderModel: MessageRowRenderModel) -> some View {
-        let thinkingText = renderModel.thinkingText ?? ""
-        let thinkingContent = renderModel.thinkingContent ?? ThinkingDisclosureContent(sections: [], fallbackText: "")
-        let activityPreview = ThinkingDisclosureParser.compactActivityPreview(fromNormalizedText: thinkingText)
-        Group {
-            // Keep completed reasoning visible too; older builds showed thinking blocks
-            // even after stream completion whenever content was present.
-            if message.isStreaming || !thinkingText.isEmpty {
-                if let activityPreview {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Thinking...")
-                            .font(AppFont.mono(.caption))
-                            .fontWeight(.regular)
-                            .italic()
-                            .foregroundStyle(.secondary.opacity(0.9))
+        ThinkingSystemBlock(
+            messageID: message.id,
+            isStreaming: message.isStreaming,
+            thinkingText: renderModel.thinkingText ?? "",
+            thinkingContent: renderModel.thinkingContent ?? ThinkingDisclosureContent(sections: [], fallbackText: ""),
+            activityPreview: renderModel.thinkingActivityPreview
+        )
+    }
 
-                        Text(activityPreview)
-                            .font(AppFont.mono(.caption))
-                            .fontWeight(.regular)
-                            .italic()
-                            .foregroundStyle(.secondary.opacity(0.9))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    .padding(.vertical, 2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Thinking...")
-                            .font(AppFont.mono(.caption))
-                            .fontWeight(.regular)
-                            .italic()
-                            .foregroundStyle(.secondary.opacity(0.9))
+    private func toolActivitySystemView(text: String) -> some View {
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
 
-                        if !thinkingText.isEmpty {
-                            ThinkingDisclosureView(
-                                messageID: message.id,
-                                content: thinkingContent
-                            )
-                        }
-                    }
-                    .padding(.vertical, 2)
+        return VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                }
             }
+
+            if message.isStreaming && showsStreamingAnimations {
+                TypingIndicator()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .contextMenu {
+            selectableTextActions(text: text, usesMarkdownSelection: false)
         }
     }
 
@@ -955,17 +878,6 @@ struct MessageRow: View, Equatable {
                 }
             }
 
-            // Buttons + sheet live in a child view so environment reads
-            // don't invalidate the parent MessageRow's Equatable short-circuit.
-            if !message.isStreaming, !allEntries.isEmpty {
-                FileChangeActionButtons(
-                    entries: allEntries,
-                    bodyText: renderState.bodyText,
-                    messageID: message.id,
-                    showInlineCommit: showInlineCommit
-                )
-            }
-
             if message.isStreaming && showsStreamingAnimations {
                 TypingIndicator()
             }
@@ -981,7 +893,7 @@ struct MessageRow: View, Equatable {
             .font(AppFont.footnote())
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .contextMenu {
                 selectableTextActions(text: text, usesMarkdownSelection: false)
             }
@@ -1023,6 +935,78 @@ struct MessageRow: View, Equatable {
             return "send failed"
         case .confirmed:
             return message.createdAt.formatted(date: .omitted, time: .shortened)
+        }
+    }
+
+    @Environment(\.inlineCommitAndPushAction) private var inlineCommitAction
+    @State private var isShowingBlockDiffSheet = false
+
+    private var hasTurnEndActions: Bool {
+        guard let accessory = assistantBlockAccessoryState else { return false }
+        return accessory.blockRevertPresentation != nil
+            || accessory.blockDiffEntries != nil
+    }
+
+    @ViewBuilder
+    private var turnEndActionButtons: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let revert = assistantBlockAccessoryState?.blockRevertPresentation {
+                assistantRevertButton(presentation: revert)
+            }
+
+            if let accessory = assistantBlockAccessoryState {
+                HStack(spacing: 10) {
+                    if let entries = accessory.blockDiffEntries, !entries.isEmpty {
+                        let totalAdditions = entries.reduce(0) { $0 + $1.additions }
+                        let totalDeletions = entries.reduce(0) { $0 + $1.deletions }
+
+                        Button {
+                            isShowingBlockDiffSheet = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc.text.magnifyingglass")
+                                    .font(AppFont.system(size: 10, weight: .medium))
+                                Text("Diff")
+                                DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
+                            }
+                            .font(AppFont.mono(.body))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .sheet(isPresented: $isShowingBlockDiffSheet) {
+                            TurnDiffSheet(
+                                title: "Changes",
+                                entries: entries,
+                                bodyText: accessory.blockDiffText ?? "",
+                                messageID: message.id
+                            )
+                        }
+                    }
+
+                    if let action = inlineCommitAction {
+                        Button {
+                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                            action()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image("cloud-upload")
+                                    .renderingMode(.template)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 18, height: 18)
+                                Text("Commit & Push")
+                            }
+                            .font(AppFont.mono(.body))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
         }
     }
 
@@ -1150,6 +1134,141 @@ private struct SelectableMessageTextSheet: View {
     }
 }
 
+// ─── Thinking UI ────────────────────────────────────────────────────
+
+// Centralizes the inline reasoning row so thinking-specific spacing, fonts, and
+// disclosure behavior are easy to tweak without hunting through MessageRow.
+// Kept as one flat struct (no sub-view nesting) to minimise per-cell view-tree
+// depth inside the LazyVStack — extra struct layers cost allocation + diffing on
+// every scroll frame.
+private struct ThinkingSystemBlock: View {
+    let messageID: String
+    let isStreaming: Bool
+    let thinkingText: String
+    let thinkingContent: ThinkingDisclosureContent
+    let activityPreview: String?
+
+    init(
+        messageID: String,
+        isStreaming: Bool,
+        thinkingText: String,
+        thinkingContent: ThinkingDisclosureContent,
+        activityPreview: String? = nil
+    ) {
+        self.messageID = messageID
+        self.isStreaming = isStreaming
+        self.thinkingText = thinkingText
+        self.thinkingContent = thinkingContent
+        self.activityPreview = activityPreview
+    }
+
+    var body: some View {
+        Group {
+            // Keep completed reasoning visible too; older builds showed thinking blocks
+            // even after stream completion whenever content was present.
+            if isStreaming || !thinkingText.isEmpty {
+                if let activityPreview {
+                    VStack(alignment: .leading, spacing: 4) {
+                        thinkingTitle
+
+                        activityPreviewText(activityPreview)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else if thinkingText.isEmpty {
+                    thinkingTitle
+                        .padding(.vertical, 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        thinkingTitle
+
+                        ThinkingDisclosureView(
+                            messageID: messageID,
+                            content: thinkingContent
+                        )
+                    }
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    // MARK: - Inline helpers (no extra View structs)
+
+    private var thinkingTitle: some View {
+        Text("Thinking...")
+            .font(AppFont.caption(weight: .medium))
+            .foregroundStyle(.secondary.opacity(0.9))
+            .overlay {
+                if isStreaming {
+                    ShimmerMask()
+                }
+            }
+            .mask(Text("Thinking...")
+                .font(AppFont.caption(weight: .medium)))
+    }
+
+    private func activityPreviewText(_ preview: String) -> Text {
+        let trimmed = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Text("") }
+
+        let splitIndex = trimmed.firstIndex(of: " ")
+        let leading: String
+        let remainder: String
+
+        if let splitIndex {
+            leading = String(trimmed[..<splitIndex])
+            remainder = String(trimmed[splitIndex...])
+        } else {
+            leading = trimmed
+            remainder = ""
+        }
+
+        let capitalised = leading.prefix(1).uppercased() + leading.dropFirst()
+
+        return Text(capitalised)
+            .font(AppFont.caption(weight: .medium))
+            .foregroundStyle(.secondary)
+        +
+        Text(remainder)
+            .font(AppFont.caption())
+            .foregroundStyle(.tertiary)
+    }
+}
+
+// A single-pass gradient sweep that slides across the text it overlays.
+private struct ShimmerMask: View {
+    @State private var phase: CGFloat = -1
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .white.opacity(0.45), location: 0.4),
+                    .init(color: .white.opacity(0.45), location: 0.6),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: w * 0.6)
+            .offset(x: phase * w)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                    phase = 1.4
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 // Owns disclosure state for compact reasoning summaries without invalidating MessageRow.
 private struct ThinkingDisclosureView: View {
     let messageID: String
@@ -1196,8 +1315,7 @@ private struct ThinkingDisclosureView: View {
                         .frame(width: 10)
 
                     Text(section.title)
-                        .font(AppFont.mono(.caption))
-                        .fontWeight(.bold)
+                        .font(AppFont.caption(weight: .semibold))
                         .foregroundStyle(.secondary.opacity(0.95))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1216,10 +1334,9 @@ private struct ThinkingDisclosureView: View {
 
     private func detailText(_ value: String) -> some View {
         Text(.init(value))
-            .font(AppFont.mono(.caption))
+            .font(AppFont.caption())
             .lineSpacing(2)
             .fontWeight(.regular)
-            .italic()
             .foregroundStyle(.secondary.opacity(0.85))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1359,4 +1476,130 @@ struct ApprovalBanner: View {
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
+}
+
+// ─── Focused Previews ───────────────────────────────────────────────
+
+private struct TimelineSystemBlockPreviewSurface<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+        }
+        .background(Color(.systemBackground))
+    }
+}
+
+@MainActor
+struct ThinkingSystemBlockCompactPreviewHost: View {
+    var body: some View {
+        TimelineSystemBlockPreviewSurface {
+            ThinkingSystemBlock(
+                messageID: "preview-thinking-compact",
+                isStreaming: true,
+                thinkingText: "running rg -n \"Thinking\" CodexMobile/CodexMobile/Views/Turn",
+                thinkingContent: ThinkingDisclosureContent(sections: [], fallbackText: "")
+            )
+        }
+    }
+}
+
+@MainActor
+struct ThinkingSystemBlockDisclosurePreviewHost: View {
+    var body: some View {
+        TimelineSystemBlockPreviewSurface {
+            ThinkingSystemBlock(
+                messageID: "preview-thinking-disclosure",
+                isStreaming: false,
+                thinkingText: """
+                **Tracing timeline rendering**
+                The thinking row now lives in its own dedicated view so typography and spacing changes stay local.
+
+                **Checking disclosure typography**
+                The selected prose font should be used for the thinking label and section titles instead of monospace.
+                """,
+                thinkingContent: ThinkingDisclosureContent(
+                    sections: [
+                        ThinkingDisclosureSection(
+                            id: "trace",
+                            title: "Tracing timeline rendering",
+                            detail: "The thinking row now lives in its own dedicated view so typography and spacing changes stay local."
+                        ),
+                        ThinkingDisclosureSection(
+                            id: "type",
+                            title: "Checking disclosure typography",
+                            detail: "The selected prose font should be used for the thinking label and section titles instead of monospace."
+                        ),
+                    ],
+                    fallbackText: ""
+                )
+            )
+        }
+    }
+}
+
+@MainActor
+struct ThinkingSystemBlockRealResponsePreviewHost: View {
+    private let rawThinkingText = """
+    Thinking...
+    **Explored 1 file**
+    Found the compact thinking block and isolated it into a dedicated view so the UI can be tuned in one place.
+
+    **Checking typography**
+    Removed italics and aligned the label with the selected prose font instead of monospace styling.
+
+    **Polishing compact activity state**
+    running rg -n "Thinking" CodexMobile/CodexMobile/Views/Turn
+    """
+
+    var body: some View {
+        let parsed = ThinkingDisclosureParser.parse(from: rawThinkingText)
+
+        return TimelineSystemBlockPreviewSurface {
+            ThinkingSystemBlock(
+                messageID: "preview-thinking-real-response",
+                isStreaming: false,
+                thinkingText: ThinkingDisclosureParser.normalizedThinkingContent(from: rawThinkingText),
+                thinkingContent: parsed
+            )
+        }
+    }
+}
+
+@MainActor
+struct ToolCallSystemBlockPreviewHost: View {
+    var body: some View {
+        TimelineSystemBlockPreviewSurface {
+            CommandExecutionStatusCard(
+                status: CommandExecutionStatusModel(
+                    command: "npm run lint -- --fix",
+                    statusLabel: "completed",
+                    accent: .completed
+                ),
+                itemId: "preview-tool-call"
+            )
+        }
+        .environment(CodexService())
+    }
+}
+
+#Preview("Thinking Block — Compact") {
+    ThinkingSystemBlockCompactPreviewHost()
+}
+
+#Preview("Thinking Block — Disclosure") {
+    ThinkingSystemBlockDisclosurePreviewHost()
+}
+
+#Preview("Thinking Block — Real Response") {
+    ThinkingSystemBlockRealResponsePreviewHost()
+}
+
+#Preview("Tool Call Block") {
+    ToolCallSystemBlockPreviewHost()
 }

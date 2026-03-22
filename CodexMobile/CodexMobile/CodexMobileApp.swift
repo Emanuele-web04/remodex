@@ -21,9 +21,6 @@ struct CodexMobileApp: App {
         WindowGroup {
             ContentView()
                 .environment(codexService)
-                .task {
-                    await codexService.requestNotificationPermissionOnFirstLaunchIfNeeded()
-                }
                 .onOpenURL { url in
                     Task { @MainActor in
                         guard CodexService.legacyGPTLoginCallbackEnabled else {

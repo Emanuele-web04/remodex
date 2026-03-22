@@ -12,7 +12,7 @@ struct VoiceRecordingCapsule: View {
     let duration: TimeInterval
     let onCancel: () -> Void
 
-    private let barWidth: CGFloat = 2
+    private let idealBarWidth: CGFloat = 2
     private let barSpacing: CGFloat = 1.5
     private let barMinHeight: CGFloat = 2
     private let barMaxHeight: CGFloat = 18
@@ -48,29 +48,25 @@ struct VoiceRecordingCapsule: View {
     }
 
     private var waveformView: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .center, spacing: barSpacing) {
-                    ForEach(Array(audioLevels.enumerated()), id: \.offset) { index, level in
-                        RoundedRectangle(cornerRadius: 1)
-                            .fill(Color.primary.opacity(0.45))
-                            .frame(
-                                width: barWidth,
-                                height: barHeight(for: level)
-                            )
-                            .id(index)
-                    }
-                }
-                .frame(maxHeight: .infinity, alignment: .center)
-            }
-            .scrollDisabled(true)
-            .onChange(of: audioLevels.count) { _, newCount in
-                guard newCount > 0 else { return }
-                withAnimation(.linear(duration: 0.06)) {
-                    proxy.scrollTo(newCount - 1, anchor: .trailing)
+        GeometryReader { geometry in
+            let renderedLevels = displayedLevels(for: geometry.size.width)
+            let renderedBarWidth = renderedBarWidth(for: geometry.size.width, slotCount: renderedLevels.count)
+
+            HStack(alignment: .center, spacing: barSpacing) {
+                ForEach(Array(renderedLevels.enumerated()), id: \.offset) { index, level in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.primary.opacity(level == 0 ? 0.12 : 0.45))
+                        .frame(
+                            width: renderedBarWidth,
+                            height: barHeight(for: level)
+                        )
+                        .id(index)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .layoutPriority(1)
     }
 
     private var durationLabel: some View {
@@ -97,6 +93,32 @@ struct VoiceRecordingCapsule: View {
 
     private func barHeight(for level: CGFloat) -> CGFloat {
         barMinHeight + (barMaxHeight - barMinHeight) * level
+    }
+
+    // Resamples the rolling meter history to the number of bars that fit on screen.
+    // When the clip is still short, leading slots stay quiet so the capsule width is still occupied.
+    private func displayedLevels(for availableWidth: CGFloat) -> [CGFloat] {
+        let slotCount = max(1, Int((max(availableWidth, 0) + barSpacing) / (idealBarWidth + barSpacing)))
+        guard !audioLevels.isEmpty else { return Array(repeating: 0, count: slotCount) }
+
+        let tail = Array(audioLevels.suffix(slotCount * 3))
+        if tail.count <= slotCount {
+            return Array(repeating: 0, count: slotCount - tail.count) + tail
+        }
+
+        return (0..<slotCount).map { index in
+            let start = Int((Double(index) / Double(slotCount)) * Double(tail.count))
+            let end = max(start + 1, Int((Double(index + 1) / Double(slotCount)) * Double(tail.count)))
+            let bucket = tail[start..<min(end, tail.count)]
+            return bucket.max() ?? 0
+        }
+    }
+
+    // Uses the full waveform lane width instead of letting the bars stop at their intrinsic content size.
+    private func renderedBarWidth(for availableWidth: CGFloat, slotCount: Int) -> CGFloat {
+        guard slotCount > 0 else { return idealBarWidth }
+        let totalSpacing = CGFloat(slotCount - 1) * barSpacing
+        return max(1, (max(availableWidth, 0) - totalSpacing) / CGFloat(slotCount))
     }
 
     private var formattedDuration: String {

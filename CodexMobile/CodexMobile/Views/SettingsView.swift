@@ -729,11 +729,40 @@ private struct SettingsArchivedChatsCard: View {
 }
 
 private struct SettingsAboutCard: View {
+    @State private var isShowingAbout = false
+
     var body: some View {
         SettingsCard(title: "About") {
             Text("Chats are End-to-end encrypted between your iPhone and Mac. The relay only sees ciphertext and connection metadata after the secure handshake completes.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                isShowingAbout = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .font(AppFont.subheadline(weight: .medium))
+                    Text("How Remodex Works")
+                        .font(AppFont.subheadline(weight: .medium))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(.primary)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
+            }
+            .buttonStyle(.plain)
+        }
+        .fullScreenCover(isPresented: $isShowingAbout) {
+            AboutRemodexView()
         }
     }
 }

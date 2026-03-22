@@ -95,6 +95,13 @@ struct ContentView: View {
                     await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
                 }
             }
+            .onChange(of: codex.isConnected) { wasConnected, isNowConnected in
+                if !wasConnected, isNowConnected {
+                    Task {
+                        await codex.requestNotificationPermissionOnFirstLaunchIfNeeded()
+                    }
+                }
+            }
             .onChange(of: codex.threadCompletionBanner) { _, banner in
                 scheduleThreadCompletionBannerDismiss(for: banner)
             }

@@ -5,6 +5,7 @@
 // Depends on: XCTest, Foundation, CodexMobile
 
 import Foundation
+import Network
 import XCTest
 @testable import CodexMobile
 
@@ -70,6 +71,29 @@ final class ContentViewModelReconnectTests: XCTestCase {
 
         XCTAssertNil(reconnectURL)
         XCTAssertEqual(service.lastErrorMessage, "Your trusted Mac is offline right now.")
+    }
+
+    func testForegroundReconnectKeepsRetryIntentArmedAfterRetryableFailures() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var attempts = 0
+
+        service.relaySessionId = "saved-session"
+        service.relayUrl = "wss://relay.local/relay"
+        service.shouldAutoReconnectOnForeground = true
+        viewModel.reconnectAttemptLimitOverride = 2
+        viewModel.reconnectSleepOverride = { _ in }
+        viewModel.connectOverride = { _, _ in
+            attempts += 1
+            throw NWError.posix(.ECONNABORTED)
+        }
+
+        await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: service)
+
+        XCTAssertEqual(attempts, 2)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertNil(service.lastErrorMessage)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 2, message: "Reconnecting..."))
     }
 
     private func makeService() -> CodexService {

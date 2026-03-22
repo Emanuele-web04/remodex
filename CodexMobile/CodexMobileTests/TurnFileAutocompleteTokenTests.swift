@@ -85,4 +85,52 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
 
         XCTAssertEqual(TurnViewModel.ambiguousFileNameAliasKeys(in: mentions), ["notes.md"])
     }
+
+    func testClosedConfirmedMentionStopsAutocompleteFromReopeningOnFollowingProse() {
+        let mentions = [
+            TurnComposerMentionedFile(fileName: "terminal.svg", path: "assets/terminal.svg"),
+        ]
+
+        XCTAssertTrue(
+            TurnViewModel.hasClosedConfirmedFileMentionPrefix(
+                in: "@terminal.svg try this one h",
+                confirmedMentions: mentions
+            )
+        )
+    }
+
+    func testClosedConfirmedMentionSupportsFileNamesWithSpaces() {
+        let mentions = [
+            TurnComposerMentionedFile(
+                fileName: "Codex iOS Recap TLDR.md",
+                path: "Docs/Codex iOS Recap TLDR.md"
+            ),
+        ]
+
+        XCTAssertTrue(
+            TurnViewModel.hasClosedConfirmedFileMentionPrefix(
+                in: "@Codex iOS Recap TLDR.md please revise this",
+                confirmedMentions: mentions
+            )
+        )
+    }
+
+    func testTrailingAutocompleteStillWorksForOpenPathWithSpaces() {
+        let mentions = [
+            TurnComposerMentionedFile(fileName: "terminal.svg", path: "assets/terminal.svg"),
+        ]
+
+        XCTAssertFalse(
+            TurnViewModel.hasClosedConfirmedFileMentionPrefix(
+                in: "compare @Codex Mobile App Plan/Codex iOS Recap TLDR.md",
+                confirmedMentions: mentions
+            )
+        )
+        XCTAssertEqual(
+            TurnViewModel.trailingFileAutocompleteToken(
+                in: "compare @Codex Mobile App Plan/Codex iOS Recap TLDR.md"
+            )?.query,
+            "Codex Mobile App Plan/Codex iOS Recap TLDR.md"
+        )
+    }
 }

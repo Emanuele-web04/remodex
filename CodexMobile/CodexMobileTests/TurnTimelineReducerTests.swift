@@ -113,6 +113,118 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(projection.messages.map(\.id), ["thinking-1", "thinking-2"])
     }
 
+    func testCollapseThinkingReusesPlaceholderAcrossCommandRows() {
+        let threadID = "thread"
+        let now = Date()
+
+        let messages = [
+            makeMessage(
+                id: "thinking-1",
+                threadID: threadID,
+                role: .system,
+                kind: .thinking,
+                text: "Thinking...",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "item-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: threadID,
+                role: .system,
+                kind: .commandExecution,
+                text: "Running rg -n \"needle\"",
+                createdAt: now.addingTimeInterval(0.5),
+                turnID: "turn-1",
+                itemID: "command-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "thinking-2",
+                threadID: threadID,
+                role: .system,
+                kind: .thinking,
+                text: "Resolved thought",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-2",
+                isStreaming: false
+            ),
+        ]
+
+        let projection = TurnTimelineReducer.project(messages: messages)
+        XCTAssertEqual(projection.messages.map(\.id), ["thinking-1", "command-1"])
+        XCTAssertEqual(projection.messages[0].text, "Resolved thought")
+        XCTAssertEqual(projection.messages[0].itemId, "item-2")
+    }
+
+    func testProjectRemovesThinkingCommandEchoWhenCommandCardExists() {
+        let threadID = "thread"
+        let now = Date()
+
+        let messages = [
+            makeMessage(
+                id: "thinking-echo",
+                threadID: threadID,
+                role: .system,
+                kind: .thinking,
+                text: "Thinking...\nRunning rg -n \"needle\"",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "thinking-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "command-1",
+                threadID: threadID,
+                role: .system,
+                kind: .commandExecution,
+                text: "Running rg -n \"needle\"",
+                createdAt: now.addingTimeInterval(0.2),
+                turnID: "turn-1",
+                itemID: "command-1",
+                isStreaming: true
+            ),
+        ]
+
+        let projection = TurnTimelineReducer.project(messages: messages)
+        XCTAssertEqual(projection.messages.map(\.id), ["command-1"])
+    }
+
+    func testToolActivityStaysSeparateFromThinkingRows() {
+        let threadID = "thread"
+        let now = Date()
+
+        let messages = [
+            makeMessage(
+                id: "thinking-1",
+                threadID: threadID,
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning block",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "thinking-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "tool-1",
+                threadID: threadID,
+                role: .system,
+                kind: .toolActivity,
+                text: "Read Sources/App.swift",
+                createdAt: now.addingTimeInterval(0.1),
+                turnID: "turn-1",
+                itemID: "tool-1",
+                isStreaming: true
+            ),
+        ]
+
+        let projection = TurnTimelineReducer.project(messages: messages)
+        XCTAssertEqual(projection.messages.map(\.id), ["thinking-1", "tool-1"])
+    }
+
     func testRemoveDuplicateAssistantMessagesByTurnAndText() {
         let now = Date()
         let messages = [
@@ -203,6 +315,34 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["assistant-1", "assistant-2"])
     }
 
+    func testRemoveDuplicateAssistantMessagesStillDedupesTurnTextWhenOneIdentityIsMissing() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "same",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "item-1"
+            ),
+            makeMessage(
+                id: "assistant-2",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "same",
+                createdAt: now.addingTimeInterval(0.2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateAssistantMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["assistant-1"])
+    }
+
     func testProjectFiltersHiddenPushResetMarker() {
         let now = Date()
         let messages = [
@@ -270,6 +410,54 @@ final class TurnTimelineReducerTests: XCTestCase {
         let projection = TurnTimelineReducer.project(messages: messages)
 
         XCTAssertEqual(projection.messages.map(\.id), ["user", "subagents", "assistant"])
+    }
+
+    func testProjectPlacesFileChangeAfterAssistantReplyWithinTurn() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Done.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "assistant-1",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "diff",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "diff-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Ship it",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+        ]
+
+        let projection = TurnTimelineReducer.project(messages: messages)
+
+        XCTAssertEqual(projection.messages.map(\.id), ["user", "assistant", "diff"])
     }
 
     func testRemoveDuplicateFileChangeMessagesKeepsNewestMatchingTurnSnapshot() {
@@ -432,7 +620,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["diff-1", "diff-2"])
     }
 
-    func testRemoveDuplicateFileChangeMessagesKeepsOlderSubsetWhenLaterSnapshotAddsFiles() {
+    func testRemoveDuplicateFileChangeMessagesDropsStreamingSubsetWhenLaterSnapshotAddsFiles() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -474,7 +662,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         ]
 
         let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
-        XCTAssertEqual(deduped.map(\.id), ["diff-1", "diff-2", "diff-3"])
+        XCTAssertEqual(deduped.map(\.id), ["diff-2", "diff-3"])
     }
 
     func testRemoveDuplicateFileChangeMessagesKeepsDistinctTurnSnapshots() {
@@ -737,6 +925,66 @@ final class TurnTimelineReducerTests: XCTestCase {
             "thinking-1",
             "assistant-1",
             "thinking-2",
+        ])
+    }
+
+    func testEnforceIntraTurnOrderPreservesToolActivityAfterAssistantInInterleavedFlow() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Hello",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "thinking-1",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning block A",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "First response",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "tool-1",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Read Sources/App.swift",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "tool-1",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "thinking-1",
+            "assistant-1",
+            "tool-1",
         ])
     }
 

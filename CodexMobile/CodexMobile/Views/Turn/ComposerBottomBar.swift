@@ -126,8 +126,8 @@ struct ComposerBottomBar: View {
             .disabled(isSendDisabled)
         }
         .padding(.horizontal, 16)
-        .padding(.bottom, 10)
-        .padding(.top, 10)
+        .padding(.bottom, 6)
+        .padding(.top, 6)
     }
 
     private var voiceButtonLabel: some View {

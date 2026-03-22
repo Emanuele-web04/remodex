@@ -260,6 +260,10 @@ struct TurnView: View {
             cancelVoiceRecordingIfNeeded()
             invalidatePendingVoicePreflight()
         }
+        .onChange(of: isInputFocused) { _, isFocused in
+            guard !isFocused else { return }
+            viewModel.clearComposerAutocomplete()
+        }
         .onChange(of: renderSnapshot.repoRefreshSignal) { _, newValue in
             guard showsGitControls, newValue != nil else { return }
             viewModel.scheduleGitStatusRefresh(
@@ -1132,7 +1136,8 @@ struct TurnView: View {
                 durationSeconds: clip.durationSeconds
             )
             viewModel.appendVoiceTranscript(transcript)
-            isInputFocused = true
+            // Keep voice flows keyboard-free; users can tap into the draft afterward if they want to edit.
+            isInputFocused = false
         } catch {
             isVoiceRecording = false
             voiceTranscriptionManager.resetMeteringState()
@@ -1153,6 +1158,9 @@ struct TurnView: View {
         }
 
         codex.lastErrorMessage = nil
+        // Dismiss any active text focus before recording so the keyboard does not
+        // compete with the waveform UI or waste vertical space during capture.
+        isInputFocused = false
         let preflightGeneration = voicePreflightGeneration + 1
         voicePreflightGeneration = preflightGeneration
         isVoicePreflighting = true
@@ -1172,7 +1180,7 @@ struct TurnView: View {
                 return
             }
             isVoiceRecording = true
-            isInputFocused = true
+            isInputFocused = false
         } catch {
             codex.lastErrorMessage = error.localizedDescription
         }

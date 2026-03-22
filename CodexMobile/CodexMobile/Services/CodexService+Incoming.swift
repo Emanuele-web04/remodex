@@ -854,9 +854,33 @@ extension CodexService {
             guard !activityLines.isEmpty else {
                 return
             }
-            for line in activityLines {
-                appendEssentialActivityLine(threadId: threadId, turnId: resolvedTurnId, line: line)
+            let itemId = extractItemID(from: paramsObject, eventObject: eventObject, itemObject: itemObject)
+            let activityText = activityLines.joined(separator: "\n")
+            if let itemId, !itemId.isEmpty {
+                appendStreamingSystemItemDelta(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    itemId: itemId,
+                    kind: .toolActivity,
+                    delta: activityText
+                )
+                return
             }
+            if let resolvedTurnId, !resolvedTurnId.isEmpty {
+                appendStreamingSystemTurnDelta(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    kind: .toolActivity,
+                    delta: activityText
+                )
+                return
+            }
+            appendSystemMessage(
+                threadId: threadId,
+                text: activityText,
+                turnId: resolvedTurnId,
+                kind: .toolActivity
+            )
             return
         }
 
@@ -1497,10 +1521,6 @@ extension CodexService {
             )
         }
 
-        if let activityLine = state.activityLine {
-            appendEssentialActivityLine(threadId: threadId, turnId: turnId, line: activityLine)
-        }
-
         if isCompleted {
             maybeAppendPushResetMarker(from: state, threadId: threadId)
         }
@@ -1598,7 +1618,7 @@ extension CodexService {
             return
         }
         recentActivityLineByThread[dedupeKey] = CodexRecentActivityLine(line: trimmedLine, timestamp: now)
-        appendThinkingActivityLine(threadId: threadId, turnId: turnId, line: trimmedLine)
+        appendToolActivityLine(threadId: threadId, turnId: turnId, line: trimmedLine)
     }
 
     private func extractToolCallActivityLines(from delta: String) -> [String] {
@@ -1802,11 +1822,15 @@ extension CodexService {
             kind = .fileChange
             body = decodeFileChangeItemBody(itemObject)
         case "toolcall":
-            guard let resolvedBody = decodeToolCallFileChangeBody(itemObject, isCompleted: isCompleted) else {
+            if let resolvedBody = decodeToolCallFileChangeBody(itemObject, isCompleted: isCompleted) {
+                kind = .fileChange
+                body = resolvedBody
+            } else if let resolvedBody = decodeToolCallActivityBody(itemObject, isCompleted: isCompleted) {
+                kind = .toolActivity
+                body = resolvedBody
+            } else {
                 return false
             }
-            kind = .fileChange
-            body = resolvedBody
         case "commandexecution":
             kind = .commandExecution
             body = decodeCommandExecutionStatusText(itemObject, isCompleted: isCompleted)
@@ -1937,6 +1961,31 @@ extension CodexService {
         }
 
         return nil
+    }
+
+    // Summarizes non-file-changing tool items into a stable system row instead of leaking them into thinking.
+    private func decodeToolCallActivityBody(
+        _ itemObject: IncomingParamsObject,
+        isCompleted: Bool
+    ) -> String? {
+        let output = extractToolCallOutputText(from: itemObject)
+        if let output {
+            let activityLines = extractToolCallActivityLines(from: output)
+            if !activityLines.isEmpty {
+                return activityLines.joined(separator: "\n")
+            }
+        }
+
+        let descriptor = toolCallDescriptor(from: itemObject)
+        let summary = toolActivitySummaryLine(
+            descriptor: descriptor,
+            rawStatus: firstNonEmptyString([
+                itemObject["status"]?.stringValue,
+                firstString(forKey: "status", in: .object(itemObject)),
+            ]),
+            isCompleted: isCompleted
+        )
+        return summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : summary
     }
 
     private func isLikelyIncomingItemPayload(_ object: IncomingParamsObject) -> Bool {

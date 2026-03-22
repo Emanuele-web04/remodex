@@ -12,6 +12,14 @@ private enum TurnAutoScrollMode {
     case manual
 }
 
+struct AssistantBlockAccessoryState: Equatable {
+    let copyText: String?
+    let showsRunningIndicator: Bool
+    let blockDiffText: String?
+    let blockDiffEntries: [TurnFileChangeSummaryEntry]?
+    let blockRevertPresentation: AssistantRevertPresentation?
+}
+
 struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let threadID: String
     let messages: [CodexMessage]
@@ -42,8 +50,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var visibleTailCount: Int = pageSize
     @State private var viewportHeight: CGFloat = 0
     // Cached per-render artifacts to avoid O(n) recomputation inside the body.
-    @State private var cachedBlockInfoByMessageID: [String: String] = [:]
-    @State private var cachedLastFileChangeMessageID: String? = nil
+    @State private var cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState] = [:]
     @State private var cachedNewestStreamingMessageID: String? = nil
     @State private var blockInfoInputKey: Int = 0
     @State private var scrollSessionThreadID: String?
@@ -87,46 +94,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 0) {
+                        // Keep the conversation virtualized in the common case so heavy
+                        // markdown/system rows do not all re-layout while the user scrolls.
                         LazyVStack(spacing: 20) {
-                            if hasEarlierMessages {
-                                Button {
-                                    withAnimation(.easeOut(duration: 0.15)) {
-                                        visibleTailCount = min(
-                                            visibleTailCount + Self.pageSize,
-                                            messages.count
-                                        )
-                                    }
-                                } label: {
-                                    Text("Load earlier messages")
-                                        .font(AppFont.subheadline())
-                                        .foregroundStyle(.secondary)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 10)
-                                }
-                                .buttonStyle(.plain)
-                            }
-
-                            ForEach(visibleMessages) { message in
-                                MessageRow(
-                                    message: message,
-                                    isRetryAvailable: isRetryAvailable,
-                                    onRetryUserMessage: onRetryUserMessage,
-                                    assistantRevertPresentation: assistantRevertStatesByMessageID[message.id],
-                                    copyBlockText: cachedBlockInfoByMessageID[message.id],
-                                    showInlineCommit: message.id == cachedLastFileChangeMessageID,
-                                    showsStreamingAnimations: isScrolledToBottom
-                                        && message.id == cachedNewestStreamingMessageID
-                                )
-                                .equatable()
-                                .environment(\.assistantRevertAction, onTapAssistantRevert)
-                                .environment(\.subagentOpenAction, onTapSubagent)
-                                .id(message.id)
-                            }
+                            timelineRows
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 12)
 
-                        // Keep bottom anchor outside LazyVStack so it is always laid out.
+                        // Keep bottom anchor outside the message stack so it is always laid out.
                         Color.clear
                             .frame(height: 1)
                             .id(scrollBottomAnchorID)
@@ -143,15 +119,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         onTapOutsideComposer()
                     }
                 )
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 1)
-                        .onChanged { _ in
-                            handleUserScrollDragChanged()
-                        }
-                        .onEnded { _ in
-                            handleUserScrollDragEnded()
-                        }
-                )
+                // Track real scroll phases instead of adding a competing drag recognizer.
+                .onScrollPhaseChange { oldPhase, newPhase in
+                    handleScrollPhaseChange(from: oldPhase, to: newPhase)
+                }
                 .onScrollGeometryChange(for: ScrollBottomGeometry.self) { geometry in
                     let vh = geometry.visibleRect.height
                     let isAtBottom: Bool
@@ -168,6 +139,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     if new.viewportHeight != old.viewportHeight, new.viewportHeight > 0 {
                         viewportHeight = new.viewportHeight
                         performInitialRecoverySnapIfNeeded(using: proxy)
+                        if shouldPinTimelineToBottomDuringGeometryChange {
+                            scheduleFollowBottomScroll(using: proxy)
+                        }
                     }
                     if new.isAtBottom != old.isAtBottom {
                         handleScrolledToBottomChanged(new.isAtBottom)
@@ -227,7 +201,43 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    /// Recomputes assistantBlockInfo and lastFileChangeIndex only when inputs actually changed.
+    @ViewBuilder
+    private var timelineRows: some View {
+        if hasEarlierMessages {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    visibleTailCount = min(
+                        visibleTailCount + Self.pageSize,
+                        messages.count
+                    )
+                }
+            } label: {
+                Text("Load earlier messages")
+                    .font(AppFont.subheadline())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+        }
+
+        ForEach(visibleMessages) { message in
+            MessageRow(
+                message: message,
+                isRetryAvailable: isRetryAvailable,
+                onRetryUserMessage: onRetryUserMessage,
+                assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
+                showsStreamingAnimations: isScrolledToBottom
+                    && message.id == cachedNewestStreamingMessageID
+            )
+            .equatable()
+            .environment(\.assistantRevertAction, onTapAssistantRevert)
+            .environment(\.subagentOpenAction, onTapSubagent)
+            .id(message.id)
+        }
+    }
+
+    /// Recomputes assistant-block copy data and the inline-commit target only when inputs actually changed.
     /// Works over the visible slice only so cost stays bounded regardless of total history.
     private func recomputeBlockInfoIfNeeded() {
         let visible = Array(visibleMessages)
@@ -240,7 +250,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning,
             latestTurnTerminalState: latestTurnTerminalState,
-            stoppedTurnIDs: stoppedTurnIDs
+            stoppedTurnIDs: stoppedTurnIDs,
+            revertStatesByMessageID: assistantRevertStatesByMessageID
         )
         cachedBlockInfoByMessageID = Dictionary(
             uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
@@ -248,9 +259,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 return (message.id, blockText)
             }
         )
-        cachedLastFileChangeMessageID = !isThreadRunning
-            ? visible.last(where: { $0.role == .system && $0.kind == .fileChange })?.id
-            : nil
         cachedNewestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
     }
 
@@ -388,11 +396,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 autoScrollMode = .followBottom
             }
         } else {
-            followBottomScrollTask?.cancel()
-            followBottomScrollTask = nil
             isScrolledToBottom = false
-            if autoScrollMode != .anchorAssistantResponse {
-                autoScrollMode = .manual
+            // Only disengage follow-bottom from user scroll gestures, not from
+            // transient geometry changes caused by content growth. The scroll phase
+            // handler already sets .manual when the user actively drags.
+            if autoScrollMode == .manual || autoScrollMode == .anchorAssistantResponse {
+                followBottomScrollTask?.cancel()
+                followBottomScrollTask = nil
             }
         }
     }
@@ -413,6 +423,23 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func handleUserScrollDragEnded() {
         isUserDraggingScroll = false
         userScrollCooldownUntil = TurnScrollStateTracker.cooldownDeadline()
+    }
+
+    // Mirrors user-driven scroll phases without pausing auto-follow during programmatic animations.
+    private func handleScrollPhaseChange(from oldPhase: ScrollPhase, to newPhase: ScrollPhase) {
+        switch newPhase {
+        case .tracking, .interacting:
+            handleUserScrollDragChanged()
+        case .decelerating, .idle:
+            let wasUserTouchingScroll = oldPhase == .tracking || oldPhase == .interacting
+            if wasUserTouchingScroll {
+                handleUserScrollDragEnded()
+            }
+        case .animating:
+            return
+        @unknown default:
+            return
+        }
     }
 
     // Repairs the initial white/blank viewport race by doing a deferred snap, then
@@ -492,7 +519,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
         switch autoScrollMode {
         case .anchorAssistantResponse:
-            _ = anchorToAssistantResponseIfNeeded(using: proxy)
+            if !anchorToAssistantResponseIfNeeded(using: proxy),
+               shouldPinTimelineToBottomDuringGeometryChange {
+                scheduleFollowBottomScroll(using: proxy)
+            }
         case .followBottom:
             if isScrolledToBottom {
                 scheduleFollowBottomScroll(using: proxy)
@@ -512,9 +542,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             try? await Task.sleep(nanoseconds: 16_000_000) // ~1 display frame
             guard !Task.isCancelled,
                   scrollSessionThreadID == expectedThreadID,
-                  autoScrollMode == .followBottom,
-                  !shouldPauseAutomaticScrolling,
-                  isScrolledToBottom else {
+                  !shouldPauseAutomaticScrolling else {
+                return
+            }
+            guard autoScrollMode == .followBottom || shouldPinTimelineToBottomDuringGeometryChange else {
                 return
             }
             proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
@@ -528,6 +559,26 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         )
     }
 
+    // Keeps the footer/timeline geometry transition stable while waiting for the first
+    // assistant row to exist, so sending a message cannot leave a temporarily blank viewport.
+    private var shouldPinTimelineToBottomDuringGeometryChange: Bool {
+        guard !shouldPauseAutomaticScrolling, isScrolledToBottom else {
+            return false
+        }
+
+        switch autoScrollMode {
+        case .followBottom:
+            return true
+        case .anchorAssistantResponse:
+            return TurnTimelineReducer.assistantResponseAnchorMessageID(
+                in: Array(visibleMessages),
+                activeTurnID: activeTurnID
+            ) == nil
+        case .manual:
+            return false
+        }
+    }
+
     /// For each message index, returns the aggregated assistant block text if the message
     /// is the last non-user message before the next user message (or end of list).
     /// Returns nil for all other indices.
@@ -536,9 +587,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         activeTurnID: String?,
         isThreadRunning: Bool,
         latestTurnTerminalState: CodexTurnTerminalState?,
-        stoppedTurnIDs: Set<String>
-    ) -> [String?] {
-        var result = [String?](repeating: nil, count: messages.count)
+        stoppedTurnIDs: Set<String>,
+        revertStatesByMessageID: [String: AssistantRevertPresentation] = [:]
+    ) -> [AssistantBlockAccessoryState?] {
+        var result = [AssistantBlockAccessoryState?](repeating: nil, count: messages.count)
         let latestBlockEnd = messages.lastIndex(where: { $0.role != .user })
         var i = messages.count - 1
         while i >= 0 {
@@ -558,6 +610,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .compactMap(\.turnId)
                 .first
             let isLatestBlock = latestBlockEnd == blockEnd
+            let copyText: String?
             if !blockText.isEmpty,
                shouldShowCopyButton(
                 blockTurnID: blockTurnID,
@@ -567,7 +620,52 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 latestTurnTerminalState: latestTurnTerminalState,
                 stoppedTurnIDs: stoppedTurnIDs
                ) {
-                result[blockEnd] = blockText
+                copyText = blockText
+            } else {
+                copyText = nil
+            }
+
+            let showsRunningIndicator = shouldShowRunningIndicator(
+                blockTurnID: blockTurnID,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning,
+                isLatestBlock: isLatestBlock,
+                latestTurnTerminalState: latestTurnTerminalState,
+                stoppedTurnIDs: stoppedTurnIDs
+            )
+
+            // Aggregate file-change entries across the block for the turn-end Diff button.
+            let fileChangeMessages = messages[blockStart...blockEnd].filter {
+                $0.role == .system && $0.kind == .fileChange && !$0.isStreaming
+            }
+            let blockDiffEntries: [TurnFileChangeSummaryEntry]? = fileChangeMessages.isEmpty ? nil : {
+                var allEntries: [TurnFileChangeSummaryEntry] = []
+                for msg in fileChangeMessages {
+                    if let parsed = TurnFileChangeSummaryParser.parse(from: msg.text) {
+                        allEntries.append(contentsOf: parsed.entries)
+                    }
+                }
+                return allEntries.isEmpty ? nil : allEntries
+            }()
+            let blockDiffText: String? = fileChangeMessages.isEmpty ? nil :
+                fileChangeMessages.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: "\n\n")
+
+            // Use the last assistant revert presentation in this block.
+            let blockRevert = messages[blockStart...blockEnd]
+                .reversed()
+                .compactMap { revertStatesByMessageID[$0.id] }
+                .first
+
+            if copyText != nil || showsRunningIndicator || blockDiffEntries != nil || blockRevert != nil {
+                result[blockEnd] = AssistantBlockAccessoryState(
+                    copyText: copyText,
+                    showsRunningIndicator: showsRunningIndicator,
+                    blockDiffText: blockDiffText,
+                    blockDiffEntries: blockDiffEntries,
+                    blockRevertPresentation: blockRevert
+                )
             }
             i = blockStart - 1
         }
@@ -600,6 +698,34 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
 
         return !isLatestBlock
+    }
+
+    // Keeps the terminal loader attached to the block that still belongs to the active run.
+    private static func shouldShowRunningIndicator(
+        blockTurnID: String?,
+        activeTurnID: String?,
+        isThreadRunning: Bool,
+        isLatestBlock: Bool,
+        latestTurnTerminalState: CodexTurnTerminalState?,
+        stoppedTurnIDs: Set<String>
+    ) -> Bool {
+        guard isThreadRunning else {
+            return false
+        }
+
+        if isLatestBlock, latestTurnTerminalState == .stopped {
+            return false
+        }
+
+        if let blockTurnID, stoppedTurnIDs.contains(blockTurnID) {
+            return false
+        }
+
+        if let blockTurnID, let activeTurnID {
+            return blockTurnID == activeTurnID
+        }
+
+        return isLatestBlock
     }
 
     // Scrolls to the bottom sentinel; used by manual jump button and initial recovery snap.

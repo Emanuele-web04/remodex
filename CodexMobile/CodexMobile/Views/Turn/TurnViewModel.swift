@@ -488,6 +488,15 @@ final class TurnViewModel {
             return
         }
 
+        // Keeps a confirmed `@file` mention closed once the user resumes normal prose after it.
+        guard !Self.hasClosedConfirmedFileMentionPrefix(
+            in: text,
+            confirmedMentions: composerMentionedFiles
+        ) else {
+            resetFileAutocompleteState()
+            return
+        }
+
         // Keep one autocomplete namespace visible at a time.
         resetSkillAutocompleteState()
         resetSlashCommandState(clearPendingSelection: true)
@@ -1271,6 +1280,58 @@ final class TurnViewModel {
         return Set(groupedKeys.compactMap { key, bucket in
             bucket.count > 1 ? key : nil
         })
+    }
+
+    // Detects when the last `@mention` already matches a confirmed chip and the user is now typing prose after it.
+    static func hasClosedConfirmedFileMentionPrefix(
+        in text: String,
+        confirmedMentions: [TurnComposerMentionedFile]
+    ) -> Bool {
+        guard !confirmedMentions.isEmpty,
+              let triggerIndex = text.lastIndex(of: "@") else {
+            return false
+        }
+
+        if triggerIndex > text.startIndex {
+            let previousCharacter = text[text.index(before: triggerIndex)]
+            guard previousCharacter.isWhitespace else {
+                return false
+            }
+        }
+
+        let tail = String(text[text.index(after: triggerIndex)...])
+        guard !tail.isEmpty else {
+            return false
+        }
+
+        let ambiguousKeys = ambiguousFileNameAliasKeys(in: confirmedMentions)
+        for mention in confirmedMentions {
+            let collisionKey = fileNameAliasCollisionKey(for: mention.fileName)
+            let allowFileNameAliases = collisionKey.map { !ambiguousKeys.contains($0) } ?? true
+            let aliases = fileMentionAliases(
+                fileName: mention.fileName,
+                path: mention.path,
+                allowFileNameAliases: allowFileNameAliases
+            )
+
+            for alias in aliases {
+                guard let range = tail.range(
+                    of: alias,
+                    options: [.anchored, .caseInsensitive]
+                ) else {
+                    continue
+                }
+
+                guard range.upperBound < tail.endIndex,
+                      tail[range.upperBound].isWhitespace else {
+                    continue
+                }
+
+                return true
+            }
+        }
+
+        return false
     }
 
     static func replacingTrailingSkillAutocompleteToken(in text: String, with selectedSkill: String) -> String? {

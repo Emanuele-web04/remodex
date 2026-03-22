@@ -136,7 +136,7 @@ struct TurnComposerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding)
-                .padding(.bottom, 12)
+                .padding(.bottom, 6)
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)
@@ -174,6 +174,8 @@ struct TurnComposerView: View {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
                     .overlay(alignment: .bottomLeading) {
+                        // Keep the floating overlay stretched to the composer width so the
+                        // recording capsule can expand all the way toward the trailing controls.
                         VStack(alignment: .leading, spacing: 6) {
                             if accessoryState.showsVoiceRecordingCapsule {
                                 VoiceRecordingCapsule(
@@ -194,6 +196,7 @@ struct TurnComposerView: View {
                                 onCloseSlashCommandPanel: onCloseSlashCommandPanel
                             )
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .offset(y: -8)
             }
@@ -232,8 +235,8 @@ struct TurnComposerView: View {
             )
         }
         .padding(.horizontal, 12)
-        .padding(.top, 6)
-        .padding(.bottom, 6)
+        .padding(.top, 4)
+        .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.easeInOut(duration: 0.18), value: isInputFocused.wrappedValue)
     }

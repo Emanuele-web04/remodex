@@ -130,6 +130,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 text.wrappedValue = textView.text
             }
             updateHeight(for: textView)
+            keepCaretVisible(in: textView)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -182,6 +183,12 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                     self.dynamicHeight.wrappedValue = pendingHeight
                 }
             }
+        }
+
+        // Keeps the newest typed line visible once the composer switches from growing to internal scrolling.
+        private func keepCaretVisible(in textView: UITextView) {
+            guard textView.isScrollEnabled else { return }
+            textView.scrollRangeToVisible(textView.selectedRange)
         }
 
         fileprivate func syncFocusIfNeeded(
