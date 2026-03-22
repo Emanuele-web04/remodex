@@ -84,6 +84,16 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
+            // Voice → Stop → Send
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback()
+                onTapVoice()
+            } label: {
+                voiceButtonLabel
+            }
+            .disabled(voiceButtonPresentation.isDisabled)
+            .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
+
             if isThreadRunning {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback()
@@ -96,15 +106,6 @@ struct ComposerBottomBar: View {
                         .background(Color(.label), in: Circle())
                 }
             }
-
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback()
-                onTapVoice()
-            } label: {
-                voiceButtonLabel
-            }
-            .disabled(voiceButtonPresentation.isDisabled)
-            .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
 
             Button {
                 HapticFeedback.shared.triggerImpactFeedback()
@@ -134,14 +135,22 @@ struct ComposerBottomBar: View {
             if voiceButtonPresentation.showsProgress {
                 ProgressView()
                     .tint(voiceButtonPresentation.foregroundColor)
-            } else {
+                    .frame(width: 32, height: 32)
+                    .background(voiceButtonPresentation.backgroundColor, in: Circle())
+            } else if voiceButtonPresentation.hasCircleBackground {
                 Image(systemName: voiceButtonPresentation.systemImageName)
                     .font(AppFont.system(size: 12, weight: .bold))
                     .foregroundStyle(voiceButtonPresentation.foregroundColor)
+                    .frame(width: 32, height: 32)
+                    .background(voiceButtonPresentation.backgroundColor, in: Circle())
+            } else {
+                Image(systemName: voiceButtonPresentation.systemImageName)
+                    .font(metaTextFont)
+                    .foregroundStyle(metaLabelColor)
+                    .frame(width: plusTapTargetSide, height: plusTapTargetSide)
+                    .contentShape(Rectangle())
             }
         }
-        .frame(width: 32, height: 32)
-        .background(voiceButtonPresentation.backgroundColor, in: Circle())
     }
 
     // MARK: - Menus
@@ -349,4 +358,5 @@ struct TurnComposerVoiceButtonPresentation {
     let accessibilityLabel: String
     let isDisabled: Bool
     let showsProgress: Bool
+    let hasCircleBackground: Bool
 }

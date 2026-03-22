@@ -61,6 +61,7 @@ struct TurnComposerView: View {
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
     let onTapVoice: () -> Void
+    let onCancelVoiceRecording: () -> Void
     let onTapCreateWorktree: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
     let onRemoveAttachment: (String) -> Void
@@ -173,15 +174,26 @@ struct TurnComposerView: View {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
                     .overlay(alignment: .bottomLeading) {
-                        TurnComposerAutocompletePanels(
-                            state: autocompleteState,
-                            onSelectFileAutocomplete: onSelectFileAutocomplete,
-                            onSelectSkillAutocomplete: onSelectSkillAutocomplete,
-                            onSelectSlashCommand: onSelectSlashCommand,
-                            onSelectCodeReviewTarget: onSelectCodeReviewTarget,
-                            onSelectForkDestination: onSelectForkDestination,
-                            onCloseSlashCommandPanel: onCloseSlashCommandPanel
-                        )
+                        VStack(alignment: .leading, spacing: 6) {
+                            if accessoryState.showsVoiceRecordingCapsule {
+                                VoiceRecordingCapsule(
+                                    audioLevels: accessoryState.voiceAudioLevels,
+                                    duration: accessoryState.voiceRecordingDuration,
+                                    onCancel: onCancelVoiceRecording
+                                )
+                                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            }
+
+                            TurnComposerAutocompletePanels(
+                                state: autocompleteState,
+                                onSelectFileAutocomplete: onSelectFileAutocomplete,
+                                onSelectSkillAutocomplete: onSelectSkillAutocomplete,
+                                onSelectSlashCommand: onSelectSlashCommand,
+                                onSelectCodeReviewTarget: onSelectCodeReviewTarget,
+                                onSelectForkDestination: onSelectForkDestination,
+                                onCloseSlashCommandPanel: onCloseSlashCommandPanel
+                            )
+                        }
                     }
                     .offset(y: -8)
             }
@@ -438,7 +450,10 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     composerMentionedFiles: [],
                     composerMentionedSkills: [],
                     composerReviewSelection: nil,
-                    isSubagentsSelectionArmed: true
+                    isSubagentsSelectionArmed: true,
+                    isVoiceRecording: false,
+                    voiceAudioLevels: [],
+                    voiceRecordingDuration: 0
                 ),
                 autocompleteState: TurnComposerAutocompleteState(
                     availableSlashCommands: TurnComposerSlashCommand.allCommands,
@@ -486,12 +501,13 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     selectServiceTier: { _ in }
                 ),
                 voiceButtonPresentation: TurnComposerVoiceButtonPresentation(
-                    systemImageName: "mic.fill",
-                    foregroundColor: .white,
-                    backgroundColor: .black,
+                    systemImageName: "mic",
+                    foregroundColor: Color(.secondaryLabel),
+                    backgroundColor: .clear,
                     accessibilityLabel: "Start voice transcription",
                     isDisabled: false,
-                    showsProgress: false
+                    showsProgress: false,
+                    hasCircleBackground: false
                 ),
                 selectedAccessMode: .onRequest,
                 contextWindowUsage: nil,
@@ -520,6 +536,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 onTapAddImage: {},
                 onTapTakePhoto: {},
                 onTapVoice: {},
+                onCancelVoiceRecording: {},
                 onTapCreateWorktree: {},
                 onSetPlanModeArmed: { _ in },
                 onRemoveAttachment: { _ in },

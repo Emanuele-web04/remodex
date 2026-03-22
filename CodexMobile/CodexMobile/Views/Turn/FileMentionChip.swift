@@ -49,7 +49,7 @@ struct SkillMentionChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "bolt.horizontal.circle")
+            Image(systemName: "square.stack.3d.up")
                 .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(Color.indigo)
 

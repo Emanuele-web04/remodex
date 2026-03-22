@@ -1032,7 +1032,11 @@ struct TurnView: View {
                 },
                 onShowStatus: presentStatusSheet,
                 voiceButtonPresentation: voiceButtonPresentation,
+                isVoiceRecording: isVoiceRecording,
+                voiceAudioLevels: voiceTranscriptionManager.audioLevels,
+                voiceRecordingDuration: voiceTranscriptionManager.recordingDuration,
                 onTapVoice: handleVoiceButtonTap,
+                onCancelVoiceRecording: cancelVoiceRecordingIfNeeded,
                 onSend: handleSend
             )
         }
@@ -1047,7 +1051,8 @@ struct TurnView: View {
                 backgroundColor: Color(.systemGray5),
                 accessibilityLabel: "Transcribing voice note",
                 isDisabled: true,
-                showsProgress: true
+                showsProgress: true,
+                hasCircleBackground: true
             )
         }
 
@@ -1058,7 +1063,8 @@ struct TurnView: View {
                 backgroundColor: Color(.systemGray5),
                 accessibilityLabel: "Preparing microphone",
                 isDisabled: true,
-                showsProgress: true
+                showsProgress: true,
+                hasCircleBackground: true
             )
         }
 
@@ -1069,17 +1075,19 @@ struct TurnView: View {
                 backgroundColor: Color(.systemRed),
                 accessibilityLabel: "Stop voice recording",
                 isDisabled: false,
-                showsProgress: false
+                showsProgress: false,
+                hasCircleBackground: true
             )
         }
 
         return TurnComposerVoiceButtonPresentation(
-            systemImageName: "mic.fill",
-            foregroundColor: Color(.systemBackground),
-            backgroundColor: Color(.label),
+            systemImageName: "mic",
+            foregroundColor: Color(.secondaryLabel),
+            backgroundColor: .clear,
             accessibilityLabel: "Start voice transcription",
             isDisabled: !codex.isConnected,
-            showsProgress: false
+            showsProgress: false,
+            hasCircleBackground: false
         )
     }
 
@@ -1109,6 +1117,7 @@ struct TurnView: View {
         do {
             guard let clip = try voiceTranscriptionManager.stopRecording() else {
                 isVoiceRecording = false
+                voiceTranscriptionManager.resetMeteringState()
                 return
             }
 
@@ -1117,6 +1126,7 @@ struct TurnView: View {
             }
 
             isVoiceRecording = false
+            voiceTranscriptionManager.resetMeteringState()
             let transcript = try await codex.transcribeVoiceAudioFile(
                 at: clip.url,
                 durationSeconds: clip.durationSeconds
@@ -1125,6 +1135,7 @@ struct TurnView: View {
             isInputFocused = true
         } catch {
             isVoiceRecording = false
+            voiceTranscriptionManager.resetMeteringState()
             codex.lastErrorMessage = error.localizedDescription
         }
     }

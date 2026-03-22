@@ -56,11 +56,18 @@ enum GPTVoiceTranscriptionError: LocalizedError {
 final class GPTVoiceTranscriptionManager: ObservableObject {
     private let audioSession = AVAudioSession.sharedInstance()
     private static let targetSampleRate: Double = 24_000
+    private static let maxAudioLevels = 60
 
     private var engine: AVAudioEngine?
     private let collector = AudioBufferCollector()
     private var captureSampleRate: Double = 0
     private var isRecording = false
+    private var durationTimer: Timer?
+
+    /// Rolling window of normalized (0…1) amplitude samples for waveform visualization.
+    @Published var audioLevels: [CGFloat] = []
+    /// Elapsed seconds since recording started.
+    @Published var recordingDuration: TimeInterval = 0
 
     // ─── Recording lifecycle ─────────────────────────────────────
 
@@ -98,9 +105,32 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
             captureSampleRate = format.sampleRate
             collector.reset()
 
-            // Collect raw buffers on the tap thread — no conversion or file I/O here.
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [collector] buffer, _ in
+            // Collect raw buffers on the tap thread and compute audio levels for the waveform.
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [collector, weak self] buffer, _ in
                 collector.append(buffer)
+
+                // Compute RMS power for waveform visualization.
+                guard let channelData = buffer.floatChannelData?[0] else { return }
+                let frameCount = Int(buffer.frameLength)
+                guard frameCount > 0 else { return }
+
+                var sumOfSquares: Float = 0
+                let ptr = channelData
+                for i in 0..<frameCount {
+                    let sample = ptr[i]
+                    sumOfSquares += sample * sample
+                }
+                let rms = sqrt(sumOfSquares / Float(frameCount))
+                let dB = 20 * log10(max(rms, 1e-6))
+                let normalized = CGFloat(max(0, min(1, (dB + 50) / 50)))
+
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.audioLevels.append(normalized)
+                    if self.audioLevels.count > Self.maxAudioLevels {
+                        self.audioLevels.removeFirst(self.audioLevels.count - Self.maxAudioLevels)
+                    }
+                }
             }
 
             self.engine = engine
@@ -108,6 +138,7 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
 
             engine.prepare()
             try engine.start()
+            startDurationTimer()
             codexLogVoiceRecording("recording active")
         } catch let error as GPTVoiceTranscriptionError {
             teardownEngine()
@@ -126,6 +157,7 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         guard isRecording else { return nil }
         isRecording = false
 
+        stopDurationTimer()
         teardownEngine()
 
         let buffers = collector.drain()
@@ -171,10 +203,37 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         let wasRecording = isRecording
         isRecording = false
 
+        stopDurationTimer()
+        resetMeteringState()
+
         if wasRecording || engine != nil {
             teardownEngine()
         }
         collector.reset()
+    }
+
+    @MainActor
+    func resetMeteringState() {
+        audioLevels = []
+        recordingDuration = 0
+    }
+
+    // ─── Duration timer ─────────────────────────────────────────
+
+    @MainActor
+    private func startDurationTimer() {
+        recordingDuration = 0
+        durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.recordingDuration += 0.1
+            }
+        }
+    }
+
+    @MainActor
+    private func stopDurationTimer() {
+        durationTimer?.invalidate()
+        durationTimer = nil
     }
 
     // ─── Mic permission ──────────────────────────────────────────
