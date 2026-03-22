@@ -11,8 +11,9 @@ struct CameraImagePicker: UIViewControllerRepresentable {
     @Environment(\.dismiss) private var dismiss
 
     func makeUIViewController(context: Context) -> UIImagePickerController {
-        let picker = UIImagePickerController()
+        let picker = AdaptiveCameraPickerController()
         picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
         picker.delegate = context.coordinator
         return picker
     }
@@ -62,5 +63,36 @@ struct CameraImagePicker: UIViewControllerRepresentable {
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
             dismiss()
         }
+    }
+}
+
+private final class AdaptiveCameraPickerController: UIImagePickerController {
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .allButUpsideDown
+    }
+
+    override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation {
+        currentInterfaceOrientation
+    }
+
+    override var shouldAutorotate: Bool {
+        true
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        setNeedsUpdateOfSupportedInterfaceOrientations()
+        UIViewController.attemptRotationToDeviceOrientation()
+    }
+
+    private var currentInterfaceOrientation: UIInterfaceOrientation {
+        if let windowScene = view.window?.windowScene,
+           windowScene.interfaceOrientation != .unknown {
+            return windowScene.interfaceOrientation
+        }
+
+        return UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.interfaceOrientation }
+            .first(where: { $0 != .unknown }) ?? .portrait
     }
 }

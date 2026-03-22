@@ -11,6 +11,7 @@ struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     @State private var viewModel = ContentViewModel()
     @State private var isSidebarOpen = false
@@ -58,12 +59,16 @@ struct ContentView: View {
                     closeSidebar()
                 }
             }
-            .onChange(of: selectedThread) { previousThread, thread in
+            .onChange(of: selectedThread?.id) { previousThreadID, threadID in
+                if let threadID, previousThreadID != threadID {
+                    // Leaving pushed destinations like Settings keeps the newly selected chat visible.
+                    navigationPath = NavigationPath()
+                }
                 codex.handleDisplayedThreadChange(
-                    from: previousThread?.id,
-                    to: thread?.id
+                    from: previousThreadID,
+                    to: threadID
                 )
-                codex.activeThreadId = thread?.id
+                codex.activeThreadId = threadID
             }
             .onChange(of: codex.activeThreadId) { _, activeThreadId in
                 guard let activeThreadId,
@@ -164,7 +169,7 @@ struct ContentView: View {
         } else if shouldShowQRScanner {
             qrScannerBody
         } else {
-            mainAppBody
+            adaptiveMainAppBody
         }
     }
 
@@ -237,6 +242,33 @@ struct ContentView: View {
         .gesture(edgeDragGesture)
     }
 
+    @ViewBuilder
+    private var adaptiveMainAppBody: some View {
+        if usesPadShell {
+            splitMainAppBody
+        } else {
+            mainAppBody
+        }
+    }
+
+    private var splitMainAppBody: some View {
+        NavigationSplitView {
+            SidebarView(
+                selectedThread: $selectedThread,
+                showSettings: $showSettings,
+                isSearchActive: $isSearchActive,
+                onClose: {},
+            )
+            .navigationSplitViewColumnWidth(min: sidebarWidth, ideal: 360, max: 420)
+        } detail: {
+            mainNavigationLayer
+                .id(selectedThread?.id ?? "home")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(.systemBackground))
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
     // MARK: - Layers
 
     private var mainNavigationLayer: some View {
@@ -258,11 +290,7 @@ struct ContentView: View {
         if let thread = selectedThread {
             TurnView(thread: thread)
                 .id(thread.id)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        hamburgerButton
-                    }
-                }
+                .toolbar { mainContentToolbar }
         } else {
             HomeEmptyStateView(
                 connectionPhase: homeConnectionPhase,
@@ -300,10 +328,15 @@ struct ContentView: View {
                     }
                 }
             }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    hamburgerButton
-                }
+            .toolbar { mainContentToolbar }
+        }
+    }
+
+    @ToolbarContentBuilder
+    private var mainContentToolbar: some ToolbarContent {
+        if !usesPadShell {
+            ToolbarItem(placement: .topBarLeading) {
+                hamburgerButton
             }
         }
     }
@@ -485,6 +518,10 @@ struct ContentView: View {
                 }
             }
         )
+    }
+
+    private var usesPadShell: Bool {
+        horizontalSizeClass == .regular
     }
 
     // Re-tries the saved relay session after the user updates the Mac package.

@@ -12,6 +12,7 @@ struct TurnView: View {
 
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
@@ -287,7 +288,15 @@ struct TurnView: View {
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
         }
-        .sheet(item: $repositoryDiffPresentation) { presentation in
+        .sheet(item: repositoryDiffSheetBinding) { presentation in
+            TurnDiffSheet(
+                title: presentation.title,
+                entries: presentation.entries,
+                bodyText: presentation.bodyText,
+                messageID: presentation.messageID
+            )
+        }
+        .fullScreenCover(item: repositoryDiffFullScreenBinding) { presentation in
             TurnDiffSheet(
                 title: presentation.title,
                 entries: presentation.entries,
@@ -1244,6 +1253,26 @@ struct TurnView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+private extension TurnView {
+    var usesPadDiffPresentation: Bool {
+        horizontalSizeClass == .regular
+    }
+
+    var repositoryDiffSheetBinding: Binding<TurnDiffPresentation?> {
+        Binding(
+            get: { usesPadDiffPresentation ? nil : repositoryDiffPresentation },
+            set: { repositoryDiffPresentation = $0 }
+        )
+    }
+
+    var repositoryDiffFullScreenBinding: Binding<TurnDiffPresentation?> {
+        Binding(
+            get: { usesPadDiffPresentation ? repositoryDiffPresentation : nil },
+            set: { repositoryDiffPresentation = $0 }
+        )
     }
 }
 

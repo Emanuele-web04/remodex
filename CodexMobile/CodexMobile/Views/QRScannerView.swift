@@ -8,6 +8,9 @@ import AVFoundation
 import SwiftUI
 
 struct QRScannerView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.openURL) private var openURL
+
     let onBack: (() -> Void)?
     let onScan: (CodexPairingQRPayload) -> Void
 
@@ -32,23 +35,25 @@ struct QRScannerView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { geometry in
+            ZStack {
+                Color.black.ignoresSafeArea()
 
-            if isCheckingPermission {
-                ProgressView()
-                    .tint(.white)
-            } else if let bridgeUpdatePrompt {
-                bridgeUpdateView(prompt: bridgeUpdatePrompt)
-            } else if hasCameraPermission {
-                QRCameraPreview { code, resetScanLock in
-                    handleScanResult(code, resetScanLock: resetScanLock)
+                if isCheckingPermission {
+                    ProgressView()
+                        .tint(.white)
+                } else if let bridgeUpdatePrompt {
+                    bridgeUpdateView(prompt: bridgeUpdatePrompt, availableWidth: geometry.size.width)
+                } else if hasCameraPermission {
+                    QRCameraPreview { code, resetScanLock in
+                        handleScanResult(code, resetScanLock: resetScanLock)
+                    }
+                    .ignoresSafeArea()
+
+                    scannerOverlay(for: geometry.size.width)
+                } else {
+                    cameraPermissionView(for: geometry.size.width)
                 }
-                .ignoresSafeArea()
-
-                scannerOverlay
-            } else {
-                cameraPermissionView
             }
         }
         .safeAreaInset(edge: .top) {
@@ -75,7 +80,7 @@ struct QRScannerView: View {
     }
 
     // Blocks repeated scans when the camera spots a bridge QR from an incompatible npm release.
-    private func bridgeUpdateView(prompt: CodexBridgeUpdatePrompt) -> some View {
+    private func bridgeUpdateView(prompt: CodexBridgeUpdatePrompt, availableWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 24) {
             Spacer()
 
@@ -114,6 +119,7 @@ struct QRScannerView: View {
             Spacer()
         }
         .padding(.horizontal, 24)
+        .frame(maxWidth: permissionContentWidth(for: availableWidth), alignment: .leading)
     }
 
     private func bridgeUpdateStep(
@@ -184,13 +190,15 @@ struct QRScannerView: View {
         .accessibilityLabel("Back")
     }
 
-    private var scannerOverlay: some View {
+    private func scannerOverlay(for availableWidth: CGFloat) -> some View {
+        let frameSize = scannerFrameSize(for: availableWidth)
+
         VStack(spacing: 24) {
             Spacer()
 
             RoundedRectangle(cornerRadius: 20)
                 .stroke(Color.white.opacity(0.6), lineWidth: 2)
-                .frame(width: 250, height: 250)
+                .frame(width: frameSize, height: frameSize)
 
             Text("Scan QR code from Remodex CLI")
                 .font(AppFont.subheadline(weight: .medium))
@@ -200,8 +208,10 @@ struct QRScannerView: View {
         }
     }
 
-    private var cameraPermissionView: some View {
-        VStack(spacing: 20) {
+    private func cameraPermissionView(for availableWidth: CGFloat) -> some View {
+        let maxWidth = permissionContentWidth(for: availableWidth)
+
+        return VStack(spacing: 20) {
             Image(systemName: "camera.fill")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
@@ -217,12 +227,30 @@ struct QRScannerView: View {
                 .padding(.horizontal, 40)
 
             Button("Open Settings") {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
+                if let url = URL(string: "app-settings:") {
+                    openURL(url)
                 }
             }
             .buttonStyle(.borderedProminent)
         }
+        .frame(maxWidth: maxWidth)
+        .padding(.horizontal, 24)
+    }
+
+    private var usesRegularPadLayout: Bool {
+        horizontalSizeClass == .regular
+    }
+
+    private func scannerFrameSize(for availableWidth: CGFloat) -> CGFloat {
+        usesWidePadLayout(for: availableWidth) ? 320 : 250
+    }
+
+    private func permissionContentWidth(for availableWidth: CGFloat) -> CGFloat {
+        usesWidePadLayout(for: availableWidth) ? 460 : 360
+    }
+
+    private func usesWidePadLayout(for availableWidth: CGFloat) -> Bool {
+        usesRegularPadLayout && availableWidth >= 900
     }
 
     // Keeps permission-prompt teardown on the main actor so backing out mid-prompt
@@ -381,23 +409,48 @@ private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
     var onScan: ((String) -> Void)?
 
     private let captureSession = AVCaptureSession()
+    private let metadataOutput = AVCaptureMetadataOutput()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var hasScanned = false
+    private var currentVideoOrientation: AVCaptureVideoOrientation = .portrait
     private var isStoppingCamera = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        startObservingDeviceOrientation()
         setupCamera()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        startObservingDeviceOrientation()
         setupCamera()
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         previewLayer?.frame = bounds
+        updateCaptureOrientation()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateCaptureOrientation()
+    }
+
+    @objc
+    private func handleDeviceOrientationDidChange() {
+        updateCaptureOrientation()
+    }
+
+    private func startObservingDeviceOrientation() {
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleDeviceOrientationDidChange),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
     }
 
     // Configures the metadata session once and starts it off the main thread.
@@ -411,23 +464,54 @@ private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
             captureSession.addInput(input)
         }
 
-        let output = AVCaptureMetadataOutput()
-        if captureSession.canAddOutput(output) {
-            captureSession.addOutput(output)
-            output.setMetadataObjectsDelegate(self, queue: .main)
-            output.metadataObjectTypes = [.qr]
+        if captureSession.canAddOutput(metadataOutput) {
+            captureSession.addOutput(metadataOutput)
+            metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
+            metadataOutput.metadataObjectTypes = [.qr]
         }
 
         let layer = AVCaptureVideoPreviewLayer(session: captureSession)
         layer.videoGravity = .resizeAspectFill
         self.layer.addSublayer(layer)
         previewLayer = layer
+        updateCaptureOrientation()
 
         QRCameraLifecycleCoordinator.shared.start(session: captureSession) { [weak self] in
             guard let self else {
                 return false
             }
             return !self.isStoppingCamera
+        }
+    }
+
+    private func updateCaptureOrientation() {
+        let orientation = captureVideoOrientation(for: UIDevice.current.orientation) ?? currentVideoOrientation
+
+        if let connection = previewLayer?.connection,
+           connection.isVideoOrientationSupported {
+            connection.videoOrientation = orientation
+        }
+
+        if let connection = metadataOutput.connection(with: .video),
+           connection.isVideoOrientationSupported {
+            connection.videoOrientation = orientation
+        }
+
+        currentVideoOrientation = orientation
+    }
+
+    private func captureVideoOrientation(for deviceOrientation: UIDeviceOrientation) -> AVCaptureVideoOrientation? {
+        switch deviceOrientation {
+        case .portrait:
+            return .portrait
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        case .landscapeLeft:
+            return .landscapeRight
+        case .landscapeRight:
+            return .landscapeLeft
+        default:
+            return nil
         }
     }
 
@@ -470,6 +554,8 @@ private class QRCameraUIView: UIView, AVCaptureMetadataOutputObjectsDelegate {
     }
 
     deinit {
+        NotificationCenter.default.removeObserver(self)
+        UIDevice.current.endGeneratingDeviceOrientationNotifications()
         stopCamera()
     }
 }
