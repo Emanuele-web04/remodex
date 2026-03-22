@@ -6,6 +6,16 @@
 
 import Foundation
 
+struct BridgeCLIInvocation {
+    let nodePath: String
+    let remodexPath: String
+
+    // Executes the actual CLI entrypoint via an absolute Node binary so GUI PATH drift does not break nvm installs.
+    func command(_ arguments: [String]) -> String {
+        ([shellQuoted(nodePath), shellQuoted(remodexPath)] + arguments).joined(separator: " ")
+    }
+}
+
 struct ShellCommandResult {
     let stdout: String
     let stderr: String
@@ -76,6 +86,9 @@ final class ShellCommandRunner {
 final class BridgeControlService {
     private let runner: ShellCommandRunner
     private let decoder = JSONDecoder()
+    private let fileManager = FileManager.default
+    private let defaultStateDirectory = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent(".remodex", isDirectory: true)
 
     init(runner: ShellCommandRunner = ShellCommandRunner()) {
         self.runner = runner
@@ -84,7 +97,8 @@ final class BridgeControlService {
     // Confirms the product contract for this companion: a global `remodex` CLI must be runnable first.
     func detectCLIAvailability() async -> BridgeCLIAvailability {
         do {
-            let result = try await runner.run(command: "remodex --version")
+            let invocation = try await resolveCLIInvocation()
+            let result = try await runner.run(command: invocation.command(["--version"]))
             guard let version = parseLatestVersion(result.stdout) else {
                 return .broken(message: "The installed CLI returned an unreadable version.")
             }
@@ -97,8 +111,9 @@ final class BridgeControlService {
 
     // Loads the daemon snapshot from the CLI so the menu bar stays aligned with the package's real control plane.
     func loadSnapshot(relayOverride: String?) async throws -> BridgeSnapshot {
+        let invocation = try await resolveCLIInvocation()
         let result = try await runner.run(
-            command: "remodex status --json",
+            command: invocation.command(["status", "--json"]),
             environment: commandEnvironment(relayOverride: relayOverride)
         )
         guard let data = result.stdout.data(using: .utf8) else {
@@ -108,34 +123,38 @@ final class BridgeControlService {
         do {
             return try decoder.decode(BridgeSnapshot.self, from: data)
         } catch {
-            throw BridgeControlError.invalidSnapshot("Bridge status returned malformed JSON.")
+            return try await loadFallbackSnapshot(from: result.stdout, invocation: invocation)
         }
     }
 
     func startBridge(relayOverride: String?) async throws {
+        let invocation = try await resolveCLIInvocation()
         _ = try await runner.run(
-            command: "remodex start",
+            command: invocation.command(["start"]),
             environment: commandEnvironment(relayOverride: relayOverride)
         )
     }
 
     func stopBridge(relayOverride: String?) async throws {
+        let invocation = try await resolveCLIInvocation()
         _ = try await runner.run(
-            command: "remodex stop",
+            command: invocation.command(["stop"]),
             environment: commandEnvironment(relayOverride: relayOverride)
         )
     }
 
     func resumeLastThread(relayOverride: String?) async throws {
+        let invocation = try await resolveCLIInvocation()
         _ = try await runner.run(
-            command: "remodex resume",
+            command: invocation.command(["resume"]),
             environment: commandEnvironment(relayOverride: relayOverride)
         )
     }
 
     func resetPairing(relayOverride: String?) async throws {
+        let invocation = try await resolveCLIInvocation()
         _ = try await runner.run(
-            command: "remodex reset-pairing",
+            command: invocation.command(["reset-pairing"]),
             environment: commandEnvironment(relayOverride: relayOverride)
         )
     }
@@ -175,6 +194,158 @@ final class BridgeControlService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    // Falls back to the daemon-state files when the global CLI still prints human-readable status output.
+    private func loadFallbackSnapshot(
+        from statusOutput: String,
+        invocation: BridgeCLIInvocation
+    ) async throws -> BridgeSnapshot {
+        let statusLines = parseStatusLines(statusOutput)
+        guard !statusLines.isEmpty else {
+            throw BridgeControlError.invalidSnapshot("Bridge status returned malformed JSON.")
+        }
+
+        let versionResult = try await runner.run(command: invocation.command(["--version"]))
+        guard let currentVersion = parseLatestVersion(versionResult.stdout) else {
+            throw BridgeControlError.invalidSnapshot("Bridge status returned an unreadable CLI version.")
+        }
+
+        let daemonConfig: BridgeDaemonConfig? = readStateFile(named: "daemon-config.json")
+        let bridgeStatus: BridgeRuntimeStatus? = readStateFile(named: "bridge-status.json")
+        let pairingSession: BridgePairingSession? = readStateFile(named: "pairing-session.json")
+        let stdoutLogPath = statusLines["stdout log"] ?? defaultStateDirectory.appendingPathComponent("logs/bridge.stdout.log").path
+        let stderrLogPath = statusLines["stderr log"] ?? defaultStateDirectory.appendingPathComponent("logs/bridge.stderr.log").path
+        let launchdPid = parsePid(statusLines["pid"])
+        let launchdLoaded = parseYesNo(statusLines["launchd loaded"]) ?? false
+        let installed = parseYesNo(statusLines["installed"]) ?? fileManager.fileExists(atPath: defaultStateDirectory.path)
+
+        return BridgeSnapshot(
+            currentVersion: currentVersion,
+            label: statusLines["service label"] ?? "com.remodex.bridge",
+            platform: "darwin",
+            installed: installed,
+            launchdLoaded: launchdLoaded,
+            launchdPid: launchdPid,
+            daemonConfig: daemonConfig,
+            bridgeStatus: bridgeStatus,
+            pairingSession: pairingSession,
+            stdoutLogPath: stdoutLogPath,
+            stderrLogPath: stderrLogPath
+        )
+    }
+
+    // Resolves both the CLI script and the Node runtime from stable absolute paths before the menu bar invokes them.
+    private func resolveCLIInvocation() async throws -> BridgeCLIInvocation {
+        let remodexPath = try await resolveExecutable(named: "remodex")
+        let nodePath = try await resolveExecutable(named: "node")
+        return BridgeCLIInvocation(nodePath: nodePath, remodexPath: remodexPath)
+    }
+
+    private func parseStatusLines(_ output: String) -> [String: String] {
+        output
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .reduce(into: [String: String]()) { partialResult, line in
+                let cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                let prefix = "[remodex] "
+                guard cleaned.hasPrefix(prefix) else {
+                    return
+                }
+
+                let payload = cleaned.dropFirst(prefix.count)
+                guard let separatorIndex = payload.firstIndex(of: ":") else {
+                    return
+                }
+
+                let key = payload[..<separatorIndex]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                let value = payload[payload.index(after: separatorIndex)...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                partialResult[key] = value
+            }
+    }
+
+    private func parseYesNo(_ value: String?) -> Bool? {
+        switch value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "yes":
+            return true
+        case "no":
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private func parsePid(_ value: String?) -> Int? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = Int(value) else {
+            return nil
+        }
+
+        return pid
+    }
+
+    private func readStateFile<T: Decodable>(named filename: String) -> T? {
+        let targetURL = defaultStateDirectory.appendingPathComponent(filename)
+        guard let data = try? Data(contentsOf: targetURL) else {
+            return nil
+        }
+
+        return try? decoder.decode(T.self, from: data)
+    }
+
+    private func resolveExecutable(named name: String) async throws -> String {
+        if let discovered = try? await runner.run(command: "command -v \(name)"),
+           let path = parseExecutablePath(discovered.stdout),
+           fileManager.isExecutableFile(atPath: path) {
+            return path
+        }
+
+        if let fallback = fallbackExecutableCandidates(named: name).first(where: { fileManager.isExecutableFile(atPath: $0) }) {
+            return fallback
+        }
+
+        throw BridgeControlError.commandFailed(
+            command: name,
+            message: "\(name) was not found in the app shell environment."
+        )
+    }
+
+    private func parseExecutablePath(_ output: String) -> String? {
+        let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return path.isEmpty ? nil : path
+    }
+
+    private func fallbackExecutableCandidates(named name: String) -> [String] {
+        let homeDirectory = NSHomeDirectory()
+        let stableCandidates = [
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "\(homeDirectory)/.local/bin/\(name)",
+            "\(homeDirectory)/.volta/bin/\(name)",
+        ]
+
+        return stableCandidates + nvmExecutableCandidates(named: name, homeDirectory: homeDirectory)
+    }
+
+    private func nvmExecutableCandidates(named name: String, homeDirectory: String) -> [String] {
+        let versionsDirectory = URL(fileURLWithPath: homeDirectory)
+            .appendingPathComponent(".nvm", isDirectory: true)
+            .appendingPathComponent("versions", isDirectory: true)
+            .appendingPathComponent("node", isDirectory: true)
+
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: versionsDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return contents
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .map { $0.appendingPathComponent("bin", isDirectory: true).appendingPathComponent(name).path }
+    }
+
     // Maps shell failures into the explicit "missing global CLI" state shown by the menu bar.
     private func classifyCLIAvailability(from error: Error) -> BridgeCLIAvailability {
         let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -200,4 +371,8 @@ final class BridgeControlService {
             "REMODEX_RELAY": relayOverride.trimmingCharacters(in: .whitespacesAndNewlines),
         ]
     }
+}
+
+private func shellQuoted(_ value: String) -> String {
+    "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
 }

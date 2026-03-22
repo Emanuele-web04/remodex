@@ -40,13 +40,13 @@ final class BridgeMenuBarStore: ObservableObject {
     private let service: BridgeControlService
     private var refreshLoopTask: Task<Void, Never>?
 
-    init(service: BridgeControlService = BridgeControlService()) {
-        self.service = service
+    init(service: BridgeControlService? = nil) {
+        self.service = service ?? BridgeControlService()
         self.relayOverride = UserDefaults.standard.string(forKey: Self.relayOverrideKey) ?? ""
         startRefreshLoop()
 
         Task {
-            await bootstrap()
+            await self.bootstrap()
         }
     }
 
@@ -87,7 +87,7 @@ final class BridgeMenuBarStore: ObservableObject {
         relayOverride = value.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(relayOverride, forKey: Self.relayOverrideKey)
         Task {
-            await refresh(showSpinner: true)
+            await self.refresh(showSpinner: true)
         }
     }
 
@@ -95,57 +95,57 @@ final class BridgeMenuBarStore: ObservableObject {
         relayOverride = ""
         UserDefaults.standard.removeObject(forKey: Self.relayOverrideKey)
         Task {
-            await refresh(showSpinner: true)
+            await self.refresh(showSpinner: true)
         }
     }
 
     func startBridge() {
         let previousPairingDate = snapshot?.pairingSession?.createdDate
         runAction(successMessage: "Bridge avviato.") {
-            try await requireCLIAvailability()
-            try await service.startBridge(relayOverride: effectiveRelayOverride)
-            try await waitForFreshPairing(after: previousPairingDate)
+            try await self.requireCLIAvailability()
+            try await self.service.startBridge(relayOverride: self.effectiveRelayOverride)
+            try await self.waitForFreshPairing(after: previousPairingDate)
         }
     }
 
     func stopBridge() {
         runAction(successMessage: "Bridge fermato.") {
-            try await requireCLIAvailability()
-            try await service.stopBridge(relayOverride: effectiveRelayOverride)
-            await refresh(showSpinner: false)
+            try await self.requireCLIAvailability()
+            try await self.service.stopBridge(relayOverride: self.effectiveRelayOverride)
+            await self.refresh(showSpinner: false)
         }
     }
 
     func resumeLastThread() {
         runAction(successMessage: "Ultimo thread riaperto in Codex.") {
-            try await requireCLIAvailability()
-            try await service.resumeLastThread(relayOverride: effectiveRelayOverride)
-            await refresh(showSpinner: false)
+            try await self.requireCLIAvailability()
+            try await self.service.resumeLastThread(relayOverride: self.effectiveRelayOverride)
+            await self.refresh(showSpinner: false)
         }
     }
 
     func resetPairing() {
         runAction(successMessage: "Pairing resettato.") {
-            try await requireCLIAvailability()
-            try await service.resetPairing(relayOverride: effectiveRelayOverride)
-            await refresh(showSpinner: false)
+            try await self.requireCLIAvailability()
+            try await self.service.resetPairing(relayOverride: self.effectiveRelayOverride)
+            await self.refresh(showSpinner: false)
         }
     }
 
     func updateBridgePackage() {
         runAction(successMessage: "Bridge aggiornato all’ultima release.") {
-            try await requireCLIAvailability()
-            try await service.updateBridgePackage()
-            if snapshot?.launchdLoaded == true {
-                try await service.startBridge(relayOverride: effectiveRelayOverride)
+            try await self.requireCLIAvailability()
+            try await self.service.updateBridgePackage()
+            if self.snapshot?.launchdLoaded == true {
+                try await self.service.startBridge(relayOverride: self.effectiveRelayOverride)
             }
-            await refresh(showSpinner: false)
+            await self.refresh(showSpinner: false)
         }
     }
 
     func retryCLISetup() {
         Task {
-            await refresh(showSpinner: true)
+            await self.refresh(showSpinner: true)
         }
     }
 
@@ -178,9 +178,9 @@ final class BridgeMenuBarStore: ObservableObject {
             guard let self else { return }
 
             while !Task.isCancelled {
-                try? await Task.sleep(for: .minutes(8))
+                try? await Task.sleep(for: .seconds(480))
                 guard !Task.isCancelled else { return }
-                await refresh(showSpinner: false)
+                await self.refresh(showSpinner: false)
             }
         }
     }
@@ -276,14 +276,14 @@ final class BridgeMenuBarStore: ObservableObject {
 
         Task {
             defer {
-                isPerformingAction = false
+                self.isPerformingAction = false
             }
 
             do {
                 try await operation()
-                transientMessage = successMessage
+                self.transientMessage = successMessage
             } catch {
-                errorMessage = error.localizedDescription
+                self.errorMessage = error.localizedDescription
             }
         }
     }

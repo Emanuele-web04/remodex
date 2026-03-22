@@ -11,10 +11,11 @@ import SwiftUI
 struct BridgeMenuBarContentView: View {
     @ObservedObject var store: BridgeMenuBarStore
     @State private var relayDraft = ""
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 headerCard
                 if store.isCLIAvailable {
                     statusGrid
@@ -40,15 +41,15 @@ struct BridgeMenuBarContentView: View {
     }
 
     private var headerCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("REMODEX CTRL")
-                        .font(.system(size: 13, weight: .black, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.95))
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Remodex Ctrl")
+                        .font(.system(size: 19, weight: .semibold))
+                        .foregroundStyle(.primary)
                     Text("Bridge cockpit from the menu bar")
-                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .font(.system(size: 12, weight: .regular))
+                        .foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 12)
@@ -82,23 +83,23 @@ struct BridgeMenuBarContentView: View {
             }
 
             Text(store.cliAvailability.setupTitle)
-                .font(.system(size: 17, weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.94))
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.primary)
 
             Text(store.cliAvailability.setupMessage)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.72))
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             LabelValueRow(label: "Install", value: BridgeCLIAvailability.installCommand)
 
             Text("After installing, reopen the menu or press retry so the companion can detect the global CLI.")
-                .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.62))
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
-                ControlActionButton("Retry", tint: .teal) {
+                ControlActionButton("Retry", style: .primary) {
                     store.retryCLISetup()
                 }
             }
@@ -139,25 +140,25 @@ struct BridgeMenuBarContentView: View {
             cardTitle("Relay Override")
 
             Text("Optional. Leave empty to use whatever `remodex` resolves from your shell or saved daemon config.")
-                .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.64))
+                .font(.system(size: 11, weight: .regular))
+                .foregroundStyle(.secondary)
 
             TextField("ws://localhost:9000/relay", text: $relayDraft)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .font(.system(size: 12, weight: .regular, design: .monospaced))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(Color(nsColor: .textBackgroundColor).opacity(0.82), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
                 )
 
             HStack(spacing: 8) {
-                ControlActionButton("Save Relay", tint: .teal) {
+                ControlActionButton("Save Relay", style: .primary) {
                     store.saveRelayOverride(relayDraft)
                 }
-                ControlActionButton("Use Defaults", tint: .gray.opacity(0.5)) {
+                ControlActionButton("Use Defaults", style: .secondary) {
                     relayDraft = ""
                     store.clearRelayOverride()
                 }
@@ -173,29 +174,29 @@ struct BridgeMenuBarContentView: View {
             cardTitle("Command Deck")
 
             HStack(spacing: 8) {
-                ControlActionButton("Start", tint: .green) {
+                ControlActionButton("Start", style: .primary) {
                     store.startBridge()
                 }
-                ControlActionButton("Stop", tint: .red) {
+                ControlActionButton("Stop", style: .destructive) {
                     store.stopBridge()
                 }
-                ControlActionButton("Resume", tint: .blue) {
+                ControlActionButton("Resume", style: .secondary) {
                     store.resumeLastThread()
                 }
             }
 
             HStack(spacing: 8) {
-                ControlActionButton("Refresh", tint: .white.opacity(0.18)) {
+                ControlActionButton("Refresh", style: .secondary) {
                     Task {
                         await store.refresh(showSpinner: true)
                     }
                 }
-                ControlActionButton("Reset Pair", tint: .orange) {
+                ControlActionButton("Reset Pair", style: .destructive) {
                     store.resetPairing()
                 }
 
                 if store.updateState.isUpdateAvailable {
-                    ControlActionButton("Update", tint: .pink) {
+                    ControlActionButton("Update", style: .primary) {
                         store.updateBridgePackage()
                     }
                 }
@@ -225,7 +226,11 @@ struct BridgeMenuBarContentView: View {
                 HStack(alignment: .top, spacing: 14) {
                     PairingQRCodeView(payload: payload)
                         .frame(width: 124, height: 124)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
 
                     VStack(alignment: .leading, spacing: 8) {
                         LabelValueRow(label: "Session", value: payload.sessionId)
@@ -235,8 +240,8 @@ struct BridgeMenuBarContentView: View {
                 }
             } else {
                 Text("Start the bridge to publish a fresh pairing payload here without opening Terminal.")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.68))
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(16)
@@ -254,13 +259,13 @@ struct BridgeMenuBarContentView: View {
             }
 
             HStack(spacing: 8) {
-                ControlActionButton("Logs Folder", tint: .white.opacity(0.18)) {
+                ControlActionButton("Logs Folder", style: .secondary) {
                     store.openLogsFolder()
                 }
-                ControlActionButton("Stdout", tint: .white.opacity(0.18)) {
+                ControlActionButton("Stdout", style: .secondary) {
                     store.openStdoutLog()
                 }
-                ControlActionButton("Stderr", tint: .white.opacity(0.18)) {
+                ControlActionButton("Stderr", style: .secondary) {
                     store.openStderrLog()
                 }
             }
@@ -303,8 +308,8 @@ struct BridgeMenuBarContentView: View {
     private var backgroundGradient: some View {
         LinearGradient(
             colors: [
-                Color(red: 0.08, green: 0.10, blue: 0.16),
-                Color(red: 0.04, green: 0.05, blue: 0.09),
+                Color(nsColor: .windowBackgroundColor),
+                Color(nsColor: .underPageBackgroundColor),
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
@@ -314,12 +319,12 @@ struct BridgeMenuBarContentView: View {
                 .fill(
                     RadialGradient(
                         colors: [
-                            Color(red: 0.14, green: 0.50, blue: 0.56).opacity(0.24),
+                            Color.accentColor.opacity(colorScheme == .dark ? 0.12 : 0.08),
                             .clear,
                         ],
-                        center: .topLeading,
+                        center: .topTrailing,
                         startRadius: 10,
-                        endRadius: 340
+                        endRadius: 380
                     )
                 )
         )
@@ -327,12 +332,12 @@ struct BridgeMenuBarContentView: View {
 
     private var cardBackground: some View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .fill(Color.white.opacity(0.06))
+            .fill(Color(nsColor: .controlBackgroundColor).opacity(colorScheme == .dark ? 0.62 : 0.78))
     }
 
     private var cardStroke: some View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            .stroke(Color.primary.opacity(0.08), lineWidth: 1)
     }
 
     private var statusTint: Color {
@@ -401,8 +406,8 @@ struct BridgeMenuBarContentView: View {
 
     private func cardTitle(_ title: String) -> some View {
         Text(title.uppercased())
-            .font(.system(size: 11, weight: .black, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.82))
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
             .tracking(1)
     }
 
@@ -412,44 +417,52 @@ struct BridgeMenuBarContentView: View {
                 .fill(tint)
                 .frame(width: 8, height: 8)
             Text(title.uppercased())
-                .font(.system(size: 10, weight: .black, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.9))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.primary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .background(tint.opacity(0.14), in: Capsule())
+        .background(tint.opacity(colorScheme == .dark ? 0.16 : 0.12), in: Capsule())
         .overlay(
             Capsule()
-                .stroke(tint.opacity(0.28), lineWidth: 1)
+                .stroke(tint.opacity(0.22), lineWidth: 1)
         )
     }
 
     private func metricChip(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title.uppercased())
-                .font(.system(size: 9, weight: .black, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.5))
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
             Text(value)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.9))
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
     }
 
     private func statusTile(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title.uppercased())
-                .font(.system(size: 9, weight: .black, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.48))
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
             Text(value)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.92))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.78), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
     }
 
     private func feedbackLine(_ message: String, tint: Color) -> some View {
@@ -460,8 +473,8 @@ struct BridgeMenuBarContentView: View {
                 .padding(.top, 4)
 
             Text(message)
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.84))
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -498,11 +511,11 @@ private struct LabelValueRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label.uppercased())
-                .font(.system(size: 9, weight: .black, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.45))
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
             Text(value)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.88))
+                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                .foregroundStyle(.primary)
                 .textSelection(.enabled)
         }
     }
@@ -510,29 +523,72 @@ private struct LabelValueRow: View {
 
 private struct ControlActionButton: View {
     let title: String
-    let tint: Color
+    let style: ControlActionButtonStyle
     let action: () -> Void
 
-    init(_ title: String, tint: Color, action: @escaping () -> Void) {
+    init(_ title: String, style: ControlActionButtonStyle = .secondary, action: @escaping () -> Void) {
         self.title = title
-        self.tint = tint
+        self.style = style
         self.action = action
     }
 
     var body: some View {
         Button(action: action) {
-            Text(title.uppercased())
-                .font(.system(size: 10, weight: .black, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.96))
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(foregroundColor)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 11)
                 .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(tint.opacity(0.9))
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(backgroundColor)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(borderColor, lineWidth: 1)
                 )
         }
         .buttonStyle(.plain)
     }
+
+    private var backgroundColor: Color {
+        switch style {
+        case .primary:
+            return .black
+        case .secondary:
+            return Color(nsColor: .textBackgroundColor).opacity(0.82)
+        case .destructive:
+            return Color(nsColor: .textBackgroundColor).opacity(0.82)
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch style {
+        case .primary:
+            return .white
+        case .secondary:
+            return .primary
+        case .destructive:
+            return .red
+        }
+    }
+
+    private var borderColor: Color {
+        switch style {
+        case .primary:
+            return .black.opacity(0.9)
+        case .secondary:
+            return .primary.opacity(0.06)
+        case .destructive:
+            return .red.opacity(0.18)
+        }
+    }
+}
+
+private enum ControlActionButtonStyle {
+    case primary
+    case secondary
+    case destructive
 }
 
 private struct PairingQRCodeView: View {
