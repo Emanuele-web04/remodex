@@ -26,6 +26,7 @@ const { createVoiceHandler, resolveVoiceAuth } = require("./voice-handler");
 const {
   composeSanitizedAuthStatusFromSettledResults,
 } = require("./account-status");
+const { createBridgePackageVersionStatusReader } = require("./package-version-status");
 const { createPushNotificationServiceClient } = require("./push-notification-service-client");
 const { createPushNotificationTracker } = require("./push-notification-tracker");
 const {
@@ -87,6 +88,7 @@ function startBridge({
     pushServiceClient,
     previewMaxChars: config.pushPreviewMaxChars,
   });
+  const readBridgePackageVersionStatus = createBridgePackageVersionStatusReader();
 
   // Keep the local Codex runtime alive across transient relay disconnects.
   let socket = null;
@@ -526,7 +528,7 @@ function startBridge({
   // Combines account/read + getAuthStatus into one safe snapshot for the phone UI.
   // The two RPCs are settled independently so one transient failure does not hide the other.
   async function readSanitizedAuthStatus() {
-    const [accountReadResult, authStatusResult] = await Promise.allSettled([
+    const [accountReadResult, authStatusResult, bridgeVersionInfoResult] = await Promise.allSettled([
       sendCodexRequest("account/read", {
         refreshToken: false,
       }),
@@ -534,6 +536,7 @@ function startBridge({
         includeToken: true,
         refreshToken: true,
       }),
+      readBridgePackageVersionStatus(),
     ]);
 
     return composeSanitizedAuthStatusFromSettledResults({
@@ -545,6 +548,9 @@ function startBridge({
         : accountReadResult,
       authStatusResult,
       loginInFlight: Boolean(pendingAuthLogin.loginId),
+      bridgeVersionInfo: bridgeVersionInfoResult.status === "fulfilled"
+        ? bridgeVersionInfoResult.value
+        : null,
     });
   }
 

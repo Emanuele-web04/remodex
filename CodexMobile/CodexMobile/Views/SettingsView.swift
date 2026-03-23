@@ -23,6 +23,7 @@ struct SettingsView: View {
                 SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
                 SettingsGPTAccountCard()
+                SettingsBridgeVersionCard()
                 runtimeDefaultsSection
                 SettingsAboutCard()
                 SettingsUsageCard()
@@ -693,6 +694,126 @@ private struct SettingsGPTAccountCard: View {
             await codex.logoutGPTAccount()
             await codex.refreshGPTAccountState()
             isLoggingOut = false
+        }
+    }
+}
+
+private struct SettingsBridgeVersionCard: View {
+    @Environment(CodexService.self) private var codex
+
+    var body: some View {
+        SettingsCard(title: "Bridge Version") {
+            HStack(spacing: 10) {
+                Text("Status")
+                Spacer()
+                SettingsStatusPill(label: versionStatusLabel)
+            }
+
+            settingsVersionRow(
+                title: "Installed on Mac",
+                value: installedVersionLabel,
+                valueStyle: installedValueStyle
+            )
+
+            settingsVersionRow(
+                title: "Latest available",
+                value: latestVersionLabel,
+                valueStyle: .primary
+            )
+
+            if let guidance = guidanceText {
+                Text(guidance)
+                    .font(AppFont.caption())
+                    .foregroundStyle(guidanceColor)
+            }
+        }
+    }
+
+    private var installedVersionLabel: String {
+        codex.bridgeInstalledVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Unknown"
+    }
+
+    private var latestVersionLabel: String {
+        codex.latestBridgePackageVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Unknown"
+    }
+
+    private var guidanceText: String? {
+        guard let installedVersion else {
+            return "Connect to a Mac bridge to read the installed package version."
+        }
+
+        guard let latestVersion else {
+            return "Installed version detected. The latest published package is unavailable right now."
+        }
+
+        if installedVersion == latestVersion {
+            return "The installed bridge matches the latest published package."
+        }
+
+        if installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending {
+            return "A newer Remodex package is available on npm."
+        }
+
+        return "This Mac is running a different build than the current npm latest."
+    }
+
+    private var versionStatusLabel: String {
+        guard let installedVersion else {
+            return "Unknown"
+        }
+
+        guard let latestVersion else {
+            return "Installed"
+        }
+
+        if installedVersion == latestVersion {
+            return "Up to date"
+        }
+
+        if installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending {
+            return "Update available"
+        }
+
+        return "Different build"
+    }
+
+    private var guidanceColor: Color {
+        guard let installedVersion,
+              let latestVersion,
+              installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending else {
+            return .secondary
+        }
+
+        return .orange
+    }
+
+    private var installedValueStyle: Color {
+        guard let installedVersion,
+              let latestVersion,
+              installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending else {
+            return .primary
+        }
+
+        return .orange
+    }
+
+    private var installedVersion: String? {
+        codex.bridgeInstalledVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
+    private var latestVersion: String? {
+        codex.latestBridgePackageVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
+    private func settingsVersionRow(title: String, value: String, valueStyle: Color) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+            Spacer()
+            Text(value)
+                .font(AppFont.mono(.subheadline))
+                .foregroundStyle(valueStyle)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
         }
     }
 }

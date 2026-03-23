@@ -6,7 +6,6 @@
 
 import Foundation
 
-private let minimumSupportedBridgePackageVersion = "1.3.4"
 private let minimumBridgePackageUpdateCommand = "npm install -g remodex@latest"
 
 enum CodexGPTAccountStatus: String, Codable, Sendable {
@@ -141,12 +140,23 @@ extension CodexService {
         }
 
         do {
-            let response = try await fetchBridgeGPTAccountState()
-            guard let payload = response.result?.objectValue else {
+            let bridgeState = try await fetchBridgeGPTAccountState()
+            guard let payload = bridgeState.response.result?.objectValue else {
                 throw CodexServiceError.invalidResponse("bridge account status response missing payload")
             }
 
-            evaluateRequiredBridgePackageVersion(from: payload)
+            bridgeInstalledVersion = firstStringValue(
+                in: payload,
+                keys: ["bridgeVersion", "bridge_version", "bridgePackageVersion", "bridge_package_version"]
+            )
+            latestBridgePackageVersion = firstStringValue(
+                in: payload,
+                keys: ["bridgeLatestVersion", "bridge_latest_version", "bridgePublishedVersion", "bridge_published_version"]
+            )
+            evaluateRequiredBridgePackageVersion(
+                from: payload,
+                allowMissingVersionPrompt: bridgeState.allowMissingVersionPrompt
+            )
             applyGPTAccountSnapshot(decodeBridgeGPTAccountSnapshot(from: payload))
             if currentPendingGPTLogin() != nil,
                (gptAccountSnapshot.hasActiveLogin || (gptAccountSnapshot.isAuthenticated && !gptAccountSnapshot.isVoiceTokenReady)) {
@@ -571,17 +581,29 @@ extension CodexService {
         syncPendingGPTLoginStateIfNeeded()
     }
 
-    private func fetchBridgeGPTAccountState() async throws -> RPCMessage {
+    private func fetchBridgeGPTAccountState() async throws -> (
+        response: RPCMessage,
+        allowMissingVersionPrompt: Bool
+    ) {
         do {
-            return try await sendRequest(method: "account/status/read", params: nil)
+            return (
+                response: try await sendRequest(method: "account/status/read", params: nil),
+                allowMissingVersionPrompt: true
+            )
         } catch {
-            return try await sendRequest(method: "getAuthStatus", params: nil)
+            return (
+                response: try await sendRequest(method: "getAuthStatus", params: nil),
+                allowMissingVersionPrompt: shouldTreatAsUnsupportedBridgeManagedAccountStatus(error)
+            )
         }
     }
 
     // Prompts for a bridge package upgrade once per session when bridge-managed status
     // reports an older npm package or omits the version entirely.
-    private func evaluateRequiredBridgePackageVersion(from payloadObject: IncomingParamsObject) {
+    private func evaluateRequiredBridgePackageVersion(
+        from payloadObject: IncomingParamsObject,
+        allowMissingVersionPrompt: Bool
+    ) {
         guard !hasPresentedMinimumBridgePackageUpdatePrompt else {
             return
         }
@@ -590,8 +612,9 @@ extension CodexService {
             in: payloadObject,
             keys: ["bridgeVersion", "bridge_version", "bridgePackageVersion", "bridge_package_version"]
         )
-        let requiresUpgrade = bridgeVersion == nil
-            || bridgePackageVersionIsOlderThanMinimum(bridgeVersion)
+        let requiresUpgrade =
+            bridgePackageVersionIsOlderThanMinimum(bridgeVersion)
+            || (bridgeVersion == nil && allowMissingVersionPrompt)
 
         guard requiresUpgrade else {
             return
@@ -601,14 +624,41 @@ extension CodexService {
         bridgeUpdatePrompt = minimumBridgePackageUpdatePrompt(currentVersion: bridgeVersion)
     }
 
-    // Treats missing bridge metadata as "too old" because current app builds require version-aware bridges.
+    // Only explicit versions can be compared here; missing versions are handled by the caller.
     private func bridgePackageVersionIsOlderThanMinimum(_ bridgeVersion: String?) -> Bool {
         guard let bridgeVersion = bridgeVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
               !bridgeVersion.isEmpty else {
+            return false
+        }
+
+        return bridgeVersion.compare(CodexService.minimumSupportedBridgePackageVersion, options: .numeric) == .orderedAscending
+    }
+
+    // Distinguishes "older bridge only exposes getAuthStatus" from transient read failures on a current bridge.
+    private func shouldTreatAsUnsupportedBridgeManagedAccountStatus(_ error: Error) -> Bool {
+        guard let serviceError = error as? CodexServiceError,
+              case .rpcError(let rpcError) = serviceError else {
+            return false
+        }
+
+        if rpcError.code == -32601 {
             return true
         }
 
-        return bridgeVersion.compare(minimumSupportedBridgePackageVersion, options: .numeric) == .orderedAscending
+        let message = rpcError.message.lowercased()
+        let mentionsUnsupportedMethod = message.contains("method not found")
+            || message.contains("unknown method")
+            || message.contains("not implemented")
+            || message.contains("does not support")
+        let mentionsAccountStatusRoute = message.contains("account/status/read")
+            || message.contains("account status read")
+            || message.contains("auth status")
+
+        guard rpcError.code == -32600 || rpcError.code == -32602 || rpcError.code == -32000 else {
+            return mentionsUnsupportedMethod && mentionsAccountStatusRoute
+        }
+
+        return mentionsUnsupportedMethod && mentionsAccountStatusRoute
     }
 
     private func minimumBridgePackageUpdatePrompt(currentVersion: String?) -> CodexBridgeUpdatePrompt {
@@ -616,10 +666,10 @@ extension CodexService {
         if let currentVersion = currentVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
            !currentVersion.isEmpty {
             message =
-                "This Mac bridge is running Remodex \(currentVersion), but this iPhone app requires Remodex \(minimumSupportedBridgePackageVersion) or newer. Update the npm package on your Mac, then reconnect."
+                "This Mac bridge is running Remodex \(currentVersion), but this iPhone app requires Remodex \(CodexService.minimumSupportedBridgePackageVersion) or newer. Update the npm package on your Mac, then reconnect."
         } else {
             message =
-                "This Mac bridge is too old for this version of Remodex iPhone. Update the Remodex npm package on your Mac to \(minimumSupportedBridgePackageVersion) or newer, then reconnect."
+                "This Mac bridge is too old for this version of Remodex iPhone. Update the Remodex npm package on your Mac to \(CodexService.minimumSupportedBridgePackageVersion) or newer, then reconnect."
         }
 
         return CodexBridgeUpdatePrompt(

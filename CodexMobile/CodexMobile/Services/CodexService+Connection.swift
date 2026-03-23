@@ -165,6 +165,8 @@ extension CodexService {
         supportsStructuredSkillInput = true
         supportsTurnCollaborationMode = false
         hasResolvedRateLimitsSnapshot = false
+        bridgeInstalledVersion = nil
+        latestBridgePackageVersion = nil
         clearConnectionSyncState()
         clearHydrationCaches()
         resumedThreadIDs.removeAll()
@@ -402,6 +404,8 @@ extension CodexService {
         connectionRecoveryState = .idle
         supportsStructuredSkillInput = true
         supportsTurnCollaborationMode = false
+        bridgeInstalledVersion = nil
+        latestBridgePackageVersion = nil
         resumedThreadIDs.removeAll()
         clearHydrationCaches()
         resetSecureTransportState()

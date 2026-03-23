@@ -272,6 +272,8 @@ struct AssistantRevertStateCacheEntry {
 @MainActor
 @Observable
 final class CodexService {
+    static let minimumSupportedBridgePackageVersion = "1.3.5"
+
     // --- Public state ---------------------------------------------------------
 
     var threads: [CodexThread] = [] {
@@ -351,6 +353,10 @@ final class CodexService {
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    // Mirrors the bridge package version currently running on the Mac, if the bridge reports it.
+    var bridgeInstalledVersion: String?
+    // Mirrors the latest published bridge package version, when the bridge can resolve it.
+    var latestBridgePackageVersion: String?
     // Fresh QR scans must use bootstrap once, even if this Mac was already trusted before.
     var shouldForceQRBootstrapOnNextHandshake = false
     // Stops infinite trusted-reconnect loops by escalating back to QR after repeated handshake failures.
