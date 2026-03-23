@@ -741,22 +741,31 @@ private struct SettingsAboutCard: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 isShowingAbout = true
             } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "info.circle")
-                        .font(AppFont.subheadline(weight: .medium))
-                    Text("How Remodex Works")
-                        .font(AppFont.subheadline(weight: .medium))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(AppFont.caption(weight: .semibold))
-                        .foregroundStyle(.tertiary)
+                settingsAccessoryRow(
+                    title: "How Remodex Works",
+                    leading: {
+                        Image(systemName: "info.circle")
+                            .font(AppFont.subheadline(weight: .medium))
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                if let url = URL(string: "https://x.com/emanueledpt") {
+                    UIApplication.shared.open(url)
                 }
-                .foregroundStyle(.primary)
-                .padding(.vertical, 10)
-                .padding(.horizontal, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
+            } label: {
+                settingsAccessoryRow(
+                    title: "Chat & Support",
+                    leading: {
+                        Image("x-icon")
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 14, height: 14)
+                    }
                 )
             }
             .buttonStyle(.plain)
@@ -764,6 +773,29 @@ private struct SettingsAboutCard: View {
         .fullScreenCover(isPresented: $isShowingAbout) {
             AboutRemodexView()
         }
+    }
+
+    // Keeps settings rows visually consistent while allowing SF Symbols or asset icons.
+    private func settingsAccessoryRow<Leading: View>(
+        title: String,
+        @ViewBuilder leading: () -> Leading
+    ) -> some View {
+        HStack(spacing: 8) {
+            leading()
+            Text(title)
+                .font(AppFont.subheadline(weight: .medium))
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .foregroundStyle(.primary)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        )
     }
 }
 
