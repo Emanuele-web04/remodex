@@ -32,7 +32,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.autocapitalizationType = .sentences
         textView.isScrollEnabled = true
         textView.showsVerticalScrollIndicator = false
-        textView.keyboardDismissMode = .none
+        // Lets upward drags that start inside the composer dismiss the keyboard too.
+        textView.keyboardDismissMode = .interactive
         textView.onPasteImageData = onPasteImageData
         textView.runtimeState = runtimeState
         textView.runtimeActions = runtimeActions
@@ -63,7 +64,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         uiView.isSelectable = true
         uiView.font = composerUIFont()
         uiView.textContainer.widthTracksTextView = true
-        uiView.keyboardDismissMode = .none
+        // Keep drag-to-dismiss active after SwiftUI updates the wrapped text view.
+        uiView.keyboardDismissMode = .interactive
         uiView.onPasteImageData = onPasteImageData
         uiView.runtimeState = runtimeState
         uiView.runtimeActions = runtimeActions
