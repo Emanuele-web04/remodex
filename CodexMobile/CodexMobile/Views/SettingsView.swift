@@ -730,11 +730,11 @@ private struct SettingsBridgeVersionCard: View {
     }
 
     private var installedVersionLabel: String {
-        codex.bridgeInstalledVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Unknown"
+        normalizedVersion(codex.bridgeInstalledVersion) ?? "Unknown"
     }
 
     private var latestVersionLabel: String {
-        codex.latestBridgePackageVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Unknown"
+        normalizedVersion(codex.latestBridgePackageVersion) ?? "Unknown"
     }
 
     private var guidanceText: String? {
@@ -798,11 +798,20 @@ private struct SettingsBridgeVersionCard: View {
     }
 
     private var installedVersion: String? {
-        codex.bridgeInstalledVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        normalizedVersion(codex.bridgeInstalledVersion)
     }
 
     private var latestVersion: String? {
-        codex.latestBridgePackageVersion?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        normalizedVersion(codex.latestBridgePackageVersion)
+    }
+
+    private func normalizedVersion(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+
+        return trimmed
     }
 
     private func settingsVersionRow(title: String, value: String, valueStyle: Color) -> some View {
