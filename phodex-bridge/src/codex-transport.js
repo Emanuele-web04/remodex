@@ -21,7 +21,8 @@ function createCodexTransport({
 
 function createSpawnTransport({ env }) {
   const launch = createCodexLaunchPlan({ env });
-  const codex = spawn(launch.command, launch.args, launch.options);
+  let codex = spawn(launch.command, launch.args, launch.options);
+  let isRestarting = false;
 
   let stdoutBuffer = "";
   let stderrBuffer = "";
@@ -29,55 +30,63 @@ function createSpawnTransport({ env }) {
   let didReportError = false;
   const listeners = createListenerBag();
 
-  codex.on("error", (error) => {
-    didReportError = true;
-    listeners.emitError(error);
-  });
-  codex.on("close", (code, signal) => {
-    if (!didRequestShutdown && !didReportError && code !== 0) {
-      didReportError = true;
-      listeners.emitError(createCodexCloseError({
-        code,
-        signal,
-        stderrBuffer,
-        launchDescription: launch.description,
-      }));
-      return;
-    }
-
-    listeners.emitClose(code, signal);
-  });
-  // Ignore broken-pipe shutdown noise once the child is already going away.
-  codex.stdin.on("error", (error) => {
-    if (didRequestShutdown && isIgnorableStdinShutdownError(error)) {
-      return;
-    }
-
-    if (isIgnorableStdinShutdownError(error)) {
-      return;
-    }
-
-    didReportError = true;
-    listeners.emitError(error);
-  });
-  // Keep stderr muted during normal operation, but preserve enough output to
-  // explain launch failures when the child exits before the bridge can use it.
-  codex.stderr.on("data", (chunk) => {
-    stderrBuffer = appendOutputBuffer(stderrBuffer, chunk.toString("utf8"));
-  });
-
-  codex.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk.toString("utf8");
-    const lines = stdoutBuffer.split("\n");
-    stdoutBuffer = lines.pop() || "";
-
-    for (const line of lines) {
-      const trimmedLine = line.trim();
-      if (trimmedLine) {
-        listeners.emitMessage(trimmedLine);
+  function wireProcessHandlers(proc, ctx) {
+    proc.on("error", (error) => {
+      ctx.didReportError = true;
+      ctx.listeners.emitError(error);
+    });
+    proc.on("close", (code, signal) => {
+      if (ctx.isRestarting) {
+        return;
       }
-    }
-  });
+      if (!ctx.didRequestShutdown && !ctx.didReportError && code !== 0) {
+        ctx.didReportError = true;
+        ctx.listeners.emitError(createCodexCloseError({
+          code,
+          signal,
+          stderrBuffer: ctx.stderrBuffer,
+          launchDescription: ctx.launch.description,
+        }));
+        return;
+      }
+      ctx.listeners.emitClose(code, signal);
+    });
+    proc.stdin.on("error", (error) => {
+      if (ctx.didRequestShutdown && isIgnorableStdinShutdownError(error)) {
+        return;
+      }
+      if (isIgnorableStdinShutdownError(error)) {
+        return;
+      }
+      ctx.didReportError = true;
+      ctx.listeners.emitError(error);
+    });
+    proc.stderr.on("data", (chunk) => {
+      ctx.stderrBuffer = appendOutputBuffer(ctx.stderrBuffer, chunk.toString("utf8"));
+    });
+    proc.stdout.on("data", (chunk) => {
+      ctx.stdoutBuffer += chunk.toString("utf8");
+      const lines = ctx.stdoutBuffer.split("\n");
+      ctx.stdoutBuffer = lines.pop() || "";
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (trimmedLine) {
+          ctx.listeners.emitMessage(trimmedLine);
+        }
+      }
+    });
+  }
+
+  const ctx = {
+    stdoutBuffer: "",
+    stderrBuffer: "",
+    didRequestShutdown: false,
+    didReportError: false,
+    get isRestarting() { return isRestarting; },
+    listeners,
+    launch,
+  };
+  wireProcessHandlers(codex, ctx);
 
   return {
     mode: "spawn",
@@ -101,8 +110,26 @@ function createSpawnTransport({ env }) {
       listeners.onError = handler;
     },
     shutdown() {
-      didRequestShutdown = true;
+      ctx.didRequestShutdown = true;
       shutdownCodexProcess(codex);
+    },
+    async restart() {
+      isRestarting = true;
+      shutdownCodexProcess(codex);
+      await new Promise((resolve) => {
+        codex.on("close", resolve);
+        setTimeout(resolve, 3000);
+      });
+      isRestarting = false;
+      ctx.stdoutBuffer = "";
+      ctx.stderrBuffer = "";
+      ctx.didRequestShutdown = false;
+      ctx.didReportError = false;
+      codex = spawn(launch.command, launch.args, launch.options);
+      wireProcessHandlers(codex, ctx);
+    },
+    get isRestarting() {
+      return isRestarting;
     },
   };
 }

@@ -34,6 +34,7 @@ const {
 } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
+const { createAuthWatcher } = require("./auth-watcher");
 
 const execFileAsync = promisify(execFile);
 
@@ -144,6 +145,41 @@ function startBridge({
     sendCodexRequest,
     logPrefix: "[remodex]",
   });
+
+  // ─── Auth hot-reload ─────────────────────────────────────────
+  const teardownAuthWatcher = createAuthWatcher({
+    onAuthChanged: async () => {
+      if (typeof codex.restart !== "function") {
+        console.warn("[remodex] Codex transport does not support restart (external endpoint mode). Skipping auth reload.");
+        return;
+      }
+      codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
+      forwardedInitializeRequestIds.clear();
+      failBridgeManagedCodexRequests(new Error("Codex transport restarting for auth reload."));
+      forwardedRequestMethodsById.clear();
+      await codex.restart();
+    },
+    logPrefix: "[remodex]",
+  });
+
+  process.on("SIGHUP", async () => {
+    console.log("[remodex] Received SIGHUP — reloading Codex transport...");
+    if (typeof codex.restart !== "function") {
+      console.warn("[remodex] Codex transport does not support restart. Ignoring SIGHUP.");
+      return;
+    }
+    codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
+    forwardedInitializeRequestIds.clear();
+    failBridgeManagedCodexRequests(new Error("Codex transport restarting via SIGHUP."));
+    forwardedRequestMethodsById.clear();
+    try {
+      await codex.restart();
+      console.log("[remodex] Codex transport restarted via SIGHUP.");
+    } catch (error) {
+      console.error("[remodex] Failed to restart Codex transport via SIGHUP:", error?.message || error);
+    }
+  });
+
   publishBridgeStatus({
     state: "starting",
     connectionStatus: "starting",

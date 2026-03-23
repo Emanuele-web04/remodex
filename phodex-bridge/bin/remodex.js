@@ -19,6 +19,7 @@ const {
   watchThreadRollout,
 } = require("../src");
 const { version } = require("../package.json");
+const { readBridgeStatus } = require("../src/daemon-state");
 
 const command = process.argv[2] || "up";
 
@@ -119,9 +120,26 @@ async function main() {
     return;
   }
 
-  console.error(`Unknown command: ${command}`);
+  if (command === "reload") {
+    assertMacOSCommand(command);
+    const status = readBridgeStatus();
+    const pid = status?.pid;
+    if (!pid) {
+      console.error("[remodex] No running bridge found. Start one with `remodex up`.");
+      process.exit(1);
+    }
+    try {
+      process.kill(pid, "SIGHUP");
+      console.log(`[remodex] Sent SIGHUP to bridge (PID ${pid}). Auth credentials will be reloaded.`);
+    } catch (error) {
+      console.error(`[remodex] Failed to send SIGHUP to PID ${pid}: ${error?.message || error}`);
+      process.exit(1);
+    }
+    return;
+  }
+    console.error(`Unknown command: ${command}`);
   console.error(
-    "Usage: remodex up | remodex run | remodex start | remodex stop | remodex status | "
+    "Usage: remodex up | remodex run | remodex start | remodex stop | remodex status | remodex reload | "
     + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version"
   );
   process.exit(1);
