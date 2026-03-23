@@ -50,20 +50,20 @@ struct VoiceRecordingCapsule: View {
     private var waveformView: some View {
         GeometryReader { geometry in
             let renderedLevels = displayedLevels(for: geometry.size.width)
-            let renderedBarWidth = renderedBarWidth(for: geometry.size.width, slotCount: renderedLevels.count)
+            let barWidth = renderedBarWidth(for: geometry.size.width, slotCount: renderedLevels.count)
 
-            HStack(alignment: .center, spacing: barSpacing) {
-                ForEach(Array(renderedLevels.enumerated()), id: \.offset) { index, level in
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.primary.opacity(level == 0 ? 0.12 : 0.45))
-                        .frame(
-                            width: renderedBarWidth,
-                            height: barHeight(for: level)
-                        )
-                        .id(index)
+            Canvas { context, size in
+                let midY = size.height / 2
+                for (index, level) in renderedLevels.enumerated() {
+                    let h = barHeight(for: level)
+                    let x = CGFloat(index) * (barWidth + barSpacing)
+                    let rect = CGRect(x: x, y: midY - h / 2, width: barWidth, height: h)
+                    context.fill(
+                        Path(roundedRect: rect, cornerRadius: 1),
+                        with: .color(.primary.opacity(0.15 + level * 0.65))
+                    )
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .layoutPriority(1)

@@ -40,18 +40,16 @@ struct CopyBlockButton: View {
 
     // Mirrors the terminal glyph while the latest assistant block is still running.
     private var runningIndicator: some View {
-        HStack(alignment: .center, spacing: 2) {
-            Image("terminal")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 15, height: 15, alignment: .leading)
-                .frame(width: 7, height: 15, alignment: .leading)
-                .clipped()
+        HStack(alignment: .bottom, spacing: 1) {
+            Text(">")
+                .font(AppFont.mono(.caption))
+                .fontWeight(.semibold)
+                .baselineOffset(-0.5)
 
             RoundedRectangle(cornerRadius: 1, style: .continuous)
                 .fill(Color.secondary)
-                .frame(width: 7, height: 1.5)
+                .frame(width: 6, height: 1.5)
+                .padding(.bottom, 2)
                 .opacity(cursorOpacity)
         }
         .foregroundStyle(.secondary)

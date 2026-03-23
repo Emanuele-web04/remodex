@@ -537,8 +537,10 @@ struct MessageRow: View, Equatable {
     var assistantBlockAccessoryState: AssistantBlockAccessoryState? = nil
     // Disables timer-driven adornments while the user reads older content.
     var showsStreamingAnimations: Bool = true
-    @Environment(\.assistantRevertAction) private var assistantRevertAction
-    @Environment(\.subagentOpenAction) private var subagentOpenAction
+    // Passed as init params instead of @Environment so .equatable() can short-circuit
+    // without environment rebinding forcing a body re-evaluation on scroll-up cell reuse.
+    var assistantRevertAction: ((CodexMessage) -> Void)? = nil
+    var subagentOpenAction: ((CodexSubagentThreadPresentation) -> Void)? = nil
     @State private var previewImage: PreviewImagePayload?
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
 

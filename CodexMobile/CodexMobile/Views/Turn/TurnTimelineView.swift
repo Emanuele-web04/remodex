@@ -227,12 +227,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 isRetryAvailable: isRetryAvailable,
                 onRetryUserMessage: onRetryUserMessage,
                 assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
-                showsStreamingAnimations: isScrolledToBottom
-                    && message.id == cachedNewestStreamingMessageID
+                // Keep streaming adornments stable while follow-bottom is active so
+                // transient bottom-geometry flips during content growth do not
+                // add/remove indicator height and make the viewport bounce.
+                showsStreamingAnimations: autoScrollMode == .followBottom
+                    && message.id == cachedNewestStreamingMessageID,
+                assistantRevertAction: onTapAssistantRevert,
+                subagentOpenAction: onTapSubagent
             )
             .equatable()
-            .environment(\.assistantRevertAction, onTapAssistantRevert)
-            .environment(\.subagentOpenAction, onTapSubagent)
             .id(message.id)
         }
     }
