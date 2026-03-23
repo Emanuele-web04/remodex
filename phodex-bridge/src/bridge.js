@@ -43,6 +43,7 @@ function startBridge({
   printPairingQr = true,
   onPairingPayload = null,
   onBridgeStatus = null,
+  isDaemon = false,
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
@@ -162,23 +163,25 @@ function startBridge({
     logPrefix: "[remodex]",
   });
 
-  process.on("SIGHUP", async () => {
-    console.log("[remodex] Received SIGHUP — reloading Codex transport...");
-    if (typeof codex.restart !== "function") {
-      console.warn("[remodex] Codex transport does not support restart. Ignoring SIGHUP.");
-      return;
-    }
-    codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
-    forwardedInitializeRequestIds.clear();
-    failBridgeManagedCodexRequests(new Error("Codex transport restarting via SIGHUP."));
-    forwardedRequestMethodsById.clear();
-    try {
-      await codex.restart();
-      console.log("[remodex] Codex transport restarted via SIGHUP.");
-    } catch (error) {
-      console.error("[remodex] Failed to restart Codex transport via SIGHUP:", error?.message || error);
-    }
-  });
+  if (isDaemon) {
+    process.on("SIGHUP", async () => {
+      console.log("[remodex] Received SIGHUP — reloading Codex transport...");
+      if (typeof codex.restart !== "function") {
+        console.warn("[remodex] Codex transport does not support restart. Ignoring SIGHUP.");
+        return;
+      }
+      codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
+      forwardedInitializeRequestIds.clear();
+      failBridgeManagedCodexRequests(new Error("Codex transport restarting via SIGHUP."));
+      forwardedRequestMethodsById.clear();
+      try {
+        await codex.restart();
+        console.log("[remodex] Codex transport restarted via SIGHUP.");
+      } catch (error) {
+        console.error("[remodex] Failed to restart Codex transport via SIGHUP:", error?.message || error);
+      }
+    });
+  }
 
   publishBridgeStatus({
     state: "starting",

@@ -53,6 +53,7 @@ function runMacOSBridgeService({ env = process.env } = {}) {
   startBridge({
     config,
     printPairingQr: false,
+    isDaemon: true,
     onPairingPayload(pairingPayload) {
       writePairingSession(pairingPayload, { env });
     },

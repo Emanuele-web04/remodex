@@ -114,19 +114,30 @@ function createSpawnTransport({ env }) {
       shutdownCodexProcess(codex);
     },
     async restart() {
+      if (isRestarting) {
+        // Serialize: wait for the in-flight restart to finish before starting another.
+        await new Promise((resolve) => {
+          const check = setInterval(() => {
+            if (!isRestarting) { clearInterval(check); resolve(); }
+          }, 100);
+        });
+      }
       isRestarting = true;
-      shutdownCodexProcess(codex);
-      await new Promise((resolve) => {
-        codex.on("close", resolve);
-        setTimeout(resolve, 3000);
-      });
-      isRestarting = false;
-      ctx.stdoutBuffer = "";
-      ctx.stderrBuffer = "";
-      ctx.didRequestShutdown = false;
-      ctx.didReportError = false;
-      codex = spawn(launch.command, launch.args, launch.options);
-      wireProcessHandlers(codex, ctx);
+      try {
+        shutdownCodexProcess(codex);
+        await new Promise((resolve) => {
+          codex.on("close", resolve);
+          setTimeout(resolve, 3000);
+        });
+        ctx.stdoutBuffer = "";
+        ctx.stderrBuffer = "";
+        ctx.didRequestShutdown = false;
+        ctx.didReportError = false;
+        codex = spawn(launch.command, launch.args, launch.options);
+        wireProcessHandlers(codex, ctx);
+      } finally {
+        isRestarting = false;
+      }
     },
     get isRestarting() {
       return isRestarting;
