@@ -67,6 +67,7 @@ struct TurnView: View {
                 errorMessage: codex.lastErrorMessage,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
+                isComposerFocused: isInputFocused,
                 emptyState: AnyView(emptyState),
                 composer: AnyView(composerWithSubagentAccessory(
                     currentThread: resolvedThread,

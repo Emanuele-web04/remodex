@@ -63,6 +63,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         uiView.isSelectable = true
         uiView.font = composerUIFont()
         uiView.textContainer.widthTracksTextView = true
+        uiView.keyboardDismissMode = .none
         uiView.onPasteImageData = onPasteImageData
         uiView.runtimeState = runtimeState
         uiView.runtimeActions = runtimeActions

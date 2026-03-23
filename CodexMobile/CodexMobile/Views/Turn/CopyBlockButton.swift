@@ -10,7 +10,6 @@ struct CopyBlockButton: View {
     let text: String?
     var isRunning: Bool = false
     @State private var showCopiedFeedback = false
-    @State private var cursorOpacity: Double = 1
 
     var body: some View {
         Group {
@@ -38,43 +37,8 @@ struct CopyBlockButton: View {
         .animation(.easeInOut(duration: 0.18), value: isRunning)
     }
 
-    // Mirrors the terminal glyph while the latest assistant block is still running.
     private var runningIndicator: some View {
-        HStack(alignment: .bottom, spacing: 1) {
-            Text(">")
-                .font(AppFont.mono(.caption))
-                .fontWeight(.semibold)
-                .baselineOffset(-0.5)
-
-            RoundedRectangle(cornerRadius: 1, style: .continuous)
-                .fill(Color.secondary)
-                .frame(width: 6, height: 1.5)
-                .padding(.bottom, 2)
-                .opacity(cursorOpacity)
-        }
-        .foregroundStyle(.secondary)
-        .frame(width: 15, height: 15)
-        .padding(6)
-        .background(
-            Circle()
-                .fill(Color.primary.opacity(0.06))
-                .overlay(
-                    Circle()
-                        .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                )
-        )
-        .contentShape(Circle())
-        .onAppear {
-            startCursorAnimationIfNeeded()
-        }
-        .onChange(of: isRunning) { _, newValue in
-            if newValue {
-                startCursorAnimationIfNeeded()
-            } else {
-                cursorOpacity = 1
-            }
-        }
-        .accessibilityLabel("Response running")
+        TerminalRunningIndicator()
     }
 
     // Keeps the compact copy affordance consistent with the rest of the timeline chrome.
@@ -103,14 +67,6 @@ struct CopyBlockButton: View {
         .contentShape(Rectangle())
     }
 
-    // Restarts the blinking underscore whenever a fresh run takes ownership of the accessory.
-    private func startCursorAnimationIfNeeded() {
-        guard isRunning else { return }
-        cursorOpacity = 1
-        withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
-            cursorOpacity = 0.18
-        }
-    }
 }
 
 #Preview("Default") {

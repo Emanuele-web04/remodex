@@ -18,6 +18,7 @@ struct TurnConversationContainerView: View {
     let errorMessage: String?
     let shouldAnchorToAssistantResponse: Binding<Bool>
     let isScrolledToBottom: Binding<Bool>
+    let isComposerFocused: Bool
     let emptyState: AnyView
     let composer: AnyView
     let repositoryLoadingToastOverlay: AnyView
@@ -70,6 +71,7 @@ struct TurnConversationContainerView: View {
                 errorMessage: errorMessage,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
                 isScrolledToBottom: isScrolledToBottom,
+                isComposerFocused: isComposerFocused,
                 onRetryUserMessage: onRetryUserMessage,
                 onTapAssistantRevert: onTapAssistantRevert,
                 onTapSubagent: onTapSubagent,
