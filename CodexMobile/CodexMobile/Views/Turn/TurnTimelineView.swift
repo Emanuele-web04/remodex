@@ -141,16 +141,14 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         contentHeight: geometry.contentSize.height
                     )
                 } action: { old, new in
-                    if new.viewportHeight != old.viewportHeight, new.viewportHeight > 0 {
+                    if new.viewportHeight > 0,
+                       abs(new.viewportHeight - old.viewportHeight) > 2 {
                         viewportHeight = new.viewportHeight
                         performInitialRecoverySnapIfNeeded(using: proxy)
-                        // Keep the latest message visible when the composer/footer height
-                        // changes while the user is already pinned to the bottom.
                         if shouldPinTimelineToBottomDuringGeometryChange {
                             scheduleFollowBottomScroll(using: proxy)
                         }
                     }
-                    // Follow-bottom should react to real content growth, not every timeline mutation.
                     if new.contentHeight > old.contentHeight,
                        shouldPinTimelineToBottomDuringGeometryChange {
                         scheduleFollowBottomScroll(using: proxy)
@@ -486,7 +484,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    // Repairs the initial white/blank viewport race with one deferred snap once layout is ready.
+    // Repairs the initial white/blank viewport race by doing a deferred snap, then
+    // one follow-up verification snap after the footer/lazy rows finish settling.
     private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
         guard initialRecoverySnapPendingThreadID == threadID,
               initialRecoverySnapTask == nil,
@@ -501,6 +500,23 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         let expectedThreadID = threadID
         initialRecoverySnapTask = Task { @MainActor in
             await Task.yield()
+            guard !Task.isCancelled,
+                  initialRecoverySnapPendingThreadID == expectedThreadID,
+                  scrollSessionThreadID == expectedThreadID,
+                  !messages.isEmpty,
+                  viewportHeight > 0,
+                  autoScrollMode == .followBottom,
+                  !shouldPauseAutomaticScrolling,
+                  !shouldAnchorToAssistantResponse else {
+                initialRecoverySnapTask = nil
+                return
+            }
+
+            scrollToBottom(using: proxy, animated: false)
+
+            // A second snap one frame later fixes the common case where the composer
+            // inset or lazy cell heights settle just after the first recovery jump.
+            try? await Task.sleep(nanoseconds: 16_000_000)
             guard !Task.isCancelled,
                   initialRecoverySnapPendingThreadID == expectedThreadID,
                   scrollSessionThreadID == expectedThreadID,
@@ -537,8 +553,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         return true
     }
 
-    // Centralizes all automatic scrolling so first-load recovery, response anchoring,
-    // and bottom-following do not compete with one another.
+    // Keep mutation handling narrow so scroll geometry remains the follow-bottom source of truth.
     private func handleTimelineMutation(using proxy: ScrollViewProxy) {
         guard !shouldPauseAutomaticScrolling else { return }
         performInitialRecoverySnapIfNeeded(using: proxy)

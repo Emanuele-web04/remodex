@@ -24,4 +24,11 @@ final class UserMessageParserTests: XCTestCase {
         XCTAssertEqual(parsed.mentions, ["Views/Turn/TurnView.swift"])
         XCTAssertEqual(parsed.body, "check this")
     }
+
+    func testParseDoesNotTreatSwiftAttributeAsFileMention() {
+        let parsed = UserMessageParser.parse("@State private var count = 0")
+
+        XCTAssertEqual(parsed.mentions, [])
+        XCTAssertEqual(parsed.body, "@State private var count = 0")
+    }
 }

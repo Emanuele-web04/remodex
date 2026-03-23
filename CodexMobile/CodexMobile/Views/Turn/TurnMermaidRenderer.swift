@@ -41,7 +41,7 @@ enum MermaidMarkdownContentCache {
 
     // Parses Mermaid fences once per message snapshot so the timeline does not redo regex work while scrolling.
     static func content(messageID: String, text: String) -> MermaidMarkdownContent? {
-        let cacheKey = "\(messageID)|\(text.hashValue)"
+        let cacheKey = TurnTextCacheKey.key(messageID: messageID, kind: "mermaid-markdown", text: text)
 
         lock.lock()
         if let cached = contentByKey[cacheKey] {
@@ -66,6 +66,10 @@ enum MermaidMarkdownContentCache {
         lock.lock()
         contentByKey.removeAll(keepingCapacity: false)
         lock.unlock()
+    }
+
+    static func resetRenderedSnapshots() {
+        MermaidRenderedSnapshotCache.reset()
     }
 }
 
@@ -548,6 +552,13 @@ private enum MermaidRenderedSnapshotCache {
             knownHeightsByKey.removeAll(keepingCapacity: true)
         }
         knownHeightsByKey[descriptor.cacheKey] = height
+        lock.unlock()
+    }
+
+    static func reset() {
+        snapshotCache.removeAllObjects()
+        lock.lock()
+        knownHeightsByKey.removeAll(keepingCapacity: false)
         lock.unlock()
     }
 }

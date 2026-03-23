@@ -124,6 +124,24 @@ final class TurnViewModel {
     private static let fileMentionSegmentRegex = try? NSRegularExpression(
         pattern: #"[A-Z]+(?=$|[A-Z][a-z]|\d)|[A-Z]?[a-z]+|\d+"#
     )
+    // Prevents Swift attribute syntax from opening file autocomplete when the user is typing code.
+    private static let disallowedBareSwiftFileMentionQueries: Set<String> = [
+        "Binding",
+        "Environment",
+        "EnvironmentObject",
+        "FocusState",
+        "MainActor",
+        "Namespace",
+        "Observable",
+        "ObservedObject",
+        "Published",
+        "SceneBuilder",
+        "State",
+        "StateObject",
+        "UIApplicationDelegateAdaptor",
+        "ViewBuilder",
+        "testable",
+    ]
 
     var input = ""
     var isSending = false
@@ -256,12 +274,24 @@ final class TurnViewModel {
 
     func cancelThreadActivation() { threadActivationTask?.cancel() }
 
+    // Cancels view-scoped async work before the chat view model disappears.
+    func cancelTransientTasks() {
+        threadActivationTask?.cancel()
+        threadActivationTask = nil
+        fileAutocompleteDebounceTask?.cancel()
+        fileAutocompleteDebounceTask = nil
+        skillAutocompleteDebounceTask?.cancel()
+        skillAutocompleteDebounceTask = nil
+        gitStatusRefreshTask?.cancel()
+        gitStatusRefreshTask = nil
+    }
+
     func activateThread(threadID: String, codex: CodexService, onComplete: @escaping () -> Void) {
         threadActivationTask?.cancel()
         threadActivationTask = Task { @MainActor [weak self] in
             guard !Task.isCancelled else { return }
-            await codex.prepareThreadForDisplay(threadId: threadID)
-            guard !Task.isCancelled else { return }
+            let didPrepare = await codex.prepareThreadForDisplay(threadId: threadID)
+            guard didPrepare, !Task.isCancelled, codex.activeThreadId == threadID else { return }
             self?.flushQueueIfPossible(codex: codex, threadID: threadID)
             onComplete()
         }
@@ -1370,7 +1400,8 @@ final class TurnViewModel {
         let rawQuery = String(text[queryStart..<text.endIndex])
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty,
-              !query.contains(where: \.isNewline) else {
+              !query.contains(where: \.isNewline),
+              isAllowedFileAutocompleteQuery(query) else {
             return nil
         }
 
@@ -1384,6 +1415,20 @@ final class TurnViewModel {
         }
 
         return TurnTrailingToken(query: query, tokenRange: triggerIndex..<text.endIndex)
+    }
+
+    // Allows flexible file aliases while keeping common Swift attributes out of file search.
+    private static func isAllowedFileAutocompleteQuery(_ query: String) -> Bool {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return false
+        }
+
+        if trimmedQuery.contains("/") || trimmedQuery.contains("\\") || trimmedQuery.contains(".") {
+            return true
+        }
+
+        return !disallowedBareSwiftFileMentionQueries.contains(trimmedQuery)
     }
 
     // Shared parser for final-token autocomplete triggers (`@`, `$`).

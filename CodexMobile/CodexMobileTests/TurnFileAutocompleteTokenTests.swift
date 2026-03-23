@@ -26,6 +26,10 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "email@test.com"))
     }
 
+    func testTrailingTokenDoesNotParseSwiftAttribute() {
+        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "add @State"))
+    }
+
     func testTrailingTokenDoesNotParseWhenAtTokenIsNotFinal() {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "fix @turnv please"))
     }

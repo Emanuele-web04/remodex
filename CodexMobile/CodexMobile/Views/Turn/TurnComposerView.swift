@@ -114,7 +114,7 @@ struct TurnComposerView: View {
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
                         Text("Ask anything... @files, $skills, /commands")
-                            .font(AppFont.body())
+                            .font(AppFont.system(size: 12))
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
                     }
@@ -136,7 +136,7 @@ struct TurnComposerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding + 4)
-                .padding(.bottom, 10)
+                .padding(.bottom, 14)
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)

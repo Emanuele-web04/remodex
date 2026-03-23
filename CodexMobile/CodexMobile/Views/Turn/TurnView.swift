@@ -260,6 +260,8 @@ struct TurnView: View {
         .onDisappear {
             cancelVoiceRecordingIfNeeded()
             invalidatePendingVoicePreflight()
+            viewModel.cancelTransientTasks()
+            viewModel.clearComposerAutocomplete()
         }
         .onChange(of: isInputFocused) { _, isFocused in
             guard !isFocused else { return }
@@ -660,9 +662,12 @@ struct TurnView: View {
     }
 
     private func prepareThreadIfReady(gitWorkingDirectory: String?) async {
-        await codex.prepareThreadForDisplay(threadId: thread.id)
+        let didPrepare = await codex.prepareThreadForDisplay(threadId: thread.id)
+        guard didPrepare, !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         await codex.refreshContextWindowUsage(threadId: thread.id)
+        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
+        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         guard gitWorkingDirectory != nil else { return }
         viewModel.refreshGitBranchTargets(
             codex: codex,

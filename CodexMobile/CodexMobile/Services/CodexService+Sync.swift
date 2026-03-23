@@ -122,6 +122,20 @@ extension CodexService {
         }
     }
 
+    // Thread opening should refresh the visible chat, not refetch the full sidebar list.
+    func requestImmediateActiveThreadSync(threadId: String? = nil) {
+        guard canRunRealtimeSyncLoop else {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if let threadId = threadId ?? self.activeThreadId {
+                await self.syncActiveThreadState(threadId: threadId)
+            }
+        }
+    }
+
     func syncThreadsList() async {
         guard isConnected, isInitialized else {
             return
@@ -175,7 +189,6 @@ extension CodexService {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let persistedArchivedIDs = locallyArchivedThreadIDs
         let persistedDeletedIDs = locallyDeletedThreadIDs
-        let serverArchivedIDs = Set(serverArchivedThreads.map(\.id))
 
         var merged: [String: CodexThread] = [:]
 

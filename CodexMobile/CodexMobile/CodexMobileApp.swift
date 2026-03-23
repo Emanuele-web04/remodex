@@ -8,6 +8,7 @@ import SwiftUI
 @MainActor
 @main
 struct CodexMobileApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(CodexMobileAppDelegate.self) private var appDelegate
     @State private var codexService: CodexService
 
@@ -28,6 +29,17 @@ struct CodexMobileApp: App {
                         }
                         await codexService.handleGPTLoginCallbackURL(url)
                     }
+                }
+                .onReceive(
+                    NotificationCenter.default.publisher(
+                        for: UIApplication.didReceiveMemoryWarningNotification
+                    )
+                ) { _ in
+                    TurnCacheManager.resetAll()
+                }
+                .onChange(of: scenePhase) { _, newPhase in
+                    guard newPhase == .background else { return }
+                    TurnCacheManager.resetAll()
                 }
         }
     }

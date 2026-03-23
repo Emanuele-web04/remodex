@@ -339,7 +339,10 @@ extension CodexService {
             }
             updateCurrentOutput(for: threadId)
         }
-        requestImmediateSync(threadId: threadId)
+        guard !Task.isCancelled, activeThreadId == threadId else {
+            return false
+        }
+        requestImmediateActiveThreadSync(threadId: threadId)
         return true
     }
 

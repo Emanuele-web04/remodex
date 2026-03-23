@@ -47,6 +47,13 @@ private struct FileChangeInlineActionRow: View {
     }
 }
 
+/// Resets the in-memory AttributedString cache that backs ``MarkdownTextView``.
+/// Kept for explicit memory recovery without forcing cold parses on every thread switch.
+@MainActor
+enum MarkdownParseCacheReset {
+    static func reset() { CachingMarkdownParser.reset() }
+}
+
 // Wraps the default Textual markdown parser with a bounded AttributedString
 // cache so Foundation's markdown parser is not re-run when LazyVStack
 // recycles a cell on upward scroll.
@@ -57,13 +64,17 @@ private struct CachingMarkdownParser: MarkupParser {
     private let inner: AttributedStringMarkdownParser = .markdown()
 
     func attributedString(for input: String) throws -> AttributedString {
-        let key = "\(input.hashValue)|\(input.count)"
+        let key = TurnTextCacheKey.key(namespace: "markdown-parser", text: input)
         if let cached = Self.cache.get(key) {
             return cached
         }
         let result = try inner.attributedString(for: input)
         Self.cache.set(key, value: result)
         return result
+    }
+
+    static func reset() {
+        cache.removeAll()
     }
 }
 
