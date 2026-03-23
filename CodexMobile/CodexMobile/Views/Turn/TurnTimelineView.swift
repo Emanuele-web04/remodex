@@ -61,9 +61,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var followBottomScrollTask: Task<Void, Never>?
     @State private var isUserDraggingScroll = false
     @State private var userScrollCooldownUntil: Date?
-    @State private var footerHeight: CGFloat = 0
-    @State private var footerCollapseProgress: CGFloat = 0
-    @State private var lastFooterDragTranslationY: CGFloat?
 
     /// The tail slice of messages currently rendered in the timeline.
     private var visibleMessages: ArraySlice<CodexMessage> {
@@ -123,8 +120,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         onTapOutsideComposer()
                     }
                 )
-                .simultaneousGesture(footerCollapseGesture)
-                // Track real scroll phases instead of adding a competing drag recognizer.
+                // Track real scroll phases instead of layering a competing drag gesture on top.
                 .onScrollPhaseChange { oldPhase, newPhase in
                     handleScrollPhaseChange(from: oldPhase, to: newPhase)
                 }
@@ -141,22 +137,30 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     }
                     return ScrollBottomGeometry(
                         isAtBottom: isAtBottom,
-                        viewportHeight: vh
+                        viewportHeight: vh,
+                        contentHeight: geometry.contentSize.height
                     )
                 } action: { old, new in
                     if new.viewportHeight != old.viewportHeight, new.viewportHeight > 0 {
                         viewportHeight = new.viewportHeight
                         performInitialRecoverySnapIfNeeded(using: proxy)
+                        // Keep the latest message visible when the composer/footer height
+                        // changes while the user is already pinned to the bottom.
                         if shouldPinTimelineToBottomDuringGeometryChange {
                             scheduleFollowBottomScroll(using: proxy)
                         }
+                    }
+                    // Follow-bottom should react to real content growth, not every timeline mutation.
+                    if new.contentHeight > old.contentHeight,
+                       shouldPinTimelineToBottomDuringGeometryChange {
+                        scheduleFollowBottomScroll(using: proxy)
                     }
                     if new.isAtBottom != old.isAtBottom {
                         handleScrolledToBottomChanged(new.isAtBottom)
                     }
                 }
-                // React to every timeline mutation so streamed text growth stays pinned
-                // when the user is already at the bottom.
+                // Timeline mutations still drive block-info refresh and assistant anchoring,
+                // but geometry decides when follow-bottom should actually fire.
                 .onChange(of: timelineChangeToken) { _, _ in
                     recomputeBlockInfoIfNeeded()
                     handleTimelineMutation(using: proxy)
@@ -172,11 +176,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .onChange(of: activeTurnID) { _, _ in
                     recomputeBlockInfoIfNeeded()
                     handleTimelineMutation(using: proxy)
-                }
-                .onChange(of: isComposerFocused) { _, isFocused in
-                    if isFocused {
-                        resetFooterCollapse()
-                    }
                 }
                 .onChange(of: latestTurnTerminalState) { _, _ in
                     recomputeBlockInfoIfNeeded()
@@ -199,7 +198,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         initialRecoverySnapPendingThreadID = nil
                         isUserDraggingScroll = false
                         userScrollCooldownUntil = nil
-                        resetFooterCollapse()
                         scrollToBottom(using: proxy, animated: true)
                     })
                 }
@@ -271,26 +269,20 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             revertStatesByMessageID: assistantRevertStatesByMessageID
         )
 
-        // Patch only entries that changed so MessageRows whose accessory state
-        // is unchanged keep the same value reference and equatable short-circuits.
-        var updated = cachedBlockInfoByMessageID
-        var newKeys = Set<String>()
-        for (message, state) in zip(visible, cachedBlockInfo) {
-            newKeys.insert(message.id)
-            if let state {
-                if updated[message.id] != state {
-                    updated[message.id] = state
-                }
-            } else {
-                updated.removeValue(forKey: message.id)
+        let updated = Dictionary(
+            uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
+                guard let blockText else { return nil }
+                return (message.id, blockText)
             }
+        )
+        if updated != cachedBlockInfoByMessageID {
+            cachedBlockInfoByMessageID = updated
         }
-        // Remove stale entries for messages no longer in the visible slice.
-        for key in updated.keys where !newKeys.contains(key) {
-            updated.removeValue(forKey: key)
+
+        let newestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
+        if newestStreamingMessageID != cachedNewestStreamingMessageID {
+            cachedNewestStreamingMessageID = newestStreamingMessageID
         }
-        cachedBlockInfoByMessageID = updated
-        cachedNewestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
     }
 
     // Hashes the fields that change copy-block aggregation or inline action placement.
@@ -342,6 +334,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
+    // Keeps the composer/footer visually stable so scrolling does not animate the bottom inset.
     private func footer(scrollToBottomAction: (() -> Void)? = nil) -> some View {
         let footerContent = VStack(spacing: 0) {
             if let errorMessage, !errorMessage.isEmpty {
@@ -354,32 +347,14 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
             composer()
         }
-        .measureFooterHeight($footerHeight)
 
-        // Only constrain the frame while collapsing.  At rest the footer sizes
-        // naturally so the bottom safe-area and padding stay intact.
-        let isCollapsing = footerCollapseProgress > 0 && footerHeight > 0
-        let effectiveHeight: CGFloat? = isCollapsing
-            ? max(footerHeight - footerHiddenOffset, footerCollapsedPeekHeight)
-            : nil
-
-        let composedFooter = footerContent
-            .frame(height: effectiveHeight, alignment: .top)
-
-        return Group {
-            if isCollapsing {
-                composedFooter
-                    .clipped()
-            } else {
-                composedFooter
-            }
-        }
+        return footerContent
+            .simultaneousGesture(composerKeyboardDismissGesture)
             .overlay(alignment: .top) {
                 if shouldShowScrollToLatestButton, let scrollToBottomAction {
                     Button {
                         HapticFeedback.shared.triggerImpactFeedback(style: .light)
                         shouldAnchorToAssistantResponse = false
-                        resetFooterCollapse()
                         scrollToBottomAction()
                     } label: {
                         Image(systemName: "arrow.down")
@@ -396,8 +371,19 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.85)))
                 }
             }
-            .animation(.easeInOut(duration: 0.18), value: footerCollapseProgress)
             .animation(.easeInOut(duration: 0.2), value: shouldShowScrollToLatestButton)
+    }
+
+    // Keeps the WhatsApp-style upward swipe dismissal available across the whole footer,
+    // including accessory rows and bars that sit outside the text view itself.
+    private var composerKeyboardDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                guard isComposerFocused else { return }
+                guard abs(value.translation.height) > abs(value.translation.width) else { return }
+                guard value.translation.height < -20 else { return }
+                onTapOutsideComposer()
+            }
     }
 
     private var shouldShowScrollToLatestButton: Bool {
@@ -420,7 +406,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         userScrollCooldownUntil = nil
         autoScrollMode = shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
         initialRecoverySnapPendingThreadID = threadID
-        resetFooterCollapse()
     }
 
     // Cancels any delayed scroll work so old thread sessions cannot move the new one.
@@ -494,9 +479,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             if wasUserTouchingScroll {
                 handleUserScrollDragEnded()
             }
-            if isScrolledToBottom {
-                resetFooterCollapse()
-            }
         case .animating:
             return
         @unknown default:
@@ -504,42 +486,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    // Tracks real finger movement so the footer does not collapse in response to its own layout changes.
-    private var footerCollapseGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                guard !messages.isEmpty else { return }
-
-                // Dismiss the keyboard on significant upward scroll, like WhatsApp / Claude.
-                if isComposerFocused {
-                    if abs(value.translation.height) > abs(value.translation.width),
-                       value.translation.height < -20 {
-                        onTapOutsideComposer()
-                    }
-                    return
-                }
-
-                guard abs(value.translation.height) > abs(value.translation.width) else {
-                    return
-                }
-
-                let previousTranslation = lastFooterDragTranslationY ?? value.translation.height
-                let delta = value.translation.height - previousTranslation
-                lastFooterDragTranslationY = value.translation.height
-
-                guard abs(delta) > 0.5 else { return }
-                footerCollapseProgress = min(max(footerCollapseProgress - (delta / 72), 0), 1)
-            }
-            .onEnded { _ in
-                lastFooterDragTranslationY = nil
-                if isScrolledToBottom || isComposerFocused {
-                    resetFooterCollapse()
-                }
-            }
-    }
-
-    // Repairs the initial white/blank viewport race by doing a deferred snap, then
-    // one follow-up verification snap after the footer/lazy rows finish settling.
+    // Repairs the initial white/blank viewport race with one deferred snap once layout is ready.
     private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
         guard initialRecoverySnapPendingThreadID == threadID,
               initialRecoverySnapTask == nil,
@@ -554,23 +501,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         let expectedThreadID = threadID
         initialRecoverySnapTask = Task { @MainActor in
             await Task.yield()
-            guard !Task.isCancelled,
-                  initialRecoverySnapPendingThreadID == expectedThreadID,
-                  scrollSessionThreadID == expectedThreadID,
-                  !messages.isEmpty,
-                  viewportHeight > 0,
-                  autoScrollMode == .followBottom,
-                  !shouldPauseAutomaticScrolling,
-                  !shouldAnchorToAssistantResponse else {
-                initialRecoverySnapTask = nil
-                return
-            }
-
-            scrollToBottom(using: proxy, animated: false)
-
-            // A second snap one frame later fixes the common case where the composer
-            // inset or lazy cell heights settle just after the first recovery jump.
-            try? await Task.sleep(nanoseconds: 16_000_000)
             guard !Task.isCancelled,
                   initialRecoverySnapPendingThreadID == expectedThreadID,
                   scrollSessionThreadID == expectedThreadID,
@@ -613,18 +543,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         guard !shouldPauseAutomaticScrolling else { return }
         performInitialRecoverySnapIfNeeded(using: proxy)
 
-        switch autoScrollMode {
-        case .anchorAssistantResponse:
-            if !anchorToAssistantResponseIfNeeded(using: proxy),
-               shouldPinTimelineToBottomDuringGeometryChange {
-                scheduleFollowBottomScroll(using: proxy)
-            }
-        case .followBottom:
-            if isScrolledToBottom {
-                scheduleFollowBottomScroll(using: proxy)
-            }
-        case .manual:
-            return
+        if autoScrollMode == .anchorAssistantResponse {
+            _ = anchorToAssistantResponseIfNeeded(using: proxy)
         }
     }
 
@@ -644,22 +564,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             guard autoScrollMode == .followBottom || shouldPinTimelineToBottomDuringGeometryChange else {
                 return
             }
-            resetFooterCollapse()
             proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
         }
-    }
-
-    private var footerHiddenOffset: CGFloat {
-        footerCollapseProgress * max(footerHeight - footerCollapsedPeekHeight, 0)
-    }
-
-    private var footerCollapsedPeekHeight: CGFloat {
-        8
-    }
-
-    private func resetFooterCollapse() {
-        footerCollapseProgress = 0
-        lastFooterDragTranslationY = nil
     }
 
     private var shouldPauseAutomaticScrolling: Bool {
@@ -673,10 +579,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // assistant row to exist, so sending a message cannot leave a temporarily blank viewport.
     private var shouldPinTimelineToBottomDuringGeometryChange: Bool {
         guard !shouldPauseAutomaticScrolling, isScrolledToBottom else {
-            return false
-        }
-        // Don't fight an in-progress footer collapse — the height change is user-driven.
-        guard footerCollapseProgress == 0 else {
             return false
         }
 
@@ -860,30 +762,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 private struct ScrollBottomGeometry: Equatable {
     let isAtBottom: Bool
     let viewportHeight: CGFloat
-}
-
-private struct FooterHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
-private extension View {
-    // Keeps the safe-area footer collapse math driven by the real composer height.
-    func measureFooterHeight(_ height: Binding<CGFloat>) -> some View {
-        background {
-            GeometryReader { geometry in
-                Color.clear
-                    .preference(key: FooterHeightPreferenceKey.self, value: geometry.size.height)
-            }
-        }
-        .onPreferenceChange(FooterHeightPreferenceKey.self) { newValue in
-            guard newValue > 0 else { return }
-            height.wrappedValue = newValue
-        }
-    }
+    let contentHeight: CGFloat
 }
 
 private struct TurnFloatingButtonPressStyle: ButtonStyle {
