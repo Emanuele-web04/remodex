@@ -361,6 +361,7 @@ final class CodexService {
     var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
     var hasPresentedServiceTierBridgeUpdatePrompt = false
     var hasPresentedThreadForkBridgeUpdatePrompt = false
+    var hasPresentedMinimumBridgePackageUpdatePrompt = false
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.

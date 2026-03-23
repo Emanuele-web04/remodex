@@ -4,6 +4,8 @@
 // Exports: composeAccountStatus, composeSanitizedAuthStatusFromSettledResults, redactAuthStatus
 // Depends on: none
 
+const { version: bridgePackageVersion = "" } = require("../package.json");
+
 // ─── Status composition ─────────────────────────────────────
 
 function composeAccountStatus({
@@ -37,6 +39,7 @@ function composeAccountStatus({
     tokenReady,
     expiresAt: null,
     requiresOpenaiAuth,
+    bridgeVersion: normalizeString(bridgePackageVersion) || null,
   };
 }
 
@@ -57,6 +60,7 @@ function redactAuthStatus(authStatus = null, extras = {}) {
     needsReauth: composed.needsReauth,
     tokenReady: composed.tokenReady,
     expiresAt: composed.expiresAt,
+    bridgeVersion: composed.bridgeVersion,
   };
 }
 

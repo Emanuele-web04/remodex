@@ -6,6 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { version: bridgePackageVersion } = require("../package.json");
 
 const {
   composeAccountStatus,
@@ -39,6 +40,7 @@ test("composeAccountStatus marks authenticated accounts and carries account meta
     tokenReady: true,
     expiresAt: null,
     requiresOpenaiAuth: false,
+    bridgeVersion: bridgePackageVersion,
   });
 });
 
@@ -67,6 +69,7 @@ test("composeAccountStatus keeps authenticated UI state when account/read still 
     tokenReady: false,
     expiresAt: null,
     requiresOpenaiAuth: false,
+    bridgeVersion: bridgePackageVersion,
   });
 });
 
@@ -96,6 +99,7 @@ test("composeAccountStatus reports reauth when auth status explicitly requires C
     tokenReady: false,
     expiresAt: null,
     requiresOpenaiAuth: true,
+    bridgeVersion: bridgePackageVersion,
   });
 });
 
@@ -120,6 +124,7 @@ test("redactAuthStatus strips token-bearing fields from the status snapshot", ()
     needsReauth: false,
     tokenReady: false,
     expiresAt: null,
+    bridgeVersion: bridgePackageVersion,
   });
   assert.equal(Object.prototype.hasOwnProperty.call(status, "authToken"), false);
 });
@@ -146,6 +151,7 @@ test("composeAccountStatus keeps a fresh signed-out state distinct from reauth",
     tokenReady: false,
     expiresAt: null,
     requiresOpenaiAuth: true,
+    bridgeVersion: bridgePackageVersion,
   });
 });
 
@@ -192,6 +198,7 @@ test("composeSanitizedAuthStatusFromSettledResults keeps the available auth snap
     needsReauth: false,
     tokenReady: true,
     expiresAt: null,
+    bridgeVersion: bridgePackageVersion,
   });
 });
 
@@ -222,6 +229,7 @@ test("composeSanitizedAuthStatusFromSettledResults keeps authenticated UI state 
     needsReauth: false,
     tokenReady: false,
     expiresAt: null,
+    bridgeVersion: bridgePackageVersion,
   });
 });
 

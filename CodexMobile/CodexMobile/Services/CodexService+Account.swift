@@ -6,6 +6,9 @@
 
 import Foundation
 
+private let minimumSupportedBridgePackageVersion = "1.3.4"
+private let minimumBridgePackageUpdateCommand = "npm install -g remodex@latest"
+
 enum CodexGPTAccountStatus: String, Codable, Sendable {
     case unknown
     case unavailable
@@ -140,9 +143,10 @@ extension CodexService {
         do {
             let response = try await fetchBridgeGPTAccountState()
             guard let payload = response.result?.objectValue else {
-                throw CodexServiceError.invalidResponse("account/status/read response missing payload")
+                throw CodexServiceError.invalidResponse("bridge account status response missing payload")
             }
 
+            evaluateRequiredBridgePackageVersion(from: payload)
             applyGPTAccountSnapshot(decodeBridgeGPTAccountSnapshot(from: payload))
             if currentPendingGPTLogin() != nil,
                (gptAccountSnapshot.hasActiveLogin || (gptAccountSnapshot.isAuthenticated && !gptAccountSnapshot.isVoiceTokenReady)) {
@@ -567,12 +571,62 @@ extension CodexService {
         syncPendingGPTLoginStateIfNeeded()
     }
 
-    func fetchBridgeGPTAccountState() async throws -> RPCMessage {
+    private func fetchBridgeGPTAccountState() async throws -> RPCMessage {
         do {
             return try await sendRequest(method: "account/status/read", params: nil)
         } catch {
             return try await sendRequest(method: "getAuthStatus", params: nil)
         }
+    }
+
+    // Prompts for a bridge package upgrade once per session when bridge-managed status
+    // reports an older npm package or omits the version entirely.
+    private func evaluateRequiredBridgePackageVersion(from payloadObject: IncomingParamsObject) {
+        guard !hasPresentedMinimumBridgePackageUpdatePrompt else {
+            return
+        }
+
+        let bridgeVersion = firstStringValue(
+            in: payloadObject,
+            keys: ["bridgeVersion", "bridge_version", "bridgePackageVersion", "bridge_package_version"]
+        )
+        let requiresUpgrade = bridgeVersion == nil
+            || bridgePackageVersionIsOlderThanMinimum(bridgeVersion)
+
+        guard requiresUpgrade else {
+            return
+        }
+
+        hasPresentedMinimumBridgePackageUpdatePrompt = true
+        bridgeUpdatePrompt = minimumBridgePackageUpdatePrompt(currentVersion: bridgeVersion)
+    }
+
+    // Treats missing bridge metadata as "too old" because current app builds require version-aware bridges.
+    private func bridgePackageVersionIsOlderThanMinimum(_ bridgeVersion: String?) -> Bool {
+        guard let bridgeVersion = bridgeVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bridgeVersion.isEmpty else {
+            return true
+        }
+
+        return bridgeVersion.compare(minimumSupportedBridgePackageVersion, options: .numeric) == .orderedAscending
+    }
+
+    private func minimumBridgePackageUpdatePrompt(currentVersion: String?) -> CodexBridgeUpdatePrompt {
+        let message: String
+        if let currentVersion = currentVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !currentVersion.isEmpty {
+            message =
+                "This Mac bridge is running Remodex \(currentVersion), but this iPhone app requires Remodex \(minimumSupportedBridgePackageVersion) or newer. Update the npm package on your Mac, then reconnect."
+        } else {
+            message =
+                "This Mac bridge is too old for this version of Remodex iPhone. Update the Remodex npm package on your Mac to \(minimumSupportedBridgePackageVersion) or newer, then reconnect."
+        }
+
+        return CodexBridgeUpdatePrompt(
+            title: "Update Remodex on your Mac to reconnect",
+            message: message,
+            command: minimumBridgePackageUpdateCommand
+        )
     }
 
     // Opens the pending ChatGPT login URL on the bridge Mac instead of opening Safari on iPhone.

@@ -151,6 +151,7 @@ extension CodexService {
         hasPresentedServiceTierBridgeUpdatePrompt = false
         supportsThreadFork = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
+        hasPresentedMinimumBridgePackageUpdatePrompt = false
         clearAllRunningState()
         readyThreadIDs.removeAll()
         failedThreadIDs.removeAll()
@@ -389,6 +390,7 @@ extension CodexService {
         hasPresentedServiceTierBridgeUpdatePrompt = false
         supportsThreadFork = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
+        hasPresentedMinimumBridgePackageUpdatePrompt = false
         clearAllRunningState()
         readyThreadIDs.removeAll()
         failedThreadIDs.removeAll()
