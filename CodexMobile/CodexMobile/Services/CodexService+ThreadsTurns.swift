@@ -11,6 +11,11 @@ extension CodexService {
     // other active project groups when the latest chats all belong to one repo.
     var recentThreadListLimit: Int { 40 }
 
+    // Encodes manual approval replies using the app-server decision object shape.
+    func approvalDecisionResult(_ decision: String) -> JSONValue {
+        .object(["decision": .string(decision)])
+    }
+
     func listThreads(limit: Int? = nil) async throws {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
@@ -400,7 +405,7 @@ extension CodexService {
             || normalizedMethod == "item/command_execution/request_approval"
         let decision = (forSession && isCommandApproval) ? "acceptForSession" : "accept"
 
-        try await sendResponse(id: request.requestID, result: .string(decision))
+        try await sendResponse(id: request.requestID, result: approvalDecisionResult(decision))
         pendingApproval = nil
     }
 
@@ -410,7 +415,7 @@ extension CodexService {
             throw CodexServiceError.noPendingApproval
         }
 
-        try await sendResponse(id: request.requestID, result: .string("decline"))
+        try await sendResponse(id: request.requestID, result: approvalDecisionResult("decline"))
         pendingApproval = nil
     }
 

@@ -140,7 +140,7 @@ extension CodexService {
                         debugRuntimeLog("auto-approve triggered method=\(method)")
                         try await sendResponse(
                             id: requestID,
-                            result: .string("accept")
+                            result: approvalDecisionResult("accept")
                         )
                     } catch {
                         debugRuntimeLog("auto-approve failed method=\(method): \(error.localizedDescription)")
