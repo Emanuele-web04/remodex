@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="CodexMobile/CodexMobile/Assets.xcassets/remodex-og.imageset/remodex-og2%20(1).png" alt="Remodex" />
+  <img src="assets/remodex-og.png" alt="Remodex" />
 </p>
 
 # Remodex
