@@ -73,6 +73,9 @@
 		<string>Geist-Medium.ttf</string>
 		<string>Geist-SemiBold.ttf</string>
 		<string>Geist-Bold.ttf</string>
+		<string>GeistMono-Regular.ttf</string>
+		<string>GeistMono-Medium.ttf</string>
+		<string>GeistMono-Bold.ttf</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>

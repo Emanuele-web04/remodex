@@ -492,7 +492,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 // Dismiss the keyboard on significant upward scroll, like WhatsApp / Claude.
                 if isComposerFocused {
                     if abs(value.translation.height) > abs(value.translation.width),
-                       value.translation.height < -30 {
+                       value.translation.height < -20 {
                         onTapOutsideComposer()
                     }
                     return

@@ -11,6 +11,7 @@ enum AppFont {
     enum Style: String, CaseIterable, Identifiable {
         case system
         case geist
+        case geistMono
         case jetBrainsMono
 
         var id: String { rawValue }
@@ -19,6 +20,7 @@ enum AppFont {
             switch self {
             case .system: return "System"
             case .geist: return "Geist"
+            case .geistMono: return "Geist Mono"
             case .jetBrainsMono: return "JetBrains Mono"
             }
         }
@@ -29,6 +31,8 @@ enum AppFont {
                 return "Use the native iOS font for regular text. Code stays monospaced."
             case .geist:
                 return "Use Geist for regular text. Code stays monospaced."
+            case .geistMono:
+                return "Use Geist Mono for regular text and code."
             case .jetBrainsMono:
                 return "Use JetBrains Mono for regular text and code."
             }
@@ -80,6 +84,15 @@ enum AppFont {
             default:
                 return ["Geist-Regular", "Geist-Medium", "Geist"]
             }
+        case .geistMono:
+            switch weight {
+            case .bold, .heavy, .black, .semibold:
+                return ["GeistMono-Bold", "GeistMono-Medium", "GeistMono-Regular"]
+            case .medium:
+                return ["GeistMono-Medium", "GeistMono-Regular"]
+            default:
+                return ["GeistMono-Regular", "GeistMono-Medium"]
+            }
         case .jetBrainsMono:
             switch weight {
             case .bold, .heavy, .black, .semibold:
@@ -94,7 +107,7 @@ enum AppFont {
 
     private static func fontSizeAdjustment(for style: Style) -> CGFloat {
         switch style {
-        case .system, .geist, .jetBrainsMono:
+        case .system, .geist, .geistMono, .jetBrainsMono:
             return 0
         }
     }
@@ -152,7 +165,31 @@ enum AppFont {
         return UIFont.preferredFont(forTextStyle: fallbackTextStyle)
     }
 
-    private static func candidateMonoFaceNames(for weight: Font.Weight) -> [String] {
+    // Keeps code surfaces on the selected mono family when the user picks a mono UI font.
+    private static var preferredMonoStyle: Style {
+        switch currentStyle {
+        case .geistMono:
+            return .geistMono
+        case .jetBrainsMono, .system, .geist:
+            return .jetBrainsMono
+        }
+    }
+
+    private static func candidateMonoFaceNames(for weight: Font.Weight, style: Style) -> [String] {
+        switch style {
+        case .geistMono:
+            switch weight {
+            case .bold, .heavy, .black, .semibold:
+                return ["GeistMono-Bold", "GeistMono-Medium", "GeistMono-Regular"]
+            case .medium:
+                return ["GeistMono-Medium", "GeistMono-Regular"]
+            default:
+                return ["GeistMono-Regular", "GeistMono-Medium"]
+            }
+        case .jetBrainsMono, .system, .geist:
+            break
+        }
+
         switch weight {
         case .bold, .heavy, .black, .semibold:
             return ["JetBrainsMono-Bold", "JetBrainsMono-Medium", "JetBrainsMono-Regular"]
@@ -168,7 +205,7 @@ enum AppFont {
     }
 
     private static func resolvedMonoFaceName(for weight: Font.Weight, size: CGFloat) -> String? {
-        for faceName in candidateMonoFaceNames(for: weight) {
+        for faceName in candidateMonoFaceNames(for: weight, style: preferredMonoStyle) {
             if UIFont(name: faceName, size: size) != nil {
                 return faceName
             }
@@ -208,6 +245,16 @@ enum AppFont {
 
     static func monoUIFont(size: CGFloat, weight: Font.Weight = .regular, textStyle: UIFont.TextStyle = .body) -> UIFont {
         resolvedMonoUIFont(size: size, weight: weight, fallbackTextStyle: textStyle)
+    }
+
+    // Mirrors the active monospaced family inside HTML renderers such as Mermaid fallback blocks.
+    static var webMonospaceFontStack: String {
+        switch preferredMonoStyle {
+        case .geistMono:
+            return "\"Geist Mono\", \"JetBrains Mono\", ui-monospace, monospace"
+        case .jetBrainsMono, .system, .geist:
+            return "\"JetBrains Mono\", \"Geist Mono\", ui-monospace, monospace"
+        }
     }
 
     private static func proseFont(

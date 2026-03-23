@@ -25,7 +25,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.backgroundColor = .clear
         textView.font = composerUIFont()
         textView.textColor = UIColor.label
-        textView.textContainerInset = .zero
+        textView.textContainerInset = UIEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
         textView.autocorrectionType = .default
