@@ -270,12 +270,26 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             stoppedTurnIDs: stoppedTurnIDs,
             revertStatesByMessageID: assistantRevertStatesByMessageID
         )
-        cachedBlockInfoByMessageID = Dictionary(
-            uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
-                guard let blockText else { return nil }
-                return (message.id, blockText)
+
+        // Patch only entries that changed so MessageRows whose accessory state
+        // is unchanged keep the same value reference and equatable short-circuits.
+        var updated = cachedBlockInfoByMessageID
+        var newKeys = Set<String>()
+        for (message, state) in zip(visible, cachedBlockInfo) {
+            newKeys.insert(message.id)
+            if let state {
+                if updated[message.id] != state {
+                    updated[message.id] = state
+                }
+            } else {
+                updated.removeValue(forKey: message.id)
             }
-        )
+        }
+        // Remove stale entries for messages no longer in the visible slice.
+        for key in updated.keys where !newKeys.contains(key) {
+            updated.removeValue(forKey: key)
+        }
+        cachedBlockInfoByMessageID = updated
         cachedNewestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
     }
 

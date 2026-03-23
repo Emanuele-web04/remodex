@@ -41,8 +41,16 @@ struct CommandExecutionCardBody: View {
     let statusLabel: String
     let accent: CommandExecutionStatusAccent
 
+    // Cached at struct level — humanize() does string parsing so we avoid
+    // re-running it on every body evaluation during streaming updates.
+    private static let humanizeCache = BoundedCache<String, CommandHumanizer.Info>(maxEntries: 128)
+
     private var display: CommandHumanizer.Info {
-        CommandHumanizer.humanize(command, isRunning: accent == .running)
+        let key = "\(command)|\(accent == .running)"
+        if let cached = Self.humanizeCache.get(key) { return cached }
+        let info = CommandHumanizer.humanize(command, isRunning: accent == .running)
+        Self.humanizeCache.set(key, value: info)
+        return info
     }
 
     var body: some View {
