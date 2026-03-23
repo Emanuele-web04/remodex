@@ -168,6 +168,7 @@ extension CodexService {
         clearHydrationCaches()
         resumedThreadIDs.removeAll()
         resetSecureTransportState()
+        cancelTrustedSessionResolve()
 
         failAllPendingRequests(with: CodexServiceError.disconnected)
     }

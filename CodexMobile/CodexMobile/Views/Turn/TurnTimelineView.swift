@@ -342,17 +342,24 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
         .measureFooterHeight($footerHeight)
 
-        // Shrink the reserved height so the safeAreaInset actually returns space to
-        // the timeline instead of just sliding the content offscreen.  The collapse is
-        // driven by drag state (not scroll geometry), so this does not re-introduce the
-        // old geometry-feedback loop.
-        let effectiveHeight: CGFloat? = footerHeight > 0
+        // Only constrain the frame while collapsing.  At rest the footer sizes
+        // naturally so the bottom safe-area and padding stay intact.
+        let isCollapsing = footerCollapseProgress > 0 && footerHeight > 0
+        let effectiveHeight: CGFloat? = isCollapsing
             ? max(footerHeight - footerHiddenOffset, footerCollapsedPeekHeight)
             : nil
 
-        return footerContent
+        let composedFooter = footerContent
             .frame(height: effectiveHeight, alignment: .top)
-            .clipped()
+
+        return Group {
+            if isCollapsing {
+                composedFooter
+                    .clipped()
+            } else {
+                composedFooter
+            }
+        }
             .overlay(alignment: .top) {
                 if shouldShowScrollToLatestButton, let scrollToBottomAction {
                     Button {

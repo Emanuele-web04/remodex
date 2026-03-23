@@ -381,6 +381,9 @@ final class CodexService {
     @ObservationIgnored var requestTransportOverride: ((String, JSONValue?) async throws -> RPCMessage)?
     // Test hook: stubs trusted-session lookup without performing a real relay HTTP request.
     @ObservationIgnored var trustedSessionResolverOverride: (() async throws -> CodexTrustedSessionResolveResponse)?
+    // Keeps the trusted-session HTTP lookup cancellable so manual retry can preempt a stuck resolve.
+    @ObservationIgnored var trustedSessionResolveTask: Task<CodexTrustedSessionResolveResponse, Error>?
+    @ObservationIgnored var trustedSessionResolveTaskID: UUID?
     var streamingAssistantMessageByTurnID: [String: String] = [:]
     var streamingSystemMessageByItemID: [String: String] = [:]
     /// Rich metadata for command execution tool calls, keyed by itemId.

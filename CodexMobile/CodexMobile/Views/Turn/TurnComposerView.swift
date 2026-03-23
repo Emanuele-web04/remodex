@@ -135,8 +135,8 @@ struct TurnComposerView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
-                .padding(.top, accessoryState.topInputPadding)
-                .padding(.bottom, 6)
+                .padding(.top, accessoryState.topInputPadding + 4)
+                .padding(.bottom, 10)
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)

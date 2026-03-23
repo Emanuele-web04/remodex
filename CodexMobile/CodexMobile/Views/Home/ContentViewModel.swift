@@ -13,14 +13,22 @@ final class ContentViewModel {
     private var hasAttemptedInitialAutoConnect = false
     private var lastSidebarOpenSyncAt: Date = .distantPast
     private let autoReconnectBackoffNanoseconds: [UInt64] = [1_000_000_000, 3_000_000_000]
+    private let reconnectSleepChunkNanoseconds: UInt64 = 100_000_000
     private(set) var isRunningAutoReconnect = false
+    private(set) var isRunningManualReconnect = false
+    private var shouldCancelManualReconnect = false
     // Test hooks keep reconnect verification fast without changing production retry behavior.
     @ObservationIgnored var reconnectAttemptLimitOverride: Int?
     @ObservationIgnored var connectOverride: ((CodexService, String) async throws -> Void)?
     @ObservationIgnored var reconnectSleepOverride: ((UInt64) async -> Void)?
+    @ObservationIgnored var reconnectSleepChunkNanosecondsOverride: UInt64?
 
     var isAttemptingAutoReconnect: Bool {
         isRunningAutoReconnect
+    }
+
+    var isAttemptingManualReconnect: Bool {
+        isRunningManualReconnect
     }
 
     // Throttles sidebar-open sync requests to avoid redundant thread refresh churn.
@@ -64,37 +72,81 @@ final class ContentViewModel {
 
     // Connects or disconnects the relay.
     func toggleConnection(codex: CodexService) async {
-        guard !codex.isConnecting, !isRunningAutoReconnect else {
-            return
-        }
-
         if codex.isConnected {
             await codex.disconnect()
             codex.clearSavedRelaySession()
             return
         }
 
+        guard !isRunningManualReconnect else {
+            return
+        }
+
+        // Flips the UI into an immediate busy state before the reconnect handoff reaches the socket layer.
+        shouldCancelManualReconnect = false
+        isRunningManualReconnect = true
+        defer { isRunningManualReconnect = false }
+
+        await stopAutoReconnectForManualRetry(codex: codex)
+
+        guard shouldContinueManualReconnect else {
+            codex.connectionRecoveryState = .idle
+            return
+        }
+
         guard let fullURL = await preferredReconnectURL(codex: codex) else {
+            codex.connectionRecoveryState = .idle
+            return
+        }
+
+        guard shouldContinueManualReconnect else {
+            codex.connectionRecoveryState = .idle
             return
         }
         do {
             try await connectWithAutoRecovery(
                 codex: codex,
                 serverURL: fullURL,
-                performAutoRetry: true
+                performAutoRetry: true,
+                continueWhile: { self.shouldContinueManualReconnect }
             )
         } catch {
+            if isCancellationLikeError(error) {
+                return
+            }
             if codex.lastErrorMessage?.isEmpty ?? true {
                 codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
             }
         }
     }
 
+    // Lets a manual reconnect tap interrupt a stuck foreground recovery loop.
+    func stopAutoReconnectForManualRetry(codex: CodexService) async {
+        guard isRunningAutoReconnect || codex.isConnecting || codex.shouldAutoReconnectOnForeground else {
+            return
+        }
+
+        codex.shouldAutoReconnectOnForeground = false
+        codex.connectionRecoveryState = .retrying(attempt: 0, message: "Preparing reconnect...")
+        codex.lastErrorMessage = nil
+        codex.cancelTrustedSessionResolve()
+
+        if codex.isConnecting || codex.isConnected {
+            await codex.disconnect()
+        }
+
+        while isRunningAutoReconnect || codex.isConnecting {
+            await sleepForReconnectBackoff(100_000_000)
+        }
+    }
+
     // Lets the manual QR flow take over instead of competing with the foreground reconnect loop.
     func stopAutoReconnectForManualScan(codex: CodexService) async {
+        shouldCancelManualReconnect = true
         codex.shouldAutoReconnectOnForeground = false
         codex.connectionRecoveryState = .idle
         codex.lastErrorMessage = nil
+        codex.cancelTrustedSessionResolve()
 
         // Cancel any in-flight reconnect so the scanner can appear immediately instead of waiting
         // for a stalled handshake to time out on its own.
@@ -102,8 +154,8 @@ final class ContentViewModel {
             await codex.disconnect()
         }
 
-        while isRunningAutoReconnect || codex.isConnecting {
-            try? await Task.sleep(nanoseconds: 100_000_000)
+        while isRunningManualReconnect || isRunningAutoReconnect || codex.isConnecting {
+            await sleepForReconnectBackoff(100_000_000)
         }
     }
 
@@ -163,7 +215,14 @@ final class ContentViewModel {
             }
 
             if codex.isConnecting {
-                await sleepForReconnectBackoff(300_000_000)
+                if !codex.shouldAutoReconnectOnForeground {
+                    codex.connectionRecoveryState = .idle
+                    return
+                }
+                await sleepForReconnectBackoff(
+                    300_000_000,
+                    continueWhile: { codex.shouldAutoReconnectOnForeground }
+                )
                 continue
             }
             do {
@@ -183,6 +242,16 @@ final class ContentViewModel {
                     if codex.lastErrorMessage?.isEmpty ?? true {
                         codex.lastErrorMessage = codex.userFacingConnectFailureMessage(error)
                     }
+                    return
+                }
+
+                if isCancellationLikeError(error) {
+                    codex.connectionRecoveryState = .idle
+                    return
+                }
+
+                if !codex.shouldAutoReconnectOnForeground {
+                    codex.connectionRecoveryState = .idle
                     return
                 }
 
@@ -206,7 +275,10 @@ final class ContentViewModel {
                 let backoffIndex = min(attempt, autoReconnectBackoffNanoseconds.count - 1)
                 let backoff = autoReconnectBackoffNanoseconds[backoffIndex]
                 attempt += 1
-                await sleepForReconnectBackoff(backoff)
+                await sleepForReconnectBackoff(
+                    backoff,
+                    continueWhile: { codex.shouldAutoReconnectOnForeground }
+                )
             }
         }
 
@@ -242,7 +314,8 @@ extension ContentViewModel {
     func connectWithAutoRecovery(
         codex: CodexService,
         serverURL: String,
-        performAutoRetry: Bool
+        performAutoRetry: Bool,
+        continueWhile shouldContinue: (() -> Bool)? = nil
     ) async throws {
         guard !isRunningAutoReconnect else {
             return
@@ -255,6 +328,11 @@ extension ContentViewModel {
         var lastError: Error?
 
         for attemptIndex in 0...maxAttemptIndex {
+            guard shouldContinue?() ?? true else {
+                codex.connectionRecoveryState = .idle
+                throw CancellationError()
+            }
+
             if attemptIndex > 0 {
                 codex.connectionRecoveryState = .retrying(
                     attempt: attemptIndex,
@@ -269,6 +347,11 @@ extension ContentViewModel {
                 codex.shouldAutoReconnectOnForeground = false
                 return
             } catch {
+                if isCancellationLikeError(error) {
+                    codex.connectionRecoveryState = .idle
+                    throw error
+                }
+
                 lastError = error
                 if codex.secureConnectionState == .rePairRequired {
                     codex.connectionRecoveryState = .idle
@@ -297,7 +380,10 @@ extension ContentViewModel {
                     attempt: attemptIndex + 1,
                     message: codex.recoveryStatusMessage(for: error)
                 )
-                try? await Task.sleep(nanoseconds: autoReconnectBackoffNanoseconds[attemptIndex])
+                await sleepForReconnectBackoff(
+                    autoReconnectBackoffNanoseconds[attemptIndex],
+                    continueWhile: shouldContinue
+                )
             }
         }
 
@@ -334,6 +420,8 @@ extension ContentViewModel {
             return .use(trustedReconnectURL)
         } catch let error as CodexTrustedSessionResolveError {
             return trustedReconnectResolution(for: error, codex: codex)
+        } catch is CancellationError {
+            return .stop
         } catch {
             if !codex.hasSavedRelaySession {
                 codex.lastErrorMessage = error.localizedDescription
@@ -396,13 +484,45 @@ extension ContentViewModel {
         return "\(relayURL)/\(sessionId)"
     }
 
-    // Centralizes reconnect sleeps so tests can skip real-time waits while preserving backoff logic.
-    private func sleepForReconnectBackoff(_ nanoseconds: UInt64) async {
+    // Centralizes reconnect sleeps so manual retry can interrupt stale foreground backoff quickly.
+    private func sleepForReconnectBackoff(
+        _ nanoseconds: UInt64,
+        continueWhile shouldContinue: (() -> Bool)? = nil
+    ) async {
         if let reconnectSleepOverride {
             await reconnectSleepOverride(nanoseconds)
             return
         }
 
-        try? await Task.sleep(nanoseconds: nanoseconds)
+        guard let shouldContinue else {
+            try? await Task.sleep(nanoseconds: nanoseconds)
+            return
+        }
+
+        var remaining = nanoseconds
+        let chunkSize = max(1 as UInt64, reconnectSleepChunkNanosecondsOverride ?? reconnectSleepChunkNanoseconds)
+        while remaining > 0 {
+            guard shouldContinue() else {
+                return
+            }
+
+            let nextChunk = min(remaining, chunkSize)
+            try? await Task.sleep(nanoseconds: nextChunk)
+            remaining -= nextChunk
+        }
+    }
+
+    // Treats cancelled resolve/connect work as intentional handoff, not as a user-visible failure.
+    private func isCancellationLikeError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
+    private var shouldContinueManualReconnect: Bool {
+        !shouldCancelManualReconnect
     }
 }

@@ -324,10 +324,38 @@ extension CodexService {
 
     // Used by: ContentViewModel trusted reconnect path.
     func resolveTrustedMacSession() async throws -> CodexTrustedSessionResolveResponse {
-        if let trustedSessionResolverOverride {
-            return try await trustedSessionResolverOverride()
+        let resolver = trustedSessionResolverOverride ?? { [weak self] in
+            guard let self else {
+                throw CancellationError()
+            }
+            return try await self.resolveTrustedMacSessionImpl()
         }
-        return try await resolveTrustedMacSessionImpl()
+        let resolveTaskID = UUID()
+        let task = Task {
+            try await resolver()
+        }
+
+        trustedSessionResolveTask = task
+        trustedSessionResolveTaskID = resolveTaskID
+        defer {
+            if trustedSessionResolveTaskID == resolveTaskID {
+                trustedSessionResolveTask = nil
+                trustedSessionResolveTaskID = nil
+            }
+        }
+
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    // Lets manual reconnect / fresh QR pairing preempt a stuck trusted-session HTTP lookup.
+    func cancelTrustedSessionResolve() {
+        trustedSessionResolveTask?.cancel()
+        trustedSessionResolveTask = nil
+        trustedSessionResolveTaskID = nil
     }
 
     // Persists the resolved live relay session and resets replay cursors when the live session changed.
@@ -569,7 +597,14 @@ private extension CodexService {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            let nsError = error as NSError
+            if Task.isCancelled
+                || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) {
+                throw CancellationError()
+            }
             throw CodexTrustedSessionResolveError.network("Could not reach the trusted Mac relay. Check your connection and try again.")
         }
 

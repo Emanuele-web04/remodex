@@ -192,7 +192,7 @@ If you point `REMODEX_RELAY` at your own self-hosted relay, managed push stays o
 
 Published npm packages can embed default private relay settings at pack time via the `prepack` script.
 
-The current package version is `1.3.3`.
+The current package version is `1.3.4`.
 
 To publish the bridge with `relay.example.invalid` as the default relay:
 
@@ -258,7 +258,7 @@ Prints the installed Remodex CLI version.
 
 ```sh
 remodex --version
-# => 1.3.3
+# => 1.3.4
 ```
 
 ### `remodex reset-pairing`

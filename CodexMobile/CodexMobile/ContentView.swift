@@ -442,6 +442,7 @@ struct ContentView: View {
         codex.hasReconnectCandidate
             && !isShowingManualScanner
             && (codex.isConnecting
+                || viewModel.isAttemptingManualReconnect
                 || viewModel.isAttemptingAutoReconnect
                 || codex.shouldAutoReconnectOnForeground
                 || isRetryingSavedPairing
@@ -450,7 +451,9 @@ struct ContentView: View {
 
     // Keeps home status honest during reconnect loops while letting post-connect sync show separately.
     private var homeConnectionPhase: CodexConnectionPhase {
-        if viewModel.isAttemptingAutoReconnect && !codex.isConnected {
+        // Only manual reconnect should force a busy shell here; background auto-retry can sit in backoff
+        // while the Mac is asleep, and that should still read as offline until a real connect starts.
+        if viewModel.isAttemptingManualReconnect && !codex.isConnected {
             return .connecting
         }
         return codex.connectionPhase
