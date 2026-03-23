@@ -47,6 +47,26 @@ private struct FileChangeInlineActionRow: View {
     }
 }
 
+// Wraps the default Textual markdown parser with a bounded AttributedString
+// cache so Foundation's markdown parser is not re-run when LazyVStack
+// recycles a cell on upward scroll.
+@MainActor
+private struct CachingMarkdownParser: MarkupParser {
+    static let shared = CachingMarkdownParser()
+    private static let cache = BoundedCache<String, AttributedString>(maxEntries: 128)
+    private let inner: AttributedStringMarkdownParser = .markdown()
+
+    func attributedString(for input: String) throws -> AttributedString {
+        let key = "\(input.hashValue)|\(input.count)"
+        if let cached = Self.cache.get(key) {
+            return cached
+        }
+        let result = try inner.attributedString(for: input)
+        Self.cache.set(key, value: result)
+        return result
+    }
+}
+
 struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
@@ -55,7 +75,7 @@ struct MarkdownTextView: View {
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
         // Keep prose on the app font, but let Textual own markdown/code layout to avoid block sizing regressions.
-        let baseView = StructuredText(markdown: transformed)
+        let baseView = StructuredText(transformed, parser: CachingMarkdownParser.shared)
             .font(AppFont.body())
             .textual.structuredTextStyle(.gitHub)
 
@@ -832,14 +852,15 @@ struct MessageRow: View, Equatable {
     }
 
     private func toolActivitySystemView(text: String) -> some View {
-        let lines = text
+        let joined = text
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+            .joined(separator: "\n")
 
         return VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                Text(line)
+            if !joined.isEmpty {
+                Text(joined)
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
