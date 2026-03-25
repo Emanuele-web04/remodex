@@ -339,7 +339,7 @@ extension CodexService {
             timeoutMessage: "Connection timed out after 12s while opening the direct relay socket."
         )
 
-        codexLogPairingTransport("opening manual TCP websocket to \(url.absoluteString)")
+        codexLogPairingTransport("opening manual TCP websocket")
         try await waitUntilManualConnectionReady(connection, configuration: waitConfiguration)
         do {
             try await performManualWebSocketHandshake(on: connection, url: url, token: token, role: role)
@@ -397,7 +397,7 @@ extension CodexService {
         let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
         parameters.defaultProtocolStack.applicationProtocols.insert(webSocketOptions, at: 0)
 
-        codexLogPairingTransport("opening NWConnection websocket to \(url.absoluteString)")
+        codexLogPairingTransport("opening NWConnection websocket")
         let connection = NWConnection(to: .url(url), using: parameters)
         let waitConfiguration = CodexConnectionReadyWaitConfiguration(
             logLabel: "NWConnection websocket",
@@ -455,7 +455,7 @@ extension CodexService {
         task.maximumMessageSize = codexWebSocketMaximumMessageSizeBytes
         let connectionTimeoutNanoseconds: UInt64 = 12_000_000_000
 
-        codexLogPairingTransport("opening URLSessionWebSocketTask to \(url.absoluteString)")
+        codexLogPairingTransport("opening URLSessionWebSocketTask")
         task.resume()
         webSocketSessionDelegate = delegate
 
@@ -630,7 +630,7 @@ extension CodexService {
         }
         requestLines.append(contentsOf: ["", ""])
 
-        codexLogPairingTransport("manual TCP websocket sending upgrade request for path=\(path)")
+        codexLogPairingTransport("sending manual TCP websocket upgrade request")
         try await sendRaw(Data(requestLines.joined(separator: "\r\n").utf8), on: connection)
 
         var headerBytes = Data()
