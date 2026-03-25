@@ -406,7 +406,7 @@ private extension CodexService {
 
         runCompletionNotificationDedupedAt[dedupeKey] = now
 
-        let title = thread(for: threadId)?.displayTitle ?? "Conversation"
+        let title = thread(for: threadId)?.displayTitle ?? CodexThread.defaultDisplayTitle
         let body: String = {
             switch result {
             case .completed:

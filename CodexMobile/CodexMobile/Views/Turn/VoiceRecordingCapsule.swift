@@ -12,13 +12,14 @@ struct VoiceRecordingCapsule: View {
     let duration: TimeInterval
     let onCancel: () -> Void
 
+    private let cardCornerRadius: CGFloat = 20
     private let idealBarWidth: CGFloat = 2
     private let barSpacing: CGFloat = 1.5
     private let barMinHeight: CGFloat = 2
     private let barMaxHeight: CGFloat = 18
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             pulsingDot
 
             waveformView
@@ -29,12 +30,19 @@ struct VoiceRecordingCapsule: View {
 
             cancelButton
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
-        .padding(4)
-        .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        // Keeps the recording UI in the same accessory family as the pinned plan card.
+        .background(
+            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
+                .fill(Color.clear)
+                .adaptiveGlass(
+                    .regular,
+                    in: RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
+                )
+        )
         .padding(.horizontal, 4)
     }
 

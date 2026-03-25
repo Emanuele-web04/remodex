@@ -88,9 +88,14 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         )
     }
 
-    // Mirrors the shared font setting so the UIKit composer stays aligned with SwiftUI text.
+    // Keeps the UIKit-backed text view on the dedicated composer size instead of
+    // falling back to the larger preferred body font under the system style.
     private func composerUIFont() -> UIFont {
-        AppFont.uiFont(size: 12, textStyle: .body)
+        let composerFontSize: CGFloat = 13
+        if AppFont.currentStyle == .system {
+            return UIFont.systemFont(ofSize: composerFontSize)
+        }
+        return AppFont.uiFont(size: composerFontSize, textStyle: .body)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {

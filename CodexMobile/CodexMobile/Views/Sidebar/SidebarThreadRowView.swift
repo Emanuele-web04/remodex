@@ -256,7 +256,7 @@ private struct SidebarSubagentNameLabel: View {
             ?? codex.resolvedSubagentDisplayLabel(threadId: thread.id, agentId: thread.agentId)
             ?? "Subagent"
         let parsed = SubagentLabelParser.parse(source)
-        let nickname = parsed.nickname.isEmpty || parsed.nickname == "Conversation" ? "Subagent" : parsed.nickname
+        let nickname = parsed.nickname.isEmpty || CodexThread.isGenericPlaceholderTitle(parsed.nickname) ? "Subagent" : parsed.nickname
         SubagentLabelParser.styledText(nickname: nickname, roleSuffix: parsed.roleSuffix)
             .font(AppFont.caption(weight: .medium))
             .lineLimit(1)

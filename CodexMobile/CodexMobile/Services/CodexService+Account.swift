@@ -284,7 +284,7 @@ extension CodexService {
                 retaining: gptAccountSnapshot
             )
         )
-        gptAccountErrorMessage = "ChatGPT voice needs a fresh sign-in on this iPhone."
+        gptAccountErrorMessage = "ChatGPT voice needs a fresh sign-in on your Mac."
     }
 
     // Stores an incoming deep-link callback and completes the pending login when the bridge is reachable.

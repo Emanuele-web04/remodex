@@ -126,6 +126,26 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testBrokenPipeGetsFriendlyFailureCopy() {
+        let service = CodexService()
+
+        XCTAssertEqual(
+            service.userFacingConnectFailureMessage(NWError.posix(.EPIPE)),
+            "Connection was interrupted. Tap Reconnect to try again."
+        )
+    }
+
+    func testTurnErrorSuppressesBrokenPipeWhileAutoReconnectIsRunning() {
+        let service = CodexService()
+        let error = NWError.posix(.EPIPE)
+        service.isAppInForeground = true
+        service.shouldAutoReconnectOnForeground = true
+        service.connectionRecoveryState = .retrying(attempt: 1, message: "Reconnecting...")
+
+        XCTAssertTrue(service.shouldSuppressRecoverableConnectionError(error))
+        XCTAssertEqual(service.userFacingTurnErrorMessage(from: error), "")
+    }
+
     func testConnectTimeSessionUnavailableCloseIsRetryable() {
         let service = CodexService()
         let error = CodexServiceError.invalidInput("WebSocket closed during connect (4002)")

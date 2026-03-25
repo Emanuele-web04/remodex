@@ -86,6 +86,15 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertEqual(thread.displayTitle, "Locke [explorer]")
     }
 
+    func testLegacyConversationTitleDisplaysAsNewThread() {
+        let thread = CodexThread(
+            id: "thread-legacy",
+            title: "Conversation"
+        )
+
+        XCTAssertEqual(thread.displayTitle, "New Thread")
+    }
+
     func testModelDisplayLabelPrefersProviderName() {
         let thread = CodexThread(
             id: "thread-agent",

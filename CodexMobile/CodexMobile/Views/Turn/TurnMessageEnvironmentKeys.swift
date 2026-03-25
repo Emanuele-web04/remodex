@@ -1,11 +1,22 @@
 // FILE: TurnMessageEnvironmentKeys.swift
-// Purpose: SwiftUI environment keys for inline commit/push, assistant revert, and subagent actions.
+// Purpose: SwiftUI environment keys for turn-scoped actions such as reconnect, inline commit/push, assistant revert, and subagent open.
 // Layer: View Support
-// Exports: EnvironmentValues.inlineCommitAndPushAction, EnvironmentValues.assistantRevertAction,
-//   EnvironmentValues.subagentOpenAction
+// Exports: EnvironmentValues.reconnectAction, EnvironmentValues.inlineCommitAndPushAction,
+//   EnvironmentValues.assistantRevertAction, EnvironmentValues.subagentOpenAction
 // Depends on: SwiftUI, CodexMessage
 
 import SwiftUI
+
+private struct ReconnectActionKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var reconnectAction: (() -> Void)? {
+        get { self[ReconnectActionKey.self] }
+        set { self[ReconnectActionKey.self] = newValue }
+    }
+}
 
 private struct InlineCommitAndPushActionKey: EnvironmentKey {
     static let defaultValue: (() -> Void)? = nil

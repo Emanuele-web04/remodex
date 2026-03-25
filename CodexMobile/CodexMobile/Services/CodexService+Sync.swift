@@ -268,7 +268,7 @@ extension CodexService {
         if let index = threadIndex(for: threadId) {
             threads[index].syncState = .archivedLocal
         } else {
-            threads.append(CodexThread(id: threadId, title: "Conversation", syncState: .archivedLocal))
+            threads.append(CodexThread(id: threadId, title: CodexThread.defaultDisplayTitle, syncState: .archivedLocal))
             threads = sortThreads(threads)
         }
 

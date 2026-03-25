@@ -11,6 +11,7 @@ struct TurnView: View {
     let thread: CodexThread
 
     @Environment(CodexService.self) private var codex
+    @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
@@ -45,6 +46,9 @@ struct TurnView: View {
         let isEmptyThread = renderSnapshot.messages.isEmpty
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
         let isWorktreeProject = resolvedThread.isManagedWorktreeProject
+        let isComposerAutocompletePresented = viewModel.isFileAutocompleteVisible
+            || viewModel.isSkillAutocompleteVisible
+            || viewModel.slashCommandPanelState != .hidden
         let isWorktreeHandoffAvailable = isWorktreeHandoffAvailable(
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
@@ -65,9 +69,11 @@ struct TurnView: View {
                 stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
                 assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
                 errorMessage: codex.lastErrorMessage,
+                connectionRecoveryAccessory: connectionRecoveryAccessory,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
+                isComposerAutocompletePresented: isComposerAutocompletePresented,
                 emptyState: AnyView(emptyState),
                 composer: AnyView(composerWithSubagentAccessory(
                     currentThread: resolvedThread,
@@ -359,6 +365,55 @@ struct TurnView: View {
         } message: { alert in
             Text(alert.message)
         }
+    }
+
+    // Reuses the home reconnect action inside the turn screen so a dropped socket is recoverable in-place.
+    private var connectionRecoveryAccessory: AnyView? {
+        guard let snapshot = connectionRecoverySnapshot else {
+            return nil
+        }
+
+        return AnyView(
+            ConnectionRecoveryCard(snapshot: snapshot) {
+                reconnectAction?()
+            }
+        )
+    }
+
+    private var connectionRecoverySnapshot: ConnectionRecoverySnapshot? {
+        guard codex.hasReconnectCandidate,
+              !codex.isConnected,
+              codex.secureConnectionState != .rePairRequired else {
+            return nil
+        }
+
+        if codex.isConnecting || codex.shouldAutoReconnectOnForeground || isRetryingConnectionRecovery {
+            return ConnectionRecoverySnapshot(
+                summary: "Trying to reconnect to your Mac.",
+                status: .reconnecting,
+                actionTitle: nil
+            )
+        }
+
+        let trimmedError = codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = {
+            guard let trimmedError, !trimmedError.isEmpty else {
+                return "Reconnect to your Mac to keep this chat in sync."
+            }
+            return trimmedError
+        }()
+        return ConnectionRecoverySnapshot(
+            summary: summary,
+            status: .interrupted,
+            actionTitle: "Reconnect"
+        )
+    }
+
+    private var isRetryingConnectionRecovery: Bool {
+        if case .retrying = codex.connectionRecoveryState {
+            return true
+        }
+        return false
     }
 
     // MARK: - Bindings

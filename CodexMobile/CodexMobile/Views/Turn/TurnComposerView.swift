@@ -114,7 +114,7 @@ struct TurnComposerView: View {
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
                         Text("Ask anything... @files, $skills, /commands")
-                            .font(AppFont.system(size: 12))
+                            .font(AppFont.system(size: 14))
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
                     }
@@ -388,7 +388,7 @@ private struct TurnComposerAccessorySection: View {
                     HStack(spacing: 6) {
                         ComposerActionChip(
                             title: "Subagents",
-                            symbolName: "person.crop.circle",
+                            symbolName: "point.3.connected.trianglepath.dotted",
                             tintColor: .teal,
                             removeAccessibilityLabel: "Remove subagents"
                         ) {

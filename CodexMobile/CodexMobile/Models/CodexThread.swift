@@ -185,12 +185,27 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
 
 extension CodexThread {
     // --- UI helpers -----------------------------------------------------------
+    static let defaultDisplayTitle = "New Thread"
     private static let noProjectGroupKey = "__no_project__"
+
+    // Old rollouts may still persist "Conversation", so treat both labels as the same placeholder.
+    static func isGenericPlaceholderTitle(_ value: String?) -> Bool {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return false
+        }
+
+        return ["Conversation", defaultDisplayTitle].contains {
+            trimmed.localizedCaseInsensitiveCompare($0) == .orderedSame
+        }
+    }
+
     var displayTitle: String {
         let cleanedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAgentLabel = agentDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedPreview = preview?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveTitle = Self.isGenericPlaceholderTitle(cleanedTitle) ? nil : cleanedTitle
 
         // Prefer explicit thread name (AI/user rename) over server title fallback.
         if let cleanedName, !cleanedName.isEmpty {
@@ -198,22 +213,22 @@ extension CodexThread {
         }
 
         if let cleanedAgentLabel, !cleanedAgentLabel.isEmpty {
-            if cleanedTitle == nil || cleanedTitle?.localizedCaseInsensitiveCompare("Conversation") == .orderedSame {
+            if cleanedTitle == nil || Self.isGenericPlaceholderTitle(cleanedTitle) {
                 return cleanedAgentLabel
             }
         }
 
-        guard let cleanedTitle, !cleanedTitle.isEmpty else {
+        guard let effectiveTitle, !effectiveTitle.isEmpty else {
             if let cleanedPreview, !cleanedPreview.isEmpty {
                 let firstCharacter = cleanedPreview.prefix(1).uppercased()
                 let remainingCharacters = cleanedPreview.dropFirst()
                 return firstCharacter + remainingCharacters
             }
 
-            return "Conversation"
+            return Self.defaultDisplayTitle
         }
 
-        return cleanedTitle
+        return effectiveTitle
     }
 
     var isSubagent: Bool {
@@ -235,7 +250,7 @@ extension CodexThread {
         for candidate in [name, title] {
             guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !trimmed.isEmpty,
-                  trimmed.localizedCaseInsensitiveCompare("Conversation") != .orderedSame else {
+                  !Self.isGenericPlaceholderTitle(trimmed) else {
                 continue
             }
             return trimmed

@@ -942,6 +942,13 @@ extension CodexService {
     }
 
     func userFacingTurnErrorMessage(from error: Error) -> String {
+        if shouldTreatSendFailureAsDisconnect(error)
+            || isRetryableSavedSessionConnectError(error)
+            || isRecoverableTransientConnectionError(error)
+            || isBenignBackgroundDisconnect(error) {
+            return userFacingConnectFailureMessage(error)
+        }
+
         if let serviceError = error as? CodexServiceError {
             switch serviceError {
             case .rpcError(let rpcError):

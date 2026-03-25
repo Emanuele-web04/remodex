@@ -31,10 +31,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
     let isRetryAvailable: Bool
     let errorMessage: String?
+    let hidesErrorMessage: Bool
 
     @Binding var shouldAnchorToAssistantResponse: Bool
     @Binding var isScrolledToBottom: Bool
     let isComposerFocused: Bool
+    let isComposerAutocompletePresented: Bool
 
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
@@ -335,7 +337,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Keeps the composer/footer visually stable so scrolling does not animate the bottom inset.
     private func footer(scrollToBottomAction: (() -> Void)? = nil) -> some View {
         let footerContent = VStack(spacing: 0) {
-            if let errorMessage, !errorMessage.isEmpty {
+            if !hidesErrorMessage, let errorMessage, !errorMessage.isEmpty {
                 Text(errorMessage)
                     .font(AppFont.caption())
                     .foregroundStyle(.red)
@@ -347,7 +349,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
 
         return footerContent
-            .simultaneousGesture(composerKeyboardDismissGesture)
+            .simultaneousGesture(
+                composerKeyboardDismissGesture,
+                including: isComposerAutocompletePresented ? .none : .all
+            )
             .overlay(alignment: .top) {
                 if shouldShowScrollToLatestButton, let scrollToBottomAction {
                     Button {
@@ -378,6 +383,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 guard isComposerFocused else { return }
+                // Let nested autocomplete panels keep the drag so their own ScrollViews
+                // can scroll without the footer dismissing the keyboard underneath them.
+                guard !isComposerAutocompletePresented else { return }
                 guard abs(value.translation.height) > abs(value.translation.width) else { return }
                 guard value.translation.height < -20 else { return }
                 onTapOutsideComposer()

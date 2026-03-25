@@ -30,6 +30,8 @@
 		B1C2D3E4F5061728394A5B6C /* CodexServiceIncomingCommandExecutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */; };
 		B3C4D5E6F708192A3B4C5D6E /* CodexPlanModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */; };
 		B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */; };
+		C04E214B2F71D34100AA3193 /* RevenueCat in Frameworks */ = {isa = PBXBuildFile; productRef = C04E214A2F71D34100AA3193 /* RevenueCat */; };
+		C04E214D2F71D4DB00AA3193 /* StoreKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C04E214C2F71D4DB00AA3193 /* StoreKit.framework */; };
 		C0DED3362F5E39DC0021A8E8 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = C0DED3352F5E39DC0021A8E8 /* Textual */; };
 		D27B9CA5F0B60ECA8AF38016 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */; };
@@ -77,6 +79,7 @@
 		B0C1D2E3F40516273849A5B6 /* TurnSlashCommandTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnSlashCommandTokenTests.swift; sourceTree = "<group>"; };
 		B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexPlanModeTests.swift; sourceTree = "<group>"; };
 		B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarThreadGroupingTests.swift; sourceTree = "<group>"; };
+		C04E214C2F71D4DB00AA3193 /* StoreKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StoreKit.framework; path = System/Library/Frameworks/StoreKit.framework; sourceTree = SDKROOT; };
 		C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodexMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingCommandExecutionTests.swift; sourceTree = "<group>"; };
 		D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingRunIndicatorTests.swift; sourceTree = "<group>"; };
@@ -100,6 +103,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C04E214D2F71D4DB00AA3193 /* StoreKit.framework in Frameworks */,
+				C04E214B2F71D34100AA3193 /* RevenueCat in Frameworks */,
 				C0DED3362F5E39DC0021A8E8 /* Textual in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -157,6 +162,7 @@
 		B593FCA030A810D9E56EC959 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				C04E214C2F71D4DB00AA3193 /* StoreKit.framework */,
 				C1F310AC95AC9514C6883203 /* iOS */,
 			);
 			name = Frameworks;
@@ -293,6 +299,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				C0DED3342F5E39DC0021A8E8 /* XCRemoteSwiftPackageReference "textual" */,
+				C04E21492F71D34100AA3193 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = C09A76AF2F4B8D7B003B3F3A /* Products */;
@@ -728,6 +735,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		C04E21492F71D34100AA3193 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/RevenueCat/purchases-ios-spm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.66.0;
+			};
+		};
 		C0DED3342F5E39DC0021A8E8 /* XCRemoteSwiftPackageReference "textual" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/gonzalezreal/textual.git";
@@ -739,6 +754,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		C04E214A2F71D34100AA3193 /* RevenueCat */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C04E21492F71D34100AA3193 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */;
+			productName = RevenueCat;
+		};
 		C0DED3352F5E39DC0021A8E8 /* Textual */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = C0DED3342F5E39DC0021A8E8 /* XCRemoteSwiftPackageReference "textual" */;

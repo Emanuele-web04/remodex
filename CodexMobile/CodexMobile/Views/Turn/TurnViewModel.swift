@@ -1722,8 +1722,10 @@ final class TurnViewModel {
                shouldRearmPlanModeAfterSendFailure(error) {
                 isPlanModeArmed = true
             }
-            if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                codex.lastErrorMessage = error.localizedDescription
+            let fallbackMessage = codex.userFacingTurnErrorMessage(from: error)
+            if (codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                && !fallbackMessage.isEmpty {
+                codex.lastErrorMessage = fallbackMessage
             }
         }
     }

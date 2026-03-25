@@ -8,6 +8,7 @@ import UIKit
 
 struct SettingsView: View {
     @Environment(CodexService.self) private var codex
+    @Environment(SubscriptionService.self) private var subscriptions
 
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
     @State private var isShowingMacNameSheet = false
@@ -23,6 +24,7 @@ struct SettingsView: View {
                 SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
                 SettingsGPTAccountCard()
+                SettingsSubscriptionCard()
                 SettingsBridgeVersionCard()
                 runtimeDefaultsSection
                 SettingsAboutCard()
@@ -41,6 +43,12 @@ struct SettingsView: View {
                     systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
                 )
             }
+        }
+        .task {
+            guard subscriptions.bootstrapState == .idle else {
+                return
+            }
+            await subscriptions.bootstrap()
         }
     }
 
@@ -268,6 +276,52 @@ struct SettingsView: View {
             get: { SidebarMacNicknameStore.nickname(for: presentation.deviceId) },
             set: { SidebarMacNicknameStore.setNickname($0, for: presentation.deviceId) }
         )
+    }
+}
+
+private struct SettingsSubscriptionCard: View {
+    @Environment(SubscriptionService.self) private var subscriptions
+    @State private var isPresentingPaywall = false
+
+    var body: some View {
+        SettingsCard(title: "Remodex Pro") {
+            HStack {
+                Text("Status")
+                Spacer()
+                Text(subscriptions.hasProAccess ? "Active" : "Free")
+                    .foregroundStyle(subscriptions.hasProAccess ? .green : .secondary)
+            }
+
+            if subscriptions.hasProAccess {
+                Text("Your Pro access is active. You can still restore purchases or manage your subscription from Apple.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Open the custom paywall to choose a monthly or yearly plan.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            SettingsButton(subscriptions.hasProAccess ? "View Pro" : "Upgrade to Pro") {
+                isPresentingPaywall = true
+            }
+
+            SettingsButton(subscriptions.isRestoring ? "Restoring..." : "Restore Purchases", isLoading: subscriptions.isRestoring) {
+                Task {
+                    await subscriptions.restorePurchases()
+                }
+            }
+            .disabled(subscriptions.isPurchasing)
+
+            if let error = subscriptions.lastErrorMessage, !error.isEmpty {
+                Text(error)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
+            }
+        }
+        .sheet(isPresented: $isPresentingPaywall) {
+            RevenueCatPaywallView()
+        }
     }
 }
 
@@ -525,9 +579,8 @@ private struct SettingsNotificationsCard: View {
 private struct SettingsGPTAccountCard: View {
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
-    @State private var isOpeningLogin = false
-    @State private var isCancellingLogin = false
     @State private var isLoggingOut = false
+    @State private var isShowingMacLoginInfo = false
 
     var body: some View {
         let snapshot = codex.gptAccountSnapshot
@@ -560,21 +613,21 @@ private struct SettingsGPTAccountCard: View {
                     .foregroundStyle(.red)
             }
 
+            // Keeps the reauth state compact while preserving access to the Mac sign-in explainer.
             if !snapshot.isAuthenticated {
-                SettingsButton(
-                    loginButtonTitle(for: snapshot),
-                    isLoading: isOpeningLogin
-                ) {
-                    startLogin()
-                }
-                .opacity(canStartLogin ? 1 : 0.55)
-                .disabled(!canStartLogin)
-            }
-
-            if snapshot.hasActiveLogin {
-                SettingsButton("Cancel login", role: .cancel, isLoading: isCancellingLogin) {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    cancelPendingLogin()
+                HStack {
+                    Spacer()
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        isShowingMacLoginInfo = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .font(AppFont.subheadline(weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("How ChatGPT voice sign-in works")
                 }
             }
 
@@ -594,26 +647,19 @@ private struct SettingsGPTAccountCard: View {
                 await codex.refreshGPTAccountState()
             }
         }
+        .sheet(isPresented: $isShowingMacLoginInfo) {
+            SettingsGPTMacLoginSheet()
+        }
     }
 
     private func hintText(for snapshot: CodexGPTAccountSnapshot) -> String? {
-        if snapshot.needsReauth { return "Voice on this bridge needs a fresh ChatGPT sign-in." }
+        if snapshot.needsReauth { return "Voice on this bridge needs a fresh ChatGPT sign-in on your Mac." }
         if snapshot.isAuthenticated && snapshot.isVoiceTokenReady { return nil }
         if snapshot.isAuthenticated { return "Waiting for voice sync..." }
-        if snapshot.hasActiveLogin && codex.isConnected { return "Complete sign-in in the browser on this iPhone." }
-        if snapshot.hasActiveLogin { return "Reconnect to your bridge to finish sign-in." }
+        if snapshot.hasActiveLogin && codex.isConnected { return "Finish the ChatGPT sign-in flow in the browser on your Mac." }
+        if snapshot.hasActiveLogin { return "Reconnect to your bridge to finish sign-in on your Mac." }
         if !codex.isConnected { return "Connect to your bridge first." }
-        return nil
-    }
-
-    private func loginButtonTitle(for snapshot: CodexGPTAccountSnapshot) -> String {
-        if snapshot.hasActiveLogin {
-            return "Open On iPhone Again"
-        }
-        if snapshot.needsReauth || snapshot.status == .expired {
-            return "Sign In on iPhone Again"
-        }
-        return "Log In on iPhone"
+        return "ChatGPT voice uses the account already signed in on your Mac."
     }
 
     private func statusIconName(for snapshot: CodexGPTAccountSnapshot) -> String {
@@ -644,47 +690,6 @@ private struct SettingsGPTAccountCard: View {
         }
     }
 
-    private var canStartLogin: Bool {
-        codex.isConnected
-    }
-
-    private func startLogin() {
-        guard !isOpeningLogin else { return }
-        HapticFeedback.shared.triggerImpactFeedback()
-        guard canStartLogin else {
-            codex.gptAccountErrorMessage = "Connect to your bridge before opening ChatGPT sign-in."
-            return
-        }
-
-        isOpeningLogin = true
-        codex.gptAccountErrorMessage = nil
-
-        Task { @MainActor in
-            defer {
-                isOpeningLogin = false
-            }
-
-            do {
-                let authURL = try await codex.startOrResumeGPTLoginOnPhone()
-                await UIApplication.shared.open(authURL)
-            } catch {
-                codex.gptAccountErrorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private func cancelPendingLogin() {
-        guard !isCancellingLogin else { return }
-        isCancellingLogin = true
-        codex.gptAccountErrorMessage = nil
-
-        Task { @MainActor in
-            await codex.cancelGPTLogin()
-            await codex.refreshGPTAccountState()
-            isCancellingLogin = false
-        }
-    }
-
     private func logout() {
         guard !isLoggingOut else { return }
         isLoggingOut = true
@@ -694,6 +699,94 @@ private struct SettingsGPTAccountCard: View {
             await codex.logoutGPTAccount()
             await codex.refreshGPTAccountState()
             isLoggingOut = false
+        }
+    }
+}
+
+private struct SettingsGPTMacLoginSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 40, height: 40)
+                        .background(
+                            Circle()
+                                .fill(Color.primary.opacity(0.08))
+                        )
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("ChatGPT voice is checked on your Mac")
+                            .font(AppFont.subheadline(weight: .semibold))
+                        Text("Remodex reads the ChatGPT session from your paired Mac bridge.")
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    gptSetupStep(
+                        number: "1",
+                        title: "Open ChatGPT on your Mac",
+                        detail: "Use the Mac that is paired with this iPhone."
+                    )
+                    gptSetupStep(
+                        number: "2",
+                        title: "Sign in there",
+                        detail: "Make sure the ChatGPT account you want for voice is already active on the Mac."
+                    )
+                    gptSetupStep(
+                        number: "3",
+                        title: "Come back to Remodex",
+                        detail: "Keep the bridge connected and reopen Settings if the status has not refreshed yet."
+                    )
+                }
+
+                Text("You do not need to start ChatGPT login from this iPhone.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+
+                Spacer(minLength: 0)
+
+                SettingsButton("Close") {
+                    dismiss()
+                }
+            }
+            .padding(20)
+            .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+            .navigationTitle("Use ChatGPT on Mac")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    // Keeps the setup instructions scannable in a compact sheet.
+    private func gptSetupStep(number: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number)
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -895,6 +988,34 @@ private struct SettingsAboutCard: View {
                             .resizable()
                             .scaledToFit()
                             .frame(width: 14, height: 14)
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                UIApplication.shared.open(AppEnvironment.privacyPolicyURL)
+            } label: {
+                settingsAccessoryRow(
+                    title: "Privacy Policy",
+                    leading: {
+                        Image(systemName: "hand.raised")
+                            .font(AppFont.subheadline(weight: .medium))
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                UIApplication.shared.open(AppEnvironment.termsOfUseURL)
+            } label: {
+                settingsAccessoryRow(
+                    title: "Terms of Use",
+                    leading: {
+                        Image(systemName: "doc.text")
+                            .font(AppFont.subheadline(weight: .medium))
                     }
                 )
             }
