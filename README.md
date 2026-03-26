@@ -40,6 +40,8 @@ If you want the public-repo distribution model explained clearly, read [SELF_HOS
 
 ## Get the App
 
+The app is live on the [App Store](https://apps.apple.com/us/app/remodex-remote-ai-coding/id6760243963).
+
 Build the iOS app from source in Xcode, install your own signed build on-device, then use the in-app onboarding flow to pair by scanning the QR from `remodex up`.
 
 If you scan the pairing QR with a generic camera or QR reader before installing the app, your device may treat the QR payload as plain text and open a web search instead of pairing.
