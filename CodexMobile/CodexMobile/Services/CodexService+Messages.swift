@@ -490,7 +490,8 @@ extension CodexService {
         threadId: String,
         text: String,
         turnId: String? = nil,
-        attachments: [CodexImageAttachment] = []
+        attachments: [CodexImageAttachment] = [],
+        fileMentions: [String] = []
     ) -> String {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty || !attachments.isEmpty else {
@@ -501,6 +502,7 @@ extension CodexService {
             threadId: threadId,
             role: .user,
             text: trimmedText,
+            fileMentions: fileMentions,
             turnId: turnId,
             isStreaming: false,
             deliveryState: .pending,
@@ -516,7 +518,8 @@ extension CodexService {
     func appendConfirmedMirroredUserMessage(
         threadId: String,
         turnId: String?,
-        text: String
+        text: String,
+        fileMentions: [String] = []
     ) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedIncomingText = Self.normalizedMessageText(trimmedText)
@@ -541,6 +544,10 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].turnId = turnId
                 didMutate = true
             }
+            if messagesByThread[threadId]?[existingIndex].fileMentions.isEmpty, !fileMentions.isEmpty {
+                messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
+                didMutate = true
+            }
             guard didMutate else {
                 return
             }
@@ -554,6 +561,7 @@ extension CodexService {
                 threadId: threadId,
                 role: .user,
                 text: trimmedText,
+                fileMentions: fileMentions,
                 turnId: turnId,
                 deliveryState: .confirmed
             )

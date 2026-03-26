@@ -695,6 +695,12 @@ struct MessageRow: View, Equatable {
             in: rawText,
             style: .mentionToken
         )
+        let confirmedFileMentions = Set(
+            message.fileMentions
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .map(TurnMessageRegexCache.removingTrailingLineColumnSuffix)
+                .filter { !$0.isEmpty }
+        )
 
         guard normalizedRawText.contains("@") || normalizedRawText.contains("$") else {
             return Text(normalizedRawText)
@@ -711,7 +717,14 @@ struct MessageRow: View, Equatable {
             return Text(normalizedRawText)
         }
 
-        return Text(userBubbleAttributedText(from: normalizedRawText, matches: matches, nsText: nsText))
+        return Text(
+            userBubbleAttributedText(
+                from: normalizedRawText,
+                matches: matches,
+                nsText: nsText,
+                confirmedFileMentions: confirmedFileMentions
+            )
+        )
     }
 
     private func normalizedMentionToken(_ token: String) -> (token: String, trailingPunctuation: String) {
@@ -735,7 +748,8 @@ struct MessageRow: View, Equatable {
     private func userBubbleAttributedText(
         from text: String,
         matches: [NSTextCheckingResult],
-        nsText: NSString
+        nsText: NSString,
+        confirmedFileMentions: Set<String>
     ) -> AttributedString {
         var attributed = AttributedString()
         var cursor = 0
@@ -759,6 +773,14 @@ struct MessageRow: View, Equatable {
             let trigger = nsText.substring(with: triggerRange)
             let rawToken = nsText.substring(with: tokenRange)
             let (normalizedToken, trailingPunctuation) = normalizedMentionToken(rawToken)
+            let fullMatch = nsText.substring(with: matchRange)
+            let normalizedConfirmedToken = TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: normalizedToken)
+            if trigger == "@", !confirmedFileMentions.contains(normalizedConfirmedToken) {
+                attributed.append(AttributedString(fullMatch))
+                cursor = matchRange.location + matchRange.length
+                continue
+            }
+
             if !normalizedToken.isEmpty {
                 let displayName: String
                 let color: Color

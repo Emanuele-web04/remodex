@@ -124,25 +124,6 @@ final class TurnViewModel {
     private static let fileMentionSegmentRegex = try? NSRegularExpression(
         pattern: #"[A-Z]+(?=$|[A-Z][a-z]|\d)|[A-Z]?[a-z]+|\d+"#
     )
-    // Prevents Swift attribute syntax from opening file autocomplete when the user is typing code.
-    private static let disallowedBareSwiftFileMentionQueries: Set<String> = [
-        "Binding",
-        "Environment",
-        "EnvironmentObject",
-        "FocusState",
-        "MainActor",
-        "Namespace",
-        "Observable",
-        "ObservedObject",
-        "Published",
-        "SceneBuilder",
-        "State",
-        "StateObject",
-        "UIApplicationDelegateAdaptor",
-        "ViewBuilder",
-        "testable",
-    ]
-
     var input = ""
     var isSending = false
     var isHandlingApproval = false
@@ -1032,6 +1013,7 @@ final class TurnViewModel {
                     threadId: threadID,
                     attachments: nextDraft.attachments,
                     skillMentions: nextDraft.skillMentions,
+                    fileMentions: confirmedFileMentionPaths(from: nextDraft.rawFileMentions),
                     collaborationMode: nextDraft.collaborationMode
                 )
             } catch {
@@ -1079,6 +1061,7 @@ final class TurnViewModel {
                         threadId: threadID,
                         attachments: draft.attachments,
                         skillMentions: draft.skillMentions,
+                        fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
                         collaborationMode: draft.collaborationMode
                     )
                     removeQueuedDraft(id: id, codex: codex, threadID: threadID)
@@ -1095,6 +1078,7 @@ final class TurnViewModel {
                     expectedTurnId: expectedTurnID,
                     attachments: draft.attachments,
                     skillMentions: draft.skillMentions,
+                    fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
                     shouldAppendUserMessage: true,
                     collaborationMode: draft.collaborationMode
                 )
@@ -1419,16 +1403,7 @@ final class TurnViewModel {
 
     // Allows flexible file aliases while keeping common Swift attributes out of file search.
     private static func isAllowedFileAutocompleteQuery(_ query: String) -> Bool {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else {
-            return false
-        }
-
-        if trimmedQuery.contains("/") || trimmedQuery.contains("\\") || trimmedQuery.contains(".") {
-            return true
-        }
-
-        return !disallowedBareSwiftFileMentionQueries.contains(trimmedQuery)
+        TurnFileMentionHeuristics.isAllowedAutocompleteQuery(query)
     }
 
     // Shared parser for final-token autocomplete triggers (`@`, `$`).
@@ -1712,6 +1687,7 @@ final class TurnViewModel {
                     threadId: threadID,
                     attachments: pendingSend.attachments,
                     skillMentions: pendingSend.skillMentions,
+                    fileMentions: confirmedFileMentionPaths(from: pendingSend.rawFileMentions),
                     collaborationMode: pendingSend.collaborationMode
                 )
             }
@@ -1739,6 +1715,22 @@ final class TurnViewModel {
         composerReviewSelection = pendingSend.rawReviewSelection
         isSubagentsSelectionArmed = pendingSend.rawSubagentsSelectionArmed
         isPlanModeArmed = pendingSend.collaborationMode == .plan
+    }
+
+    // Carries only autocomplete-confirmed file selections into the timeline renderer.
+    private func confirmedFileMentionPaths(from mentions: [TurnComposerMentionedFile]) -> [String] {
+        var uniquePaths: [String] = []
+        var seenPaths: Set<String> = []
+
+        for mention in mentions {
+            let path = mention.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty, seenPaths.insert(path).inserted else {
+                continue
+            }
+            uniquePaths.append(path)
+        }
+
+        return uniquePaths
     }
 
     // Restores a queued row using the exact composer payload captured before it entered the queue.

@@ -35,6 +35,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
     let role: CodexMessageRole
     var kind: CodexMessageKind
     var text: String
+    var fileMentions: [String]
     let createdAt: Date
     var turnId: String?
     var itemId: String?
@@ -55,6 +56,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         role: CodexMessageRole,
         kind: CodexMessageKind = .chat,
         text: String,
+        fileMentions: [String] = [],
         createdAt: Date = Date(),
         turnId: String? = nil,
         itemId: String? = nil,
@@ -71,6 +73,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         self.role = role
         self.kind = kind
         self.text = text
+        self.fileMentions = fileMentions
         self.createdAt = createdAt
         self.turnId = turnId
         self.itemId = itemId
@@ -89,6 +92,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         case role
         case kind
         case text
+        case fileMentions
         case createdAt
         case turnId
         case itemId
@@ -108,6 +112,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         role = try container.decode(CodexMessageRole.self, forKey: .role)
         kind = try container.decodeIfPresent(CodexMessageKind.self, forKey: .kind) ?? .chat
         text = try container.decode(String.self, forKey: .text)
+        fileMentions = try container.decodeIfPresent([String].self, forKey: .fileMentions) ?? []
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         turnId = try container.decodeIfPresent(String.self, forKey: .turnId)
         itemId = try container.decodeIfPresent(String.self, forKey: .itemId)

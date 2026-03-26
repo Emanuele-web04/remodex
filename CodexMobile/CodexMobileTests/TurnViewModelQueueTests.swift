@@ -217,6 +217,60 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertTrue(service.messagesByThread["thread-queue"]?.isEmpty ?? true)
     }
 
+    func testSendTurnStoresOnlyConfirmedFileMentionsOnUserMessage() async {
+        let service = makeService()
+        service.isConnected = true
+        service.resumedThreadIDs.insert("thread-queue")
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-new")]),
+                includeJSONRPC: false
+            )
+        }
+
+        let viewModel = makeViewModel()
+        viewModel.input = "Please inspect @TurnView.swift"
+        viewModel.composerMentionedFiles = [
+            TurnComposerMentionedFile(
+                fileName: "TurnView.swift",
+                path: "CodexMobile/Views/Turn/TurnView.swift"
+            )
+        ]
+
+        viewModel.sendTurn(codex: service, threadID: "thread-queue")
+        await waitForSendCompletion(viewModel)
+
+        let message = try XCTUnwrap(service.messagesByThread["thread-queue"]?.last)
+        XCTAssertEqual(message.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
+        XCTAssertEqual(message.fileMentions, ["CodexMobile/Views/Turn/TurnView.swift"])
+    }
+
+    func testSendTurnDoesNotStoreManualFileLikeTextAsConfirmedMention() async {
+        let service = makeService()
+        service.isConnected = true
+        service.resumedThreadIDs.insert("thread-queue")
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-new")]),
+                includeJSONRPC: false
+            )
+        }
+
+        let viewModel = makeViewModel()
+        viewModel.input = "Please inspect @CodexMobile/Views/Turn/TurnView.swift"
+
+        viewModel.sendTurn(codex: service, threadID: "thread-queue")
+        await waitForSendCompletion(viewModel)
+
+        let message = try XCTUnwrap(service.messagesByThread["thread-queue"]?.last)
+        XCTAssertEqual(message.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
+        XCTAssertTrue(message.fileMentions.isEmpty)
+    }
+
     func testFlushQueuePreservesPlanModeFromBusyThreadQueue() async {
         let service = makeService()
         service.isConnected = true

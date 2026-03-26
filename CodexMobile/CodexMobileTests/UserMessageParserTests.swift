@@ -31,4 +31,32 @@ final class UserMessageParserTests: XCTestCase {
         XCTAssertEqual(parsed.mentions, [])
         XCTAssertEqual(parsed.body, "@State private var count = 0")
     }
+
+    func testParseDoesNotTreatTerminalScopedTaskLabelAsFileMention() {
+        let parsed = UserMessageParser.parse("@t3tools/contracts:build cache hit, replaying logs")
+
+        XCTAssertEqual(parsed.mentions, [])
+        XCTAssertEqual(parsed.body, "@t3tools/contracts:build cache hit, replaying logs")
+    }
+
+    func testParseDoesNotTreatBareTerminalHandleAsFileMention() {
+        let parsed = UserMessageParser.parse("@remodex cache hit")
+
+        XCTAssertEqual(parsed.mentions, [])
+        XCTAssertEqual(parsed.body, "@remodex cache hit")
+    }
+
+    func testParseKeepsFileMentionWithLineNumber() {
+        let parsed = UserMessageParser.parse("@Views/Turn/TurnView.swift:42 check this")
+
+        XCTAssertEqual(parsed.mentions, ["Views/Turn/TurnView.swift:42"])
+        XCTAssertEqual(parsed.body, "check this")
+    }
+
+    func testParseKeepsCommonExtensionlessFileMention() {
+        let parsed = UserMessageParser.parse("@Makefile fix this target")
+
+        XCTAssertEqual(parsed.mentions, ["Makefile"])
+        XCTAssertEqual(parsed.body, "fix this target")
+    }
 }

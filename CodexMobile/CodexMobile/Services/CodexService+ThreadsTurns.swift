@@ -130,6 +130,7 @@ extension CodexService {
         threadId: String?,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
+        fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
         collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
@@ -152,6 +153,7 @@ extension CodexService {
                     trimmedInput,
                     attachments: attachments,
                     skillMentions: skillMentions,
+                    fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendUserMessage,
                     collaborationMode: collaborationMode
@@ -167,6 +169,7 @@ extension CodexService {
                 trimmedInput,
                 attachments: attachments,
                 skillMentions: skillMentions,
+                fileMentions: fileMentions,
                 to: initialThreadId,
                 shouldAppendUserMessage: shouldAppendUserMessage,
                 collaborationMode: collaborationMode
@@ -189,6 +192,7 @@ extension CodexService {
                     trimmedInput,
                     attachments: attachments,
                     skillMentions: skillMentions,
+                    fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendUserMessage,
                     collaborationMode: collaborationMode
@@ -738,12 +742,18 @@ extension CodexService {
         _ userInput: String,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
+        fileMentions: [String] = [],
         to threadId: String,
         shouldAppendUserMessage: Bool = true,
         collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
         let pendingMessageId = shouldAppendUserMessage
-            ? appendUserMessage(threadId: threadId, text: userInput, attachments: attachments)
+            ? appendUserMessage(
+                threadId: threadId,
+                text: userInput,
+                attachments: attachments,
+                fileMentions: fileMentions
+            )
             : ""
         activeThreadId = threadId
         markThreadAsRunning(threadId)
@@ -829,12 +839,18 @@ extension CodexService {
         expectedTurnId: String?,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
+        fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
         collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
         let pendingMessageId = shouldAppendUserMessage
-            ? appendUserMessage(threadId: normalizedThreadID, text: userInput, attachments: attachments)
+            ? appendUserMessage(
+                threadId: normalizedThreadID,
+                text: userInput,
+                attachments: attachments,
+                fileMentions: fileMentions
+            )
             : ""
         var resolvedExpectedTurnID = normalizedInterruptIdentifier(expectedTurnId)
         if resolvedExpectedTurnID == nil {

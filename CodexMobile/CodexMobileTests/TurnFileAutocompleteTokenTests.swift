@@ -34,6 +34,37 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "fix @turnv please"))
     }
 
+    func testTrailingTokenDoesNotParseTerminalScopedTaskLabel() {
+        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "paste @t3tools/contracts:build"))
+    }
+
+    func testTrailingTokenDoesNotParseBareTerminalHandle() {
+        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "paste @remodex"))
+    }
+
+    func testTrailingTokenStillParsesLineReferencedFile() {
+        let token = TurnViewModel.trailingFileAutocompleteToken(in: "open @Views/Turn/TurnView.swift:42")
+
+        XCTAssertEqual(token?.query, "Views/Turn/TurnView.swift:42")
+    }
+
+    func testTrailingTokenKeepsCommonExtensionlessFilesWorking() {
+        let token = TurnViewModel.trailingFileAutocompleteToken(in: "check @Makefile")
+
+        XCTAssertEqual(token?.query, "Makefile")
+    }
+
+    func testRemovingTrailingLineColumnSuffixKeepsBasePath() {
+        XCTAssertEqual(
+            TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: "Views/Turn/TurnView.swift:42:7"),
+            "Views/Turn/TurnView.swift"
+        )
+        XCTAssertEqual(
+            TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: "Views/Turn/TurnView.swift"),
+            "Views/Turn/TurnView.swift"
+        )
+    }
+
     func testReplacingTrailingTokenUpdatesOnlyFinalAtToken() {
         let updated = TurnViewModel.replacingTrailingFileAutocompleteToken(
             in: "compare @first and @turnv",
