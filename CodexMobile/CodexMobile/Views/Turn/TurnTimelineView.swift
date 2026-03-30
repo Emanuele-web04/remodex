@@ -152,8 +152,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             scheduleFollowBottomScroll(using: proxy)
                         }
                     }
-                    if new.contentHeight > old.contentHeight,
-                       shouldPinTimelineToBottomDuringGeometryChange {
+                    if TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
+                        previousHeight: old.contentHeight,
+                        newHeight: new.contentHeight,
+                        isPinnedToBottom: shouldPinTimelineToBottomDuringGeometryChange
+                    ) {
                         scheduleFollowBottomScroll(using: proxy)
                     }
                     if new.isAtBottom != old.isAtBottom {

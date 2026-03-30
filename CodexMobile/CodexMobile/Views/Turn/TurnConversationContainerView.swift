@@ -47,17 +47,49 @@ struct TurnConversationContainerView: View {
         return cachedMessageLayout
     }
 
-    // Avoids showing the generic "new chat" empty state behind a pinned plan-only accessory.
+    // Keeps accessory-only chats informative instead of showing a blank viewport.
     private var timelineEmptyState: AnyView {
-        guard messageLayout.pinnedTaskPlanMessage != nil
-                || messageLayout.pinnedStructuredUserInputMessage != nil,
-              messageLayout.timelineMessages.isEmpty else {
+        guard messageLayout.timelineMessages.isEmpty else {
             return emptyState
         }
-        return AnyView(
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        )
+
+        if let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage {
+            let questionCount = pinnedStructuredUserInputMessage.structuredUserInputRequest?.questions.count ?? 0
+            let title = questionCount == 1 ? "One answer needed" : "Answers needed"
+            let summary: String
+            if questionCount <= 0 {
+                summary = "Codex is waiting for your input before it can continue."
+            } else if questionCount == 1 {
+                summary = "Codex is waiting for one answer before it can continue."
+            } else {
+                summary = "Codex is waiting for \(questionCount) answers before it can continue."
+            }
+            return AnyView(
+                AccessoryBackedEmptyState(
+                    systemImage: "questionmark.circle",
+                    tint: Color(.plan),
+                    title: title,
+                    summary: summary,
+                    detail: "Open the prompt above the composer to review the questions and reply."
+                )
+            )
+        }
+
+        if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
+            let snapshot = PlanAccessorySnapshot(message: pinnedTaskPlanMessage)
+            let summary = snapshot.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AnyView(
+                AccessoryBackedEmptyState(
+                    systemImage: snapshot.status.symbolName,
+                    tint: snapshot.status.tint,
+                    title: snapshot.status == .inProgress ? "Plan in progress" : "Plan ready",
+                    summary: summary.isEmpty ? "Codex has prepared a plan for this chat." : summary,
+                    detail: "Open the plan card above the composer to review the current steps."
+                )
+            )
+        }
+
+        return emptyState
     }
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -236,6 +268,51 @@ private struct TimelineMessageLayout: Equatable {
         pinnedTaskPlanMessage: nil,
         pinnedStructuredUserInputMessage: nil
     )
+}
+
+private struct AccessoryBackedEmptyState: View {
+    let systemImage: String
+    let tint: Color
+    let title: String
+    let summary: String
+    let detail: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 14) {
+                Image(systemName: systemImage)
+                    .font(AppFont.system(size: 24, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 56, height: 56)
+                    .background(
+                        Circle()
+                            .fill(tint.opacity(0.12))
+                    )
+
+                Text(title)
+                    .font(AppFont.title3(weight: .semibold))
+                    .multilineTextAlignment(.center)
+
+                Text(summary)
+                    .font(AppFont.body())
+                    .foregroundStyle(.primary.opacity(0.9))
+                    .multilineTextAlignment(.center)
+
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: 320)
+            .padding(.horizontal, 24)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
 }
 
 extension CodexMessage {
