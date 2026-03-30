@@ -6,12 +6,6 @@
 
 import SwiftUI
 
-private enum TurnAutoScrollMode {
-    case followBottom
-    case anchorAssistantResponse
-    case manual
-}
-
 struct AssistantBlockAccessoryState: Equatable {
     let copyText: String?
     let showsRunningIndicator: Bool
@@ -458,15 +452,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         userScrollCooldownUntil = nil
         followBottomScrollTask?.cancel()
         followBottomScrollTask = nil
-        if autoScrollMode != .anchorAssistantResponse, !isScrolledToBottom {
-            autoScrollMode = .manual
-        }
+        autoScrollMode = TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: autoScrollMode)
     }
 
     // Preserves user-controlled deceleration for a short cooldown before auto-follow can resume.
     private func handleUserScrollDragEnded() {
         isUserDraggingScroll = false
         userScrollCooldownUntil = TurnScrollStateTracker.cooldownDeadline()
+        autoScrollMode = TurnScrollStateTracker.modeAfterUserDragEnded(
+            currentMode: autoScrollMode,
+            isScrolledToBottom: isScrolledToBottom
+        )
     }
 
     // Mirrors user-driven scroll phases without pausing auto-follow during programmatic animations.
