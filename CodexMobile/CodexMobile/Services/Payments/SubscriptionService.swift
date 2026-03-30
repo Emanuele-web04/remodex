@@ -72,6 +72,18 @@ final class SubscriptionService {
     private(set) var isRestoring = false
     private(set) var lastErrorMessage: String?
 
+    static func usesLocalDevelopmentBypass(bundleIdentifier: String) -> Bool {
+#if DEBUG
+        debugPersonalBundleIdentifiers.contains(bundleIdentifier)
+#else
+        false
+#endif
+    }
+
+    static var usesLocalDevelopmentBypassForCurrentBuild: Bool {
+        usesLocalDevelopmentBypass(bundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+    }
+
     var isUsingLocalDevelopmentProOverride: Bool {
         isLocalDevelopmentProOverrideEnabled
     }
@@ -268,7 +280,7 @@ private extension SubscriptionService {
     var isLocalDevelopmentProOverrideEnabled: Bool {
 #if DEBUG
         defaults.bool(forKey: Self.debugForceProAccessDefaultsKey)
-            || Self.debugPersonalBundleIdentifiers.contains(bundleIdentifier)
+            || Self.usesLocalDevelopmentBypass(bundleIdentifier: bundleIdentifier)
 #else
         return false
 #endif

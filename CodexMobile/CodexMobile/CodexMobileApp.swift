@@ -263,13 +263,16 @@ struct CodexMobileApp: App {
     @State private var codexService: CodexService
     @State private var subscriptionService: SubscriptionService
     private let uiTestLaunchConfiguration: CodexUITestLaunchConfiguration
+    private let shouldSkipRevenueCatBootstrap: Bool
 
     init() {
         let uiTestLaunchConfiguration = CodexUITestLaunchConfiguration.current
         self.uiTestLaunchConfiguration = uiTestLaunchConfiguration
+        let shouldSkipRevenueCatBootstrap = SubscriptionService.usesLocalDevelopmentBypassForCurrentBuild
+        self.shouldSkipRevenueCatBootstrap = shouldSkipRevenueCatBootstrap
         CodexDebugLaunchConfiguration.current.apply()
 
-        if !uiTestLaunchConfiguration.isEnabled {
+        if !uiTestLaunchConfiguration.isEnabled, !shouldSkipRevenueCatBootstrap {
             Self.configureRevenueCatIfAvailable()
         }
 
@@ -290,6 +293,9 @@ struct CodexMobileApp: App {
                     .environment(codexService)
                     .environment(subscriptionService)
                     .task {
+                        guard !shouldSkipRevenueCatBootstrap else {
+                            return
+                        }
                         await subscriptionService.bootstrap()
                     }
                     .onOpenURL { url in
