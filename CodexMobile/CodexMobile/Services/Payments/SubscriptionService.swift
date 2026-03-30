@@ -76,6 +76,10 @@ final class SubscriptionService {
         isLocalDevelopmentProOverrideEnabled
     }
 
+    var shouldBypassSubscriptionGates: Bool {
+        isLocalDevelopmentProOverrideEnabled
+    }
+
     init(defaults: UserDefaults = .standard, bundleIdentifier: String? = nil) {
         self.defaults = defaults
         self.bundleIdentifier = bundleIdentifier ?? (Bundle.main.bundleIdentifier ?? "")
@@ -242,6 +246,8 @@ private extension SubscriptionService {
             return false
         }
 
+        customerInfoUpdatesTask?.cancel()
+        customerInfoUpdatesTask = nil
         customerInfo = nil
         currentOffering = nil
         packageOptions = []
@@ -269,7 +275,9 @@ private extension SubscriptionService {
     }
 
     func startCustomerInfoObserverIfConfigured() {
-        guard customerInfoUpdatesTask == nil, Purchases.isConfigured else {
+        guard !isLocalDevelopmentProOverrideEnabled,
+              customerInfoUpdatesTask == nil,
+              Purchases.isConfigured else {
             return
         }
 
@@ -285,6 +293,9 @@ private extension SubscriptionService {
     }
 
     func handleCustomerInfoStreamUpdate(_ info: CustomerInfo) {
+        guard !isLocalDevelopmentProOverrideEnabled else {
+            return
+        }
         applyCustomerInfo(info)
         bootstrapState = .ready
     }
@@ -316,6 +327,10 @@ private extension SubscriptionService {
     }
 
     func applyCustomerInfo(_ info: CustomerInfo) {
+        guard !isLocalDevelopmentProOverrideEnabled else {
+            _ = applyLocalDevelopmentOverrideIfNeeded()
+            return
+        }
         customerInfo = info
         let entitlement = info.entitlements.all[AppEnvironment.revenueCatEntitlementName]
         hasProAccess = entitlement?.isActive == true

@@ -176,9 +176,11 @@ struct ContentView: View {
             OnboardingView {
                 finishOnboardingAndShowScanner()
             }
-        } else if subscriptions.bootstrapState == .failed {
+        } else if !subscriptions.shouldBypassSubscriptionGates,
+                  subscriptions.bootstrapState == .failed {
             SubscriptionBootstrapFailureView()
-        } else if subscriptions.bootstrapState != .ready || !subscriptions.hasProAccess {
+        } else if !subscriptions.shouldBypassSubscriptionGates,
+                  (subscriptions.bootstrapState != .ready || !subscriptions.hasProAccess) {
             SubscriptionGateView()
         } else if shouldShowQRScanner {
             qrScannerBody

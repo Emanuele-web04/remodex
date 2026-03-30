@@ -81,7 +81,24 @@ final class SubscriptionServiceTests: XCTestCase {
         )
 
         XCTAssertTrue(service.isUsingLocalDevelopmentProOverride)
+        XCTAssertTrue(service.shouldBypassSubscriptionGates)
         XCTAssertEqual(service.bootstrapState, .ready)
         XCTAssertTrue(service.hasProAccess)
+    }
+
+    func testSubscriptionGatesAreNotBypassedWithoutLocalOverride() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        defer {
+            defaults.removePersistentDomain(forName: #function)
+        }
+
+        let service = SubscriptionService(
+            defaults: defaults,
+            bundleIdentifier: "com.example.remodex"
+        )
+
+        XCTAssertFalse(service.isUsingLocalDevelopmentProOverride)
+        XCTAssertFalse(service.shouldBypassSubscriptionGates)
     }
 }

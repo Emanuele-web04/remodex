@@ -325,7 +325,12 @@ private struct SettingsSubscriptionCard: View {
                     .foregroundStyle(.red)
             }
         }
-        .sheet(isPresented: $isPresentingPaywall) {
+        .sheet(
+            isPresented: Binding(
+                get: { isPresentingPaywall && !subscriptions.shouldBypassSubscriptionGates },
+                set: { isPresentingPaywall = $0 }
+            )
+        ) {
             RevenueCatPaywallView()
         }
     }

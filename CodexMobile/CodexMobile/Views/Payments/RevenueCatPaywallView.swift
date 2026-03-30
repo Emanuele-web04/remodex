@@ -75,22 +75,26 @@ struct RevenueCatPaywallView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 16) {
-                        header
-                        
-                        featureCard
+            Group {
+                if subscriptions.shouldBypassSubscriptionGates && !isPreviewMode {
+                    bypassView
+                } else {
+                    VStack(spacing: 0) {
+                        ScrollView(.vertical, showsIndicators: false) {
+                            VStack(spacing: 16) {
+                                header
+
+                                featureCard
+                            }
+                            .padding(.horizontal, 20)
+                            .padding(.bottom, 16)
+                        }
+
+                        Spacer(minLength: 0)
+
+                        bottomSection
                     }
-                    .padding(.horizontal, 20)
-             
-                    .padding(.bottom, 16)
                 }
-
-                Spacer(minLength: 0)
-
-                bottomSection
-                    
             }
             .opacity(appeared ? 1 : 0)
             .background(Color(.systemBackground))
@@ -110,6 +114,17 @@ struct RevenueCatPaywallView: View {
             }
             .interactiveDismissDisabled(!dismissable)
             .task {
+                guard !(subscriptions.shouldBypassSubscriptionGates && !isPreviewMode) else {
+                    if dismissable {
+                        dismiss()
+                    } else {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            appeared = true
+                        }
+                    }
+                    return
+                }
+
                 guard !isPreviewMode else {
                     seedDefaultSelectionIfNeeded()
                     return
@@ -138,6 +153,35 @@ struct RevenueCatPaywallView: View {
                 }
             }
         }
+    }
+
+    private var bypassView: some View {
+        VStack(spacing: 16) {
+            Spacer()
+
+            Image(systemName: "checkmark.shield")
+                .font(.system(size: 40, weight: .semibold))
+                .foregroundStyle(.green)
+
+            Text("Remodex Pro Enabled")
+                .font(AppFont.system(size: 24, weight: .bold))
+
+            Text("Local development Pro access is enabled for this build, so subscription paywalls are bypassed.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+
+            if dismissable {
+                Button("Continue") {
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            Spacer()
+        }
+        .padding(24)
     }
 
     // MARK: - Header (logo + title + subtitle)
