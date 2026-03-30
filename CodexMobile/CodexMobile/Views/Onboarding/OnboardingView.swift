@@ -9,8 +9,11 @@ import SwiftUI
 struct OnboardingView: View {
     let onContinue: () -> Void
     @State private var currentPage = 0
+    @State private var isShowingCodexInstallReminder = false
 
     private let pageCount = 5
+    private let codexInstallStepIndex = 2
+    private let codexInstallCommand = "npm install -g @openai/codex@latest"
 
     var body: some View {
         ZStack {
@@ -29,7 +32,7 @@ struct OnboardingView: View {
                         icon: "terminal",
                         title: "Install Codex CLI",
                         description: "The AI coding agent that lives in your terminal. Remodex connects to it from your iPhone.",
-                        command: "npm install -g @openai/codex@latest"
+                        command: codexInstallCommand
                     )
                     .tag(2)
 
@@ -57,6 +60,14 @@ struct OnboardingView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .alert("Install Codex CLI First", isPresented: $isShowingCodexInstallReminder) {
+            Button("Stay Here", role: .cancel) {}
+            Button("Continue Anyway") {
+                advanceToNextPage()
+            }
+        } message: {
+            Text("Copy and paste \"\(codexInstallCommand)\" on your Mac before moving on. Remodex will not work until Codex CLI is installed and available in your PATH.")
+        }
     }
 
     // MARK: - Bottom bar
@@ -119,12 +130,22 @@ struct OnboardingView: View {
     }
 
     private func handleContinue() {
+        // The CLI install step is a hard requirement, so warn before advancing.
+        if currentPage == codexInstallStepIndex {
+            isShowingCodexInstallReminder = true
+            return
+        }
+
         if currentPage < pageCount - 1 {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                currentPage += 1
-            }
+            advanceToNextPage()
         } else {
             onContinue()
+        }
+    }
+
+    private func advanceToNextPage() {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            currentPage += 1
         }
     }
 }
