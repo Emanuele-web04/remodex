@@ -292,7 +292,7 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .userInputPrompt }.isEmpty)
     }
 
-    func testStructuredUserInputPromptDoesNotPersistAcrossRelaunch() {
+    func testStructuredUserInputPromptPersistsAcrossRelaunchUntilResolved() {
         let suiteName = "CodexPlanModeTests.Persistence.\(UUID().uuidString)"
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
@@ -330,7 +330,146 @@ final class CodexPlanModeTests: XCTestCase {
 
         let relaunchedService = makeService(suiteName: suiteName, reset: false)
         let promptMessages = relaunchedService.messages(for: threadID).filter { $0.kind == .userInputPrompt }
-        XCTAssertTrue(promptMessages.isEmpty)
+        XCTAssertEqual(promptMessages.count, 1)
+        XCTAssertEqual(promptMessages[0].structuredUserInputRequest?.questions.first?.id, "path")
+    }
+
+    func testStructuredUserInputPromptWithoutTurnIDStillCreatesPromptCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let requestID: JSONValue = .string("request-\(UUID().uuidString)")
+
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "item/tool/requestUserInput",
+                params: .object([
+                    "threadId": .string(threadID),
+                    "questions": .array([
+                        .object([
+                            "id": .string("path"),
+                            "header": .string("Direction"),
+                            "question": .string("Which path should we take?"),
+                            "isOther": .bool(false),
+                            "isSecret": .bool(false),
+                            "options": .array([
+                                .object([
+                                    "label": .string("Ship it"),
+                                    "description": .string("Build the fastest version"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        let promptMessages = service.messages(for: threadID).filter { $0.kind == .userInputPrompt }
+        XCTAssertEqual(promptMessages.count, 1)
+        XCTAssertNil(promptMessages[0].turnId)
+    }
+
+    func testTurnStartedDoesNotClearPendingStructuredUserInputPromptBeforeResolution() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let requestID: JSONValue = .string("request-\(UUID().uuidString)")
+
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "item/tool/requestUserInput",
+                params: .object([
+                    "threadId": .string(threadID),
+                    "turnId": .string(turnID),
+                    "questions": .array([
+                        .object([
+                            "id": .string("path"),
+                            "header": .string("Direction"),
+                            "question": .string("Which path should we take?"),
+                            "isOther": .bool(false),
+                            "isSecret": .bool(false),
+                            "options": .array([
+                                .object([
+                                    "label": .string("Ship it"),
+                                    "description": .string("Build the fastest version"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string("turn-\(UUID().uuidString)"),
+            ])
+        )
+
+        let promptMessages = service.messages(for: threadID).filter { $0.kind == .userInputPrompt }
+        XCTAssertEqual(promptMessages.count, 1)
+        XCTAssertEqual(promptMessages[0].structuredUserInputRequest?.requestID, requestID)
+    }
+
+    func testTurnCompletionDoesNotClearPendingStructuredUserInputPromptBeforeResolution() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let requestID: JSONValue = .string("request-\(UUID().uuidString)")
+
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "item/tool/requestUserInput",
+                params: .object([
+                    "threadId": .string(threadID),
+                    "turnId": .string(turnID),
+                    "questions": .array([
+                        .object([
+                            "id": .string("path"),
+                            "header": .string("Direction"),
+                            "question": .string("Which path should we take?"),
+                            "isOther": .bool(false),
+                            "isSecret": .bool(false),
+                            "options": .array([
+                                .object([
+                                    "label": .string("Ship it"),
+                                    "description": .string("Build the fastest version"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+
+        let promptMessages = service.messages(for: threadID).filter { $0.kind == .userInputPrompt }
+        XCTAssertEqual(promptMessages.count, 1)
+        XCTAssertEqual(promptMessages[0].structuredUserInputRequest?.requestID, requestID)
+
+        service.handleNotification(
+            method: "serverRequest/resolved",
+            params: .object([
+                "threadId": .string(threadID),
+                "requestId": requestID,
+            ])
+        )
+
+        XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .userInputPrompt }.isEmpty)
     }
 
     func testBuildStructuredUserInputResponseMatchesServerShape() {

@@ -59,12 +59,14 @@ extension CodexService {
         paramsObject: IncomingParamsObject?
     ) {
         guard let paramsObject,
-              let threadId = normalizedPlanIdentifier(paramsObject["threadId"]?.stringValue),
-              let turnId = normalizedPlanIdentifier(paramsObject["turnId"]?.stringValue) else {
+              let threadId = normalizedPlanIdentifier(paramsObject["threadId"]?.stringValue) else {
             return
         }
 
-        threadIdByTurnID[turnId] = threadId
+        let turnId = normalizedPlanIdentifier(paramsObject["turnId"]?.stringValue)
+        if let turnId {
+            threadIdByTurnID[turnId] = threadId
+        }
         let itemId = normalizedPlanIdentifier(paramsObject["itemId"]?.stringValue) ?? "request-\(idKey(from: requestID))"
         let questions = decodeStructuredUserInputQuestions(from: paramsObject["questions"])
         guard !questions.isEmpty else {
@@ -79,6 +81,12 @@ extension CodexService {
                 requestID: requestID,
                 questions: questions
             )
+        )
+        notifyStructuredUserInputIfNeeded(
+            threadId: threadId,
+            turnId: turnId,
+            requestID: requestID,
+            questions: questions
         )
     }
 

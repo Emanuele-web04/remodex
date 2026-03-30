@@ -32,6 +32,8 @@ struct TurnConversationContainerView: View {
     let onTapOutsideComposer: () -> Void
 
     @State private var isShowingPinnedPlanSheet = false
+    @State private var isShowingPinnedStructuredUserInputSheet = false
+    @State private var lastAutoPresentedStructuredUserInputMessageID: String?
     @State private var cachedMessageLayout = TimelineMessageLayout.empty
     @State private var lastMessageLayoutThreadID: String?
     @State private var lastMessageLayoutToken: Int = -1
@@ -47,7 +49,8 @@ struct TurnConversationContainerView: View {
 
     // Avoids showing the generic "new chat" empty state behind a pinned plan-only accessory.
     private var timelineEmptyState: AnyView {
-        guard messageLayout.pinnedTaskPlanMessage != nil,
+        guard messageLayout.pinnedTaskPlanMessage != nil
+                || messageLayout.pinnedStructuredUserInputMessage != nil,
               messageLayout.timelineMessages.isEmpty else {
             return emptyState
         }
@@ -95,21 +98,44 @@ struct TurnConversationContainerView: View {
         }
         .onAppear {
             rebuildMessageLayoutIfNeeded(force: true)
+            autoPresentStructuredUserInputIfNeeded()
         }
         .onChange(of: threadID) { _, _ in
+            lastAutoPresentedStructuredUserInputMessageID = nil
             rebuildMessageLayoutIfNeeded(force: true)
+            autoPresentStructuredUserInputIfNeeded()
         }
         .onChange(of: timelineChangeToken) { _, _ in
             rebuildMessageLayoutIfNeeded()
+            autoPresentStructuredUserInputIfNeeded()
         }
         .onChange(of: messageLayout.pinnedTaskPlanMessage?.id) { _, newValue in
             if newValue == nil {
                 isShowingPinnedPlanSheet = false
             }
         }
+        .onChange(of: messageLayout.pinnedStructuredUserInputMessage?.id) { _, newValue in
+            guard let newValue else {
+                isShowingPinnedStructuredUserInputSheet = false
+                return
+            }
+
+            if lastAutoPresentedStructuredUserInputMessageID != newValue {
+                lastAutoPresentedStructuredUserInputMessageID = newValue
+                isShowingPinnedStructuredUserInputSheet = true
+            }
+        }
         .sheet(isPresented: $isShowingPinnedPlanSheet) {
             if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
                 PlanExecutionSheet(message: pinnedTaskPlanMessage)
+            }
+        }
+        .sheet(isPresented: $isShowingPinnedStructuredUserInputSheet) {
+            if let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage {
+                StructuredUserInputSheet(
+                    requestMessage: pinnedStructuredUserInputMessage,
+                    planMessage: messageLayout.pinnedTaskPlanMessage
+                )
             }
         }
     }
@@ -126,6 +152,14 @@ struct TurnConversationContainerView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+            if let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage {
+                StructuredUserInputAccessory(message: pinnedStructuredUserInputMessage) {
+                    isShowingPinnedStructuredUserInputSheet = true
+                }
+                .padding(.horizontal, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             if let connectionRecoveryAccessory {
                 connectionRecoveryAccessory
                     .padding(.horizontal, 12)
@@ -135,6 +169,7 @@ struct TurnConversationContainerView: View {
             composer
         }
         .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedTaskPlanMessage?.id)
+        .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedStructuredUserInputMessage?.id)
     }
 
     // Rebuilds the plan/timeline split only when the thread or timeline token really changed.
@@ -150,15 +185,32 @@ struct TurnConversationContainerView: View {
         cachedMessageLayout = Self.buildMessageLayout(from: messages)
     }
 
+    // Auto-opens a newly pending prompt once per request id so reconnect-replayed questions do not stay buried.
+    private func autoPresentStructuredUserInputIfNeeded() {
+        guard let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage else {
+            return
+        }
+
+        guard lastAutoPresentedStructuredUserInputMessageID != pinnedStructuredUserInputMessage.id else {
+            return
+        }
+
+        lastAutoPresentedStructuredUserInputMessageID = pinnedStructuredUserInputMessage.id
+        isShowingPinnedStructuredUserInputSheet = true
+    }
+
     // Separates pinned plan content from renderable timeline rows in one pass.
     private static func buildMessageLayout(from messages: [CodexMessage]) -> TimelineMessageLayout {
         var timelineMessages: [CodexMessage] = []
         timelineMessages.reserveCapacity(messages.count)
         var pinnedTaskPlanMessage: CodexMessage?
+        var pinnedStructuredUserInputMessage: CodexMessage?
 
         for message in messages {
             if message.shouldDisplayPinnedPlanAccessory {
                 pinnedTaskPlanMessage = message
+            } else if message.shouldDisplayPinnedStructuredUserInputAccessory {
+                pinnedStructuredUserInputMessage = message
             } else if message.isPlanSystemMessage {
                 continue
             } else {
@@ -168,7 +220,8 @@ struct TurnConversationContainerView: View {
 
         return TimelineMessageLayout(
             timelineMessages: timelineMessages,
-            pinnedTaskPlanMessage: pinnedTaskPlanMessage
+            pinnedTaskPlanMessage: pinnedTaskPlanMessage,
+            pinnedStructuredUserInputMessage: pinnedStructuredUserInputMessage
         )
     }
 }
@@ -176,10 +229,12 @@ struct TurnConversationContainerView: View {
 private struct TimelineMessageLayout: Equatable {
     let timelineMessages: [CodexMessage]
     let pinnedTaskPlanMessage: CodexMessage?
+    let pinnedStructuredUserInputMessage: CodexMessage?
 
     static let empty = TimelineMessageLayout(
         timelineMessages: [],
-        pinnedTaskPlanMessage: nil
+        pinnedTaskPlanMessage: nil,
+        pinnedStructuredUserInputMessage: nil
     )
 }
 
@@ -204,5 +259,11 @@ extension CodexMessage {
         }
 
         return steps.contains { $0.status != .completed }
+    }
+
+    var shouldDisplayPinnedStructuredUserInputAccessory: Bool {
+        role == .system
+            && kind == .userInputPrompt
+            && structuredUserInputRequest != nil
     }
 }

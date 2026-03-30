@@ -174,6 +174,7 @@ enum CodexNotificationPayloadKeys {
     static let threadId = "threadId"
     static let turnId = "turnId"
     static let result = "result"
+    static let requestId = "requestId"
 }
 
 // Tracks the real terminal outcome of a run, including user interruption.
@@ -430,6 +431,7 @@ final class CodexService {
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]
+    var structuredUserInputNotificationDedupedAt: [String: Date] = [:]
     var notificationCenterDelegateProxy: CodexNotificationCenterDelegateProxy?
     var notificationObserverTokens: [NSObjectProtocol] = []
     var remoteNotificationDeviceToken: String?

@@ -20,122 +20,179 @@ const {
 } = require("../src");
 const { version } = require("../package.json");
 
-const command = process.argv[2] || "up";
+const defaultDeps = {
+  printMacOSBridgePairingQr,
+  printMacOSBridgeServiceStatus,
+  readBridgeConfig,
+  resetMacOSBridgePairing,
+  runMacOSBridgeService,
+  startBridge,
+  startMacOSBridgeService,
+  stopMacOSBridgeService,
+  resetBridgePairing,
+  openLastActiveThread,
+  watchThreadRollout,
+};
 
-void main();
+if (require.main === module) {
+  void main();
+}
 
 // ─── ENTRY POINT ─────────────────────────────────────────────
 
-async function main() {
+async function main({
+  argv = process.argv,
+  platform = process.platform,
+  consoleImpl = console,
+  exitImpl = process.exit,
+  deps = defaultDeps,
+} = {}) {
+  const command = argv[2] || "up";
+
   if (isVersionCommand(command)) {
-    console.log(version);
+    consoleImpl.log(version);
     return;
   }
 
   if (command === "up") {
-    if (process.platform === "darwin") {
-      const result = await startMacOSBridgeService({
+    if (platform === "darwin") {
+      const result = await deps.startMacOSBridgeService({
         waitForPairing: true,
       });
-      printMacOSBridgePairingQr({
+      deps.printMacOSBridgePairingQr({
         pairingSession: result.pairingSession,
       });
       return;
     }
 
-    startBridge();
+    deps.startBridge();
     return;
   }
 
   if (command === "run") {
-    startBridge();
+    deps.startBridge();
     return;
   }
 
   if (command === "run-service") {
-    runMacOSBridgeService();
+    deps.runMacOSBridgeService();
     return;
   }
 
   if (command === "start") {
-    assertMacOSCommand(command);
-    readBridgeConfig();
-    await startMacOSBridgeService({
+    assertMacOSCommand(command, {
+      platform,
+      consoleImpl,
+      exitImpl,
+    });
+    deps.readBridgeConfig();
+    await deps.startMacOSBridgeService({
       waitForPairing: false,
     });
-    console.log("[remodex] macOS bridge service is running.");
+    consoleImpl.log("[remodex] macOS bridge service is running.");
+    return;
+  }
+
+  if (command === "restart") {
+    assertMacOSCommand(command, {
+      platform,
+      consoleImpl,
+      exitImpl,
+    });
+    deps.readBridgeConfig();
+    await deps.startMacOSBridgeService({
+      waitForPairing: false,
+    });
+    consoleImpl.log("[remodex] macOS bridge service restarted.");
     return;
   }
 
   if (command === "stop") {
-    assertMacOSCommand(command);
-    stopMacOSBridgeService();
-    console.log("[remodex] macOS bridge service stopped.");
+    assertMacOSCommand(command, {
+      platform,
+      consoleImpl,
+      exitImpl,
+    });
+    deps.stopMacOSBridgeService();
+    consoleImpl.log("[remodex] macOS bridge service stopped.");
     return;
   }
 
   if (command === "status") {
-    assertMacOSCommand(command);
-    printMacOSBridgeServiceStatus();
+    assertMacOSCommand(command, {
+      platform,
+      consoleImpl,
+      exitImpl,
+    });
+    deps.printMacOSBridgeServiceStatus();
     return;
   }
 
   if (command === "reset-pairing") {
     try {
-      if (process.platform === "darwin") {
-        resetMacOSBridgePairing();
-        console.log("[remodex] Stopped the macOS bridge service and cleared the saved pairing state. Run `remodex up` to pair again.");
+      if (platform === "darwin") {
+        deps.resetMacOSBridgePairing();
+        consoleImpl.log("[remodex] Stopped the macOS bridge service and cleared the saved pairing state. Run `remodex up` to pair again.");
       } else {
-        resetBridgePairing();
-        console.log("[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.");
+        deps.resetBridgePairing();
+        consoleImpl.log("[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.");
       }
     } catch (error) {
-      console.error(`[remodex] ${(error && error.message) || "Failed to clear the saved pairing state."}`);
-      process.exit(1);
+      consoleImpl.error(`[remodex] ${(error && error.message) || "Failed to clear the saved pairing state."}`);
+      exitImpl(1);
     }
     return;
   }
 
   if (command === "resume") {
     try {
-      const state = openLastActiveThread();
-      console.log(
+      const state = deps.openLastActiveThread();
+      consoleImpl.log(
         `[remodex] Opened last active thread: ${state.threadId} (${state.source || "unknown"})`
       );
     } catch (error) {
-      console.error(`[remodex] ${(error && error.message) || "Failed to reopen the last thread."}`);
-      process.exit(1);
+      consoleImpl.error(`[remodex] ${(error && error.message) || "Failed to reopen the last thread."}`);
+      exitImpl(1);
     }
     return;
   }
 
   if (command === "watch") {
     try {
-      watchThreadRollout(process.argv[3] || "");
+      deps.watchThreadRollout(argv[3] || "");
     } catch (error) {
-      console.error(`[remodex] ${(error && error.message) || "Failed to watch the thread rollout."}`);
-      process.exit(1);
+      consoleImpl.error(`[remodex] ${(error && error.message) || "Failed to watch the thread rollout."}`);
+      exitImpl(1);
     }
     return;
   }
 
-  console.error(`Unknown command: ${command}`);
-  console.error(
-    "Usage: remodex up | remodex run | remodex start | remodex stop | remodex status | "
+  consoleImpl.error(`Unknown command: ${command}`);
+  consoleImpl.error(
+    "Usage: remodex up | remodex run | remodex start | remodex restart | remodex stop | remodex status | "
     + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version"
   );
-  process.exit(1);
+  exitImpl(1);
 }
 
-function assertMacOSCommand(name) {
-  if (process.platform === "darwin") {
+function assertMacOSCommand(name, {
+  platform = process.platform,
+  consoleImpl = console,
+  exitImpl = process.exit,
+} = {}) {
+  if (platform === "darwin") {
     return;
   }
 
-  console.error(`[remodex] \`${name}\` is only available on macOS. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
-  process.exit(1);
+  consoleImpl.error(`[remodex] \`${name}\` is only available on macOS. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
+  exitImpl(1);
 }
 
 function isVersionCommand(value) {
   return value === "-v" || value === "--v" || value === "-V" || value === "--version" || value === "version";
 }
+
+module.exports = {
+  isVersionCommand,
+  main,
+};

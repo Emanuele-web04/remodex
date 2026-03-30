@@ -241,6 +241,11 @@ In both cases the bridge:
 ### `remodex start`
 
 macOS only. Starts the background bridge service without waiting for or printing a QR in the current terminal.
+If the service is already loaded, this path refreshes it in place.
+
+### `remodex restart`
+
+macOS only. Explicitly restarts the background bridge service without waiting for or printing a QR in the current terminal.
 
 ### `remodex stop`
 

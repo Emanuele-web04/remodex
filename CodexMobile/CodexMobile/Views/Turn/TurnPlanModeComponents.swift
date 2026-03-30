@@ -1,7 +1,8 @@
 // FILE: TurnPlanModeComponents.swift
 // Purpose: Renders inline plan cards, composer plan affordances, and structured question cards.
 // Layer: View Component
-// Exports: PlanSystemCard, PlanExecutionAccessory, PlanExecutionSheet, StructuredUserInputCard
+// Exports: PlanSystemCard, PlanExecutionAccessory, PlanExecutionSheet, StructuredUserInputAccessory,
+//   StructuredUserInputSheet, StructuredUserInputCard
 // Depends on: SwiftUI, CodexService, CodexMessage, StructuredUserInputCardView
 
 import SwiftUI
@@ -134,6 +135,76 @@ struct StructuredUserInputCard: View {
                 codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
             }
         }
+    }
+}
+
+struct StructuredUserInputAccessory: View {
+    let message: CodexMessage
+    let onTap: () -> Void
+
+    private var questionCount: Int {
+        message.structuredUserInputRequest?.questions.count ?? 0
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            PlanModeCardContainer(title: "Input needed", showsProgress: false) {
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(questionCount == 1 ? "Codex needs one answer" : "Codex needs \(questionCount) answers")
+                            .font(AppFont.subheadline(weight: .medium))
+                            .foregroundStyle(.primary)
+
+                        Text("Open the prompt to review the plan and respond.")
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "chevron.up.circle.fill")
+                        .font(AppFont.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color(.plan))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct StructuredUserInputSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let requestMessage: CodexMessage
+    let planMessage: CodexMessage?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let planMessage {
+                        PlanSystemCard(message: planMessage)
+                    }
+
+                    if let request = requestMessage.structuredUserInputRequest {
+                        StructuredUserInputCard(request: request)
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color(.systemBackground))
+            .navigationTitle("Questions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }
 
