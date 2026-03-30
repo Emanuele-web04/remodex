@@ -47,8 +47,13 @@ private struct CachedSubscriptionState: Codable, Equatable {
 @Observable
 final class SubscriptionService {
     private static let cachedStateDefaultsKey = "codex.subscription.cachedState"
+    private static let debugForceProAccessDefaultsKey = "codex.subscription.debugForceProAccess"
+    private static let debugPersonalBundleIdentifiers: Set<String> = [
+        "com.zackkirsh.remodex"
+    ]
 
     private let defaults: UserDefaults
+    private let bundleIdentifier: String
     // Keep the task handle nonisolated so `deinit` can cancel it under Swift 6 isolation rules.
     nonisolated(unsafe) private var customerInfoUpdatesTask: Task<Void, Never>?
     private var isBootstrapping = false
@@ -67,9 +72,15 @@ final class SubscriptionService {
     private(set) var isRestoring = false
     private(set) var lastErrorMessage: String?
 
-    init(defaults: UserDefaults = .standard) {
+    var isUsingLocalDevelopmentProOverride: Bool {
+        isLocalDevelopmentProOverrideEnabled
+    }
+
+    init(defaults: UserDefaults = .standard, bundleIdentifier: String? = nil) {
         self.defaults = defaults
+        self.bundleIdentifier = bundleIdentifier ?? (Bundle.main.bundleIdentifier ?? "")
         restoreCachedStateIfAvailable()
+        applyLocalDevelopmentOverrideIfNeeded()
         startCustomerInfoObserverIfConfigured()
     }
 
@@ -80,6 +91,10 @@ final class SubscriptionService {
     // Bootstraps subscription state once at launch or from the recovery retry action.
     func bootstrap() async {
         guard !isBootstrapping else {
+            return
+        }
+
+        if applyLocalDevelopmentOverrideIfNeeded() {
             return
         }
 
@@ -116,6 +131,10 @@ final class SubscriptionService {
             return
         }
 
+        if applyLocalDevelopmentOverrideIfNeeded() {
+            return
+        }
+
         startCustomerInfoObserverIfConfigured()
         guard Purchases.isConfigured else {
             return
@@ -132,6 +151,10 @@ final class SubscriptionService {
 
     // Reads the current RevenueCat offerings and normalizes the package list for SwiftUI.
     func loadOfferings() async {
+        if applyLocalDevelopmentOverrideIfNeeded() {
+            return
+        }
+
         startCustomerInfoObserverIfConfigured()
         isLoading = true
         lastErrorMessage = nil
@@ -143,6 +166,10 @@ final class SubscriptionService {
 
     // Starts a purchase flow for the selected package and refreshes entitlements on success.
     func purchase(_ option: SubscriptionPackageOption) async {
+        if applyLocalDevelopmentOverrideIfNeeded() {
+            return
+        }
+
         guard !isPurchasing else {
             return
         }
@@ -178,6 +205,10 @@ final class SubscriptionService {
 
     // Restores store purchases and then re-checks the Pro entitlement state.
     func restorePurchases() async {
+        if applyLocalDevelopmentOverrideIfNeeded() {
+            return
+        }
+
         guard !isRestoring else {
             return
         }
@@ -205,6 +236,38 @@ final class SubscriptionService {
 }
 
 private extension SubscriptionService {
+    @discardableResult
+    func applyLocalDevelopmentOverrideIfNeeded() -> Bool {
+        guard isLocalDevelopmentProOverrideEnabled else {
+            return false
+        }
+
+        customerInfo = nil
+        currentOffering = nil
+        packageOptions = []
+        hasProAccess = true
+        hasCachedOptimisticAccess = true
+        latestPurchaseDate = nil
+        willRenew = false
+        managementURL = nil
+        isLoading = false
+        isPurchasing = false
+        isRestoring = false
+        lastErrorMessage = nil
+        bootstrapState = .ready
+        persistCachedState()
+        return true
+    }
+
+    var isLocalDevelopmentProOverrideEnabled: Bool {
+#if DEBUG
+        defaults.bool(forKey: Self.debugForceProAccessDefaultsKey)
+            || Self.debugPersonalBundleIdentifiers.contains(bundleIdentifier)
+#else
+        return false
+#endif
+    }
+
     func startCustomerInfoObserverIfConfigured() {
         guard customerInfoUpdatesTask == nil, Purchases.isConfigured else {
             return

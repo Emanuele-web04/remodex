@@ -7,7 +7,7 @@
 import Foundation
 import Security
 
-enum CodexSecureKeys {
+nonisolated enum CodexSecureKeys {
     static let relaySessionId = "codex.relay.sessionId"
     static let relayUrl = "codex.relay.url"
     static let relayMacDeviceId = "codex.relay.macDeviceId"
@@ -21,9 +21,9 @@ enum CodexSecureKeys {
     static let messageHistoryKey = "codex.local.messageHistoryKey"
 }
 
-enum SecureStore {
+nonisolated enum SecureStore {
     // Reads a UTF-8 string value from Keychain.
-    static func readString(for key: String) -> String? {
+    nonisolated static func readString(for key: String) -> String? {
         var query = baseQuery(for: key)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -41,7 +41,7 @@ enum SecureStore {
     }
 
     // Reads opaque key material or encrypted payload blobs from Keychain.
-    static func readData(for key: String) -> Data? {
+    nonisolated static func readData(for key: String) -> Data? {
         var query = baseQuery(for: key)
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -58,7 +58,7 @@ enum SecureStore {
     }
 
     // Writes a UTF-8 string to Keychain; empty values are treated as delete.
-    static func writeString(_ value: String, for key: String) {
+    nonisolated static func writeString(_ value: String, for key: String) {
         if value.isEmpty {
             deleteValue(for: key)
             return
@@ -68,7 +68,7 @@ enum SecureStore {
     }
 
     // Stores raw data in Keychain; used by local message-history encryption keys.
-    static func writeData(_ value: Data, for key: String) {
+    nonisolated static func writeData(_ value: Data, for key: String) {
         if value.isEmpty {
             deleteValue(for: key)
             return
@@ -83,7 +83,7 @@ enum SecureStore {
     }
 
     // Convenience wrapper for small Codable payloads kept in Keychain.
-    static func readCodable<Value: Decodable>(_ type: Value.Type, for key: String) -> Value? {
+    nonisolated static func readCodable<Value: Decodable>(_ type: Value.Type, for key: String) -> Value? {
         guard let data = readData(for: key) else {
             return nil
         }
@@ -91,19 +91,19 @@ enum SecureStore {
     }
 
     // Convenience wrapper for small Codable payloads kept in Keychain.
-    static func writeCodable<Value: Encodable>(_ value: Value, for key: String) {
+    nonisolated static func writeCodable<Value: Encodable>(_ value: Value, for key: String) {
         guard let data = try? JSONEncoder().encode(value) else {
             return
         }
         writeData(data, for: key)
     }
 
-    static func deleteValue(for key: String) {
+    nonisolated static func deleteValue(for key: String) {
         let query = baseQuery(for: key)
         SecItemDelete(query as CFDictionary)
     }
 
-    private static func baseQuery(for key: String) -> [String: Any] {
+    private nonisolated static func baseQuery(for key: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
@@ -111,7 +111,7 @@ enum SecureStore {
         ]
     }
 
-    private static var serviceName: String {
+    private nonisolated static var serviceName: String {
         Bundle.main.bundleIdentifier ?? "com.codexmobile.app"
     }
 }

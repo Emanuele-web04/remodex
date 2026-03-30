@@ -7,7 +7,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createCodexTransport } = require("../src/codex-transport");
+const {
+  createCodexLaunchPlan,
+  createCodexTransport,
+  detectSessionSourceFlagSupport,
+} = require("../src/codex-transport");
 
 class FakeWebSocket {
   static CONNECTING = 0;
@@ -61,4 +65,38 @@ test("endpoint transport only sends outbound messages after the websocket opens"
 
   transport.send('{"id":"list-2","method":"thread/list"}');
   assert.deepEqual(socket.sentMessages, ['{"id":"list-2","method":"thread/list"}']);
+});
+
+test("detectSessionSourceFlagSupport returns true when the installed CLI advertises the flag", () => {
+  const supported = detectSessionSourceFlagSupport({
+    execFileSyncImpl() {
+      return "Usage: codex app-server --session-source <SOURCE>";
+    },
+  });
+
+  assert.equal(supported, true);
+});
+
+test("createCodexLaunchPlan omits --session-source when the installed CLI does not support it", () => {
+  const launch = createCodexLaunchPlan({
+    env: {},
+    execFileSyncImpl() {
+      return "Usage: codex app-server --ws-issuer <ISSUER>";
+    },
+  });
+
+  assert.deepEqual(launch.args, ["app-server"]);
+  assert.equal(launch.description, "`codex app-server`");
+});
+
+test("createCodexLaunchPlan includes --session-source when the installed CLI supports it", () => {
+  const launch = createCodexLaunchPlan({
+    env: {},
+    execFileSyncImpl() {
+      return "Usage: codex app-server --session-source <SOURCE>";
+    },
+  });
+
+  assert.deepEqual(launch.args, ["app-server", "--session-source", "app-server"]);
+  assert.equal(launch.description, "`codex app-server --session-source app-server`");
 });

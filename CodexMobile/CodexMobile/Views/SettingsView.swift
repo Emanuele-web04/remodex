@@ -292,7 +292,11 @@ private struct SettingsSubscriptionCard: View {
                     .foregroundStyle(subscriptions.hasProAccess ? .green : .secondary)
             }
 
-            if subscriptions.hasProAccess {
+            if subscriptions.isUsingLocalDevelopmentProOverride {
+                Text("Local debug Pro access is enabled for this build. Subscription and paywall controls are hidden.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            } else if subscriptions.hasProAccess {
                 Text("Your Pro access is active. You can still restore purchases or manage your subscription from Apple.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
@@ -302,16 +306,18 @@ private struct SettingsSubscriptionCard: View {
                     .foregroundStyle(.secondary)
             }
 
-            SettingsButton(subscriptions.hasProAccess ? "View Pro" : "Upgrade to Pro") {
-                isPresentingPaywall = true
-            }
-
-            SettingsButton(subscriptions.isRestoring ? "Restoring..." : "Restore Purchases", isLoading: subscriptions.isRestoring) {
-                Task {
-                    await subscriptions.restorePurchases()
+            if !subscriptions.isUsingLocalDevelopmentProOverride {
+                SettingsButton(subscriptions.hasProAccess ? "View Pro" : "Upgrade to Pro") {
+                    isPresentingPaywall = true
                 }
+
+                SettingsButton(subscriptions.isRestoring ? "Restoring..." : "Restore Purchases", isLoading: subscriptions.isRestoring) {
+                    Task {
+                        await subscriptions.restorePurchases()
+                    }
+                }
+                .disabled(subscriptions.isPurchasing)
             }
-            .disabled(subscriptions.isPurchasing)
 
             if let error = subscriptions.lastErrorMessage, !error.isEmpty {
                 Text(error)

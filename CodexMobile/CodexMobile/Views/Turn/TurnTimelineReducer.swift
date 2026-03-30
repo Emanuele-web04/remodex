@@ -619,11 +619,7 @@ enum TurnTimelineReducer {
         let turnId = normalizedIdentifier(message.turnId)
         let key = duplicateFileChangeKey(for: message)
 
-        let paths = Set(
-            TurnFileChangeSummaryParser.parse(from: message.text)?
-                .entries
-                .map(\.path) ?? []
-        )
+        let paths = fileChangePaths(from: message.text)
 
         // Need at least a key or paths to participate in dedup.
         guard key != nil || !paths.isEmpty else {
@@ -641,6 +637,59 @@ enum TurnTimelineReducer {
     // Treats newer file-change snapshots as authoritative only when they describe the
     // same turn (or a turnless→turnful upgrade) and either the same dedupe key or a
     // provisional-to-final snapshot upgrade with matching paths.
+    private static func fileChangePaths(from text: String) -> Set<String> {
+        let parsedPaths = Set(
+            TurnFileChangeSummaryParser.parse(from: text)?
+                .entries
+                .map(\.path) ?? []
+        )
+        guard parsedPaths.isEmpty else {
+            return parsedPaths
+        }
+
+        var fallbackPaths: Set<String> = []
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else {
+                continue
+            }
+
+            if let path = fallbackFileChangePath(from: line) {
+                fallbackPaths.insert(path)
+            }
+        }
+
+        return fallbackPaths
+    }
+
+    private static func fallbackFileChangePath(from line: String) -> String? {
+        if line.lowercased().hasPrefix("path:") {
+            let path = line.dropFirst("Path:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+            return path.isEmpty ? nil : path
+        }
+
+        let inlineVerbs = ["Edited", "Updated", "Added", "Created", "Deleted", "Removed", "Renamed", "Moved"]
+        for verb in inlineVerbs {
+            let prefix = "\(verb) "
+            guard line.hasPrefix(prefix) else {
+                continue
+            }
+
+            var path = String(line.dropFirst(prefix.count))
+            if let totalsRange = path.range(of: " +", options: .backwards) {
+                path = String(path[..<totalsRange.lowerBound])
+            }
+            if let totalsRange = path.range(of: " -", options: .backwards) {
+                path = String(path[..<totalsRange.lowerBound])
+            }
+
+            let trimmedPath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmedPath.isEmpty ? nil : trimmedPath
+        }
+
+        return nil
+    }
+
     private static func fileChangeMessage(
         _ newer: FileChangeDedupSignature,
         supersedes older: FileChangeDedupSignature

@@ -6,7 +6,7 @@
 
 import Foundation
 
-enum JSONValue: Codable, Hashable, Sendable {
+nonisolated enum JSONValue: Codable, Hashable, Sendable {
     case string(String)
     case integer(Int)
     case double(Double)
@@ -88,17 +88,17 @@ enum JSONValue: Codable, Hashable, Sendable {
 extension JSONValue {
     // --- Access helpers -------------------------------------------------------
 
-    var stringValue: String? {
+    nonisolated var stringValue: String? {
         guard case .string(let value) = self else { return nil }
         return value
     }
 
-    var intValue: Int? {
+    nonisolated var intValue: Int? {
         guard case .integer(let value) = self else { return nil }
         return value
     }
 
-    var doubleValue: Double? {
+    nonisolated var doubleValue: Double? {
         switch self {
         case .integer(let value):
             return Double(value)
@@ -109,17 +109,17 @@ extension JSONValue {
         }
     }
 
-    var boolValue: Bool? {
+    nonisolated var boolValue: Bool? {
         guard case .bool(let value) = self else { return nil }
         return value
     }
 
-    var objectValue: [String: JSONValue]? {
+    nonisolated var objectValue: [String: JSONValue]? {
         guard case .object(let value) = self else { return nil }
         return value
     }
 
-    var arrayValue: [JSONValue]? {
+    nonisolated var arrayValue: [JSONValue]? {
         guard case .array(let value) = self else { return nil }
         return value
     }

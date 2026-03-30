@@ -6,7 +6,7 @@
 
 import Foundation
 
-struct CodexSkillMetadata: Decodable, Hashable, Sendable, Identifiable {
+nonisolated struct CodexSkillMetadata: Codable, Hashable, Sendable, Identifiable {
     let name: String
     let description: String?
     let path: String?
@@ -54,7 +54,7 @@ struct CodexSkillMetadata: Decodable, Hashable, Sendable, Identifiable {
     }
 }
 
-struct CodexTurnSkillMention: Hashable, Sendable {
+nonisolated struct CodexTurnSkillMention: Hashable, Sendable {
     let id: String
     let name: String?
     let path: String?

@@ -325,7 +325,7 @@ extension CodexService {
 
         // Rehydrate in-flight turn metadata after reconnect/background transitions.
         // Without this refresh, stop-state can disappear until a new live event arrives.
-        await refreshInFlightTurnState(threadId: threadId)
+        _ = await refreshInFlightTurnState(threadId: threadId)
         guard !Task.isCancelled else {
             return false
         }
@@ -544,7 +544,9 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].turnId = turnId
                 didMutate = true
             }
-            if messagesByThread[threadId]?[existingIndex].fileMentions.isEmpty, !fileMentions.isEmpty {
+            if let existingMessage = messagesByThread[threadId]?[existingIndex],
+               existingMessage.fileMentions.isEmpty,
+               !fileMentions.isEmpty {
                 messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
                 didMutate = true
             }
@@ -2438,10 +2440,20 @@ extension CodexService {
 
     // Keeps stopped-turn lookup thread-local so scroll/render code never rescans full transcripts.
     func rebuildStoppedTurnIDs(for threadId: String, messages: [CodexMessage]) -> Set<String> {
-        let stoppedTurnIDs = Set(
+        let stoppedTurnIDsFromMessages = Set(
             messages.compactMap(\.turnId)
                 .filter { terminalStateByTurnID[$0] == .stopped }
         )
+        let trackedStoppedTurnIDs: Set<String> = Set(
+            terminalStateByTurnID.compactMap { turnId, state in
+                guard state == .stopped,
+                      threadIdByTurnID[turnId] == threadId else {
+                    return nil
+                }
+                return turnId
+            }
+        )
+        let stoppedTurnIDs = stoppedTurnIDsFromMessages.union(trackedStoppedTurnIDs)
         stoppedTurnIDsByThread[threadId] = stoppedTurnIDs
         return stoppedTurnIDs
     }

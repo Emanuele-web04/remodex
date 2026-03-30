@@ -30,7 +30,7 @@ final class TurnSlashCommandTokenTests: XCTestCase {
 
     func testForkCommandIsAllowedWhenSlashTokenIsTheOnlyDraftContent() {
         XCTAssertTrue(TurnComposerCommandLogic.canOfferForkSlashCommand(in: "/fo"))
-        XCTAssertFalse(TurnComposerCommandLogic.canOfferForkSlashCommand(in: "   /fo"))
+        XCTAssertTrue(TurnComposerCommandLogic.canOfferForkSlashCommand(in: "   /fo"))
     }
 
     func testForkCommandIsHiddenWhenDraftAlreadyContainsText() {

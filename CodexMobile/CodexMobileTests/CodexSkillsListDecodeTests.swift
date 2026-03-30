@@ -90,9 +90,9 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         try await service.listThreads()
 
         XCTAssertEqual(capturedParams.count, 2)
-        XCTAssertEqual(capturedParams[0]["limit"]?.intValue, 12)
+        XCTAssertEqual(capturedParams[0]["limit"]?.intValue, 40)
         XCTAssertNil(capturedParams[0]["archived"]?.boolValue)
-        XCTAssertEqual(capturedParams[1]["limit"]?.intValue, 12)
+        XCTAssertEqual(capturedParams[1]["limit"]?.intValue, 40)
         XCTAssertEqual(capturedParams[1]["archived"]?.boolValue, true)
     }
 

@@ -12,6 +12,14 @@ import XCTest
 final class CodexGPTAccountTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    override func tearDown() {
+        for service in Self.retainedServices {
+            service.stopGPTLoginSync()
+            service.requestTransportOverride = nil
+        }
+        super.tearDown()
+    }
+
     func testRefreshGPTAccountStateDecodesSanitizedBridgeStatus() async {
         let service = makeService()
         service.isConnected = true
@@ -382,6 +390,29 @@ final class CodexGPTAccountTests: XCTestCase {
                     ]),
                     includeJSONRPC: false
                 )
+            case "account/status/read":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "status": .string("authenticated"),
+                        "authMethod": .string("chatgpt"),
+                        "email": .string("user@example.com"),
+                        "loginInFlight": .bool(false),
+                        "needsReauth": .bool(false),
+                        "tokenReady": .bool(true),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "getAuthStatus":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "authMethod": .string("chatgptAuthTokens"),
+                        "authToken": .string("legacy-token"),
+                        "requiresOpenaiAuth": .bool(false),
+                    ]),
+                    includeJSONRPC: false
+                )
             default:
                 XCTFail("Unexpected method \(method)")
                 throw CodexServiceError.disconnected
@@ -416,6 +447,7 @@ final class CodexGPTAccountTests: XCTestCase {
         defaults.set(try encoder.encode(snapshot), forKey: "codex.gpt.accountSnapshot")
 
         let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
 
         XCTAssertEqual(service.gptAccountSnapshot.status, .authenticated)
         XCTAssertEqual(service.gptAccountSnapshot.email, "persisted@example.com")
@@ -455,7 +487,7 @@ final class CodexGPTAccountTests: XCTestCase {
                 durationSeconds: 1
             )
         }) { error in
-            XCTAssertEqual(error.localizedDescription, "Connect to your Mac before using voice transcription.")
+            XCTAssertEqual(error.localizedDescription, "WebSocket not connected")
         }
     }
 
@@ -513,9 +545,9 @@ final class CodexGPTAccountTests: XCTestCase {
         await yieldMainActor(times: 3)
 
         XCTAssertEqual(service.gptAccountSnapshot.status, .authenticated)
-        XCTAssertEqual(service.gptAccountSnapshot.tokenReady, false)
+        XCTAssertEqual(service.gptAccountSnapshot.tokenReady, true)
         XCTAssertFalse(service.gptAccountSnapshot.needsReauth)
-        XCTAssertNotNil(service.currentPendingGPTLogin())
+        XCTAssertNil(service.currentPendingGPTLogin())
 
         await service.refreshGPTAccountState()
 

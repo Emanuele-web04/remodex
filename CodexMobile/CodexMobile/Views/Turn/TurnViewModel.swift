@@ -599,8 +599,8 @@ final class TurnViewModel {
         let normalizedRoot = root
         skillAutocompleteQuery = query
         isSkillAutocompleteVisible = true
-        let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[normalizedRoot] != nil
-        let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(normalizedRoot)
+        let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[normalizedRoot] != nil || codex.cachedSkills(for: normalizedRoot) != nil
+        let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(normalizedRoot) || codex.isUnsupportedSkillRoot(normalizedRoot)
         isSkillAutocompleteLoading = !hasCachedSkillIndex && !rootIsUnsupported
         skillAutocompleteDebounceTask?.cancel()
 
@@ -618,8 +618,9 @@ final class TurnViewModel {
             guard !Task.isCancelled else { return }
 
             do {
-                if unsupportedSkillsAutocompleteRoots.contains(normalizedRoot),
-                   cachedSkillSearchIndexByRoot[normalizedRoot] == nil {
+                if (unsupportedSkillsAutocompleteRoots.contains(normalizedRoot) || codex.isUnsupportedSkillRoot(normalizedRoot)),
+                   cachedSkillSearchIndexByRoot[normalizedRoot] == nil,
+                   codex.cachedSkills(for: normalizedRoot) == nil {
                     guard self.skillAutocompleteQuery == expectedQuery else { return }
                     self.skillAutocompleteItems = []
                     self.isSkillAutocompleteLoading = false
@@ -630,6 +631,11 @@ final class TurnViewModel {
                 let indexedSkills: [TurnSkillSearchIndexEntry]
                 if let cachedIndex = self.cachedSkillSearchIndexByRoot[normalizedRoot] {
                     indexedSkills = cachedIndex
+                } else if let cachedSkills = codex.cachedSkills(for: normalizedRoot) {
+                    indexedSkills = cachedSkills
+                        .filter { $0.enabled }
+                        .map(TurnSkillSearchIndexEntry.init(skill:))
+                    self.cachedSkillSearchIndexByRoot[normalizedRoot] = indexedSkills
                 } else {
                     let listedSkills = try await codex.listSkills(cwds: [normalizedRoot], forceReload: false)
                     guard !Task.isCancelled else { return }
@@ -653,6 +659,7 @@ final class TurnViewModel {
 
                 if Self.isMethodNotFoundRPCError(error) {
                     self.unsupportedSkillsAutocompleteRoots.insert(normalizedRoot)
+                    codex.markUnsupportedSkillRoot(normalizedRoot)
                 }
 
                 self.skillAutocompleteItems = []

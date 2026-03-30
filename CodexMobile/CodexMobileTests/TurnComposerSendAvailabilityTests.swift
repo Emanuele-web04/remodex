@@ -98,6 +98,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
     func testSendTurnUsesCannedPromptWhenSubagentsChipIsSelected() async {
         let service = makeService()
         service.isConnected = true
+        service.resumedThreadIDs.insert("thread-subagents")
 
         var capturedParams: JSONValue?
         service.requestTransportOverride = { method, params in
@@ -127,6 +128,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
     func testSendTurnPrefixesDraftTextWhenSubagentsChipIsSelected() async {
         let service = makeService()
         service.isConnected = true
+        service.resumedThreadIDs.insert("thread-literal-subagents")
 
         var capturedParams: JSONValue?
         service.requestTransportOverride = { method, params in
@@ -158,6 +160,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
     func testSendTurnPrefixesPromptBeforeOrdinaryDraftText() async {
         let service = makeService()
         service.isConnected = true
+        service.resumedThreadIDs.insert("thread-shifted-subagents")
 
         var capturedParams: JSONValue?
         service.requestTransportOverride = { method, params in
@@ -186,6 +189,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
     func testSendTurnTrimsLeadingWhitespaceBeforeApplyingSubagentsPrompt() async {
         let service = makeService()
         service.isConnected = true
+        service.resumedThreadIDs.insert("thread-trimmed-subagents")
 
         var capturedParams: JSONValue?
         service.requestTransportOverride = { method, params in
@@ -214,6 +218,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
     func testSendTurnPrefixesPromptAfterFileMentionRewrite() async {
         let service = makeService()
         service.isConnected = true
+        service.resumedThreadIDs.insert("thread-file-mention-subagents")
 
         var capturedParams: JSONValue?
         service.requestTransportOverride = { method, params in

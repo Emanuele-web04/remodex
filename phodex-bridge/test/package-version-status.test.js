@@ -6,6 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { version: installedVersion } = require("../package.json");
 
 const {
   createBridgePackageVersionStatusReader,
@@ -37,7 +38,7 @@ test("readBridgePackageVersionStatus returns immediately while latest version lo
   const firstResult = await readBridgePackageVersionStatus();
 
   assert.equal(fetchCallCount, 1);
-  assert.equal(firstResult.bridgeVersion, "1.3.5");
+  assert.equal(firstResult.bridgeVersion, installedVersion);
   assert.equal(firstResult.bridgeLatestVersion, null);
 
   deferred.resolve("9.9.9");

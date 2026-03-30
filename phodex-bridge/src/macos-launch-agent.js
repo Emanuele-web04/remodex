@@ -76,7 +76,7 @@ async function startMacOSBridgeService({
   pairingPollIntervalMs = DEFAULT_PAIRING_WAIT_INTERVAL_MS,
 } = {}) {
   assertDarwinPlatform(platform);
-  const config = readBridgeConfig({ env });
+  const config = resolveMacOSBridgeStartConfig({ env, fsImpl });
   assertRelayConfigured(config);
   const startedAt = Date.now();
 
@@ -117,6 +117,22 @@ async function startMacOSBridgeService({
     plistPath,
     pairingSession,
   };
+}
+
+// In a source checkout, prefer the last saved daemon config when the current shell
+// does not provide an explicit relay URL so `remodex up` keeps working after first setup.
+function resolveMacOSBridgeStartConfig({ env = process.env, fsImpl = fs } = {}) {
+  const explicitConfig = readBridgeConfig({ env, fsImpl });
+  if (typeof explicitConfig?.relayUrl === "string" && explicitConfig.relayUrl.trim()) {
+    return explicitConfig;
+  }
+
+  const savedConfig = readDaemonConfig({ env, fsImpl });
+  if (typeof savedConfig?.relayUrl === "string" && savedConfig.relayUrl.trim()) {
+    return savedConfig;
+  }
+
+  return explicitConfig;
 }
 
 function stopMacOSBridgeService({
@@ -447,6 +463,7 @@ module.exports = {
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
   resetMacOSBridgePairing,
+  resolveMacOSBridgeStartConfig,
   resolveLaunchAgentPlistPath,
   runMacOSBridgeService,
   startMacOSBridgeService,

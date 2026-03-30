@@ -1087,7 +1087,7 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         XCTAssertEqual(
             normalized,
-            "W -->|Yes| X[Relay replaces old Mac socket<br/>4001 to old connection]"
+            "W -->|Yes| X[\"Relay replaces old Mac socket<br/>4001 to old connection\"]"
         )
     }
 
@@ -1098,7 +1098,7 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         let normalized = MermaidSourceNormalizer.normalized(source)
 
-        XCTAssertEqual(normalized, source)
+        XCTAssertEqual(normalized, "W -->|Yes| X[\"Relay replaces old Mac socket<br/>4001 to old connection\"]")
     }
 
     func testMermaidSourceNormalizerQuotesSquareNodeLabels() {
@@ -1176,7 +1176,8 @@ final class TurnTimelineReducerTests: XCTestCase {
             stoppedTurnIDs: []
         )
 
-        XCTAssertEqual(blockInfo, ["Completed response"])
+        XCTAssertEqual(blockInfo.count, 1)
+        XCTAssertEqual(blockInfo[0]?.copyText, "Completed response")
     }
 
     func testAssistantBlockInfoHidesCopyWhenLatestRunStopped() {

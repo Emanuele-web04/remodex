@@ -7,7 +7,7 @@
 import CryptoKit
 import Foundation
 
-struct CodexMessagePersistence {
+nonisolated struct CodexMessagePersistence {
     // v6 encrypts the on-device message cache while keeping backward-compatible legacy fallbacks.
     private let fileName = "codex-message-history-v6.bin"
     private let legacyFileNames = [
@@ -19,7 +19,7 @@ struct CodexMessagePersistence {
     ]
 
     // Loads the saved message map from disk. Returns an empty store on failure.
-    func load() -> [String: [CodexMessage]] {
+    nonisolated func load() -> [String: [CodexMessage]] {
         let decoder = JSONDecoder()
 
         for fileURL in storeURLs {
@@ -42,7 +42,7 @@ struct CodexMessagePersistence {
     }
 
     // Persists all thread timelines atomically to avoid corrupt partial writes.
-    func save(_ value: [String: [CodexMessage]]) {
+    nonisolated func save(_ value: [String: [CodexMessage]]) {
         let encoder = JSONEncoder()
         guard let plaintext = try? encoder.encode(sanitizedForPersistence(value)),
               let data = encryptPersistedPayload(plaintext) else {
@@ -54,11 +54,11 @@ struct CodexMessagePersistence {
         try? data.write(to: fileURL, options: [.atomic])
     }
 
-    private var storeURL: URL {
+    private nonisolated var storeURL: URL {
         storeURLs[0]
     }
 
-    private var storeURLs: [URL] {
+    private nonisolated var storeURLs: [URL] {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fm.temporaryDirectory
@@ -68,20 +68,20 @@ struct CodexMessagePersistence {
         return names.map { directory.appendingPathComponent($0, isDirectory: false) }
     }
 
-    private func ensureParentDirectoryExists(for fileURL: URL) {
+    private nonisolated func ensureParentDirectoryExists(for fileURL: URL) {
         let directory = fileURL.deletingLastPathComponent()
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
     // Uses a Keychain-backed AES key so chat history remains private if the app data is copied out.
-    private func encryptPersistedPayload(_ plaintext: Data) -> Data? {
+    private nonisolated func encryptPersistedPayload(_ plaintext: Data) -> Data? {
         let key = messageHistoryKey()
         let sealedBox = try? AES.GCM.seal(plaintext, using: key)
         return sealedBox?.combined
     }
 
     // Opens the encrypted chat cache while still allowing plaintext fallbacks from older app versions.
-    private func decryptPersistedPayload(_ encryptedData: Data) -> Data? {
+    private nonisolated func decryptPersistedPayload(_ encryptedData: Data) -> Data? {
         let key = messageHistoryKey()
         guard let sealedBox = try? AES.GCM.SealedBox(combined: encryptedData) else {
             return nil
@@ -89,7 +89,7 @@ struct CodexMessagePersistence {
         return try? AES.GCM.open(sealedBox, using: key)
     }
 
-    private func messageHistoryKey() -> SymmetricKey {
+    private nonisolated func messageHistoryKey() -> SymmetricKey {
         if let storedKey = SecureStore.readData(for: CodexSecureKeys.messageHistoryKey) {
             return SymmetricKey(data: storedKey)
         }
@@ -102,7 +102,7 @@ struct CodexMessagePersistence {
 
     // Structured input cards are live request state, not durable history; dropping them
     // here prevents stale prompts from resurfacing after reconnects or relaunches.
-    private func sanitizedForPersistence(_ value: [String: [CodexMessage]]) -> [String: [CodexMessage]] {
+    private nonisolated func sanitizedForPersistence(_ value: [String: [CodexMessage]]) -> [String: [CodexMessage]] {
         value.mapValues { messages in
             messages.filter { $0.kind != .userInputPrompt }
         }

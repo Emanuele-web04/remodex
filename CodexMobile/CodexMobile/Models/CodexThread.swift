@@ -7,12 +7,12 @@
 
 import Foundation
 
-enum CodexThreadSyncState: String, Codable, Hashable, Sendable {
+nonisolated enum CodexThreadSyncState: String, Codable, Hashable, Sendable {
     case live
     case archivedLocal
 }
 
-struct CodexThread: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     let id: String
     var title: String?
     var name: String?
@@ -369,17 +369,7 @@ extension CodexThread {
 
     // --- Date parsing ---------------------------------------------------------
 
-    private static let iso8601Formatters: [ISO8601DateFormatter] = {
-        let withFractions = ISO8601DateFormatter()
-        withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        let standard = ISO8601DateFormatter()
-        standard.formatOptions = [.withInternetDateTime]
-
-        return [withFractions, standard]
-    }()
-
-    private static func decodeDateIfPresent(
+    private nonisolated static func decodeDateIfPresent(
         from container: KeyedDecodingContainer<CodingKeys>,
         keys: [CodingKeys]
     ) throws -> Date? {
@@ -407,23 +397,25 @@ extension CodexThread {
         return nil
     }
 
-    private static func parseISO8601(_ value: String) -> Date? {
-        for formatter in iso8601Formatters {
-            if let date = formatter.date(from: value) {
-                return date
-            }
+    private nonisolated static func parseISO8601(_ value: String) -> Date? {
+        let withFractions = ISO8601DateFormatter()
+        withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFractions.date(from: value) {
+            return date
         }
 
-        return nil
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+        return standard.date(from: value)
     }
 
     // Supports both seconds and milliseconds timestamps.
-    private static func decodeUnixTimestamp(_ rawValue: Double) -> Date {
+    private nonisolated static func decodeUnixTimestamp(_ rawValue: Double) -> Date {
         let secondsValue = rawValue > 10_000_000_000 ? rawValue / 1000 : rawValue
         return Date(timeIntervalSince1970: secondsValue)
     }
 
-    private static func decodeStringIfPresent(
+    private nonisolated static func decodeStringIfPresent(
         from container: KeyedDecodingContainer<CodingKeys>,
         keys: [CodingKeys]
     ) -> String? {
@@ -437,7 +429,7 @@ extension CodexThread {
         return nil
     }
 
-    private static func decodeThreadIdentity(
+    private nonisolated static func decodeThreadIdentity(
         from container: KeyedDecodingContainer<CodingKeys>,
         metadata: [String: JSONValue]?,
         keys: [CodingKeys],
@@ -459,7 +451,7 @@ extension CodexThread {
         return nil
     }
 
-    private static func sanitizedAgentIdentity(_ value: String?) -> String? {
+    private nonisolated static func sanitizedAgentIdentity(_ value: String?) -> String? {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -472,7 +464,7 @@ extension CodexThread {
         return trimmed
     }
 
-    private static func normalizeIdentifier(_ value: String?) -> String? {
+    private nonisolated static func normalizeIdentifier(_ value: String?) -> String? {
         guard let value else {
             return nil
         }
@@ -481,7 +473,7 @@ extension CodexThread {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func normalizeProjectPath(_ value: String?) -> String? {
+    private nonisolated static func normalizeProjectPath(_ value: String?) -> String? {
         guard let value else {
             return nil
         }
@@ -534,6 +526,12 @@ extension CodexThread {
             return nil
         }
 
-        return "[\(token)]"
+        if let trailingDigits = token.split(whereSeparator: { !$0.isNumber }).last,
+           !trailingDigits.isEmpty,
+           trailingDigits.allSatisfy(\.isNumber) {
+            return String(trailingDigits)
+        }
+
+        return token
     }
 }

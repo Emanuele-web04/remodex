@@ -162,7 +162,7 @@ final class CodexStatusTests: XCTestCase {
         )
 
         XCTAssertEqual(service.rateLimitBuckets.count, 1)
-        XCTAssertEqual(service.rateLimitBuckets.first?.limitId, "codex")
+        XCTAssertEqual(service.rateLimitBuckets.first?.limitId, "primary")
         XCTAssertEqual(service.rateLimitBuckets.first?.primary?.remainingPercent, 58)
     }
 

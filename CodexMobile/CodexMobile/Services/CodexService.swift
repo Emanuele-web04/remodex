@@ -279,6 +279,7 @@ final class CodexService {
     var threads: [CodexThread] = [] {
         didSet {
             rebuildThreadLookupCaches()
+            persistThreadListSnapshot()
         }
     }
     var isConnected = false
@@ -288,7 +289,13 @@ final class CodexService {
     // Tracks the non-blocking bootstrap that hydrates chats/models after the socket is ready.
     var isBootstrappingConnectionSync = false
     var currentOutput = ""
-    var activeThreadId: String?
+    var activeThreadId: String? {
+        didSet {
+            if oldValue != activeThreadId {
+                persistThreadListSnapshot()
+            }
+        }
+    }
     var activeTurnId: String?
     var activeTurnIdByThread: [String: String] = [:]
 
@@ -349,7 +356,13 @@ final class CodexService {
     // Relay session persistence
     var relaySessionId: String?
     var relayUrl: String?
-    var relayMacDeviceId: String?
+    var relayMacDeviceId: String? {
+        didSet {
+            if normalizedIdentifier(oldValue) != normalizedIdentifier(relayMacDeviceId) {
+                resetSkillsCacheForConnectionContextChange()
+            }
+        }
+    }
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
@@ -397,12 +410,20 @@ final class CodexService {
     var commandExecutionDetailsByItemID: [String: CommandExecutionDetails] = [:]
     // Debounces disk writes while streaming to keep UI responsive.
     var messagePersistenceDebounceTask: Task<Void, Never>?
+    var threadListPersistenceDebounceTask: Task<Void, Never>?
+    var pendingImmediateSyncTask: Task<Void, Never>?
+    var pendingImmediateSyncThreadID: String?
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
     var assistantCompletionFingerprintByThread: [String: (text: String, timestamp: Date)] = [:]
     // Dedupes concise activity feed lines per thread/turn to avoid visual spam.
     var recentActivityLineByThread: [String: CodexRecentActivityLine] = [:]
+    @ObservationIgnored var cachedSkillsByRoot: [String: [CodexSkillMetadata]] = [:]
+    @ObservationIgnored var unsupportedSkillRoots: Set<String> = []
+    @ObservationIgnored var persistedThreadListSnapshot: CodexThreadListSnapshot?
+    @ObservationIgnored var isRestoringPersistedThreadListSnapshot = false
+    @ObservationIgnored var persistedSkillsCacheSnapshot = CodexSkillsCacheSnapshot(entriesByRoot: [:])
     var contextWindowUsageByThread: [String: ContextWindowUsage] = [:]
     var rateLimitBuckets: [CodexRateLimitBucket] = []
     // Distinguishes "not loaded yet" from "loaded successfully, but no visible buckets exist".
@@ -422,7 +443,14 @@ final class CodexService {
     // Keeps the phone-side account UI in sync while ChatGPT login is being completed on the Mac.
     var gptAccountLoginSyncTask: Task<Void, Never>?
     var postConnectSyncToken: UUID?
-    var connectedServerIdentity: String?
+    var connectedServerIdentity: String? {
+        didSet {
+            if normalizedIdentifier(oldValue) != normalizedIdentifier(connectedServerIdentity) {
+                resetSkillsCacheForConnectionContextChange()
+                restorePersistedThreadListSnapshotIfNeeded()
+            }
+        }
+    }
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
     var mirroredRunningCatchupThreadIDs: Set<String> = []
     var lastMirroredRunningCatchupAtByThread: [String: Date] = [:]
@@ -475,6 +503,8 @@ final class CodexService {
     let decoder: JSONDecoder
     let messagePersistence = CodexMessagePersistence()
     let aiChangeSetPersistence = AIChangeSetPersistence()
+    let threadListPersistence: CodexThreadListPersistence
+    let skillsPersistence: CodexSkillsPersistence
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering
     let remoteNotificationRegistrar: CodexRemoteNotificationRegistering
@@ -488,17 +518,33 @@ final class CodexService {
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
+    static let persistenceNamespaceDefaultsKey = "codex.persistenceNamespace"
+
+    static func persistenceNamespace(for defaults: UserDefaults) -> String {
+        if let existing = defaults.string(forKey: persistenceNamespaceDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !existing.isEmpty {
+            return existing
+        }
+
+        let generated = UUID().uuidString.lowercased()
+        defaults.set(generated, forKey: persistenceNamespaceDefaultsKey)
+        return generated
+    }
 
     init(
         encoder: JSONEncoder = JSONEncoder(),
         decoder: JSONDecoder = JSONDecoder(),
         defaults: UserDefaults = .standard,
         userNotificationCenter: CodexUserNotificationCentering = UNUserNotificationCenter.current(),
-        remoteNotificationRegistrar: CodexRemoteNotificationRegistering = CodexApplicationRemoteNotificationRegistrar()
+        remoteNotificationRegistrar: CodexRemoteNotificationRegistering = CodexApplicationRemoteNotificationRegistrar.shared
     ) {
+        let persistenceNamespace = Self.persistenceNamespace(for: defaults)
         self.encoder = encoder
         self.decoder = decoder
         self.defaults = defaults
+        self.threadListPersistence = CodexThreadListPersistence(namespace: persistenceNamespace)
+        self.skillsPersistence = CodexSkillsPersistence(namespace: persistenceNamespace)
         self.userNotificationCenter = userNotificationCenter
         self.remoteNotificationRegistrar = remoteNotificationRegistrar
         self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
@@ -627,7 +673,42 @@ final class CodexService {
             self.secureConnectionState = .liveSessionUnresolved
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
+        persistedThreadListSnapshot = threadListPersistence.load()
+        persistedSkillsCacheSnapshot = skillsPersistence.load() ?? CodexSkillsCacheSnapshot(entriesByRoot: [:])
+        restorePersistedConnectionContextIfNeeded()
+        restorePersistedThreadListSnapshotIfNeeded()
         rebuildThreadLookupCaches()
+    }
+
+    @MainActor deinit {
+        trustedSessionResolveTask?.cancel()
+        trustedSessionResolveTask = nil
+        messagePersistenceDebounceTask?.cancel()
+        messagePersistenceDebounceTask = nil
+        threadListPersistenceDebounceTask?.cancel()
+        threadListPersistenceDebounceTask = nil
+        pendingImmediateSyncTask?.cancel()
+        pendingImmediateSyncTask = nil
+        coalescedRevertRefreshTask?.cancel()
+        coalescedRevertRefreshTask = nil
+        threadListSyncTask?.cancel()
+        threadListSyncTask = nil
+        activeThreadSyncTask?.cancel()
+        activeThreadSyncTask = nil
+        runningThreadWatchSyncTask?.cancel()
+        runningThreadWatchSyncTask = nil
+        postConnectSyncTask?.cancel()
+        postConnectSyncTask = nil
+        gptAccountLoginSyncTask?.cancel()
+        gptAccountLoginSyncTask = nil
+        notificationObserverTokens.forEach(NotificationCenter.default.removeObserver)
+        notificationObserverTokens.removeAll()
+        if let delegateProxy = notificationCenterDelegateProxy,
+           userNotificationCenter.delegate === delegateProxy {
+            userNotificationCenter.delegate = nil
+        }
+        notificationCenterDelegateProxy = nil
+        endBackgroundRunGraceTask(reason: "deinit")
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.

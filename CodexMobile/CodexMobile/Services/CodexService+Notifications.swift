@@ -17,6 +17,8 @@ protocol CodexRemoteNotificationRegistering: AnyObject {
 }
 
 final class CodexApplicationRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
+    nonisolated static let shared = CodexApplicationRemoteNotificationRegistrar()
+
     // Requests the APNs device token once alert permission is no longer denied.
     func registerForRemoteNotifications() {
 #if targetEnvironment(simulator)
@@ -170,6 +172,7 @@ extension CodexService {
         SecureStore.writeString(token, for: CodexSecureKeys.pushDeviceToken)
 
         Task { @MainActor [weak self] in
+            await self?.refreshNotificationAuthorizationStatus()
             await self?.syncManagedPushRegistrationIfNeeded(force: true)
         }
     }
@@ -361,7 +364,9 @@ private extension CodexService {
                 return
             }
 
-            self?.handleRemoteNotificationDeviceToken(tokenData)
+            Task { @MainActor [weak self] in
+                self?.handleRemoteNotificationDeviceToken(tokenData)
+            }
         }
 
         let didFailObserver = NotificationCenter.default.addObserver(
@@ -373,7 +378,9 @@ private extension CodexService {
                 return
             }
 
-            self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+            Task { @MainActor [weak self] in
+                self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+            }
         }
 
         notificationObserverTokens = [didRegisterObserver, didFailObserver]
@@ -495,7 +502,7 @@ private extension CodexService {
         }
 
         do {
-            try await listThreads()
+            try await listThreads(autoSelectFirstLiveThread: false)
             return true
         } catch {
             debugRuntimeLog("thread refresh for notification routing failed: \(error.localizedDescription)")

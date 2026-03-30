@@ -16,7 +16,7 @@ extension CodexService {
         .object(["decision": .string(decision)])
     }
 
-    func listThreads(limit: Int? = nil) async throws {
+    func listThreads(limit: Int? = nil, autoSelectFirstLiveThread: Bool = true) async throws {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
@@ -30,9 +30,13 @@ extension CodexService {
             debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
         }
 
-        reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
+        reconcileLocalThreadsWithServer(
+            activeThreads,
+            serverArchivedThreads: archivedThreads,
+            autoSelectFirstLiveThread: autoSelectFirstLiveThread
+        )
 
-        if activeThreadId == nil {
+        if autoSelectFirstLiveThread, activeThreadId == nil {
             activeThreadId = firstLiveThreadID()
         }
     }
@@ -353,6 +357,104 @@ extension CodexService {
         }
     }
 
+    func cachedSkills(for root: String) -> [CodexSkillMetadata]? {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty else {
+            return nil
+        }
+
+        if let cachedSkills = cachedSkillsByRoot[normalizedRoot] {
+            return cachedSkills
+        }
+
+        guard let entry = persistedSkillsCacheEntry(for: normalizedRoot), !entry.isUnsupported else {
+            return nil
+        }
+
+        cachedSkillsByRoot[normalizedRoot] = entry.skills
+        return entry.skills
+    }
+
+    func isUnsupportedSkillRoot(_ root: String) -> Bool {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty else {
+            return false
+        }
+
+        if unsupportedSkillRoots.contains(normalizedRoot) {
+            return true
+        }
+
+        guard let entry = persistedSkillsCacheEntry(for: normalizedRoot), entry.isUnsupported else {
+            return false
+        }
+
+        unsupportedSkillRoots.insert(normalizedRoot)
+        return true
+    }
+
+    func markUnsupportedSkillRoot(_ root: String) {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty else {
+            return
+        }
+
+        unsupportedSkillRoots.insert(normalizedRoot)
+        cachedSkillsByRoot.removeValue(forKey: normalizedRoot)
+        persistSkillsCacheEntry(
+            CodexSkillsCacheEntry(
+                skills: [],
+                savedAt: Date(),
+                serverIdentity: normalizedIdentifier(connectedServerIdentity),
+                relayMacDeviceId: normalizedRelayMacDeviceId ?? preferredTrustedMacDeviceId,
+                isUnsupported: true
+            ),
+            for: normalizedRoot
+        )
+    }
+
+    private func persistedSkillsCacheEntry(for root: String) -> CodexSkillsCacheEntry? {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty,
+              let entry = persistedSkillsCacheSnapshot.entriesByRoot[normalizedRoot],
+              isUsableSkillsCacheEntry(entry) else {
+            return nil
+        }
+
+        let maxAge: TimeInterval = 30 * 60
+        guard Date().timeIntervalSince(entry.savedAt) <= maxAge else {
+            return nil
+        }
+
+        return entry
+    }
+
+    private func isUsableSkillsCacheEntry(_ entry: CodexSkillsCacheEntry) -> Bool {
+        let currentRelayMacDeviceId = normalizedRelayMacDeviceId ?? preferredTrustedMacDeviceId
+        if let entryRelayMacDeviceId = normalizedIdentifier(entry.relayMacDeviceId) {
+            return entryRelayMacDeviceId == currentRelayMacDeviceId
+        }
+
+        if let entryServerIdentity = normalizedIdentifier(entry.serverIdentity) {
+            guard let currentServerIdentity = normalizedIdentifier(connectedServerIdentity) else {
+                return false
+            }
+            return entryServerIdentity == currentServerIdentity
+        }
+
+        return currentRelayMacDeviceId == nil && normalizedIdentifier(connectedServerIdentity) == nil
+    }
+
+    private func persistSkillsCacheEntry(_ entry: CodexSkillsCacheEntry, for root: String) {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty else {
+            return
+        }
+
+        persistedSkillsCacheSnapshot.entriesByRoot[normalizedRoot] = entry
+        skillsPersistence.save(persistedSkillsCacheSnapshot)
+    }
+
     // Loads available skills for one or more roots with shape-fallback compatibility.
     func listSkills(
         cwds: [String]?,
@@ -361,6 +463,15 @@ extension CodexService {
         let normalizedCwds = (cwds ?? [])
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+        let cacheRoot = normalizedCwds.count == 1 ? normalizedCwds[0] : nil
+        if let cacheRoot, !forceReload {
+            if isUnsupportedSkillRoot(cacheRoot) {
+                return []
+            }
+            if let cachedSkills = cachedSkills(for: cacheRoot) {
+                return cachedSkills
+            }
+        }
         var paramsObject: RPCObject = [:]
         if !normalizedCwds.isEmpty {
             paramsObject["cwds"] = .array(normalizedCwds.map { .string($0) })
@@ -395,6 +506,20 @@ extension CodexService {
             }
             .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if let cacheRoot {
+            cachedSkillsByRoot[cacheRoot] = dedupedByName
+            unsupportedSkillRoots.remove(cacheRoot)
+            persistSkillsCacheEntry(
+                CodexSkillsCacheEntry(
+                    skills: dedupedByName,
+                    savedAt: Date(),
+                    serverIdentity: normalizedIdentifier(connectedServerIdentity),
+                    relayMacDeviceId: normalizedRelayMacDeviceId ?? preferredTrustedMacDeviceId,
+                    isUnsupported: false
+                ),
+                for: cacheRoot
+            )
+        }
         return dedupedByName
     }
 
@@ -958,6 +1083,10 @@ extension CodexService {
     }
 
     func userFacingTurnErrorMessage(from error: Error) -> String {
+        if shouldSuppressRecoverableConnectionError(error) {
+            return ""
+        }
+
         if shouldTreatSendFailureAsDisconnect(error)
             || isRetryableSavedSessionConnectError(error)
             || isRecoverableTransientConnectionError(error)

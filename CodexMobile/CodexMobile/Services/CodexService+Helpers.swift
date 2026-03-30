@@ -7,6 +7,19 @@
 import Foundation
 
 extension CodexService {
+    func restorePersistedConnectionContextIfNeeded() {
+        guard !hasSavedRelaySession,
+              !hasTrustedMacReconnectCandidate,
+              normalizedIdentifier(connectedServerIdentity) == nil,
+              let snapshotServerIdentity = persistedThreadListSnapshot?
+                .serverIdentity
+                .flatMap(normalizedIdentifier) else {
+            return
+        }
+
+        connectedServerIdentity = snapshotServerIdentity
+    }
+
     // Rebuilds service-owned thread lookup caches whenever the sorted thread list changes.
     func rebuildThreadLookupCaches() {
         threadByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
@@ -32,6 +45,90 @@ extension CodexService {
     // Keeps the default "open the latest live conversation" lookup out of repeated array scans.
     func firstLiveThreadID() -> String? {
         firstLiveThreadIDCache
+    }
+
+    func restorePersistedThreadListSnapshotIfNeeded() {
+        guard let snapshot = persistedThreadListSnapshot,
+              shouldRestoreThreadListSnapshot(snapshot) else {
+            return
+        }
+
+        let restoredThreads = sortThreads(snapshot.threads)
+        let restoredActiveThreadId: String?
+        if let candidateThreadId = normalizedIdentifier(snapshot.lastActiveThreadId),
+           restoredThreads.contains(where: { $0.id == candidateThreadId }) {
+            restoredActiveThreadId = candidateThreadId
+        } else {
+            restoredActiveThreadId = nil
+        }
+
+        guard threads != restoredThreads || activeThreadId != restoredActiveThreadId else {
+            return
+        }
+
+        isRestoringPersistedThreadListSnapshot = true
+        defer { isRestoringPersistedThreadListSnapshot = false }
+        threads = restoredThreads
+        activeThreadId = restoredActiveThreadId
+    }
+
+    private func shouldRestoreThreadListSnapshot(_ snapshot: CodexThreadListSnapshot) -> Bool {
+        if let snapshotRelayMacDeviceId = normalizedIdentifier(snapshot.relayMacDeviceId) {
+            return snapshotRelayMacDeviceId == normalizedRelayMacDeviceId
+                || snapshotRelayMacDeviceId == preferredTrustedMacDeviceId
+        }
+
+        if let snapshotServerIdentity = normalizedIdentifier(snapshot.serverIdentity) {
+            guard !hasSavedRelaySession && !hasTrustedMacReconnectCandidate,
+                  let currentServerIdentity = normalizedIdentifier(connectedServerIdentity) else {
+                return false
+            }
+
+            return snapshotServerIdentity == currentServerIdentity
+        }
+
+        return !hasSavedRelaySession && !hasTrustedMacReconnectCandidate
+    }
+
+    func persistThreadListSnapshot() {
+        guard !isRestoringPersistedThreadListSnapshot else {
+            return
+        }
+
+        threadListPersistenceDebounceTask?.cancel()
+        threadListPersistenceDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self else { return }
+
+            let snapshot = self.makeThreadListSnapshot()
+            self.persistedThreadListSnapshot = snapshot
+            self.threadListPersistenceDebounceTask = nil
+
+            Task.detached { [threadListPersistence] in
+                threadListPersistence.save(snapshot)
+            }
+        }
+    }
+
+    func resetSkillsCacheForConnectionContextChange() {
+        cachedSkillsByRoot.removeAll()
+        unsupportedSkillRoots.removeAll()
+        persistedSkillsCacheSnapshot = skillsPersistence.load() ?? CodexSkillsCacheSnapshot(entriesByRoot: [:])
+    }
+
+    private func makeThreadListSnapshot() -> CodexThreadListSnapshot {
+        let normalizedActiveThreadId = normalizedIdentifier(activeThreadId)
+        let persistedActiveThreadId = threads.contains(where: { $0.id == normalizedActiveThreadId })
+            ? normalizedActiveThreadId
+            : nil
+
+        return CodexThreadListSnapshot(
+            threads: threads,
+            lastActiveThreadId: persistedActiveThreadId,
+            savedAt: Date(),
+            serverIdentity: normalizedIdentifier(connectedServerIdentity),
+            relayMacDeviceId: normalizedRelayMacDeviceId ?? preferredTrustedMacDeviceId
+        )
     }
 
     func resolveThreadID(_ preferredThreadID: String?) async throws -> String {

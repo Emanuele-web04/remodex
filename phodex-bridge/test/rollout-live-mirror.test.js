@@ -125,8 +125,8 @@ test("desktop-origin bootstrap replays the pending user message and final assist
 test("phone-origin rollouts do not emit mirrored updates", async (t) => {
   const { homeDir } = createTemporaryRolloutHome({
     threadId: "thread-phone",
-    originator: "codexmobile_ios",
-    source: "ios",
+    originator: "Codex Desktop",
+    source: "appServer",
     lines: [
       taskStarted("turn-live"),
       functionCall("call-1", "exec_command", {
@@ -216,7 +216,7 @@ test("desktop-origin idle watchers stream new rollout growth after the phone reo
 test("desktop-origin detection stays narrow", () => {
   assert.equal(isDesktopRolloutOrigin({ originator: "Codex Desktop", source: "vscode" }), true);
   assert.equal(isDesktopRolloutOrigin({ originator: "codex_vscode", source: "vscode" }), true);
-  assert.equal(isDesktopRolloutOrigin({ originator: "codexmobile_ios", source: "ios" }), false);
+  assert.equal(isDesktopRolloutOrigin({ originator: "Codex Desktop", source: "appServer" }), false);
 });
 
 function createTemporaryRolloutHome({ threadId, originator, source, lines }) {

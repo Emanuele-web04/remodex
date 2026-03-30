@@ -583,7 +583,13 @@ function isDesktopRolloutOrigin(sessionMeta) {
     return false;
   }
 
-  if (originator.includes("mobile") || originator.includes("ios")) {
+  if (
+    originator.includes("mobile")
+    || originator.includes("ios")
+    || source.includes("appserver")
+    || source.includes("app-server")
+    || source === "mcp"
+  ) {
     return false;
   }
 

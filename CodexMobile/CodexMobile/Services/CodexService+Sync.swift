@@ -107,32 +107,68 @@ extension CodexService {
         updateBackgroundRunGraceTask()
     }
 
+    private func resolvedImmediateSyncThreadID(_ threadId: String?) -> String? {
+        normalizedIdentifier(threadId) ?? normalizedIdentifier(activeThreadId)
+    }
+
     func requestImmediateSync(threadId: String? = nil) {
         guard canRunRealtimeSyncLoop else {
             return
         }
 
-        Task { @MainActor [weak self] in
+        let resolvedThreadID = resolvedImmediateSyncThreadID(threadId)
+        if let resolvedThreadID {
+            pendingImmediateSyncThreadID = resolvedThreadID
+        }
+
+        guard pendingImmediateSyncTask == nil else {
+            return
+        }
+
+        pendingImmediateSyncTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.syncThreadsList()
-            await self.refreshInactiveRunningBadgeThreads()
-            if let threadId = threadId ?? self.activeThreadId {
-                await self.syncActiveThreadState(threadId: threadId)
+            defer { self.pendingImmediateSyncTask = nil }
+
+            while !Task.isCancelled {
+                let requestedThreadID = self.pendingImmediateSyncThreadID ?? self.resolvedImmediateSyncThreadID(nil)
+                self.pendingImmediateSyncThreadID = nil
+
+                await self.syncThreadsList()
+                await self.refreshInactiveRunningBadgeThreads()
+
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                if self.pendingImmediateSyncThreadID != nil {
+                    continue
+                }
+
+                if let threadID = requestedThreadID ?? self.resolvedImmediateSyncThreadID(nil) {
+                    await self.syncActiveThreadState(threadId: threadID)
+                }
+
+                guard !Task.isCancelled else {
+                    return
+                }
+
+                if self.pendingImmediateSyncThreadID == nil {
+                    break
+                }
             }
         }
     }
 
     // Thread opening should refresh the visible chat, not refetch the full sidebar list.
     func requestImmediateActiveThreadSync(threadId: String? = nil) {
-        guard canRunRealtimeSyncLoop else {
+        guard canRunRealtimeSyncLoop,
+              let threadID = resolvedImmediateSyncThreadID(threadId) else {
             return
         }
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            if let threadId = threadId ?? self.activeThreadId {
-                await self.syncActiveThreadState(threadId: threadId)
-            }
+            await self.syncActiveThreadState(threadId: threadID)
         }
     }
 
@@ -184,7 +220,8 @@ extension CodexService {
 
     func reconcileLocalThreadsWithServer(
         _ serverThreads: [CodexThread],
-        serverArchivedThreads: [CodexThread] = []
+        serverArchivedThreads: [CodexThread] = [],
+        autoSelectFirstLiveThread: Bool = true
     ) {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let persistedArchivedIDs = locallyArchivedThreadIDs
@@ -202,7 +239,12 @@ extension CodexService {
 
             if let localThread = localByID[liveThread.id] {
                 liveThread = mergedThread(liveThread, with: localThread)
-                liveThread.syncState = localThread.syncState
+                if localThread.syncState == .archivedLocal,
+                   !persistedArchivedIDs.contains(liveThread.id) {
+                    liveThread.syncState = .live
+                } else {
+                    liveThread.syncState = localThread.syncState
+                }
             } else if persistedArchivedIDs.contains(liveThread.id) {
                 liveThread.syncState = .archivedLocal
             } else {
@@ -248,7 +290,7 @@ extension CodexService {
         // Full reconciliation — always refresh all threads even if busy-roots already hit some.
         refreshAllThreadTimelineStates()
 
-        if activeThreadId == nil {
+        if autoSelectFirstLiveThread, activeThreadId == nil {
             activeThreadId = firstLiveThreadID()
         }
 

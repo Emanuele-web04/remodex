@@ -1398,17 +1398,6 @@ extension CodexService {
                 ]
             )
         )
-        let model = normalizedIdentifier(
-            firstStringValue(
-                in: itemObject,
-                keys: [
-                    "modelProvider", "model_provider",
-                    "modelProviderId", "model_provider_id",
-                    "modelName", "model_name",
-                    "model",
-                ]
-            )
-        )
         let prompt = normalizedIdentifier(
             firstStringValue(
                 in: itemObject,
@@ -1421,7 +1410,9 @@ extension CodexService {
             agentId: agentId,
             nickname: nickname,
             role: role,
-            model: model,
+            // The top-level collab tool-call model is the requested model for spawned agents,
+            // not confirmed per-agent runtime metadata, so keep the synthetic row unset here.
+            model: nil,
             prompt: prompt
         )]
     }

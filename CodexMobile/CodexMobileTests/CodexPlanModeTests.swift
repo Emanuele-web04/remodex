@@ -18,6 +18,7 @@ final class CodexPlanModeTests: XCTestCase {
         service.supportsTurnCollaborationMode = true
         service.availableModels = [makeModel()]
         service.setSelectedModelId("gpt-5-codex")
+        service.resumedThreadIDs.insert("thread-plan")
 
         var capturedTurnStartParams: [JSONValue] = []
         service.requestTransportOverride = { method, params in
@@ -51,6 +52,10 @@ final class CodexPlanModeTests: XCTestCase {
             "medium"
         )
 
+        service.runningThreadIDs.remove("thread-plan")
+        service.activeTurnIdByThread["thread-plan"] = nil
+        service.activeTurnId = nil
+
         viewModel.input = "Normal follow-up"
         viewModel.sendTurn(codex: service, threadID: "thread-plan")
         await waitForSendCompletion(viewModel)
@@ -67,14 +72,17 @@ final class CodexPlanModeTests: XCTestCase {
         service.setSelectedModelId("gpt-5-codex")
 
         let threadID = "thread-\(UUID().uuidString)"
+        service.resumedThreadIDs.insert(threadID)
         var capturedTurnStartParams: [JSONValue] = []
+        var shouldRejectPlanMode = true
 
         service.requestTransportOverride = { method, params in
             XCTAssertEqual(method, "turn/start")
             let requestParams = params ?? .null
             capturedTurnStartParams.append(requestParams)
 
-            if capturedTurnStartParams.count == 1 {
+            if shouldRejectPlanMode {
+                shouldRejectPlanMode = false
                 throw CodexServiceError.rpcError(
                     RPCError(
                         code: -32600,
@@ -155,6 +163,8 @@ final class CodexPlanModeTests: XCTestCase {
     func testPlanModeSendFailureRearmsToggleAndSkipsFallbackRequest() async {
         let service = makeService()
         service.isConnected = true
+        service.supportsTurnCollaborationMode = true
+        service.resumedThreadIDs.insert("thread-plan-failure")
 
         var attemptedRequestCount = 0
         service.requestTransportOverride = { _, _ in

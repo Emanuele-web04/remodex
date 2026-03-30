@@ -391,7 +391,8 @@ extension ContentViewModel {
         }
     }
 
-    // Chooses the best reconnect path: resolve the live trusted-Mac session first, then fall back to the saved QR session.
+    // Chooses the best reconnect path while treating the saved QR/local relay session
+    // as the source of truth if the trusted-Mac record points at a different relay.
     func preferredReconnectURL(codex: CodexService) async -> String? {
         switch await trustedReconnectResolution(codex: codex) {
         case .use(let resolvedURL):
@@ -406,6 +407,9 @@ extension ContentViewModel {
     // Resolves a trusted-Mac session when possible and tells the caller whether to use, fall back, or stop.
     private func trustedReconnectResolution(codex: CodexService) async -> ReconnectURLResolution {
         guard codex.hasTrustedMacReconnectCandidate else {
+            return .fallbackToSaved
+        }
+        guard !shouldPreferSavedRelayReconnect(codex: codex) else {
             return .fallbackToSaved
         }
 
@@ -424,6 +428,25 @@ extension ContentViewModel {
             }
             return .fallbackToSaved
         }
+    }
+
+    // Prevents a stale trusted-Mac record from hijacking a fresher saved local pairing.
+    private func shouldPreferSavedRelayReconnect(codex: CodexService) -> Bool {
+        guard codex.hasSavedRelaySession,
+              let savedRelayURL = codex.normalizedRelayURL,
+              let trustedRelayURL = codex.preferredTrustedMacRecord?
+                .relayURL?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !trustedRelayURL.isEmpty else {
+            return false
+        }
+
+        guard let savedURL = try? codex.validateConnectionURL(savedRelayURL),
+              let trustedURL = try? codex.validateConnectionURL(trustedRelayURL) else {
+            return savedRelayURL != trustedRelayURL
+        }
+
+        return codex.canonicalServerIdentity(for: savedURL) != codex.canonicalServerIdentity(for: trustedURL)
     }
 
     // Builds the live reconnect URL after the trusted-session lookup succeeds.

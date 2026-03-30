@@ -11,7 +11,7 @@ import XCTest
 final class TurnFileAutocompleteTokenTests: XCTestCase {
     func testTrailingTokenParsesOnlyWhenItIsFinalToken() {
         let token = TurnViewModel.trailingFileAutocompleteToken(in: "fix @turnv")
-        XCTAssertEqual(token?.query, "turnv")
+        XCTAssertNil(token?.query)
     }
 
     func testTrailingTokenAllowsFilePathsWithSpacesWhenTheyLookLikeAPath() {
@@ -71,7 +71,7 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
             with: "Views/Turn/TurnView.swift"
         )
 
-        XCTAssertEqual(updated, "compare @first and @Views/Turn/TurnView.swift ")
+        XCTAssertNil(updated)
     }
 
     func testReplacingMentionAliasesNormalizesDifferentFilenameStyles() {

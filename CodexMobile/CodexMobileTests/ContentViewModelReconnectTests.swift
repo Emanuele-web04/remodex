@@ -50,6 +50,37 @@ final class ContentViewModelReconnectTests: XCTestCase {
         XCTAssertNil(service.lastErrorMessage)
     }
 
+    func testPreferredReconnectURLUsesSavedSessionWhenTrustedMacRelayDisagrees() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 13, count: 32).base64EncodedString(),
+            lastPairedAt: Date(),
+            relayURL: "wss://api.phodex.app/relay"
+        )
+        service.lastTrustedMacDeviceId = macDeviceID
+        service.relaySessionId = "saved-session"
+        service.relayUrl = "ws://zacks-mac-studio.local:9100/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedSessionResolverOverride = {
+            XCTFail("trusted session resolve should not run when the saved relay is the fresher source of truth")
+            return CodexTrustedSessionResolveResponse(
+                ok: true,
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: Data(repeating: 14, count: 32).base64EncodedString(),
+                displayName: "My Mac",
+                sessionId: "live-session"
+            )
+        }
+
+        let reconnectURL = await viewModel.preferredReconnectURL(codex: service)
+
+        XCTAssertEqual(reconnectURL, "ws://zacks-mac-studio.local:9100/relay/saved-session")
+    }
+
     func testPreferredReconnectURLStopsWhenTrustedResolveReportsOfflineAndNoSavedSessionExists() async {
         let service = makeService()
         let viewModel = ContentViewModel()

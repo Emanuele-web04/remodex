@@ -141,6 +141,8 @@ extension CodexService {
         finalizeAllStreamingState()
         messagePersistenceDebounceTask?.cancel()
         messagePersistenceDebounceTask = nil
+        threadListPersistenceDebounceTask?.cancel()
+        threadListPersistenceDebounceTask = nil
         messagePersistence.save(messagesByThread)
         assistantCompletionFingerprintByThread.removeAll()
         recentActivityLineByThread.removeAll()
@@ -201,6 +203,10 @@ extension CodexService {
         }
         pendingNotificationOpenThreadID = nil
         lastPushRegistrationSignature = nil
+        resetSkillsCacheForConnectionContextChange()
+        threadListPersistenceDebounceTask?.cancel()
+        persistedThreadListSnapshot = nil
+        threadListPersistence.clear()
         clearTransientConnectionPrompts()
     }
 
@@ -245,8 +251,8 @@ extension CodexService {
     func initializeSession() async throws {
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         let clientInfo: JSONValue = .object([
-            "name": .string("codexmobile_ios"),
-            "title": .string("CodexMobile iOS"),
+            "name": .string("Codex Desktop"),
+            "title": .string("Codex Desktop"),
             "version": .string(appVersion),
         ])
 
@@ -358,7 +364,7 @@ extension CodexService {
         if let threadId = activeThreadId
             ?? resolvedPreferredThreadId
             ?? firstLiveThreadID() {
-            await refreshInFlightTurnState(threadId: threadId)
+            _ = await refreshInFlightTurnState(threadId: threadId)
             if threadHasActiveOrRunningTurn(threadId) {
                 _ = try? await ensureThreadResumed(threadId: threadId, force: true)
                 if activeThreadId == threadId {
@@ -497,13 +503,14 @@ extension CodexService {
         return true
     }
 
-    // Drops only the stale saved relay session after repeated secure reconnect failures.
-    // This preserves the trusted Mac record, but stops looping on a dead session id forever.
+    // Falls back to trusted-Mac recovery without discarding the saved relay candidate.
+    // This stops reconnect loops while preserving local-first recovery context for the next attempt.
     func recoverTrustedReconnectCandidate() {
-        if hasSavedRelaySession {
-            clearSavedRelaySession()
-        } else {
-            secureConnectionState = .liveSessionUnresolved
+        secureConnectionState = .liveSessionUnresolved
+        if let trustedMac = preferredTrustedMacRecord {
+            secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+        } else if let relayMacIdentityPublicKey = normalizedRelayMacIdentityPublicKey {
+            secureMacFingerprint = codexSecureFingerprint(for: relayMacIdentityPublicKey)
         }
         lastErrorMessage = Self.trustedReconnectRecoveryMessage
     }
@@ -693,7 +700,7 @@ extension CodexService {
 
     // Treats write-side socket loss the same as receive-side disconnects so UI can recover instead of hanging.
     func shouldTreatSendFailureAsDisconnect(_ error: Error) -> Bool {
-        if isBenignBackgroundDisconnect(error) || isRecoverableTransientConnectionError(error) {
+        if isBenignBackgroundDisconnect(error) {
             return true
         }
 

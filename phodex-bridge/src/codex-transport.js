@@ -4,23 +4,24 @@
 // Exports: createCodexTransport
 // Depends on: child_process, ws
 
-const { spawn } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const WebSocket = require("ws");
 
 function createCodexTransport({
   endpoint = "",
   env = process.env,
+  execFileSyncImpl = execFileSync,
   WebSocketImpl = WebSocket,
 } = {}) {
   if (endpoint) {
     return createWebSocketTransport({ endpoint, WebSocketImpl });
   }
 
-  return createSpawnTransport({ env });
+  return createSpawnTransport({ env, execFileSyncImpl });
 }
 
-function createSpawnTransport({ env }) {
-  const launch = createCodexLaunchPlan({ env });
+function createSpawnTransport({ env, execFileSyncImpl }) {
+  const launch = createCodexLaunchPlan({ env, execFileSyncImpl });
   const codex = spawn(launch.command, launch.args, launch.options);
 
   let stdoutBuffer = "";
@@ -109,30 +110,48 @@ function createSpawnTransport({ env }) {
 
 // Builds a single, platform-aware launch path so the bridge never "guesses"
 // between multiple commands and accidentally starts duplicate runtimes.
-function createCodexLaunchPlan({ env }) {
+function createCodexLaunchPlan({ env, execFileSyncImpl = execFileSync }) {
   const sharedOptions = {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...env },
   };
+  const supportsSessionSourceFlag = detectSessionSourceFlagSupport({ env, execFileSyncImpl });
+  const sessionSourceArgs = supportsSessionSourceFlag ? ["--session-source", "app-server"] : [];
+  const launchCommandText = supportsSessionSourceFlag
+    ? "codex app-server --session-source app-server"
+    : "codex app-server";
 
   if (process.platform === "win32") {
     return {
       command: env.ComSpec || "cmd.exe",
-      args: ["/d", "/c", "codex app-server"],
+      args: ["/d", "/c", launchCommandText],
       options: {
         ...sharedOptions,
         windowsHide: true,
       },
-      description: "`cmd.exe /d /c codex app-server`",
+      description: `\`cmd.exe /d /c ${launchCommandText}\``,
     };
   }
 
   return {
     command: "codex",
-    args: ["app-server"],
+    args: ["app-server", ...sessionSourceArgs],
     options: sharedOptions,
-    description: "`codex app-server`",
+    description: `\`${launchCommandText}\``,
   };
+}
+
+function detectSessionSourceFlagSupport({ env, execFileSyncImpl = execFileSync }) {
+  try {
+    const output = execFileSyncImpl("codex", ["app-server", "--help"], {
+      encoding: "utf8",
+      env: { ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return typeof output === "string" && output.includes("--session-source");
+  } catch {
+    return false;
+  }
 }
 
 // Stops the exact process tree we launched on Windows so the shell wrapper
@@ -235,4 +254,8 @@ function createListenerBag() {
   };
 }
 
-module.exports = { createCodexTransport };
+module.exports = {
+  createCodexLaunchPlan,
+  createCodexTransport,
+  detectSessionSourceFlagSupport,
+};
