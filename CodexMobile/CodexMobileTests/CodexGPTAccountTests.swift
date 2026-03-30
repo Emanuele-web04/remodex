@@ -459,6 +459,84 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
+    func testUnsupportedVoiceBridgeAuthMarksBridgeSessionAsUnsupported() {
+        let service = makeService()
+        let error = CodexServiceError.rpcError(
+            RPCError(
+                code: -32600,
+                message: "Invalid request: unknown variant `voice/resolveAuth`, expected one of `initialize`, `thread/start`"
+            )
+        )
+
+        XCTAssertTrue(service.consumeUnsupportedVoiceBridgeAuth(error))
+        XCTAssertFalse(service.supportsBridgeVoiceAuth)
+        XCTAssertEqual(service.classifyVoiceFailure(error), .bridgeSessionUnsupported)
+    }
+
+    func testResolvedVoiceRecoveryClearsBannerOnceVoiceAuthIsHealthy() {
+        let service = makeService()
+        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
+            status: .authenticated,
+            authMethod: .chatgpt,
+            email: "voice@example.com",
+            displayName: nil,
+            planType: "plus",
+            loginInFlight: false,
+            needsReauth: false,
+            expiresAt: nil,
+            tokenReady: true,
+            updatedAt: .now
+        )
+
+        XCTAssertNil(service.resolveVoiceRecoveryReason(.voiceSyncInProgress))
+        XCTAssertNil(service.resolveVoiceRecoveryReason(.macLoginRequired))
+        XCTAssertNil(service.resolveVoiceRecoveryReason(.macReauthenticationRequired))
+    }
+
+    func testVoiceMissingTokenWhileAuthenticatedIsClassifiedAsSyncing() {
+        let service = makeService()
+        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
+            status: .authenticated,
+            authMethod: .chatgpt,
+            email: "voice@example.com",
+            displayName: nil,
+            planType: "plus",
+            loginInFlight: false,
+            needsReauth: false,
+            expiresAt: nil,
+            tokenReady: false,
+            tokenUnavailableSince: .now,
+            updatedAt: .now
+        )
+
+        let error = CodexServiceError.rpcError(
+            RPCError(
+                code: -32000,
+                message: "No ChatGPT session token available. Sign in to ChatGPT on the Mac.",
+                data: .object([
+                    "errorCode": .string("token_missing"),
+                ])
+            )
+        )
+
+        XCTAssertEqual(service.classifyVoiceFailure(error), .voiceSyncInProgress)
+    }
+
+    func testVoiceAuthUnavailableIsClassifiedAsReconnectRequired() {
+        let service = makeService()
+        let error = CodexServiceError.rpcError(
+            RPCError(
+                code: -32000,
+                message: "Could not read ChatGPT session from the Mac runtime. Is the bridge running?",
+                data: .object([
+                    "errorCode": .string("auth_unavailable"),
+                ])
+            )
+        )
+
+        XCTAssertEqual(service.classifyVoiceFailure(error), .reconnectRequired)
+    }
+
     func testSuccessfulLoginKeepsPollingUntilVoiceTokenIsReady() async throws {
         let service = makeService()
         service.isConnected = true

@@ -6,11 +6,13 @@
 
 import SwiftUI
 import PhotosUI
+import UIKit
 
 struct TurnView: View {
     let thread: CodexThread
 
     @Environment(CodexService.self) private var codex
+    @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
@@ -33,6 +35,8 @@ struct TurnView: View {
     @State private var isVoicePreflighting = false
     @State private var voicePreflightGeneration = 0
     @State private var isVoiceTranscribing = false
+    @State private var voiceRecoveryReason: CodexVoiceFailureReason?
+    @State private var isShowingVoiceSetupSheet = false
     @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -69,7 +73,7 @@ struct TurnView: View {
                 stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
                 assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
                 errorMessage: codex.lastErrorMessage,
-                connectionRecoveryAccessory: connectionRecoveryAccessory,
+                composerRecoveryAccessory: composerRecoveryAccessory,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
@@ -242,9 +246,11 @@ struct TurnView: View {
                 if !isConnected {
                     cancelVoiceRecordingIfNeeded()
                     invalidatePendingVoicePreflight()
+                    clearVoiceRecovery()
                     return
                 }
 
+                clearVoiceRecovery()
                 guard !wasConnected, isConnected else { return }
                 viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
                 guard showsGitControls else { return }
@@ -266,6 +272,7 @@ struct TurnView: View {
         .onDisappear {
             cancelVoiceRecordingIfNeeded()
             invalidatePendingVoicePreflight()
+            clearVoiceRecovery()
             viewModel.cancelTransientTasks()
             viewModel.clearComposerAutocomplete()
         }
@@ -299,6 +306,9 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
+        }
+        .sheet(isPresented: $isShowingVoiceSetupSheet) {
+            GPTVoiceSetupSheet()
         }
         .sheet(item: $repositoryDiffPresentation) { presentation in
             TurnDiffSheet(
@@ -367,8 +377,16 @@ struct TurnView: View {
         }
     }
 
-    // Reuses the home reconnect action inside the turn screen so a dropped socket is recoverable in-place.
-    private var connectionRecoveryAccessory: AnyView? {
+    // Reuses the shared recovery-card slot for both transport reconnects and voice-specific guidance.
+    private var composerRecoveryAccessory: AnyView? {
+        if let voiceRecoveryPresentation {
+            return AnyView(
+                ConnectionRecoveryCard(snapshot: voiceRecoveryPresentation.snapshot) {
+                    handleVoiceRecoveryAction(voiceRecoveryPresentation.action)
+                }
+            )
+        }
+
         guard let snapshot = connectionRecoverySnapshot else {
             return nil
         }
@@ -378,6 +396,18 @@ struct TurnView: View {
                 reconnectAction?()
             }
         )
+    }
+
+    private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {
+        guard let voiceRecoveryReason else {
+            return nil
+        }
+
+        guard let resolvedReason = codex.resolveVoiceRecoveryReason(voiceRecoveryReason) else {
+            return nil
+        }
+
+        return buildVoiceRecoveryPresentation(for: resolvedReason)
     }
 
     private var connectionRecoverySnapshot: ConnectionRecoverySnapshot? {
@@ -391,7 +421,7 @@ struct TurnView: View {
             return ConnectionRecoverySnapshot(
                 summary: "Trying to reconnect to your Mac.",
                 status: .reconnecting,
-                actionTitle: nil
+                trailingStyle: .progress
             )
         }
 
@@ -405,7 +435,7 @@ struct TurnView: View {
         return ConnectionRecoverySnapshot(
             summary: summary,
             status: .interrupted,
-            actionTitle: "Reconnect"
+            trailingStyle: .action("Reconnect")
         )
     }
 
@@ -1196,13 +1226,14 @@ struct TurnView: View {
                 at: clip.url,
                 durationSeconds: clip.durationSeconds
             )
+            clearVoiceRecovery()
             viewModel.appendVoiceTranscript(transcript)
             // Keep voice flows keyboard-free; users can tap into the draft afterward if they want to edit.
             isInputFocused = false
         } catch {
             isVoiceRecording = false
             voiceTranscriptionManager.resetMeteringState()
-            codex.lastErrorMessage = error.localizedDescription
+            presentVoiceRecovery(for: error)
         }
     }
 
@@ -1213,11 +1244,17 @@ struct TurnView: View {
             return
         }
 
-        guard codex.isConnected else {
-            codex.lastErrorMessage = "Connect to your Mac before using voice transcription."
+        guard codex.supportsBridgeVoiceAuth else {
+            presentVoiceRecovery(for: .bridgeSessionUnsupported)
             return
         }
 
+        guard codex.isConnected else {
+            presentVoiceRecovery(for: .reconnectRequired)
+            return
+        }
+
+        clearVoiceRecovery()
         codex.lastErrorMessage = nil
         // Dismiss any active text focus before recording so the keyboard does not
         // compete with the waveform UI or waste vertical space during capture.
@@ -1243,7 +1280,7 @@ struct TurnView: View {
             isVoiceRecording = true
             isInputFocused = false
         } catch {
-            codex.lastErrorMessage = error.localizedDescription
+            presentVoiceRecovery(for: error)
         }
     }
 
@@ -1255,6 +1292,150 @@ struct TurnView: View {
 
         voiceTranscriptionManager.cancelRecording()
         isVoiceRecording = false
+    }
+
+    private func clearVoiceRecovery() {
+        voiceRecoveryReason = nil
+    }
+
+    // Keeps voice failures out of the transcript by routing them into a dedicated recovery accessory.
+    private func presentVoiceRecovery(for error: Error) {
+        presentVoiceRecovery(for: codex.classifyVoiceFailure(error))
+    }
+
+    private func presentVoiceRecovery(for reason: CodexVoiceFailureReason) {
+        voiceRecoveryReason = reason
+        codex.lastErrorMessage = nil
+    }
+
+    private func buildVoiceRecoveryPresentation(for reason: CodexVoiceFailureReason) -> VoiceRecoveryPresentation {
+        switch reason {
+        case .reconnectRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Reconnect to your Mac to use voice mode.",
+                    detail: "Keep the Remodex bridge running on your Mac, then try the microphone again.",
+                    status: .interrupted,
+                    trailingStyle: .action("Reconnect")
+                ),
+                action: .reconnect
+            )
+        case .bridgeSessionUnsupported:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "This bridge session does not support voice mode yet.",
+                    detail: "Restart Remodex on your Mac, then reconnect this iPhone. If it still happens, update Remodex on your Mac and pair again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("Reconnect")
+                ),
+                action: .reconnect
+            )
+        case .macLoginRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Sign in to ChatGPT on your Mac to use voice mode.",
+                    detail: "Open ChatGPT on the paired Mac, sign in there, then come back here and try again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("How To Fix")
+                ),
+                action: .showSetupHelp
+            )
+        case .macReauthenticationRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "ChatGPT voice needs a fresh sign-in on your Mac.",
+                    detail: "Open ChatGPT on the paired Mac, sign in again there, then retry voice mode here.",
+                    status: .actionRequired,
+                    trailingStyle: .action("How To Fix")
+                ),
+                action: .showSetupHelp
+            )
+        case .voiceSyncInProgress:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Voice mode is still syncing from your Mac.",
+                    detail: "Keep the bridge connected for a moment, then try again.",
+                    status: .syncing,
+                    trailingStyle: .progress
+                ),
+                action: .none
+            )
+        case .chatGPTRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Voice mode needs a ChatGPT session on your Mac.",
+                    detail: "API-key-only auth is not enough here. Sign in to ChatGPT on the paired Mac, then try again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("How To Fix")
+                ),
+                action: .showSetupHelp
+            )
+        case .microphonePermissionRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Microphone access is off for Remodex.",
+                    detail: "Open iPhone Settings, allow Microphone for Remodex, then try recording again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("Open Settings")
+                ),
+                action: .openSystemSettings
+            )
+        case .microphoneUnavailable:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "No microphone input is available right now.",
+                    detail: "Check that another app is not holding the microphone, then try again.",
+                    status: .actionRequired,
+                    trailingStyle: .none
+                ),
+                action: .none
+            )
+        case .recorderUnavailable:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Remodex could not start the recorder.",
+                    detail: "Close other audio-heavy apps, then try voice mode again.",
+                    status: .actionRequired,
+                    trailingStyle: .none
+                ),
+                action: .none
+            )
+        case .generic(let message):
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: message,
+                    status: .actionRequired,
+                    trailingStyle: .none
+                ),
+                action: .none
+            )
+        }
+    }
+
+    private func handleVoiceRecoveryAction(_ action: VoiceRecoveryAction) {
+        switch action {
+        case .reconnect:
+            reconnectAction?()
+        case .showSetupHelp:
+            isShowingVoiceSetupSheet = true
+        case .openSystemSettings:
+            guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else {
+                return
+            }
+            openURL(settingsURL)
+        case .none:
+            break
+        }
     }
 
     // Invalidates any in-flight async mic startup so it cannot reopen the recorder after leaving the screen.
@@ -1314,6 +1495,18 @@ struct TurnView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
+}
+
+private enum VoiceRecoveryAction: Equatable {
+    case reconnect
+    case showSetupHelp
+    case openSystemSettings
+    case none
+}
+
+private struct VoiceRecoveryPresentation: Equatable {
+    let snapshot: ConnectionRecoverySnapshot
+    let action: VoiceRecoveryAction
 }
 
 private struct SubagentParentAccessoryCard: View {

@@ -648,7 +648,7 @@ private struct SettingsGPTAccountCard: View {
             }
         }
         .sheet(isPresented: $isShowingMacLoginInfo) {
-            SettingsGPTMacLoginSheet()
+            GPTVoiceSetupSheet()
         }
     }
 
@@ -699,94 +699,6 @@ private struct SettingsGPTAccountCard: View {
             await codex.logoutGPTAccount()
             await codex.refreshGPTAccountState()
             isLoggingOut = false
-        }
-    }
-}
-
-private struct SettingsGPTMacLoginSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 12) {
-                    Image(systemName: "mic.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 40, height: 40)
-                        .background(
-                            Circle()
-                                .fill(Color.primary.opacity(0.08))
-                        )
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("ChatGPT voice is checked on your Mac")
-                            .font(AppFont.subheadline(weight: .semibold))
-                        Text("Remodex reads the ChatGPT session from your paired Mac bridge.")
-                            .font(AppFont.caption())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    gptSetupStep(
-                        number: "1",
-                        title: "Open ChatGPT on your Mac",
-                        detail: "Use the Mac that is paired with this iPhone."
-                    )
-                    gptSetupStep(
-                        number: "2",
-                        title: "Sign in there",
-                        detail: "Make sure the ChatGPT account you want for voice is already active on the Mac."
-                    )
-                    gptSetupStep(
-                        number: "3",
-                        title: "Come back to Remodex",
-                        detail: "Keep the bridge connected and reopen Settings if the status has not refreshed yet."
-                    )
-                }
-
-                Text("You do not need to start ChatGPT login from this iPhone.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-
-                Spacer(minLength: 0)
-
-                SettingsButton("Close") {
-                    dismiss()
-                }
-            }
-            .padding(20)
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
-            .navigationTitle("Use ChatGPT on Mac")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-
-    // Keeps the setup instructions scannable in a compact sheet.
-    private func gptSetupStep(number: String, title: String, detail: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(number)
-                .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 20, alignment: .leading)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .foregroundStyle(.primary)
-                Text(detail)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
         }
     }
 }

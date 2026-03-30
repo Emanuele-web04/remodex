@@ -340,6 +340,8 @@ final class CodexService {
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
+    // Runtime compatibility flag for the bridge-owned `voice/resolveAuth` voice flow.
+    var supportsBridgeVoiceAuth = true
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
     // Seeds brand-new chats with one-shot composer actions like code review.

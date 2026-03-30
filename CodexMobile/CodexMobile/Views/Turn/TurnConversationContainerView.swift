@@ -16,7 +16,7 @@ struct TurnConversationContainerView: View {
     let stoppedTurnIDs: Set<String>
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
     let errorMessage: String?
-    let connectionRecoveryAccessory: AnyView?
+    let composerRecoveryAccessory: AnyView?
     let shouldAnchorToAssistantResponse: Binding<Bool>
     let isScrolledToBottom: Binding<Bool>
     let isComposerFocused: Bool
@@ -106,7 +106,7 @@ struct TurnConversationContainerView: View {
                 assistantRevertStatesByMessageID: assistantRevertStatesByMessageID,
                 isRetryAvailable: !isThreadRunning,
                 errorMessage: errorMessage,
-                hidesErrorMessage: connectionRecoveryAccessory != nil,
+                hidesErrorMessage: composerRecoveryAccessory != nil,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
                 isScrolledToBottom: isScrolledToBottom,
                 isComposerFocused: isComposerFocused,
@@ -192,8 +192,8 @@ struct TurnConversationContainerView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            if let connectionRecoveryAccessory {
-                connectionRecoveryAccessory
+            if let composerRecoveryAccessory {
+                composerRecoveryAccessory
                     .padding(.horizontal, 12)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }

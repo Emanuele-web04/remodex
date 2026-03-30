@@ -149,6 +149,7 @@ extension CodexService {
         assistantRevertStateRevision = 0
         supportsServiceTier = true
         hasPresentedServiceTierBridgeUpdatePrompt = false
+        supportsBridgeVoiceAuth = true
         supportsThreadFork = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
         hasPresentedMinimumBridgePackageUpdatePrompt = false
@@ -390,6 +391,7 @@ extension CodexService {
         assistantRevertStateRevision = 0
         supportsServiceTier = true
         hasPresentedServiceTierBridgeUpdatePrompt = false
+        supportsBridgeVoiceAuth = true
         supportsThreadFork = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
         hasPresentedMinimumBridgePackageUpdatePrompt = false
