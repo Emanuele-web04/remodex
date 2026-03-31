@@ -6,11 +6,13 @@
 
 import SwiftUI
 import PhotosUI
+import UIKit
 
 struct TurnView: View {
     let thread: CodexThread
 
     @Environment(CodexService.self) private var codex
+    @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
@@ -33,6 +35,8 @@ struct TurnView: View {
     @State private var isVoicePreflighting = false
     @State private var voicePreflightGeneration = 0
     @State private var isVoiceTranscribing = false
+    @State private var voiceRecoveryReason: CodexVoiceFailureReason?
+    @State private var isShowingVoiceSetupSheet = false
     @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -58,6 +62,13 @@ struct TurnView: View {
             gitWorkingDirectory: gitWorkingDirectory,
             isWorktreeProject: isWorktreeProject
         )
+        let visibleConversationErrorMessage = turnVisibleConversationErrorMessage(
+            lastErrorMessage: codex.lastErrorMessage,
+            isConnected: codex.isConnected,
+            shouldSuppressConnectedMessage: codex.shouldSuppressConnectedConversationErrorMessage(
+                codex.lastErrorMessage
+            )
+        )
 
         return TurnConversationContainerView(
                 threadID: thread.id,
@@ -68,8 +79,8 @@ struct TurnView: View {
                 latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
                 stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
                 assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
-                errorMessage: codex.lastErrorMessage,
-                connectionRecoveryAccessory: connectionRecoveryAccessory,
+                errorMessage: visibleConversationErrorMessage,
+                connectionRecoveryAccessory: composerRecoveryAccessory,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
@@ -238,17 +249,19 @@ struct TurnView: View {
                     threadID: thread.id
                 )
             },
-            onConnectionChanged: { wasConnected, isConnected in
-                if !isConnected {
-                    cancelVoiceRecordingIfNeeded()
-                    invalidatePendingVoicePreflight()
-                    return
-                }
+                onConnectionChanged: { wasConnected, isConnected in
+                    if !isConnected {
+                        cancelVoiceRecordingIfNeeded()
+                        invalidatePendingVoicePreflight()
+                        clearVoiceRecovery()
+                        return
+                    }
 
-                guard !wasConnected, isConnected else { return }
-                viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
-                guard showsGitControls else { return }
-                viewModel.refreshGitBranchTargets(
+                    clearVoiceRecovery()
+                    guard !wasConnected, isConnected else { return }
+                    viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
+                    guard showsGitControls else { return }
+                    viewModel.refreshGitBranchTargets(
                     codex: codex,
                     workingDirectory: gitWorkingDirectory,
                     threadID: thread.id
@@ -266,6 +279,7 @@ struct TurnView: View {
         .onDisappear {
             cancelVoiceRecordingIfNeeded()
             invalidatePendingVoicePreflight()
+            clearVoiceRecovery()
             viewModel.cancelTransientTasks()
             viewModel.clearComposerAutocomplete()
         }
@@ -299,6 +313,9 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
+        }
+        .sheet(isPresented: $isShowingVoiceSetupSheet) {
+            VoiceSetupSheet()
         }
         .sheet(item: $repositoryDiffPresentation) { presentation in
             TurnDiffSheet(
@@ -368,7 +385,15 @@ struct TurnView: View {
     }
 
     // Reuses the home reconnect action inside the turn screen so a dropped socket is recoverable in-place.
-    private var connectionRecoveryAccessory: AnyView? {
+    private var composerRecoveryAccessory: AnyView? {
+        if let voiceRecoveryPresentation {
+            return AnyView(
+                VoiceRecoveryCard(presentation: voiceRecoveryPresentation) {
+                    handleVoiceRecoveryAction(voiceRecoveryPresentation.action)
+                }
+            )
+        }
+
         guard let snapshot = connectionRecoverySnapshot else {
             return nil
         }
@@ -378,6 +403,14 @@ struct TurnView: View {
                 reconnectAction?()
             }
         )
+    }
+
+    private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {
+        guard let voiceRecoveryReason else {
+            return nil
+        }
+
+        return buildVoiceRecoveryPresentation(for: voiceRecoveryReason)
     }
 
     private var connectionRecoverySnapshot: ConnectionRecoverySnapshot? {
@@ -1196,13 +1229,14 @@ struct TurnView: View {
                 at: clip.url,
                 durationSeconds: clip.durationSeconds
             )
+            clearVoiceRecovery()
             viewModel.appendVoiceTranscript(transcript)
             // Keep voice flows keyboard-free; users can tap into the draft afterward if they want to edit.
             isInputFocused = false
         } catch {
             isVoiceRecording = false
             voiceTranscriptionManager.resetMeteringState()
-            codex.lastErrorMessage = error.localizedDescription
+            presentVoiceRecovery(for: error)
         }
     }
 
@@ -1214,10 +1248,16 @@ struct TurnView: View {
         }
 
         guard codex.isConnected else {
-            codex.lastErrorMessage = "Connect to your Mac before using voice transcription."
+            presentVoiceRecovery(for: .reconnectRequired)
             return
         }
 
+        if let reason = voiceRecoveryReasonForUnavailableVoice() {
+            presentVoiceRecovery(for: reason)
+            return
+        }
+
+        clearVoiceRecovery()
         codex.lastErrorMessage = nil
         // Dismiss any active text focus before recording so the keyboard does not
         // compete with the waveform UI or waste vertical space during capture.
@@ -1243,8 +1283,58 @@ struct TurnView: View {
             isVoiceRecording = true
             isInputFocused = false
         } catch {
-            codex.lastErrorMessage = error.localizedDescription
+            presentVoiceRecovery(for: error)
         }
+    }
+
+    private func voiceRecoveryReasonForUnavailableVoice() -> CodexVoiceFailureReason? {
+        if codex.gptAccountSnapshot.hasActiveLogin || codex.gptVoiceTemporarilyUnavailable {
+            return .voiceSyncInProgress
+        }
+
+        if codex.gptAccountSnapshot.needsReauth || codex.gptAccountSnapshot.status == .expired {
+            return .macReauthenticationRequired
+        }
+
+        if !codex.gptAccountSnapshot.isAuthenticated {
+            return .macLoginRequired
+        }
+
+        return nil
+    }
+
+    private func clearVoiceRecovery() {
+        voiceRecoveryReason = nil
+        isShowingVoiceSetupSheet = false
+    }
+
+    private func presentVoiceRecovery(for error: Error) {
+        presentVoiceRecovery(for: classifyVoiceFailure(error, codex: codex))
+    }
+
+    private func presentVoiceRecovery(for reason: CodexVoiceFailureReason) {
+        voiceRecoveryReason = reason
+        codex.lastErrorMessage = nil
+    }
+
+    private func handleVoiceRecoveryAction(_ action: VoiceRecoveryAction) {
+        switch action {
+        case .reconnect:
+            reconnectAction?()
+        case .showSetupHelp:
+            isShowingVoiceSetupSheet = true
+        case .openSystemSettings:
+            guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else {
+                return
+            }
+            openURL(settingsURL)
+        case .none:
+            break
+        }
+    }
+
+    private func buildVoiceRecoveryPresentation(for reason: CodexVoiceFailureReason) -> VoiceRecoveryPresentation {
+        makeVoiceRecoveryPresentation(for: reason)
     }
 
     // Clears any partial microphone capture when the screen leaves the active voice flow.
@@ -1374,6 +1464,366 @@ private struct CheckedOutElsewhereAlert: Identifiable {
         }
 
         return "'\(branch)' is already checked out in another worktree. Open that chat from the sidebar to continue there."
+    }
+}
+
+enum CodexVoiceFailureReason: Equatable {
+    case reconnectRequired
+    case macLoginRequired
+    case macReauthenticationRequired
+    case voiceSyncInProgress
+    case microphonePermissionRequired
+    case microphoneUnavailable
+    case recorderUnavailable
+    case generic(String)
+}
+
+enum VoiceRecoveryAction: Equatable {
+    case reconnect
+    case showSetupHelp
+    case openSystemSettings
+    case none
+}
+
+enum VoiceRecoveryStatus: Equatable {
+    case needsAction
+    case syncing
+
+    var label: String {
+        switch self {
+        case .needsAction:
+            return "Needs attention"
+        case .syncing:
+            return "Syncing"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .needsAction:
+            return .orange
+        case .syncing:
+            return Color(.plan)
+        }
+    }
+}
+
+struct VoiceRecoverySnapshot: Equatable {
+    let title: String
+    let summary: String
+    let status: VoiceRecoveryStatus
+    let actionTitle: String?
+    let accessibilityHint: String
+
+    var isActionable: Bool {
+        actionTitle != nil
+    }
+}
+
+struct VoiceRecoveryPresentation: Equatable {
+    let snapshot: VoiceRecoverySnapshot
+    let action: VoiceRecoveryAction
+}
+
+func classifyVoiceFailure(_ error: Error, codex: CodexService) -> CodexVoiceFailureReason {
+    if let serviceError = error as? CodexServiceError {
+        switch serviceError {
+        case .disconnected:
+            return .reconnectRequired
+        default:
+            break
+        }
+    }
+
+    if let voiceError = error as? GPTVoiceTranscriptionError {
+        switch voiceError {
+        case .microphonePermissionDenied:
+            return .microphonePermissionRequired
+        case .missingMicrophoneInput:
+            return .microphoneUnavailable
+        case .unableToConfigureAudioSession,
+             .unableToPrepareAudioEngine,
+             .unableToCreateOutputFile,
+             .alreadyRecording,
+             .notRecording:
+            return .recorderUnavailable
+        case .authExpired:
+            return codex.gptAccountSnapshot.needsReauth ? .macReauthenticationRequired : .macLoginRequired
+        case .transcriptionFailed(let message):
+            return .generic(message)
+        }
+    }
+
+    if codex.gptAccountSnapshot.hasActiveLogin || codex.gptVoiceTemporarilyUnavailable {
+        return .voiceSyncInProgress
+    }
+
+    if codex.gptAccountSnapshot.needsReauth || codex.gptAccountSnapshot.status == .expired {
+        return .macReauthenticationRequired
+    }
+
+    if !codex.gptAccountSnapshot.isAuthenticated {
+        return .macLoginRequired
+    }
+
+    return .generic(error.localizedDescription)
+}
+
+func makeVoiceRecoveryPresentation(for reason: CodexVoiceFailureReason) -> VoiceRecoveryPresentation {
+    switch reason {
+    case .reconnectRequired:
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: "Reconnect to your Mac to use voice mode.",
+                status: .needsAction,
+                actionTitle: "Reconnect",
+                accessibilityHint: "Reconnects the bridge session"
+            ),
+            action: .reconnect
+        )
+    case .macLoginRequired:
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: "Sign in to ChatGPT on your Mac to use voice mode.",
+                status: .needsAction,
+                actionTitle: "How To Fix",
+                accessibilityHint: "Shows voice setup help"
+            ),
+            action: .showSetupHelp
+        )
+    case .macReauthenticationRequired:
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: "ChatGPT voice needs a fresh sign-in on your Mac.",
+                status: .needsAction,
+                actionTitle: "How To Fix",
+                accessibilityHint: "Shows voice setup help"
+            ),
+            action: .showSetupHelp
+        )
+    case .voiceSyncInProgress:
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: "ChatGPT is still syncing on your Mac.",
+                status: .syncing,
+                actionTitle: nil,
+                accessibilityHint: "Voice sync is still in progress"
+            ),
+            action: .none
+        )
+    case .microphonePermissionRequired:
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: "Microphone access is off for Remodex.",
+                status: .needsAction,
+                actionTitle: "Open Settings",
+                accessibilityHint: "Opens iPhone Settings to allow microphone access"
+            ),
+            action: .openSystemSettings
+        )
+    case .microphoneUnavailable:
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: "No microphone input is available right now.",
+                status: .needsAction,
+                actionTitle: nil,
+                accessibilityHint: "Voice mode is unavailable"
+            ),
+            action: .none
+        )
+    case .recorderUnavailable:
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: "Remodex could not start the recorder.",
+                status: .needsAction,
+                actionTitle: nil,
+                accessibilityHint: "Voice mode is unavailable"
+            ),
+            action: .none
+        )
+    case .generic(let message):
+        return VoiceRecoveryPresentation(
+            snapshot: VoiceRecoverySnapshot(
+                title: "Voice Mode",
+                summary: message,
+                status: .needsAction,
+                actionTitle: nil,
+                accessibilityHint: "Voice mode is unavailable"
+            ),
+            action: .none
+        )
+    }
+}
+
+func voiceRecoveryPresentation(for reason: CodexVoiceFailureReason) -> VoiceRecoveryPresentation {
+    makeVoiceRecoveryPresentation(for: reason)
+}
+
+func turnVisibleConversationErrorMessage(
+    lastErrorMessage: String?,
+    isConnected: Bool,
+    shouldSuppressConnectedMessage: Bool
+) -> String? {
+    guard let trimmedMessage = lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+          !trimmedMessage.isEmpty else {
+        return nil
+    }
+
+    if shouldSuppressConnectedMessage
+        || shouldSuppressStaleConnectedTurnErrorMessage(trimmedMessage, isConnected: isConnected) {
+        return nil
+    }
+
+    return trimmedMessage
+}
+
+private func shouldSuppressStaleConnectedTurnErrorMessage(
+    _ message: String,
+    isConnected: Bool
+) -> Bool {
+    guard isConnected else {
+        return false
+    }
+
+    return message.lowercased().contains("saved pairing timed out while waiting for the mac")
+}
+
+private struct VoiceRecoveryCard: View {
+    let presentation: VoiceRecoveryPresentation
+    let onTap: () -> Void
+
+    var body: some View {
+        GlassAccessoryCard(onTap: {
+            guard presentation.snapshot.isActionable else { return }
+            onTap()
+        }) {
+            leadingMarker
+        } header: {
+            headerRow
+        } summary: {
+            summaryRow
+        } trailing: {
+            trailingContent
+        }
+        .opacity(presentation.snapshot.isActionable ? 1 : 0.94)
+        .accessibilityLabel(presentation.snapshot.title)
+        .accessibilityValue(presentation.snapshot.status.label)
+        .accessibilityHint(presentation.snapshot.accessibilityHint)
+    }
+
+    private var leadingMarker: some View {
+        ZStack {
+            Circle()
+                .fill(presentation.snapshot.status.tint.opacity(0.1))
+                .frame(width: 22, height: 22)
+
+            Circle()
+                .fill(presentation.snapshot.status.tint)
+                .frame(width: 7, height: 7)
+        }
+    }
+
+    private var headerRow: some View {
+        HStack(alignment: .center, spacing: 6) {
+            Text(presentation.snapshot.title)
+                .font(AppFont.mono(.caption2))
+                .foregroundStyle(.secondary)
+
+            Circle()
+                .fill(Color(.separator).opacity(0.6))
+                .frame(width: 3, height: 3)
+
+            Text(presentation.snapshot.status.label)
+                .font(AppFont.caption(weight: .regular))
+                .foregroundStyle(presentation.snapshot.status.tint)
+        }
+    }
+
+    private var summaryRow: some View {
+        Text(presentation.snapshot.summary)
+            .font(AppFont.subheadline(weight: .medium))
+            .foregroundStyle(.primary)
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
+    }
+
+    private var trailingContent: some View {
+        Group {
+            if let actionTitle = presentation.snapshot.actionTitle {
+                Text(actionTitle)
+                    .font(AppFont.caption(weight: .semibold))
+                    .foregroundStyle(presentation.snapshot.status.tint)
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(presentation.snapshot.status.tint)
+            }
+        }
+        .frame(minWidth: 58, alignment: .trailing)
+    }
+}
+
+private struct VoiceSetupSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Voice setup")
+                        .font(AppFont.title2(weight: .semibold))
+
+                    Text("Open ChatGPT on the paired Mac, sign in there if needed, then return to Remodex and try the microphone again.")
+                        .font(AppFont.body())
+                        .foregroundStyle(.primary)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        setupStep(number: "1", text: "Keep the Remodex bridge running on your Mac.")
+                        setupStep(number: "2", text: "Open ChatGPT on that Mac and sign in again if prompted.")
+                        setupStep(number: "3", text: "Come back here and tap the microphone again.")
+                    }
+                    .padding(.top, 4)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+            }
+            .background(Color(.systemBackground))
+            .navigationTitle("Voice setup")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func setupStep(number: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number)
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(Color(.plan))
+                .frame(width: 22, height: 22)
+                .background(Color(.plan).opacity(0.12), in: Circle())
+
+            Text(text)
+                .font(AppFont.body())
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+        }
     }
 }
 

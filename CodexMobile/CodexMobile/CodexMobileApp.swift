@@ -52,6 +52,16 @@ private struct CodexDebugLaunchConfiguration {
     }
 }
 
+private struct CodexProcessLaunchConfiguration {
+    let isRunningUnitTests: Bool
+
+    static let current = Self(environment: ProcessInfo.processInfo.environment)
+
+    init(environment: [String: String]) {
+        isRunningUnitTests = environment["XCTestConfigurationFilePath"] != nil
+    }
+}
+
 private struct CodexUITestTimelineFixtureView: View {
     private static let fixtureThreadID = "codex-ui-tests-thread"
 
@@ -263,21 +273,28 @@ struct CodexMobileApp: App {
     @State private var codexService: CodexService
     @State private var subscriptionService: SubscriptionService
     private let uiTestLaunchConfiguration: CodexUITestLaunchConfiguration
+    private let processLaunchConfiguration: CodexProcessLaunchConfiguration
     private let shouldSkipRevenueCatBootstrap: Bool
 
     init() {
         let uiTestLaunchConfiguration = CodexUITestLaunchConfiguration.current
+        let processLaunchConfiguration = CodexProcessLaunchConfiguration.current
         self.uiTestLaunchConfiguration = uiTestLaunchConfiguration
-        let shouldSkipRevenueCatBootstrap = SubscriptionService.usesLocalDevelopmentBypassForCurrentBuild
-        self.shouldSkipRevenueCatBootstrap = shouldSkipRevenueCatBootstrap
+        self.processLaunchConfiguration = processLaunchConfiguration
         CodexDebugLaunchConfiguration.current.apply()
+        let shouldSkipRevenueCatBootstrap =
+            processLaunchConfiguration.isRunningUnitTests
+            || SubscriptionService.shouldBypassSubscriptionGatesForCurrentBuild
+        self.shouldSkipRevenueCatBootstrap = shouldSkipRevenueCatBootstrap
 
-        if !uiTestLaunchConfiguration.isEnabled, !shouldSkipRevenueCatBootstrap {
+        if !uiTestLaunchConfiguration.isEnabled,
+           !processLaunchConfiguration.isRunningUnitTests,
+           !shouldSkipRevenueCatBootstrap {
             Self.configureRevenueCatIfAvailable()
         }
 
         let service = CodexService()
-        if !uiTestLaunchConfiguration.isEnabled {
+        if !uiTestLaunchConfiguration.isEnabled, !processLaunchConfiguration.isRunningUnitTests {
             service.configureNotifications()
         }
         _codexService = State(initialValue: service)

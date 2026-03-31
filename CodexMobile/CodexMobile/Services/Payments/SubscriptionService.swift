@@ -54,6 +54,7 @@ final class SubscriptionService {
 
     private let defaults: UserDefaults
     private let bundleIdentifier: String
+    private var pricingRuntimeSupported: Bool
     // Keep the task handle nonisolated so `deinit` can cancel it under Swift 6 isolation rules.
     nonisolated(unsafe) private var customerInfoUpdatesTask: Task<Void, Never>?
     private var isBootstrapping = false
@@ -84,17 +85,48 @@ final class SubscriptionService {
         usesLocalDevelopmentBypass(bundleIdentifier: Bundle.main.bundleIdentifier ?? "")
     }
 
+    static var shouldBypassSubscriptionGatesForCurrentBuild: Bool {
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? ""
+        // Local/open-source builds should not strand the user behind a paywall
+        // when the app bundle does not ship working subscription pricing.
+        let pricingUnavailable = AppEnvironment.revenueCatPublicAPIKey == nil
+#if DEBUG
+        return UserDefaults.standard.bool(forKey: debugForceProAccessDefaultsKey)
+            || usesLocalDevelopmentBypass(bundleIdentifier: bundleIdentifier)
+            || pricingUnavailable
+#else
+        pricingUnavailable
+#endif
+    }
+
     var isUsingLocalDevelopmentProOverride: Bool {
-        isLocalDevelopmentProOverrideEnabled
+        isSubscriptionBypassEnabled
     }
 
     var shouldBypassSubscriptionGates: Bool {
-        isLocalDevelopmentProOverrideEnabled
+        isSubscriptionBypassEnabled
     }
 
-    init(defaults: UserDefaults = .standard, bundleIdentifier: String? = nil) {
+    var subscriptionBypassStatusMessage: String? {
+        guard isSubscriptionBypassEnabled else {
+            return nil
+        }
+
+        if shouldAutoUnlockBecausePricingIsUnavailable {
+            return "Pro access is enabled for this build because subscription pricing is unavailable here, so subscription paywalls are bypassed."
+        }
+
+        return "Pro access is enabled for this build because a local or debug override is active, so subscription paywalls are bypassed."
+    }
+
+    init(
+        defaults: UserDefaults = .standard,
+        bundleIdentifier: String? = nil,
+        pricingRuntimeSupported: Bool? = nil
+    ) {
         self.defaults = defaults
         self.bundleIdentifier = bundleIdentifier ?? (Bundle.main.bundleIdentifier ?? "")
+        self.pricingRuntimeSupported = pricingRuntimeSupported ?? (AppEnvironment.revenueCatPublicAPIKey != nil)
         restoreCachedStateIfAvailable()
         applyLocalDevelopmentOverrideIfNeeded()
         startCustomerInfoObserverIfConfigured()
@@ -125,19 +157,22 @@ final class SubscriptionService {
         lastErrorMessage = nil
 
         guard Purchases.isConfigured else {
-            if !hadOptimisticAccess {
-                bootstrapState = .failed
-                lastErrorMessage = "Subscriptions are unavailable right now."
-            }
-            isLoading = false
+            markPricingUnavailableAsUnsupported()
             return
         }
 
         async let offeringsTask = refreshOfferings(updatesLastError: !hadOptimisticAccess)
         await refreshCustomerInfo(updatesLastError: !hadOptimisticAccess)
 
+        if applyLocalDevelopmentOverrideIfNeeded() {
+            return
+        }
+
         bootstrapState = (customerInfo != nil || hadOptimisticAccess) ? .ready : .failed
         await offeringsTask
+        if applyLocalDevelopmentOverrideIfNeeded() {
+            return
+        }
         isLoading = false
     }
 
@@ -254,7 +289,7 @@ final class SubscriptionService {
 private extension SubscriptionService {
     @discardableResult
     func applyLocalDevelopmentOverrideIfNeeded() -> Bool {
-        guard isLocalDevelopmentProOverrideEnabled else {
+        guard isSubscriptionBypassEnabled else {
             return false
         }
 
@@ -277,7 +312,11 @@ private extension SubscriptionService {
         return true
     }
 
-    var isLocalDevelopmentProOverrideEnabled: Bool {
+    var isSubscriptionBypassEnabled: Bool {
+        isExplicitLocalDevelopmentProOverrideEnabled || shouldAutoUnlockBecausePricingIsUnavailable
+    }
+
+    var isExplicitLocalDevelopmentProOverrideEnabled: Bool {
 #if DEBUG
         defaults.bool(forKey: Self.debugForceProAccessDefaultsKey)
             || Self.usesLocalDevelopmentBypass(bundleIdentifier: bundleIdentifier)
@@ -286,8 +325,19 @@ private extension SubscriptionService {
 #endif
     }
 
+    var shouldAutoUnlockBecausePricingIsUnavailable: Bool {
+        !pricingRuntimeSupported
+    }
+
+    // Treat "pricing unavailable" as an unsupported local build configuration and
+    // immediately unlock the app instead of leaving a non-functional paywall visible.
+    func markPricingUnavailableAsUnsupported() {
+        pricingRuntimeSupported = false
+        _ = applyLocalDevelopmentOverrideIfNeeded()
+    }
+
     func startCustomerInfoObserverIfConfigured() {
-        guard !isLocalDevelopmentProOverrideEnabled,
+        guard !isSubscriptionBypassEnabled,
               customerInfoUpdatesTask == nil,
               Purchases.isConfigured else {
             return
@@ -305,7 +355,7 @@ private extension SubscriptionService {
     }
 
     func handleCustomerInfoStreamUpdate(_ info: CustomerInfo) {
-        guard !isLocalDevelopmentProOverrideEnabled else {
+        guard !isSubscriptionBypassEnabled else {
             return
         }
         applyCustomerInfo(info)
@@ -317,13 +367,19 @@ private extension SubscriptionService {
             let offerings = try await Purchases.shared.offerings()
             let preferredOffering = offerings.current
                 ?? offerings.offering(identifier: AppEnvironment.revenueCatDefaultOfferingID)
+            let normalizedOptions = normalizedPackageOptions(from: preferredOffering)
+            guard preferredOffering != nil, !normalizedOptions.isEmpty else {
+                markPricingUnavailableAsUnsupported()
+                return
+            }
             currentOffering = preferredOffering
-            packageOptions = normalizedPackageOptions(from: preferredOffering)
+            packageOptions = normalizedOptions
             lastErrorMessage = nil
         } catch {
             if updatesLastError {
                 lastErrorMessage = userFacingMessage(for: error)
             }
+            markPricingUnavailableAsUnsupported()
         }
     }
 
@@ -339,7 +395,7 @@ private extension SubscriptionService {
     }
 
     func applyCustomerInfo(_ info: CustomerInfo) {
-        guard !isLocalDevelopmentProOverrideEnabled else {
+        guard !isSubscriptionBypassEnabled else {
             _ = applyLocalDevelopmentOverrideIfNeeded()
             return
         }

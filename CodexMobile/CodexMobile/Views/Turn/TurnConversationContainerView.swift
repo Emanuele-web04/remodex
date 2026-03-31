@@ -16,7 +16,7 @@ struct TurnConversationContainerView: View {
     let stoppedTurnIDs: Set<String>
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
     let errorMessage: String?
-    let connectionRecoveryAccessory: AnyView?
+    let composerRecoveryAccessory: AnyView?
     let shouldAnchorToAssistantResponse: Binding<Bool>
     let isScrolledToBottom: Binding<Bool>
     let isComposerFocused: Bool
@@ -32,12 +32,68 @@ struct TurnConversationContainerView: View {
     let onTapOutsideComposer: () -> Void
 
     @State private var isShowingPinnedPlanSheet = false
-    @State private var cachedMessageLayout = TimelineMessageLayout.empty
+    @State private var isShowingPinnedStructuredUserInputSheet = false
+    @State private var lastAutoPresentedStructuredUserInputMessageID: String?
+    @State private var cachedMessageLayout = TurnConversationLayout.empty
     @State private var lastMessageLayoutThreadID: String?
     @State private var lastMessageLayoutToken: Int = -1
 
-    // Falls back to a one-off rebuild during first render, then keeps later renders on cached derived state.
-    private var messageLayout: TimelineMessageLayout {
+    init(
+        threadID: String,
+        messages: [CodexMessage],
+        timelineChangeToken: Int,
+        activeTurnID: String?,
+        isThreadRunning: Bool,
+        latestTurnTerminalState: CodexTurnTerminalState?,
+        stoppedTurnIDs: Set<String>,
+        assistantRevertStatesByMessageID: [String: AssistantRevertPresentation],
+        errorMessage: String?,
+        connectionRecoveryAccessory: AnyView?,
+        shouldAnchorToAssistantResponse: Binding<Bool>,
+        isScrolledToBottom: Binding<Bool>,
+        isComposerFocused: Bool,
+        isComposerAutocompletePresented: Bool,
+        emptyState: AnyView,
+        composer: AnyView,
+        repositoryLoadingToastOverlay: AnyView,
+        usageToastOverlay: AnyView,
+        isRepositoryLoadingToastVisible: Bool,
+        onRetryUserMessage: @escaping (String) -> Void,
+        onTapAssistantRevert: @escaping (CodexMessage) -> Void,
+        onTapSubagent: @escaping (CodexSubagentThreadPresentation) -> Void,
+        onTapOutsideComposer: @escaping () -> Void
+    ) {
+        self.threadID = threadID
+        self.messages = messages
+        self.timelineChangeToken = timelineChangeToken
+        self.activeTurnID = activeTurnID
+        self.isThreadRunning = isThreadRunning
+        self.latestTurnTerminalState = latestTurnTerminalState
+        self.stoppedTurnIDs = stoppedTurnIDs
+        self.assistantRevertStatesByMessageID = assistantRevertStatesByMessageID
+        self.errorMessage = errorMessage
+        self.composerRecoveryAccessory = connectionRecoveryAccessory
+        self.shouldAnchorToAssistantResponse = shouldAnchorToAssistantResponse
+        self.isScrolledToBottom = isScrolledToBottom
+        self.isComposerFocused = isComposerFocused
+        self.isComposerAutocompletePresented = isComposerAutocompletePresented
+        self.emptyState = emptyState
+        self.composer = composer
+        self.repositoryLoadingToastOverlay = repositoryLoadingToastOverlay
+        self.usageToastOverlay = usageToastOverlay
+        self.isRepositoryLoadingToastVisible = isRepositoryLoadingToastVisible
+        self.onRetryUserMessage = onRetryUserMessage
+        self.onTapAssistantRevert = onTapAssistantRevert
+        self.onTapSubagent = onTapSubagent
+        self.onTapOutsideComposer = onTapOutsideComposer
+
+        let initialLayout = Self.buildMessageLayout(from: messages)
+        _cachedMessageLayout = State(initialValue: initialLayout)
+        _lastMessageLayoutThreadID = State(initialValue: threadID)
+        _lastMessageLayoutToken = State(initialValue: timelineChangeToken)
+    }
+
+    private var messageLayout: TurnConversationLayout {
         guard lastMessageLayoutThreadID == threadID,
               lastMessageLayoutToken == timelineChangeToken else {
             return Self.buildMessageLayout(from: messages)
@@ -45,20 +101,56 @@ struct TurnConversationContainerView: View {
         return cachedMessageLayout
     }
 
-    // Avoids showing the generic "new chat" empty state behind a pinned plan-only accessory.
+    // Avoids showing the generic "new chat" empty state behind a pinned accessory-only conversation.
     private var timelineEmptyState: AnyView {
-        guard messageLayout.pinnedTaskPlanMessage != nil,
-              messageLayout.timelineMessages.isEmpty else {
+        let layout = messageLayout
+        guard layout.timelineMessages.isEmpty else {
             return emptyState
         }
-        return AnyView(
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        )
+
+        if let pinnedStructuredUserInputMessage = layout.pinnedStructuredUserInputMessage {
+            let questionCount = pinnedStructuredUserInputMessage.structuredUserInputRequest?.questions.count ?? 0
+            let title = questionCount == 1 ? "One answer needed" : "Answers needed"
+            let summary: String
+            if questionCount <= 0 {
+                summary = "Codex is waiting for your input before it can continue."
+            } else if questionCount == 1 {
+                summary = "Codex is waiting for one answer before it can continue."
+            } else {
+                summary = "Codex is waiting for \(questionCount) answers before it can continue."
+            }
+            return AnyView(
+                AccessoryBackedEmptyState(
+                    systemImage: "questionmark.circle",
+                    tint: Color(.plan),
+                    title: title,
+                    summary: summary,
+                    detail: "Open the prompt above the composer to review the questions and reply."
+                )
+            )
+        }
+
+        if let pinnedTaskPlanMessage = layout.pinnedTaskPlanMessage {
+            let snapshot = PlanAccessorySnapshot(message: pinnedTaskPlanMessage)
+            let summary = snapshot.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AnyView(
+                AccessoryBackedEmptyState(
+                    systemImage: snapshot.status.symbolName,
+                    tint: snapshot.status.tint,
+                    title: snapshot.status == .inProgress ? "Plan in progress" : "Plan ready",
+                    summary: summary.isEmpty ? "Codex has prepared a plan for this chat." : summary,
+                    detail: "Open the plan card above the composer to review the current steps."
+                )
+            )
+        }
+
+        return emptyState
     }
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
+        let messageLayout = self.messageLayout
+
         ZStack(alignment: .top) {
             TurnTimelineView(
                 threadID: threadID,
@@ -71,7 +163,7 @@ struct TurnConversationContainerView: View {
                 assistantRevertStatesByMessageID: assistantRevertStatesByMessageID,
                 isRetryAvailable: !isThreadRunning,
                 errorMessage: errorMessage,
-                hidesErrorMessage: connectionRecoveryAccessory != nil,
+                hidesErrorMessage: composerRecoveryAccessory != nil,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
                 isScrolledToBottom: isScrolledToBottom,
                 isComposerFocused: isComposerFocused,
@@ -95,16 +187,31 @@ struct TurnConversationContainerView: View {
         }
         .onAppear {
             rebuildMessageLayoutIfNeeded(force: true)
+            autoPresentStructuredUserInputIfNeeded()
         }
         .onChange(of: threadID) { _, _ in
+            lastAutoPresentedStructuredUserInputMessageID = nil
             rebuildMessageLayoutIfNeeded(force: true)
+            autoPresentStructuredUserInputIfNeeded()
         }
         .onChange(of: timelineChangeToken) { _, _ in
             rebuildMessageLayoutIfNeeded()
+            autoPresentStructuredUserInputIfNeeded()
         }
         .onChange(of: messageLayout.pinnedTaskPlanMessage?.id) { _, newValue in
             if newValue == nil {
                 isShowingPinnedPlanSheet = false
+            }
+        }
+        .onChange(of: messageLayout.pinnedStructuredUserInputMessage?.id) { _, newValue in
+            guard let newValue else {
+                isShowingPinnedStructuredUserInputSheet = false
+                return
+            }
+
+            if lastAutoPresentedStructuredUserInputMessageID != newValue {
+                lastAutoPresentedStructuredUserInputMessageID = newValue
+                isShowingPinnedStructuredUserInputSheet = true
             }
         }
         .sheet(isPresented: $isShowingPinnedPlanSheet) {
@@ -112,12 +219,23 @@ struct TurnConversationContainerView: View {
                 PlanExecutionSheet(message: pinnedTaskPlanMessage)
             }
         }
+        .sheet(isPresented: $isShowingPinnedStructuredUserInputSheet) {
+            if let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage {
+                StructuredUserInputSheet(
+                    requestMessage: pinnedStructuredUserInputMessage,
+                    planMessage: messageLayout.pinnedTaskPlanMessage
+                )
+            }
+        }
     }
 
     // Keeps the active plan discoverable without covering the message timeline.
     private var composerWithPinnedPlanAccessory: some View {
-        VStack(spacing: 8) {
-            if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
+        let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage
+        let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage
+
+        return VStack(spacing: 8) {
+            if let pinnedTaskPlanMessage {
                 PlanExecutionAccessory(message: pinnedTaskPlanMessage) {
                     isShowingPinnedPlanSheet = true
                 }
@@ -126,15 +244,24 @@ struct TurnConversationContainerView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            if let connectionRecoveryAccessory {
-                connectionRecoveryAccessory
+            if let pinnedStructuredUserInputMessage {
+                StructuredUserInputAccessory(message: pinnedStructuredUserInputMessage) {
+                    isShowingPinnedStructuredUserInputSheet = true
+                }
+                .padding(.horizontal, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            if let composerRecoveryAccessory {
+                composerRecoveryAccessory
                     .padding(.horizontal, 12)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             composer
         }
-        .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedTaskPlanMessage?.id)
+        .animation(.easeInOut(duration: 0.18), value: pinnedTaskPlanMessage?.id)
+        .animation(.easeInOut(duration: 0.18), value: pinnedStructuredUserInputMessage?.id)
     }
 
     // Rebuilds the plan/timeline split only when the thread or timeline token really changed.
@@ -150,15 +277,31 @@ struct TurnConversationContainerView: View {
         cachedMessageLayout = Self.buildMessageLayout(from: messages)
     }
 
+    private func autoPresentStructuredUserInputIfNeeded() {
+        guard let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage else {
+            return
+        }
+
+        guard lastAutoPresentedStructuredUserInputMessageID != pinnedStructuredUserInputMessage.id else {
+            return
+        }
+
+        lastAutoPresentedStructuredUserInputMessageID = pinnedStructuredUserInputMessage.id
+        isShowingPinnedStructuredUserInputSheet = true
+    }
+
     // Separates pinned plan content from renderable timeline rows in one pass.
-    private static func buildMessageLayout(from messages: [CodexMessage]) -> TimelineMessageLayout {
+    static func buildMessageLayout(from messages: [CodexMessage]) -> TurnConversationLayout {
         var timelineMessages: [CodexMessage] = []
         timelineMessages.reserveCapacity(messages.count)
         var pinnedTaskPlanMessage: CodexMessage?
+        var pinnedStructuredUserInputMessage: CodexMessage?
 
         for message in messages {
             if message.shouldDisplayPinnedPlanAccessory {
                 pinnedTaskPlanMessage = message
+            } else if message.shouldDisplayPinnedStructuredUserInputAccessory {
+                pinnedStructuredUserInputMessage = message
             } else if message.isPlanSystemMessage {
                 continue
             } else {
@@ -166,26 +309,35 @@ struct TurnConversationContainerView: View {
             }
         }
 
-        return TimelineMessageLayout(
+        return TurnConversationLayout(
             timelineMessages: timelineMessages,
-            pinnedTaskPlanMessage: pinnedTaskPlanMessage
+            pinnedTaskPlanMessage: pinnedTaskPlanMessage,
+            pinnedStructuredUserInputMessage: pinnedStructuredUserInputMessage
         )
     }
 }
 
-private struct TimelineMessageLayout: Equatable {
+struct TurnConversationLayout: Equatable {
     let timelineMessages: [CodexMessage]
     let pinnedTaskPlanMessage: CodexMessage?
+    let pinnedStructuredUserInputMessage: CodexMessage?
 
-    static let empty = TimelineMessageLayout(
+    static let empty = TurnConversationLayout(
         timelineMessages: [],
-        pinnedTaskPlanMessage: nil
+        pinnedTaskPlanMessage: nil,
+        pinnedStructuredUserInputMessage: nil
     )
 }
 
 extension CodexMessage {
     var isPlanSystemMessage: Bool {
         role == .system && kind == .plan
+    }
+
+    var shouldDisplayPinnedStructuredUserInputAccessory: Bool {
+        role == .system
+            && kind == .userInputPrompt
+            && structuredUserInputRequest != nil
     }
 
     // Hides terminal 3/3-style plans so only genuinely active plans stay pinned above the composer.
@@ -204,5 +356,120 @@ extension CodexMessage {
         }
 
         return steps.contains { $0.status != .completed }
+    }
+}
+
+private struct AccessoryBackedEmptyState: View {
+    let systemImage: String
+    let tint: Color
+    let title: String
+    let summary: String
+    let detail: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 14) {
+                Image(systemName: systemImage)
+                    .font(AppFont.system(size: 24, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 56, height: 56)
+                    .background(
+                        Circle()
+                            .fill(tint.opacity(0.12))
+                    )
+
+                Text(title)
+                    .font(AppFont.title3(weight: .semibold))
+                    .multilineTextAlignment(.center)
+
+                Text(summary)
+                    .font(AppFont.body())
+                    .foregroundStyle(.primary.opacity(0.9))
+                    .multilineTextAlignment(.center)
+
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: 320)
+            .padding(.horizontal, 24)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+private struct StructuredUserInputAccessory: View {
+    let message: CodexMessage
+    let onTap: () -> Void
+
+    private var questionCount: Int {
+        message.structuredUserInputRequest?.questions.count ?? 0
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            PlanModeCardContainer(title: "Input needed", showsProgress: false) {
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(questionCount == 1 ? "Codex needs one answer" : "Codex needs \(questionCount) answers")
+                            .font(AppFont.subheadline(weight: .medium))
+                            .foregroundStyle(.primary)
+
+                        Text("Open the prompt to review the plan and respond.")
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: "chevron.up.circle.fill")
+                        .font(AppFont.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Color(.plan))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct StructuredUserInputSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let requestMessage: CodexMessage
+    let planMessage: CodexMessage?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let planMessage {
+                        PlanSystemCard(message: planMessage)
+                    }
+
+                    if let request = requestMessage.structuredUserInputRequest {
+                        StructuredUserInputCard(request: request)
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color(.systemBackground))
+            .navigationTitle("Questions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }

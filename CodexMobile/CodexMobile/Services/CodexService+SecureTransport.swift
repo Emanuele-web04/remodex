@@ -189,6 +189,7 @@ extension CodexService {
             trustMac(
                 deviceId: macDeviceId,
                 publicKey: serverHello.macIdentityPublicKey,
+                cloudAsyncSharedSecret: relayCloudAsyncSharedSecret,
                 relayURL: normalizedRelayURL,
                 displayName: trustedMac?.displayName
             )
@@ -262,12 +263,14 @@ extension CodexService {
         SecureStore.writeString(payload.relay, for: CodexSecureKeys.relayUrl)
         SecureStore.writeString(payload.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
+        SecureStore.writeString(payload.cloudAsyncSharedSecret ?? "", for: CodexSecureKeys.relayCloudAsyncSharedSecret)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = payload.sessionId
         relayUrl = payload.relay
         relayMacDeviceId = payload.macDeviceId
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
+        relayCloudAsyncSharedSecret = payload.cloudAsyncSharedSecret
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
         shouldForceQRBootstrapOnNextHandshake = true
@@ -290,7 +293,7 @@ extension CodexService {
             }
         }
 
-        if secureConnectionState == .rePairRequired || secureConnectionState == .updateRequired {
+        if secureConnectionState == .updateRequired {
             return
         }
 
@@ -368,6 +371,11 @@ extension CodexService {
         }
         rememberResolvedTrustedSession(resolved, relayURL: relayURL)
     }
+
+    func secureControlTimeoutError(for kind: String) -> CodexSecureTransportError {
+        let timeoutMessage = "Timed out waiting for the secure Remodex \(kind) message."
+        return .timedOut(timeoutMessage)
+    }
 }
 
 private extension CodexService {
@@ -402,7 +410,6 @@ private extension CodexService {
         }
 
         let waiterID = UUID()
-        let timeoutMessage = "Timed out waiting for the secure Remodex \(kind) message."
 
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
             pendingSecureControlContinuations[kind, default: []].append(
@@ -415,7 +422,7 @@ private extension CodexService {
                 self.resumePendingSecureControlWaiterIfNeeded(
                     kind: kind,
                     waiterID: waiterID,
-                    result: .failure(CodexSecureTransportError.timedOut(timeoutMessage))
+                    result: .failure(self.secureControlTimeoutError(for: kind))
                 )
             }
         }
@@ -530,13 +537,20 @@ private extension CodexService {
         }
     }
 
-    func trustMac(deviceId: String, publicKey: String, relayURL: String?, displayName: String?) {
+    func trustMac(
+        deviceId: String,
+        publicKey: String,
+        cloudAsyncSharedSecret: String?,
+        relayURL: String?,
+        displayName: String?
+    ) {
         let existing = trustedMacRegistry.records[deviceId]
         trustedMacRegistry.records[deviceId] = CodexTrustedMacRecord(
             macDeviceId: deviceId,
             macIdentityPublicKey: publicKey,
             lastPairedAt: Date(),
             relayURL: relayURL ?? existing?.relayURL,
+            cloudAsyncSharedSecret: cloudAsyncSharedSecret ?? existing?.cloudAsyncSharedSecret,
             displayName: displayName ?? existing?.displayName,
             lastResolvedSessionId: existing?.lastResolvedSessionId,
             lastResolvedAt: existing?.lastResolvedAt,
@@ -647,15 +661,19 @@ private extension CodexService {
     }
 
     private func rememberResolvedTrustedSession(_ resolved: CodexTrustedSessionResolveResponse, relayURL: String) {
+        let resolvedCloudAsyncSharedSecret = relayCloudAsyncSharedSecret
+            ?? trustedMacRegistry.records[resolved.macDeviceId]?.cloudAsyncSharedSecret
         SecureStore.writeString(resolved.sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(relayURL, for: CodexSecureKeys.relayUrl)
         SecureStore.writeString(resolved.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(resolved.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
+        SecureStore.writeString(resolvedCloudAsyncSharedSecret ?? "", for: CodexSecureKeys.relayCloudAsyncSharedSecret)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         relaySessionId = resolved.sessionId
         relayUrl = relayURL
         relayMacDeviceId = resolved.macDeviceId
         relayMacIdentityPublicKey = resolved.macIdentityPublicKey
+        relayCloudAsyncSharedSecret = resolvedCloudAsyncSharedSecret
         relayProtocolVersion = codexSecureProtocolVersion
         shouldForceQRBootstrapOnNextHandshake = false
         trustedReconnectFailureCount = 0
@@ -666,6 +684,7 @@ private extension CodexService {
 
         if var trustedMac = trustedMacRegistry.records[resolved.macDeviceId] {
             trustedMac.relayURL = relayURL
+            trustedMac.cloudAsyncSharedSecret = resolvedCloudAsyncSharedSecret ?? trustedMac.cloudAsyncSharedSecret
             trustedMac.displayName = resolved.displayName ?? trustedMac.displayName
             trustedMac.lastResolvedSessionId = resolved.sessionId
             trustedMac.lastResolvedAt = Date()

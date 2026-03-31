@@ -191,11 +191,12 @@ final class ContentViewModel {
         defer { isRunningAutoReconnect = false }
 
         var attempt = 0
-
-        let maxAttempts = reconnectAttemptLimitOverride ?? 50
-
-        // Keep retryable reconnects alive until the socket recovers or the pairing becomes invalid.
-        while codex.shouldAutoReconnectOnForeground, attempt < maxAttempts {
+        // The test-only attempt limit bounds the loop without mutating reconnect intent.
+        while codex.shouldAutoReconnectOnForeground {
+            if let reconnectAttemptLimitOverride,
+               attempt >= reconnectAttemptLimitOverride {
+                return
+            }
 
             guard let fullURL = await preferredReconnectURL(codex: codex) else {
                 codex.shouldAutoReconnectOnForeground = false
@@ -277,13 +278,6 @@ final class ContentViewModel {
                 )
             }
         }
-
-        // Exhausted all attempts — stop retrying but keep the saved pairing for next foreground cycle.
-        if attempt >= maxAttempts {
-            codex.shouldAutoReconnectOnForeground = false
-            codex.connectionRecoveryState = .idle
-            codex.lastErrorMessage = "Could not reconnect. Tap Reconnect to try again."
-        }
     }
 }
 
@@ -300,11 +294,23 @@ extension ContentViewModel {
             return
         }
 
-        try await codex.connect(
-            serverURL: serverURL,
-            token: "",
-            role: "iphone"
-        )
+        do {
+            try await codex.connect(
+                serverURL: serverURL,
+                token: "",
+                role: "iphone"
+            )
+        } catch {
+            if codex.shouldAttemptCloudAsyncFallback(after: error, serverURL: serverURL) {
+                do {
+                    try await codex.activateCloudAsyncFallback(serverURL: serverURL)
+                    return
+                } catch let fallbackError {
+                    throw fallbackError
+                }
+            }
+            throw error
+        }
     }
 
     func connectWithAutoRecovery(

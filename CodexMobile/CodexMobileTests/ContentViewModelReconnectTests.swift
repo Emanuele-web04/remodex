@@ -376,11 +376,38 @@ final class ContentViewModelReconnectTests: XCTestCase {
         XCTAssertFalse(viewModel.isAttemptingManualReconnect)
     }
 
+    func testConnectSurfacesCloudFallbackFailureInsteadOfOriginalRelayTimeout() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        let expectedError = CodexCloudAsyncTransportError.unavailable(
+            "Could not reach Convex for off-LAN async messaging."
+        )
+
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+        service.connectAttemptOverride = { _, _, _, _ in
+            throw NWError.posix(.ETIMEDOUT)
+        }
+        service.cloudAsyncFallbackActivationOverride = { _, _ in
+            throw expectedError
+        }
+
+        do {
+            try await viewModel.connect(codex: service, serverURL: "ws://192.168.1.31:9000/relay/session")
+            XCTFail("Expected fallback failure to be surfaced.")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, expectedError.localizedDescription)
+        }
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "ContentViewModelReconnectTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
         let service = CodexService(defaults: defaults)
+        service.connectAttemptOverride = nil
+        service.cloudAsyncFallbackActivationOverride = nil
         Self.retainedServices.append(service)
         return service
     }

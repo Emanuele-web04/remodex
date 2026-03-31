@@ -196,6 +196,193 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testSecureTransportTimeoutIsRetryableForAutoRecovery() {
+        let service = makeService()
+        let error = CodexSecureTransportError.timedOut(
+            "Timed out waiting for the secure Remodex serverHello message."
+        )
+
+        XCTAssertTrue(service.isRecoverableTransientConnectionError(error))
+    }
+
+    func testCloudAsyncFallbackIsBlockedWhileLocalRelayPathIsAvailable() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+        service.localRelayPathAvailabilityOverride = { true }
+
+        XCTAssertFalse(
+            service.shouldAttemptCloudAsyncFallback(
+                after: NWError.posix(.ETIMEDOUT),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsNotBlockedByGenericLocalRelayPathMonitorState() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+        service.hasResolvedLocalRelayPathAvailability = true
+        service.hasActiveLocalRelayPath = true
+
+        XCTAssertTrue(
+            service.shouldAttemptCloudAsyncFallback(
+                after: NWError.posix(.ETIMEDOUT),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsAllowedWhenLocalNetworkPermissionIsDenied() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+        service.localNetworkAuthorizationStatus = .denied
+
+        XCTAssertTrue(
+            service.shouldAttemptCloudAsyncFallback(
+                after: NWError.posix(.ETIMEDOUT),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsAllowedForLocalRelayTimeoutWhenOffLAN() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+        service.localRelayPathAvailabilityOverride = { false }
+
+        XCTAssertTrue(
+            service.shouldAttemptCloudAsyncFallback(
+                after: NWError.posix(.ETIMEDOUT),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsBlockedForSecureHandshakeFailures() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+
+        XCTAssertFalse(
+            service.shouldAttemptCloudAsyncFallback(
+                after: CodexSecureTransportError.invalidHandshake("bad pairing"),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsAllowedForConnectionRefusedOnLocalRelayHost() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+
+        XCTAssertTrue(
+            service.shouldAttemptCloudAsyncFallback(
+                after: NWError.posix(.ECONNREFUSED),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsBlockedForSavedSessionCloseCode4002() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+
+        XCTAssertFalse(
+            service.shouldAttemptCloudAsyncFallback(
+                after: CodexServiceError.invalidInput("WebSocket closed during connect (4002)"),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsBlockedForNonLocalRelayHosts() {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+
+        XCTAssertFalse(
+            service.shouldAttemptCloudAsyncFallback(
+                after: NWError.posix(.ETIMEDOUT),
+                serverURL: "wss://relay.example/relay/session"
+            )
+        )
+    }
+
+    func testHandleReceiveErrorResetsTransportModeToDisconnected() {
+        let service = makeService()
+        service.transportMode = .liveRelay
+        service.isConnected = true
+        service.isInitialized = true
+
+        service.handleReceiveError(NWError.posix(.ECONNRESET))
+
+        XCTAssertEqual(service.transportMode, .disconnected)
+        XCTAssertFalse(service.isConnected)
+        XCTAssertFalse(service.isInitialized)
+    }
+
+    func testCanonicalServerIdentityIgnoresRelaySessionPathComponent() {
+        let service = makeService()
+        let firstURL = URL(string: "ws://192.168.1.31:9000/relay/session-a")!
+        let secondURL = URL(string: "ws://192.168.1.31:9000/relay/session-b")!
+
+        XCTAssertEqual(service.canonicalServerIdentity(for: firstURL), "ws://192.168.1.31:9000/relay")
+        XCTAssertEqual(service.canonicalServerIdentity(for: secondURL), "ws://192.168.1.31:9000/relay")
+    }
+
+    func testConnectedEncryptedSessionSuppressesStaleSavedPairingTimeoutMessage() {
+        let service = makeService()
+        service.isConnected = true
+        service.connectionRecoveryState = .idle
+        service.secureConnectionState = .encrypted
+
+        XCTAssertTrue(
+            service.shouldSuppressConnectedConversationErrorMessage(
+                "The saved pairing timed out while waiting for the Mac. Scan a new QR code to reconnect."
+            )
+        )
+    }
+
+    func testConnectedTrustedMacSessionSuppressesStaleSavedPairingTimeoutMessage() {
+        let service = makeService()
+        service.isConnected = true
+        service.connectionRecoveryState = .idle
+        service.secureConnectionState = .trustedMac
+
+        XCTAssertTrue(
+            service.shouldSuppressConnectedConversationErrorMessage(
+                "The saved pairing timed out while waiting for the Mac. Scan a new QR code to reconnect."
+            )
+        )
+    }
+
+    func testConnectedEncryptedSessionDoesNotSuppressNonConnectionErrorMessage() {
+        let service = makeService()
+        service.isConnected = true
+        service.connectionRecoveryState = .idle
+        service.secureConnectionState = .encrypted
+
+        XCTAssertFalse(
+            service.shouldSuppressConnectedConversationErrorMessage(
+                "Only 8 images are allowed per message."
+            )
+        )
+    }
+
     func testPrepareForConnectionAttemptPreservesFreshQRHandshakeState() async {
         let service = makeService()
         let payload = CodexPairingQRPayload(
@@ -235,6 +422,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
         let service = CodexService(defaults: defaults)
+        service.localRelayPathAvailabilityOverride = nil
         Self.retainedServices.append(service)
         return service
     }

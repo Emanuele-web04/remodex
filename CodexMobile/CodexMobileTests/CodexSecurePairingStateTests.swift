@@ -10,6 +10,8 @@ import XCTest
 
 @MainActor
 final class CodexSecurePairingStateTests: XCTestCase {
+    private static var retainedServices: [CodexService] = []
+
     override func setUp() {
         super.setUp()
         clearStoredSecureRelayState()
@@ -21,7 +23,7 @@ final class CodexSecurePairingStateTests: XCTestCase {
     }
 
     func testRememberRelayPairingForcesFreshQRBootstrapEvenForTrustedMac() {
-        let service = CodexService()
+        let service = makeService()
         let macDeviceID = "mac-\(UUID().uuidString)"
         let originalPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
         let freshQRPublicKey = Data(repeating: 2, count: 32).base64EncodedString()
@@ -50,7 +52,7 @@ final class CodexSecurePairingStateTests: XCTestCase {
     }
 
     func testRememberRelayPairingShowsHandshakeStateForBrandNewMac() {
-        let service = CodexService()
+        let service = makeService()
         let freshQRPublicKey = Data(repeating: 4, count: 32).base64EncodedString()
 
         service.rememberRelayPairing(
@@ -69,21 +71,134 @@ final class CodexSecurePairingStateTests: XCTestCase {
         XCTAssertEqual(service.secureMacFingerprint, codexSecureFingerprint(for: freshQRPublicKey))
     }
 
-    func testResetSecureTransportStatePreservesRePairRequiredState() {
-        let service = CodexService()
+    func testRememberRelayPairingPersistsCloudAsyncSharedSecret() {
+        let service = makeService()
+        let sharedSecret = Data(repeating: 5, count: 32).base64EncodedString()
+
+        service.rememberRelayPairing(
+            CodexPairingQRPayload(
+                v: codexPairingQRVersion,
+                relay: "ws://relay.local/relay",
+                sessionId: "session-\(UUID().uuidString)",
+                macDeviceId: "mac-\(UUID().uuidString)",
+                macIdentityPublicKey: Data(repeating: 6, count: 32).base64EncodedString(),
+                cloudAsyncSharedSecret: sharedSecret,
+                expiresAt: Int64(Date().addingTimeInterval(60).timeIntervalSince1970 * 1000)
+            )
+        )
+
+        XCTAssertEqual(service.normalizedRelayCloudAsyncSharedSecret, sharedSecret)
+        XCTAssertEqual(
+            SecureStore.readString(for: CodexSecureKeys.relayCloudAsyncSharedSecret),
+            sharedSecret
+        )
+        XCTAssertTrue(service.hasCloudAsyncFallbackCredentials)
+    }
+
+    func testSecureServerHelloTimeoutStaysRecoverableForTrustedReconnectContext() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "wss://relay.local/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 7, count: 32).base64EncodedString(),
+            lastPairedAt: Date(),
+            relayURL: "wss://relay.local/relay"
+        )
+        service.secureConnectionState = .reconnecting
+        service.connectionRecoveryState = .retrying(attempt: 2, message: "Reconnecting...")
+        service.shouldAutoReconnectOnForeground = true
+
+        let error = service.secureControlTimeoutError(for: "serverHello")
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "Timed out waiting for the secure Remodex serverHello message."
+        )
+        XCTAssertEqual(service.secureConnectionState, .reconnecting)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 2, message: "Reconnecting..."))
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testSecureServerHelloTimeoutKeepsFreshQRBootstrapRecoverable() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.rememberRelayPairing(
+            CodexPairingQRPayload(
+                v: codexPairingQRVersion,
+                relay: "wss://relay.local/relay",
+                sessionId: "session-\(UUID().uuidString)",
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: Data(repeating: 9, count: 32).base64EncodedString(),
+                expiresAt: Int64(Date().addingTimeInterval(60).timeIntervalSince1970 * 1000)
+            )
+        )
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 10, count: 32).base64EncodedString(),
+            lastPairedAt: Date(),
+            relayURL: "wss://relay.local/relay"
+        )
+        service.connectionRecoveryState = .retrying(attempt: 2, message: "Reconnecting...")
+        service.shouldAutoReconnectOnForeground = true
+
+        let error = service.secureControlTimeoutError(for: "serverHello")
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "Timed out waiting for the secure Remodex serverHello message."
+        )
+        XCTAssertNotEqual(service.secureConnectionState, .rePairRequired)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 2, message: "Reconnecting..."))
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testNonServerHelloTimeoutKeepsGenericSecureTimeoutState() {
+        let service = makeService()
+
+        let error = service.secureControlTimeoutError(for: "secureReady")
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "Timed out waiting for the secure Remodex secureReady message."
+        )
+        XCTAssertNotEqual(service.secureConnectionState, .rePairRequired)
+        XCTAssertEqual(service.connectionRecoveryState, .idle)
+        XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testResetSecureTransportStateFallsBackToTrustedMacAfterRePairRequiredState() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
         service.relaySessionId = "session-\(UUID().uuidString)"
         service.relayUrl = "ws://relay.local/relay"
+        service.relayMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 11, count: 32).base64EncodedString(),
+            lastPairedAt: Date()
+        )
         service.secureConnectionState = .rePairRequired
         service.secureMacFingerprint = "ABC123"
 
         service.resetSecureTransportState()
 
-        XCTAssertEqual(service.secureConnectionState, .rePairRequired)
-        XCTAssertEqual(service.secureMacFingerprint, "ABC123")
+        XCTAssertEqual(service.secureConnectionState, .trustedMac)
+        XCTAssertEqual(
+            service.secureMacFingerprint,
+            codexSecureFingerprint(for: service.trustedMacRegistry.records[macDeviceID]?.macIdentityPublicKey ?? "")
+        )
     }
 
     func testApplyingResolvedTrustedSessionResetsReplayCursorWhenLiveSessionChanges() {
-        let service = CodexService()
+        let service = makeService()
         let macDeviceID = "mac-\(UUID().uuidString)"
 
         service.relaySessionId = "stale-session"
@@ -111,7 +226,7 @@ final class CodexSecurePairingStateTests: XCTestCase {
     }
 
     func testApplyingResolvedTrustedSessionKeepsReplayCursorWhenLiveSessionIsUnchanged() {
-        let service = CodexService()
+        let service = makeService()
         let macDeviceID = "mac-\(UUID().uuidString)"
 
         service.relaySessionId = "same-session"
@@ -139,11 +254,21 @@ final class CodexSecurePairingStateTests: XCTestCase {
     }
 
     // Clears the persisted relay session keys touched by secure reconnect tests.
+    private func makeService() -> CodexService {
+        let suiteName = "CodexSecurePairingStateTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
+        return service
+    }
+
     private func clearStoredSecureRelayState() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayCloudAsyncSharedSecret)
         SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         SecureStore.deleteValue(for: CodexSecureKeys.trustedMacRegistry)

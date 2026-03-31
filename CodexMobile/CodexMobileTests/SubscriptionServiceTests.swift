@@ -17,10 +17,19 @@ final class SubscriptionServiceTests: XCTestCase {
             defaults.removePersistentDomain(forName: #function)
         }
 
-        let service = SubscriptionService(defaults: defaults)
+        let service = SubscriptionService(
+            defaults: defaults,
+            bundleIdentifier: "com.example.remodex",
+            pricingRuntimeSupported: true
+        )
 
         XCTAssertEqual(service.bootstrapState, .ready)
         XCTAssertTrue(service.hasProAccess)
+        XCTAssertTrue(service.shouldBypassSubscriptionGates)
+        XCTAssertEqual(
+            service.subscriptionBypassStatusMessage,
+            "Pro access is enabled for this build because a local or debug override is active, so subscription paywalls are bypassed."
+        )
         XCTAssertFalse(service.isLoading)
         XCTAssertNil(service.lastErrorMessage)
     }
@@ -41,10 +50,15 @@ final class SubscriptionServiceTests: XCTestCase {
             defaults.removePersistentDomain(forName: #function)
         }
 
-        let service = SubscriptionService(defaults: defaults)
+        let service = SubscriptionService(
+            defaults: defaults,
+            bundleIdentifier: "com.example.remodex",
+            pricingRuntimeSupported: true
+        )
 
         XCTAssertEqual(service.bootstrapState, .ready)
         XCTAssertTrue(service.hasProAccess)
+        XCTAssertTrue(service.shouldBypassSubscriptionGates)
     }
 
     func testCachedFreeStateStaysFreeWithoutExplicitDebugOverride() {
@@ -62,10 +76,39 @@ final class SubscriptionServiceTests: XCTestCase {
             defaults.removePersistentDomain(forName: #function)
         }
 
-        let service = SubscriptionService(defaults: defaults)
+        let service = SubscriptionService(
+            defaults: defaults,
+            bundleIdentifier: "com.example.remodex",
+            pricingRuntimeSupported: true
+        )
 
         XCTAssertEqual(service.bootstrapState, .idle)
         XCTAssertFalse(service.hasProAccess)
+        XCTAssertFalse(service.shouldBypassSubscriptionGates)
+        XCTAssertNil(service.subscriptionBypassStatusMessage)
+    }
+
+    func testPricingUnavailableBuildBypassesSubscriptionGates() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        defer {
+            defaults.removePersistentDomain(forName: #function)
+        }
+
+        let service = SubscriptionService(
+            defaults: defaults,
+            bundleIdentifier: "com.example.remodex",
+            pricingRuntimeSupported: false
+        )
+
+        XCTAssertTrue(service.isUsingLocalDevelopmentProOverride)
+        XCTAssertTrue(service.shouldBypassSubscriptionGates)
+        XCTAssertEqual(
+            service.subscriptionBypassStatusMessage,
+            "Pro access is enabled for this build because subscription pricing is unavailable here, so subscription paywalls are bypassed."
+        )
+        XCTAssertEqual(service.bootstrapState, .ready)
+        XCTAssertTrue(service.hasProAccess)
     }
 
     func testPersonalDebugBundleIdentifierEnablesLocalDevelopmentOverride() {
@@ -77,13 +120,18 @@ final class SubscriptionServiceTests: XCTestCase {
 
         let service = SubscriptionService(
             defaults: defaults,
-            bundleIdentifier: "com.zackkirsh.remodex"
+            bundleIdentifier: "com.zackkirsh.remodex",
+            pricingRuntimeSupported: true
         )
 
         XCTAssertTrue(service.isUsingLocalDevelopmentProOverride)
         XCTAssertTrue(service.shouldBypassSubscriptionGates)
         XCTAssertEqual(service.bootstrapState, .ready)
         XCTAssertTrue(service.hasProAccess)
+        XCTAssertEqual(
+            service.subscriptionBypassStatusMessage,
+            "Pro access is enabled for this build because a local or debug override is active, so subscription paywalls are bypassed."
+        )
     }
 
     func testSubscriptionGatesAreNotBypassedWithoutLocalOverride() {
@@ -95,10 +143,12 @@ final class SubscriptionServiceTests: XCTestCase {
 
         let service = SubscriptionService(
             defaults: defaults,
-            bundleIdentifier: "com.example.remodex"
+            bundleIdentifier: "com.example.remodex",
+            pricingRuntimeSupported: true
         )
 
         XCTAssertFalse(service.isUsingLocalDevelopmentProOverride)
         XCTAssertFalse(service.shouldBypassSubscriptionGates)
+        XCTAssertNil(service.subscriptionBypassStatusMessage)
     }
 }

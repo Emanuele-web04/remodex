@@ -33,6 +33,11 @@ extension CodexService {
         role: String? = nil,
         performInitialSync: Bool = true
     ) async throws {
+        if let connectAttemptOverride {
+            try await connectAttemptOverride(serverURL, token, role, performInitialSync)
+            return
+        }
+
         guard !isConnecting else {
             lastErrorMessage = "Connection already in progress"
             throw CodexServiceError.invalidInput("Connection already in progress")
@@ -94,6 +99,7 @@ extension CodexService {
             try await performSecureHandshake()
 
             isConnected = true
+            transportMode = .liveRelay
             shouldAutoReconnectOnForeground = false
             connectionRecoveryState = .idle
             lastErrorMessage = nil
@@ -135,6 +141,7 @@ extension CodexService {
 
         isConnected = false
         isInitialized = false
+        transportMode = .disconnected
         isLoadingThreads = false
         isLoadingModels = false
         pendingApproval = nil
@@ -184,12 +191,14 @@ extension CodexService {
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayCloudAsyncSharedSecret)
         SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = nil
         relayUrl = nil
         relayMacDeviceId = nil
         relayMacIdentityPublicKey = nil
+        relayCloudAsyncSharedSecret = nil
         relayProtocolVersion = codexSecureProtocolVersion
         lastAppliedBridgeOutboundSeq = 0
         shouldForceQRBootstrapOnNextHandshake = false
@@ -208,6 +217,67 @@ extension CodexService {
         persistedThreadListSnapshot = nil
         threadListPersistence.clear()
         clearTransientConnectionPrompts()
+    }
+
+    func activateCloudAsyncFallback(serverURL: String, performInitialSync: Bool = true) async throws {
+        if let cloudAsyncFallbackActivationOverride {
+            try await cloudAsyncFallbackActivationOverride(serverURL, performInitialSync)
+            return
+        }
+
+        guard let cloudAsyncTransport else {
+            throw CodexCloudAsyncTransportError.unavailable("Off-LAN async transport is not configured.")
+        }
+
+        let normalizedServerURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = try validateConnectionURL(normalizedServerURL)
+        let serverIdentity = canonicalServerIdentity(for: url)
+        if let previousIdentity = connectedServerIdentity, previousIdentity != serverIdentity {
+            resetThreadRuntimeStateForServerSwitch()
+        }
+        connectedServerIdentity = serverIdentity
+
+        let availability = await cloudAsyncTransport.availability(for: self)
+        guard case .available = availability else {
+            if case .unavailable(let message) = availability {
+                throw CodexCloudAsyncTransportError.unavailable(message)
+            }
+            throw CodexCloudAsyncTransportError.unavailable("Off-LAN async transport is unavailable.")
+        }
+
+        await prepareForConnectionAttempt(preserveReconnectIntent: true)
+        transportMode = .cloudAsyncFallback
+        isConnected = true
+        isInitialized = false
+        shouldAutoReconnectOnForeground = false
+        connectionRecoveryState = .idle
+        lastErrorMessage = nil
+        clearHydrationCaches()
+
+        do {
+            try await initializeSession()
+            trustedReconnectFailureCount = 0
+            secureConnectionState = .encrypted
+            secureMacFingerprint = cloudAsyncFallbackCredentials
+                .map { codexSecureFingerprint(for: $0.macIdentityPublicKey) }
+            bridgeUpdatePrompt = nil
+            startSyncLoop()
+            Task { @MainActor [weak self] in
+                await self?.syncManagedPushRegistrationIfNeeded(force: true)
+            }
+            if performInitialSync {
+                schedulePostConnectSyncPass()
+            }
+            Task { @MainActor [weak self] in
+                await self?.refreshGPTAccountState()
+                self?.startGPTLoginSyncIfNeeded()
+            }
+        } catch {
+            transportMode = .disconnected
+            isConnected = false
+            isInitialized = false
+            throw error
+        }
     }
 
     func forgetTrustedMac(deviceId: String? = nil) {
@@ -299,6 +369,7 @@ extension CodexService {
         let wasTrustedReconnectAttempt = secureConnectionState == .reconnecting
         isConnected = false
         isInitialized = false
+        transportMode = .disconnected
         shouldAutoReconnectOnForeground = disposition.shouldAutoReconnectOnForeground
         if disposition.shouldClearSavedRelaySession {
             clearSavedRelaySession()
@@ -628,8 +699,19 @@ extension CodexService {
         let host = (url.host ?? "unknown-host").lowercased()
         let defaultPort = (scheme == "wss") ? 443 : 80
         let port = url.port ?? defaultPort
-        let path = url.path.isEmpty ? "/" : url.path
+        let path = normalizedServerIdentityPath(for: url)
         return "\(scheme)://\(host):\(port)\(path)"
+    }
+
+    private func normalizedServerIdentityPath(for url: URL) -> String {
+        let path = url.path.isEmpty ? "/" : url.path
+        let components = path.split(separator: "/", omittingEmptySubsequences: true)
+        guard components.count >= 2,
+              components[components.count - 2].caseInsensitiveCompare("relay") == .orderedSame else {
+            return path
+        }
+
+        return "/" + components.dropLast().joined(separator: "/")
     }
 
     func validateConnectionURL(_ serverURL: String) throws -> URL {
@@ -674,6 +756,64 @@ extension CodexService {
         return error.localizedDescription
     }
 
+    func shouldAttemptCloudAsyncFallback(after error: Error, serverURL: String) -> Bool {
+        guard hasCloudAsyncFallbackCredentials,
+              let url = try? validateConnectionURL(serverURL),
+              requiresLocalNetworkAuthorization(for: url) else {
+            return false
+        }
+
+        let localRelayPathAvailability = localRelayPathAvailabilityForCloudFallback()
+
+        if secureConnectionState == .rePairRequired || secureConnectionState == .updateRequired {
+            return false
+        }
+
+        if localRelayPathAvailability == true {
+            return false
+        }
+
+        if error is CodexSecureTransportError || isRetryableSavedSessionConnectError(error) {
+            return false
+        }
+
+        if isRecoverableTransientConnectionError(error) {
+            return localRelayPathAvailability != true
+        }
+
+        if let nwError = error as? NWError {
+            switch nwError {
+            case .dns:
+                return true
+            case .posix(let code)
+                where code == .ECONNREFUSED
+                || code == .ENETDOWN
+                || code == .ENETUNREACH
+                || code == .EHOSTUNREACH:
+                return true
+            default:
+                break
+            }
+        }
+
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else {
+            return false
+        }
+
+        switch nsError.code {
+        case NSURLErrorNotConnectedToInternet:
+            return localRelayPathAvailability != true
+        case NSURLErrorTimedOut,
+             NSURLErrorCannotFindHost,
+             NSURLErrorDNSLookupFailed,
+             NSURLErrorCannotConnectToHost:
+            return localRelayPathAvailability != true
+        default:
+            return false
+        }
+    }
+
     // Treats common local relay socket teardowns as transient so foreground return can recover quietly.
     func isBenignBackgroundDisconnect(_ error: Error) -> Bool {
         if let serviceError = error as? CodexServiceError {
@@ -713,6 +853,11 @@ extension CodexService {
     }
 
     func isRecoverableTransientConnectionError(_ error: Error) -> Bool {
+        if let secureTransportError = error as? CodexSecureTransportError,
+           case .timedOut = secureTransportError {
+            return true
+        }
+
         if let serviceError = error as? CodexServiceError {
             if case .invalidInput(let message) = serviceError {
                 return message.localizedCaseInsensitiveContains("timed out")
@@ -807,6 +952,32 @@ extension CodexService {
             return "Connection timed out. Check server/network."
         }
         return error.localizedDescription
+    }
+
+    // Hides stale reconnect/pairing copy once a newer secure session is already active.
+    func shouldSuppressConnectedConversationErrorMessage(_ message: String?) -> Bool {
+        guard isConnected,
+              connectionRecoveryState == .idle,
+              let normalizedMessage = message?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+              !normalizedMessage.isEmpty else {
+            return false
+        }
+
+        let staleConnectionFragments = [
+            "saved pairing timed out while waiting for the mac",
+            "scan a new qr code to reconnect",
+            "saved mac session is temporarily unavailable",
+            "relay pairing is no longer valid",
+            "relay session was replaced by another mac connection",
+            "device was replaced by a newer connection",
+            "secure reconnect could not be restored from the saved session",
+            "connection was interrupted. tap reconnect to try again.",
+            "connection timed out. check server/network.",
+        ]
+
+        return staleConnectionFragments.contains { normalizedMessage.contains($0) }
     }
 
     // Distinguishes relay frame-size failures from generic disconnects so reconnect UI can explain them.
@@ -1019,5 +1190,32 @@ extension CodexService {
         return normalized.hasPrefix("fe80:")
             || normalized.hasPrefix("fc")
             || normalized.hasPrefix("fd")
+    }
+
+    func startLocalRelayPathMonitor() {
+        guard localRelayPathMonitor == nil else {
+            return
+        }
+
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let hasActiveLocalRelayPath =
+                path.status == .satisfied
+                && (path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet))
+
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    return
+                }
+                self.hasResolvedLocalRelayPathAvailability = true
+                self.hasActiveLocalRelayPath = hasActiveLocalRelayPath
+            }
+        }
+        localRelayPathMonitor = monitor
+        monitor.start(queue: localRelayPathMonitorQueue)
+    }
+
+    func localRelayPathAvailabilityForCloudFallback() -> Bool? {
+        return localRelayPathAvailabilityOverride?()
     }
 }
