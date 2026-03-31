@@ -1604,15 +1604,7 @@ final class TurnViewModel {
     }
 
     private func normalizedAutocompleteRoot(for thread: CodexThread) -> String? {
-        if let normalizedProjectPath = thread.normalizedProjectPath {
-            return normalizedProjectPath
-        }
-
-        guard let rawCwd = thread.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawCwd.isEmpty else {
-            return nil
-        }
-        return rawCwd
+        thread.gitWorkingDirectory
     }
 
     private func fileAutocompleteCancellationToken(for threadID: String) -> String {

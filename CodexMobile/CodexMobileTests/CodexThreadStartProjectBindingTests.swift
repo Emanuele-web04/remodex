@@ -32,6 +32,28 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertTrue(params.isEmpty)
     }
 
+    func testMakeThreadStartParamsSkipsPseudoProjectBucketCwd() {
+        let normalized = CodexThreadStartProjectBinding.normalizedProjectPath("server")
+        let params = CodexThreadStartProjectBinding.makeThreadStartParams(
+            modelIdentifier: nil,
+            preferredProjectPath: normalized,
+            serviceTier: nil
+        )
+
+        XCTAssertNil(params["cwd"])
+        XCTAssertTrue(params.isEmpty)
+    }
+
+    func testNormalizedProjectPathPreservesTildeRoot() {
+        XCTAssertEqual(CodexThreadStartProjectBinding.normalizedProjectPath("~/"), "~/")
+        XCTAssertEqual(CodexThreadStartProjectBinding.normalizedProjectPath("~/repo/"), "~/repo")
+    }
+
+    func testNormalizedProjectPathPreservesWindowsDriveRoot() {
+        XCTAssertEqual(CodexThreadStartProjectBinding.normalizedProjectPath("C:/"), "C:/")
+        XCTAssertEqual(CodexThreadStartProjectBinding.normalizedProjectPath("C:/repo/"), "C:/repo")
+    }
+
     func testApplyFallbackSetsCwdWhenMissingInResponse() {
         let responseThread = CodexThread(id: "thread-1", cwd: nil)
         let patched = CodexThreadStartProjectBinding.applyPreferredProjectFallback(
@@ -52,6 +74,16 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertEqual(patched.cwd, "/server/path")
     }
 
+    func testApplyFallbackOverridesPseudoProjectBucketCwd() {
+        let responseThread = CodexThread(id: "thread-1", cwd: "server")
+        let patched = CodexThreadStartProjectBinding.applyPreferredProjectFallback(
+            to: responseThread,
+            preferredProjectPath: "/Users/me/work/project"
+        )
+
+        XCTAssertEqual(patched.cwd, "/Users/me/work/project")
+    }
+
     func testGitWorkingDirectoryReturnsNormalizedThreadPath() {
         let thread = CodexThread(id: "thread-1", cwd: "/Users/me/work/project///")
 
@@ -61,6 +93,13 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
     func testGitWorkingDirectoryIsNilForUnboundThread() {
         let thread = CodexThread(id: "thread-1", cwd: "   ")
 
+        XCTAssertNil(thread.gitWorkingDirectory)
+    }
+
+    func testPseudoProjectBucketDoesNotBecomeGitWorkingDirectory() {
+        let thread = CodexThread(id: "thread-1", cwd: "_default")
+
+        XCTAssertNil(thread.normalizedProjectPath)
         XCTAssertNil(thread.gitWorkingDirectory)
     }
 

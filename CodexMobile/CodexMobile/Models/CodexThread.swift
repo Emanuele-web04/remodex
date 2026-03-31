@@ -321,13 +321,7 @@ extension CodexThread {
         if let normalizedProjectPath {
             return normalizedProjectPath
         }
-
-        guard let cwd else {
-            return nil
-        }
-
-        let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return nil
     }
 
     // Stable key for grouping threads by project.
@@ -365,6 +359,11 @@ extension CodexThread {
         }
 
         return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "laptopcomputer" : "arrow.triangle.branch"
+    }
+
+    // Shared path gate for every flow that needs to decide whether a cwd represents a real local project.
+    static func normalizedFilesystemProjectPath(_ value: String?) -> String? {
+        normalizeProjectPath(value)
     }
 
     // --- Date parsing ---------------------------------------------------------
@@ -491,8 +490,8 @@ extension CodexThread {
             return nil
         }
 
-        if trimmed == "/" {
-            return trimmed
+        if let normalizedRootPath = normalizedFilesystemRootPath(trimmed) {
+            return normalizedRootPath
         }
 
         var normalized = trimmed
@@ -500,7 +499,75 @@ extension CodexThread {
             normalized.removeLast()
         }
 
-        return normalized.isEmpty ? "/" : normalized
+        if normalized.isEmpty {
+            return "/"
+        }
+
+        guard isLikelyFilesystemPath(normalized) else {
+            return nil
+        }
+
+        return normalized
+    }
+
+    // Preserves valid filesystem roots that would otherwise be mangled by generic trailing-slash trimming.
+    private static func normalizedFilesystemRootPath(_ value: String) -> String? {
+        if value == "/" {
+            return "/"
+        }
+
+        if value.first == "~", value.dropFirst().allSatisfy({ $0 == "/" }) {
+            return "~/"
+        }
+
+        let utf16View = value.utf16
+        guard utf16View.count >= 3 else {
+            return nil
+        }
+
+        let startIndex = utf16View.startIndex
+        let first = utf16View[startIndex]
+        let second = utf16View[utf16View.index(after: startIndex)]
+        let thirdIndex = utf16View.index(startIndex, offsetBy: 2)
+        let third = utf16View[thirdIndex]
+        let isDriveLetter = (65...90).contains(first) || (97...122).contains(first)
+        guard isDriveLetter, second == 58, third == 92 || third == 47 else {
+            return nil
+        }
+
+        let remainder = value.dropFirst(3)
+        guard remainder.allSatisfy({ $0 == "/" || $0 == "\\" }) else {
+            return nil
+        }
+
+        let drive = UnicodeScalar(first).map(String.init) ?? "C"
+        return "\(drive):/"
+    }
+
+    // Rejects pseudo-buckets like `server` or `_default` so only real local paths create project groups.
+    private static func isLikelyFilesystemPath(_ value: String) -> Bool {
+        if value == "/" {
+            return true
+        }
+
+        if value.hasPrefix("/") || value.hasPrefix("~/") {
+            return true
+        }
+
+        let utf16View = value.utf16
+        guard utf16View.count >= 3 else {
+            return false
+        }
+
+        let first = utf16View[utf16View.startIndex]
+        let second = utf16View[utf16View.index(after: utf16View.startIndex)]
+        let third = utf16View[utf16View.index(utf16View.startIndex, offsetBy: 2)]
+        let isDriveLetter = (65...90).contains(first) || (97...122).contains(first)
+        if isDriveLetter, second == 58, third == 92 || third == 47 {
+            return true
+        }
+
+        return value.hasPrefix("\\\\")
     }
 
     private static func projectBaseDisplayName(for normalizedProjectPath: String) -> String {

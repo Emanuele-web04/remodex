@@ -999,7 +999,7 @@ struct TurnView: View {
     }
 
     private func threadNavigationContext(for thread: CodexThread) -> TurnThreadNavigationContext? {
-        guard let path = thread.normalizedProjectPath ?? thread.cwd,
+        guard let path = thread.gitWorkingDirectory,
               !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }

@@ -455,25 +455,7 @@ extension CodexService {
 enum CodexThreadStartProjectBinding {
     // Normalizes project paths before sending them to thread/start.
     static func normalizedProjectPath(_ rawValue: String?) -> String? {
-        guard let rawValue else {
-            return nil
-        }
-
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
-        }
-
-        if trimmed == "/" {
-            return trimmed
-        }
-
-        var normalized = trimmed
-        while normalized.hasSuffix("/") {
-            normalized.removeLast()
-        }
-
-        return normalized.isEmpty ? "/" : normalized
+        CodexThread.normalizedFilesystemProjectPath(rawValue)
     }
 
     static func makeThreadStartParams(
