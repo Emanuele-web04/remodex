@@ -93,6 +93,10 @@ extension CodexService {
             if isConnected && isInitialized {
                 startSyncLoop()
                 requestImmediateSync(threadId: activeThreadId)
+                // Re-check bridge-managed state when the app becomes active again.
+                Task { @MainActor [weak self] in
+                    await self?.refreshBridgeManagedState(allowAvailableBridgeUpdatePrompt: true)
+                }
             } else {
                 stopSyncLoop()
             }

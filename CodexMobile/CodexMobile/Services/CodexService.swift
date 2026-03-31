@@ -371,6 +371,8 @@ final class CodexService {
     var hasPresentedServiceTierBridgeUpdatePrompt = false
     var hasPresentedThreadForkBridgeUpdatePrompt = false
     var hasPresentedMinimumBridgePackageUpdatePrompt = false
+    // Remembers the latest optional npm update we already surfaced so foreground refreshes stay non-spammy.
+    var lastPresentedAvailableBridgePackageVersion: String?
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.

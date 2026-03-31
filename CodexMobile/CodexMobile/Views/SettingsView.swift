@@ -705,6 +705,7 @@ private struct SettingsGPTAccountCard: View {
 
 private struct SettingsBridgeVersionCard: View {
     @Environment(CodexService.self) private var codex
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         SettingsCard(title: "Bridge Version") {
@@ -730,6 +731,15 @@ private struct SettingsBridgeVersionCard: View {
                 Text(guidance)
                     .font(AppFont.caption())
                     .foregroundStyle(guidanceColor)
+            }
+        }
+        .task {
+            await codex.refreshBridgeVersionState()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                await codex.refreshBridgeVersionState()
             }
         }
     }

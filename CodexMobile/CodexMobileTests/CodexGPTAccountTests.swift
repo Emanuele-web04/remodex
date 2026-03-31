@@ -83,6 +83,135 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertFalse(service.gptVoiceRequiresLogin)
     }
 
+    func testRefreshBridgeVersionStatePresentsOptionalBridgeUpdateWhenLatestIsNewer() async {
+        let service = makeService()
+        service.isConnected = true
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
+
+        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.7")
+        XCTAssertEqual(service.latestBridgePackageVersion, "1.3.8")
+        XCTAssertEqual(
+            service.bridgeUpdatePrompt?.title,
+            "A newer Remodex update is available on your Mac"
+        )
+        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
+        XCTAssertEqual(service.gptAccountSnapshot.status, .unknown)
+    }
+
+    func testRefreshBridgeVersionStateDoesNotPresentOptionalBridgeUpdateWithoutForegroundFlag() async {
+        let service = makeService()
+        service.isConnected = true
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshBridgeVersionState()
+
+        XCTAssertNil(service.bridgeUpdatePrompt)
+    }
+
+    func testRefreshBridgeVersionStateDoesNotRepeatOptionalBridgeUpdateForSameLatestVersion() async {
+        let service = makeService()
+        service.isConnected = true
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
+        let firstPrompt = service.bridgeUpdatePrompt
+
+        service.bridgeUpdatePrompt = nil
+        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
+
+        XCTAssertNotNil(firstPrompt)
+        XCTAssertNil(service.bridgeUpdatePrompt)
+    }
+
+    func testForegroundReturnRefreshesBridgeVersionAndPresentsOptionalUpdatePrompt() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.syncRealtimeEnabled = false
+        service.isAppInForeground = false
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        service.setForegroundState(true)
+        await yieldMainActor(times: 3)
+
+        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.7")
+        XCTAssertEqual(service.latestBridgePackageVersion, "1.3.8")
+        XCTAssertEqual(
+            service.bridgeUpdatePrompt?.title,
+            "A newer Remodex update is available on your Mac"
+        )
+    }
+
     func testStartOrResumeGPTLoginUsesChatGPTVariantAndCachesPendingURL() async throws {
         let service = makeService()
         service.isConnected = true
