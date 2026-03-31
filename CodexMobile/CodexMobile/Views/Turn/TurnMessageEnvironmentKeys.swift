@@ -29,6 +29,18 @@ extension EnvironmentValues {
     }
 }
 
+// Shares the current inline commit/push phase with timeline actions.
+private struct InlineCommitAndPushPhaseKey: EnvironmentKey {
+    static let defaultValue: InlineCommitAndPushPhase? = nil
+}
+
+extension EnvironmentValues {
+    var inlineCommitAndPushPhase: InlineCommitAndPushPhase? {
+        get { self[InlineCommitAndPushPhaseKey.self] }
+        set { self[InlineCommitAndPushPhaseKey.self] = newValue }
+    }
+}
+
 private struct AssistantRevertActionKey: EnvironmentKey {
     static let defaultValue: ((CodexMessage) -> Void)? = nil
 }

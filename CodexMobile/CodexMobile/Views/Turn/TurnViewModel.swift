@@ -151,6 +151,7 @@ final class TurnViewModel {
     // MARK: - Git state
 
     var runningGitAction: TurnGitActionKind? = nil
+    var inlineCommitAndPushPhase: InlineCommitAndPushPhase? = nil
     var isRunningGitAction: Bool { runningGitAction != nil }
     var isShowingNothingToCommitAlert = false
     var gitSyncAlert: TurnGitSyncAlert? = nil
@@ -2112,14 +2113,19 @@ final class TurnViewModel {
     func inlineCommitAndPush(codex: CodexService, workingDirectory: String?, threadID: String) {
         guard !isRunningGitAction else { return }
         runningGitAction = .commitAndPush
+        inlineCommitAndPushPhase = .committing
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.runningGitAction = nil }
+            defer {
+                self.runningGitAction = nil
+                self.inlineCommitAndPushPhase = nil
+            }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
             do {
                 _ = try await gitService.commit(message: nil)
+                inlineCommitAndPushPhase = .pushing
                 let pushResult = try await gitService.push()
                 handleSuccessfulPush(
                     pushResult,

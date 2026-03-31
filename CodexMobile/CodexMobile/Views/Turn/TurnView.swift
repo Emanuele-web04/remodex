@@ -114,6 +114,7 @@ struct TurnView: View {
                 threadID: thread.id
             )
         } as (() -> Void)? : nil)
+        .environment(\.inlineCommitAndPushPhase, viewModel.inlineCommitAndPushPhase)
         .navigationTitle(resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {

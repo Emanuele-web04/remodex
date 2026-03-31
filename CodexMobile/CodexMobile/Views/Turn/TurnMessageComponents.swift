@@ -1013,12 +1013,21 @@ struct MessageRow: View, Equatable {
     }
 
     @Environment(\.inlineCommitAndPushAction) private var inlineCommitAction
+    @Environment(\.inlineCommitAndPushPhase) private var inlineCommitAndPushPhase
     @State private var isShowingBlockDiffSheet = false
 
     private var hasTurnEndActions: Bool {
         guard let accessory = assistantBlockAccessoryState else { return false }
         return accessory.blockRevertPresentation != nil
             || accessory.blockDiffEntries != nil
+    }
+
+    private var isInlineCommitAndPushRunning: Bool {
+        inlineCommitAndPushPhase != nil
+    }
+
+    private var inlineCommitAndPushTitle: String {
+        inlineCommitAndPushPhase?.title ?? "Commit & Push"
     }
 
     @ViewBuilder
@@ -1065,12 +1074,20 @@ struct MessageRow: View, Equatable {
                             action()
                         } label: {
                             HStack(spacing: 4) {
-                                Image("cloud-upload")
-                                    .renderingMode(.template)
-                                    .resizable()
-                                    .scaledToFit()
+                                // Mirror the top-bar git feedback so the inline CTA feels responsive too.
+                                Group {
+                                    if isInlineCommitAndPushRunning {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image("cloud-upload")
+                                            .renderingMode(.template)
+                                            .resizable()
+                                            .scaledToFit()
+                                    }
+                                }
                                     .frame(width: 18, height: 18)
-                                Text("Commit & Push")
+                                Text(inlineCommitAndPushTitle)
                             }
                             .font(AppFont.mono(.body))
                             .padding(.horizontal, 14)
@@ -1078,6 +1095,7 @@ struct MessageRow: View, Equatable {
                             .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                         }
                         .buttonStyle(.plain)
+                        .disabled(isInlineCommitAndPushRunning)
                     }
                 }
             }
