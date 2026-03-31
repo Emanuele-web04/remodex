@@ -22,7 +22,7 @@ const {
   rememberTrustedPhone,
 } = require("./secure-device-state");
 
-const PAIRING_QR_VERSION = 2;
+const PAIRING_QR_VERSION = 3;
 const SECURE_PROTOCOL_VERSION = 1;
 const HANDSHAKE_TAG = "remodex-e2ee-v1";
 const HANDSHAKE_MODE_QR_BOOTSTRAP = "qr_bootstrap";
@@ -60,6 +60,7 @@ function createBridgeSecureTransport({
       sessionId,
       macDeviceId: currentDeviceState.macDeviceId,
       macIdentityPublicKey: currentDeviceState.macIdentityPublicKey,
+      cloudAsyncSharedSecret: currentDeviceState.cloudAsyncSharedSecret || "",
       expiresAt: currentPairingExpiresAt,
     };
   }

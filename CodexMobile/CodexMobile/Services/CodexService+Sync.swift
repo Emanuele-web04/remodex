@@ -69,7 +69,7 @@ extension CodexService {
             }
         }
 
-        requestImmediateSync(threadId: activeThreadId)
+        requestImmediateSync(threadId: activeThreadId, includeThreadList: false)
     }
 
     func stopSyncLoop() {
@@ -92,14 +92,14 @@ extension CodexService {
         if isForeground {
             if isConnected && isInitialized {
                 startSyncLoop()
-                requestImmediateSync(threadId: activeThreadId)
+                requestImmediateSync(threadId: activeThreadId, includeThreadList: false)
             } else {
                 stopSyncLoop()
             }
         } else {
             if isConnected && isInitialized {
                 startSyncLoop()
-                requestImmediateSync(threadId: activeThreadId)
+                requestImmediateSync(threadId: activeThreadId, includeThreadList: false)
             } else {
                 stopSyncLoop()
             }
@@ -111,7 +111,7 @@ extension CodexService {
         normalizedIdentifier(threadId) ?? normalizedIdentifier(activeThreadId)
     }
 
-    func requestImmediateSync(threadId: String? = nil) {
+    func requestImmediateSync(threadId: String? = nil, includeThreadList: Bool = true) {
         guard canRunRealtimeSyncLoop else {
             return
         }
@@ -120,6 +120,7 @@ extension CodexService {
         if let resolvedThreadID {
             pendingImmediateSyncThreadID = resolvedThreadID
         }
+        pendingImmediateSyncNeedsThreadList = pendingImmediateSyncNeedsThreadList || includeThreadList
 
         guard pendingImmediateSyncTask == nil else {
             return
@@ -128,19 +129,26 @@ extension CodexService {
         pendingImmediateSyncTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.pendingImmediateSyncTask = nil }
+            var didSyncThreadListThisBurst = false
 
             while !Task.isCancelled {
                 let requestedThreadID = self.pendingImmediateSyncThreadID ?? self.resolvedImmediateSyncThreadID(nil)
+                let shouldSyncThreadList = self.pendingImmediateSyncNeedsThreadList
+                    && !didSyncThreadListThisBurst
                 self.pendingImmediateSyncThreadID = nil
+                self.pendingImmediateSyncNeedsThreadList = false
 
-                await self.syncThreadsList()
-                await self.refreshInactiveRunningBadgeThreads()
+                if shouldSyncThreadList {
+                    didSyncThreadListThisBurst = true
+                    await self.syncThreadsList(includeArchived: false)
+                    await self.refreshInactiveRunningBadgeThreads()
+                }
 
                 guard !Task.isCancelled else {
                     return
                 }
 
-                if self.pendingImmediateSyncThreadID != nil {
+                if self.pendingImmediateSyncThreadID != nil || self.pendingImmediateSyncNeedsThreadList {
                     continue
                 }
 
@@ -152,7 +160,7 @@ extension CodexService {
                     return
                 }
 
-                if self.pendingImmediateSyncThreadID == nil {
+                if self.pendingImmediateSyncThreadID == nil, !self.pendingImmediateSyncNeedsThreadList {
                     break
                 }
             }
@@ -165,28 +173,20 @@ extension CodexService {
               let threadID = resolvedImmediateSyncThreadID(threadId) else {
             return
         }
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.syncActiveThreadState(threadId: threadID)
-        }
+        requestImmediateSync(threadId: threadID, includeThreadList: false)
     }
 
-    func syncThreadsList() async {
+    func syncThreadsList(includeArchived: Bool = true) async {
         guard isConnected, isInitialized else {
             return
         }
 
         do {
-            let activeThreads = try await fetchServerThreads(limit: recentThreadListLimit)
-
-            // Also fetch server-archived threads so they survive app restarts.
-            var archivedThreads: [CodexThread] = []
-            do {
-                archivedThreads = try await fetchServerThreads(limit: recentThreadListLimit, archived: true)
-            } catch {
-                debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
-            }
+            async let activeThreadsTask = fetchServerThreads(limit: recentThreadListLimit)
+            let activeThreads = try await activeThreadsTask
+            let archivedThreads = includeArchived
+                ? await fetchArchivedThreadsIfNeeded(limit: recentThreadListLimit)
+                : threads.filter { $0.syncState == .archivedLocal }
 
             reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
             debugSyncLog("sync thread/list active=\(activeThreads.count) archived=\(archivedThreads.count) local=\(threads.count)")
@@ -293,6 +293,8 @@ extension CodexService {
         if autoSelectFirstLiveThread, activeThreadId == nil {
             activeThreadId = firstLiveThreadID()
         }
+
+        isRestoredThreadListSnapshotAwaitingLiveSync = false
 
         if pendingNotificationOpenThreadID != nil {
             // A successful thread/list refresh gives us fresh server truth, so retry
@@ -405,7 +407,7 @@ extension CodexService {
     }
 
     private func sendThreadNameSetRPC(threadId: String, name: String) {
-        guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
+        guard hasAvailableRequestTransport else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
@@ -730,7 +732,7 @@ extension CodexService {
     /// Best-effort server-side archive/unarchive. Failures are logged but never
     /// surface to the user or trigger reconnection side-effects.
     private func sendThreadArchiveRPC(threadId: String, unarchive: Bool) {
-        guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
+        guard hasAvailableRequestTransport else { return }
         let method = unarchive ? "thread/unarchive" : "thread/archive"
         Task { @MainActor [weak self] in
             guard let self else { return }

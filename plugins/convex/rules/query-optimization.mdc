@@ -1,0 +1,48 @@
+---
+description: Use indexes instead of filter() for efficient database queries
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Query Optimization
+
+Avoid using `.filter()` on database queries. Instead, use indexed queries with `.withIndex()` or filter in TypeScript after collecting results.
+
+## Why
+
+Using `.filter()` on queries performs a full table scan, which becomes slow as your data grows. Indexes provide fast lookups.
+
+## Examples
+
+**Bad:**
+```typescript
+const user = await ctx.db
+  .query("users")
+  .filter(q => q.eq(q.field("email"), email))
+  .first();
+```
+
+**Good:**
+```typescript
+// In schema.ts
+export default defineSchema({
+  users: defineTable({
+    email: v.string(),
+    name: v.string(),
+  }).index("by_email", ["email"]),
+});
+
+// In your function
+const user = await ctx.db
+  .query("users")
+  .withIndex("by_email", q => q.eq("email", email))
+  .first();
+```
+
+## For Small Result Sets
+
+If you must filter by a field that doesn't warrant an index:
+```typescript
+const allUsers = await ctx.db.query("users").collect();
+const filtered = allUsers.filter(user => user.age > 18);
+```

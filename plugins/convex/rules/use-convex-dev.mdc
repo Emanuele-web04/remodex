@@ -1,0 +1,122 @@
+---
+description: Always use 'npx convex dev' for development, never 'npx convex deploy' which is for production only
+alwaysApply: true
+globs: ["**/*.md", "**/*.ts", "**/*.js", "**/*.tsx", "**/*.jsx"]
+---
+
+# Use convex dev for Development
+
+**Important:** When working with Convex, always use `npx convex dev` during development. Never use `npx convex deploy` unless you're deploying to production.
+
+## The Commands
+
+### npx convex dev (Development)
+Use this for all development work:
+- Runs a local development server
+- Watches for file changes
+- Auto-reloads functions and schema
+- Uses a development deployment
+- Safe to experiment and test
+
+```bash
+# Start development (use this!)
+npx convex dev
+```
+
+### npx convex deploy (Production Only!)
+**Only** use this when deploying to production:
+- Deploys to your production environment
+- Used by CI/CD pipelines
+- Should NOT be used during development
+- Affects live users
+
+```bash
+# Production deployment only!
+npx convex deploy
+```
+
+## Why This Matters
+
+**Using `deploy` during development can:**
+- ❌ Deploy untested code to production
+- ❌ Affect live users
+- ❌ Break production database schema
+- ❌ Create production data inconsistencies
+
+**Using `dev` for development ensures:**
+- ✅ Safe, isolated development environment
+- ✅ Fast iteration with auto-reload
+- ✅ No risk to production
+- ✅ Easy testing and debugging
+
+## Correct Workflow
+
+**Development:**
+```bash
+# 1. Start dev server
+npx convex dev
+
+# 2. Make changes to code
+# 3. Test locally
+# 4. Repeat
+```
+
+**Deployment:**
+```bash
+# Only after thorough testing:
+npx convex deploy
+
+# Or in CI/CD:
+# - Run tests
+# - If tests pass, deploy
+```
+
+## Common Patterns
+
+### Initial Setup
+```bash
+npm install convex
+npx convex dev  # Creates account & starts dev
+```
+
+### Daily Development
+```bash
+npx convex dev  # Always use this
+# Keep it running while you code
+```
+
+### Production Deployment
+```bash
+# Test everything first!
+npm run test
+npm run build
+
+# Then deploy
+npx convex deploy
+```
+
+### CI/CD Pipeline
+```yaml
+# GitHub Actions example
+- name: Deploy to Convex
+  run: npx convex deploy --cmd 'npm run build'
+  env:
+    CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+```
+
+## Red Flags
+
+If you see someone suggest:
+- "Just run `npx convex deploy` to test"  ❌ Wrong!
+- "Use `deploy` for development"  ❌ Wrong!
+- "Deploy to see if it works"  ❌ Wrong!
+
+**Always use `npx convex dev` for development!**
+
+## Documentation
+
+When writing docs or instructions:
+- ✅ Always mention `npx convex dev` for development
+- ✅ Clearly label `npx convex deploy` as "Production only"
+- ✅ Show the difference between the two
+- ✅ Warn against using deploy during development

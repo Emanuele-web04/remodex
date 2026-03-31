@@ -190,7 +190,10 @@ enum TurnThreadForkCoordinator {
                 viewModel.refreshGitBranchTargets(
                     codex: codex,
                     workingDirectory: sourceWorkingDirectory,
-                    threadID: threadID
+                    threadID: threadID,
+                    requestTimeoutMs: GitActionsService.passiveRequestTimeoutMs,
+                    force: true,
+                    showsLoadingIndicator: false
                 )
             }
             return .removed

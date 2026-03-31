@@ -35,6 +35,7 @@ If you use the public repo, you should expect one of these flows:
 
 1. Local LAN pairing on your own machine with `./run-local-remodex.sh`
 2. A self-hosted relay on your own VPS, passed in through `REMODEX_RELAY`
+3. The same self-hosted relay plus the code-owned Convex async queue in the source tree
 
 That means:
 
@@ -42,6 +43,7 @@ That means:
 - git commands still run on your Mac
 - the iPhone is still a paired remote client
 - the relay is only the transport layer
+- Convex is optional and only stores encrypted off-LAN async messages
 - the first QR scan bootstraps trust
 - later reconnects can reuse that trusted Mac over the same relay
 

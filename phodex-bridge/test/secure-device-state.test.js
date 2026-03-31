@@ -161,6 +161,7 @@ function makeDeviceState(overrides = {}) {
     macDeviceId: "mac-device-id",
     macIdentityPublicKey: "mac-public-key",
     macIdentityPrivateKey: "mac-private-key",
+    cloudAsyncSharedSecret: "cloud-async-secret",
     trustedPhones: {},
     ...overrides,
   };

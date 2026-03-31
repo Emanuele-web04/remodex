@@ -1,0 +1,91 @@
+---
+description: Never use Date.now() in queries as it breaks caching and reactivity
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Avoid Date.now() in Queries
+
+Never use `Date.now()` or `new Date()` inside query functions. It prevents proper caching and breaks reactive subscriptions.
+
+## Why
+
+Queries should be deterministic. Using `Date.now()` means the query returns different results every millisecond, defeating Convex's reactivity system.
+
+## Bad Pattern
+
+```typescript
+export const getActiveTasks = query({
+  handler: async (ctx) => {
+    const now = Date.now(); // ❌ Don't do this
+    return await ctx.db
+      .query("tasks")
+      .filter(q => q.lt(q.field("dueDate"), now))
+      .collect();
+  },
+});
+```
+
+## Good Solutions
+
+### Option 1: Pass Time as Argument
+
+```typescript
+export const getActiveTasks = query({
+  args: { now: v.number() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("tasks")
+      .filter(q => q.lt(q.field("dueDate"), args.now))
+      .collect();
+  },
+});
+
+// Client passes current time
+const tasks = useQuery(api.tasks.getActiveTasks, { now: Date.now() });
+```
+
+### Option 2: Use Status Fields with Scheduled Functions
+
+```typescript
+// Update status periodically with a cron job
+export const updateTaskStatuses = internalMutation({
+  handler: async (ctx) => {
+    const now = Date.now();
+    const expiredTasks = await ctx.db
+      .query("tasks")
+      .withIndex("by_status", q => q.eq("status", "active"))
+      .filter(q => q.lt(q.field("dueDate"), now))
+      .collect();
+
+    for (const task of expiredTasks) {
+      await ctx.db.patch(task._id, { status: "expired" });
+    }
+  },
+});
+
+// Query is simple and efficient
+export const getActiveTasks = query({
+  handler: async (ctx) => {
+    return await ctx.db
+      .query("tasks")
+      .withIndex("by_status", q => q.eq("status", "active"))
+      .collect();
+  },
+});
+```
+
+### Option 3: Use Coarser Time Granularity
+
+If you need day-level filtering:
+```typescript
+export const getToday = query({
+  args: { today: v.string() }, // "2024-01-15"
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("events")
+      .withIndex("by_date", q => q.eq("date", args.today))
+      .collect();
+  },
+});
+```

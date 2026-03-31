@@ -66,6 +66,13 @@ test("normalizeBranchListEntry strips linked-worktree markers from branch labels
   });
 });
 
+test("resolveRequestTimeoutMs clamps invalid and oversized request overrides", () => {
+  assert.equal(__test.resolveRequestTimeoutMs({}), 30_000);
+  assert.equal(__test.resolveRequestTimeoutMs({ requestTimeoutMs: -1 }), 30_000);
+  assert.equal(__test.resolveRequestTimeoutMs({ requestTimeoutMs: 4_999.9 }), 4_999);
+  assert.equal(__test.resolveRequestTimeoutMs({ timeoutMs: 60_000 }), 30_000);
+});
+
 test("gitBranches marks branches that are checked out in another worktree", async () => {
   const repoDir = makeTempRepo();
   const siblingWorktree = path.join(path.dirname(repoDir), `${path.basename(repoDir)}-wt-feature`);

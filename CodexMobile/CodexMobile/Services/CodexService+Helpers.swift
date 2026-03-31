@@ -66,6 +66,7 @@ extension CodexService {
             return
         }
 
+        isRestoredThreadListSnapshotAwaitingLiveSync = true
         isRestoringPersistedThreadListSnapshot = true
         defer { isRestoringPersistedThreadListSnapshot = false }
         threads = restoredThreads
@@ -95,23 +96,40 @@ extension CodexService {
             return
         }
 
-        threadListPersistenceDebounceTask?.cancel()
-        threadListPersistenceDebounceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled, let self else { return }
+        let token = UUID()
+        threadListPersistenceDebounceTask?.task.cancel()
+        threadListPersistenceDebounceTask = CodexThreadListPersistenceTaskRecord(
+            token: token,
+            task: Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer {
+                    if self.threadListPersistenceDebounceTask?.token == token {
+                        self.threadListPersistenceDebounceTask = nil
+                    }
+                }
 
-            let snapshot = self.makeThreadListSnapshot()
-            self.persistedThreadListSnapshot = snapshot
-            self.threadListPersistenceDebounceTask = nil
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                guard !Task.isCancelled else { return }
 
-            Task.detached { [threadListPersistence] in
-                threadListPersistence.save(snapshot)
+                let snapshot = self.makeThreadListSnapshot()
+                self.persistedThreadListSnapshot = snapshot
+                self.threadListPersistence.save(snapshot)
             }
+        )
+    }
+
+    // Waits for any scheduled thread-list snapshot write to finish before teardown or cleanup.
+    func waitForThreadListPersistenceFlush() async {
+        while let task = threadListPersistenceDebounceTask?.task {
+            await task.value
         }
     }
 
     func resetSkillsCacheForConnectionContextChange() {
         cachedSkillsByRoot.removeAll()
+        skillAutocompleteIndexByRoot.removeAll()
+        skillListLoadTaskByRoot.values.forEach { $0.task.cancel() }
+        skillListLoadTaskByRoot.removeAll()
         unsupportedSkillRoots.removeAll()
         persistedSkillsCacheSnapshot = skillsPersistence.load() ?? CodexSkillsCacheSnapshot(entriesByRoot: [:])
     }

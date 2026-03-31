@@ -52,7 +52,12 @@ struct ContentView: View {
                 guard !wasOpen, isOpen else {
                     return
                 }
-                if viewModel.shouldRequestSidebarFreshSync(isConnected: codex.isConnected) {
+                if viewModel.shouldRequestSidebarFreshSync(
+                    isConnected: codex.isConnected,
+                    isBootstrappingConnectionSync: codex.isBootstrappingConnectionSync,
+                    isLoadingThreads: codex.isLoadingThreads,
+                    hasThreads: !codex.threads.isEmpty
+                ) {
                     codex.requestImmediateSync(threadId: codex.activeThreadId)
                 }
             }
@@ -292,7 +297,7 @@ struct ContentView: View {
         } else {
             HomeEmptyStateView(
                 connectionPhase: homeConnectionPhase,
-                statusMessage: codex.lastErrorMessage,
+                statusMessage: codex.visibleConnectedConversationErrorMessage(codex.lastErrorMessage),
                 securityLabel: codex.secureConnectionState.statusLabel,
                 trustedPairPresentation: codex.trustedPairPresentation,
                 offlinePrimaryButtonTitle: codex.hasReconnectCandidate ? "Reconnect" : "Scan QR Code",
@@ -445,6 +450,10 @@ struct ContentView: View {
 
         if isShowingManualScanner {
             return true
+        }
+
+        if codex.secureConnectionState == .rePairRequired {
+            return !viewModel.isAttemptingManualReconnect && !isPreparingManualScanner
         }
 
         if viewModel.isAttemptingAutoReconnect || shouldShowReconnectShell || isPreparingManualScanner {

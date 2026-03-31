@@ -1,0 +1,306 @@
+---
+description: Use "use node" directive in action files that need Node.js APIs. Cannot write queries or mutations in "use node" files.
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Use "use node" for Node.js APIs in Actions
+
+When you need Node.js APIs (fetch, crypto, Buffer, etc.) in Convex, you must use **actions** with the `"use node"` directive.
+
+## The Rule
+
+**Files with `"use node"` can ONLY contain:**
+- ✅ `action` functions
+- ✅ `internalAction` functions
+- ✅ Helper functions called by actions
+- ❌ **NEVER** `query` or `mutation` functions
+
+**Files without `"use node"` can contain:**
+- ✅ `query` functions
+- ✅ `mutation` functions
+- ✅ `internalQuery` and `internalMutation` functions
+- ❌ Cannot use Node.js-specific APIs
+
+## When to Use "use node"
+
+Use actions with `"use node"` when you need:
+
+### External API Calls
+```typescript
+"use node";
+
+import { action } from "./_generated/server";
+import { v } from "convex/values";
+
+export const fetchWeather = action({
+  args: { city: v.string() },
+  handler: async (ctx, args) => {
+    // fetch is available because of "use node"
+    const response = await fetch(
+      `https://api.weather.com/weather?city=${args.city}`
+    );
+    const data = await response.json();
+
+    // Store in database via mutation
+    await ctx.runMutation(api.weather.store, {
+      city: args.city,
+      data: data,
+    });
+
+    return data;
+  },
+});
+```
+
+### AI/LLM Integrations
+```typescript
+"use node";
+
+import { action } from "./_generated/server";
+import OpenAI from "openai";
+
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+export const generateSuggestion = action({
+  args: { prompt: v.string() },
+  handler: async (ctx, args) => {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4",
+      messages: [{ role: "user", content: args.prompt }],
+    });
+
+    return completion.choices[0].message.content;
+  },
+});
+```
+
+### Node.js Crypto
+```typescript
+"use node";
+
+import { action } from "./_generated/server";
+import crypto from "crypto";
+
+export const generateSecureToken = action({
+  handler: async (ctx) => {
+    const token = crypto.randomBytes(32).toString("hex");
+
+    await ctx.runMutation(api.tokens.store, { token });
+
+    return token;
+  },
+});
+```
+
+### Third-Party SDKs
+```typescript
+"use node";
+
+import { action } from "./_generated/server";
+import Stripe from "stripe";
+
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+export const createPayment = action({
+  args: { amount: v.number() },
+  handler: async (ctx, args) => {
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: args.amount,
+      currency: "usd",
+    });
+
+    return paymentIntent.client_secret;
+  },
+});
+```
+
+## File Organization
+
+### ❌ Wrong: Mixing in Same File
+```typescript
+"use node";
+
+import { action, mutation } from "./_generated/server";
+
+// ❌ ERROR: Cannot have mutations in "use node" file
+export const create = mutation({
+  handler: async (ctx, args) => {
+    // This will fail!
+  },
+});
+
+export const fetchData = action({
+  handler: async (ctx) => {
+    const data = await fetch("...");
+    return data;
+  },
+});
+```
+
+### ✅ Correct: Separate Files
+
+**convex/tasks.ts** (no "use node"):
+```typescript
+import { query, mutation } from "./_generated/server";
+
+export const list = query({
+  handler: async (ctx) => {
+    return await ctx.db.query("tasks").collect();
+  },
+});
+
+export const create = mutation({
+  args: { title: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("tasks", { title: args.title });
+  },
+});
+```
+
+**convex/tasksActions.ts** (with "use node"):
+```typescript
+"use node";
+
+import { action } from "./_generated/server";
+import { api } from "./_generated/api";
+
+export const generateTaskSuggestions = action({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    // Fetch from external AI service
+    const response = await fetch("https://ai-service.com/suggest", {
+      method: "POST",
+      body: JSON.stringify({ userId: args.userId }),
+    });
+
+    const suggestions = await response.json();
+
+    // Store via mutation
+    for (const suggestion of suggestions) {
+      await ctx.runMutation(api.tasks.create, {
+        title: suggestion.title,
+      });
+    }
+
+    return suggestions;
+  },
+});
+```
+
+## Common Pattern: Action → Mutation
+
+Since actions can't directly modify the database in "use node" files, use this pattern:
+
+```typescript
+// convex/externalActions.ts
+"use node";
+
+import { action } from "./_generated/server";
+import { api, internal } from "./_generated/api";
+
+export const syncFromExternalAPI = action({
+  handler: async (ctx) => {
+    // 1. Fetch from external API (needs Node.js)
+    const response = await fetch("https://api.example.com/data");
+    const data = await response.json();
+
+    // 2. Write to database via mutation
+    await ctx.runMutation(internal.data.storeExternal, {
+      data: data,
+    });
+  },
+});
+
+// convex/data.ts (no "use node")
+import { internalMutation } from "./_generated/server";
+
+export const storeExternal = internalMutation({
+  args: { data: v.any() },
+  handler: async (ctx, args) => {
+    // Now we can write to database
+    await ctx.db.insert("externalData", args.data);
+  },
+});
+```
+
+## What Doesn't Need "use node"
+
+These work in regular queries/mutations without "use node":
+
+### Convex Built-in fetch
+```typescript
+// convex/data.ts (no "use node" needed)
+import { action } from "./_generated/server";
+
+export const fetchData = action({
+  handler: async (ctx) => {
+    // Convex provides fetch in actions by default
+    const response = await fetch("https://api.example.com/data");
+    return await response.json();
+  },
+});
+```
+
+**However**, if you need Node.js-specific features like:
+- Custom headers with Node.js libraries
+- Stream processing
+- Node.js crypto
+- File system operations
+- Third-party SDKs that depend on Node.js
+
+Then you need `"use node"`.
+
+## Quick Reference
+
+| Need | Use | Directive | Can Write |
+|------|-----|-----------|-----------|
+| Database queries | `query` | No directive | queries only |
+| Database writes | `mutation` | No directive | mutations only |
+| External API | `action` | `"use node"` | actions only |
+| Node.js APIs | `action` | `"use node"` | actions only |
+| Third-party SDKs | `action` | `"use node"` | actions only |
+
+## Red Flags
+
+Watch for these errors:
+
+### ❌ Mutation in "use node" file
+```typescript
+"use node";
+
+// ERROR: Cannot export mutations from "use node" files
+export const create = mutation({ ... });
+```
+
+### ❌ Query in "use node" file
+```typescript
+"use node";
+
+// ERROR: Cannot export queries from "use node" files
+export const list = query({ ... });
+```
+
+### ❌ Missing "use node" with Node APIs
+```typescript
+// ERROR: crypto is not available without "use node"
+import crypto from "crypto";
+
+export const generate = action({
+  handler: async (ctx) => {
+    const token = crypto.randomBytes(32); // Will fail!
+  },
+});
+```
+
+## Checklist
+
+When writing Convex functions:
+
+- [ ] Need external API? → `action` with `"use node"`
+- [ ] Need Node.js APIs? → `action` with `"use node"`
+- [ ] Need third-party SDK? → `action` with `"use node"`
+- [ ] Reading database? → `query` (no "use node")
+- [ ] Writing database? → `mutation` (no "use node")
+- [ ] File has `"use node"`? → Only `action` exports
+- [ ] File has queries/mutations? → Remove `"use node"`

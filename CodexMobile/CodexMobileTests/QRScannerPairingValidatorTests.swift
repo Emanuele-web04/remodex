@@ -55,6 +55,23 @@ final class QRScannerPairingValidatorTests: XCTestCase {
         XCTAssertEqual(payload.relay, "wss://relay.example")
     }
 
+    func testValidPayloadDecodesCloudAsyncSharedSecret() {
+        let result = validatePairingQRCode(
+            pairingQRCode(
+                v: codexPairingQRVersion,
+                cloudAsyncSharedSecret: "c2hhcmVkLXNlY3JldA==",
+                expiresAt: 1_900_000_000_000
+            ),
+            now: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+
+        guard case .success(let payload) = result else {
+            return XCTFail("Expected a valid payload with a shared secret.")
+        }
+
+        XCTAssertEqual(payload.cloudAsyncSharedSecret, "c2hhcmVkLXNlY3JldA==")
+    }
+
     func testExpiredPayloadReturnsScanError() {
         let result = validatePairingQRCode(
             pairingQRCode(
@@ -73,10 +90,11 @@ final class QRScannerPairingValidatorTests: XCTestCase {
 
     private func pairingQRCode(
         v: Int,
+        cloudAsyncSharedSecret: String? = nil,
         expiresAt: Int64
     ) -> String {
         """
-        {"v":\(v),"relay":"wss://relay.example","sessionId":"session-123","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(expiresAt)}
+        {"v":\(v),"relay":"wss://relay.example","sessionId":"session-123","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key"\(cloudAsyncSharedSecret.map { ",\"cloudAsyncSharedSecret\":\"\($0)\"" } ?? ""),"expiresAt":\(expiresAt)}
         """
     }
 }

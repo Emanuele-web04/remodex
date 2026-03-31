@@ -1,0 +1,560 @@
+---
+description: Always use ESLint with @convex-dev/eslint-plugin to catch Convex-specific issues and enforce best practices
+alwaysApply: true
+globs: ["**/*.ts", "**/*.js", "package.json", "eslint.config.*", ".eslintrc.*"]
+---
+
+# Always Use ESLint with Convex
+
+Every Convex project should use ESLint with the official `@convex-dev/eslint-plugin` to catch common mistakes and enforce best practices.
+
+## Why ESLint for Convex?
+
+**ESLint catches issues that TypeScript can't:**
+- ❌ Missing `await` on promises (floating promises)
+- ❌ Missing argument validators
+- ❌ Missing return validators
+- ❌ Using `.filter()` instead of indexes
+- ❌ Missing table names in database operations
+- ❌ Using `.collect()` without pagination
+- ❌ And more!
+
+**Without ESLint, you'll:**
+- Ship bugs from un-awaited promises
+- Deploy functions without validators
+- Write slow queries without indexes
+- Miss best practices
+
+**With ESLint, you'll:**
+- Catch errors before deployment
+- Enforce Convex best practices
+- Get auto-fixes for many issues
+- Have confidence in your code
+
+## Quick Setup
+
+### 1. Install ESLint Plugin
+
+```bash
+npm install --save-dev @convex-dev/eslint-plugin
+```
+
+### 2. Configure ESLint
+
+**Modern (Flat Config) - Recommended:**
+
+```javascript
+// eslint.config.mjs
+import convexPlugin from "@convex-dev/eslint-plugin";
+
+export default [
+  // Apply to all files
+  ...convexPlugin.configs.recommended,
+
+  // Your custom rules
+  {
+    rules: {
+      // Add your overrides here
+    },
+  },
+];
+```
+
+**Legacy (.eslintrc.js):**
+
+```javascript
+// .eslintrc.js
+module.exports = {
+  extends: ["plugin:@convex-dev/recommended"],
+  rules: {
+    // Your custom rules
+  },
+};
+```
+
+### 3. Add Scripts to package.json
+
+```json
+{
+  "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit"
+  }
+}
+```
+
+### 4. Run Lint
+
+```bash
+# Check for issues
+npm run lint
+
+# Auto-fix issues
+npm run lint:fix
+```
+
+## Essential Convex ESLint Rules
+
+The `@convex-dev/eslint-plugin` includes these critical rules:
+
+### 1. No Floating Promises (`no-floating-promises`)
+
+**Catches:**
+```typescript
+export const createTask = mutation({
+  handler: async (ctx, args) => {
+    ctx.db.insert("tasks", args); // ❌ Missing await!
+  },
+});
+```
+
+**Fixes to:**
+```typescript
+export const createTask = mutation({
+  handler: async (ctx, args) => {
+    await ctx.db.insert("tasks", args); // ✅ Awaited
+  },
+});
+```
+
+### 2. Require Argument Validators (`require-argument-validators`)
+
+**Catches:**
+```typescript
+export const getTask = query({
+  // ❌ Missing args validator
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.taskId);
+  },
+});
+```
+
+**Fixes to:**
+```typescript
+export const getTask = query({
+  args: { taskId: v.id("tasks") }, // ✅ Validator added
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.taskId);
+  },
+});
+```
+
+### 3. Explicit Table IDs (`explicit-table-ids`)
+
+**Catches:**
+```typescript
+const task = await ctx.db.get(taskId); // ❌ Missing table name
+```
+
+**Fixes to:**
+```typescript
+const task = await ctx.db.get("tasks", taskId); // ✅ Table name added
+```
+
+**Note:** Convex now requires table names in `ctx.db.get()`, `patch()`, `replace()`, and `delete()`.
+
+### 4. No Query Collect (`no-query-collect`)
+
+**Catches:**
+```typescript
+const allTasks = await ctx.db.query("tasks").collect(); // ⚠️ Potentially huge!
+```
+
+**Suggests:**
+```typescript
+// Use pagination for large datasets
+const results = await ctx.db.query("tasks").paginate({
+  cursor: null,
+  limit: 100,
+});
+```
+
+### 5. Prefer Indexes (`prefer-indexes`)
+
+**Catches:**
+```typescript
+const user = await ctx.db
+  .query("users")
+  .filter(q => q.eq(q.field("email"), email)); // ❌ Slow!
+```
+
+**Suggests:**
+```typescript
+const user = await ctx.db
+  .query("users")
+  .withIndex("by_email", q => q.eq("email", email)); // ✅ Fast!
+```
+
+## Additional Recommended Rules
+
+Add these TypeScript ESLint rules for Convex:
+
+```javascript
+// eslint.config.mjs
+export default [
+  ...convexPlugin.configs.recommended,
+  {
+    rules: {
+      // Floating promises (critical!)
+      "@typescript-eslint/no-floating-promises": "error",
+
+      // Misused promises
+      "@typescript-eslint/no-misused-promises": "error",
+
+      // Require await in async functions
+      "require-await": "error",
+
+      // No console.log in production
+      "no-console": ["warn", { allow: ["warn", "error"] }],
+
+      // Enforce return types
+      "@typescript-eslint/explicit-function-return-type": ["warn", {
+        allowExpressions: true,
+      }],
+
+      // No any (encourage proper typing)
+      "@typescript-eslint/no-explicit-any": "warn",
+
+      // No unused vars
+      "@typescript-eslint/no-unused-vars": ["error", {
+        argsIgnorePattern: "^_",
+        varsIgnorePattern: "^_",
+      }],
+    },
+  },
+];
+```
+
+## TypeScript Strict Mode
+
+Enable strict mode in `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}
+```
+
+## Pre-Commit Hooks
+
+Use Husky + lint-staged to lint before commits:
+
+```bash
+npm install --save-dev husky lint-staged
+npx husky init
+```
+
+```javascript
+// .husky/pre-commit
+npm run lint
+npm run typecheck
+```
+
+Or with lint-staged for faster commits:
+
+```json
+// package.json
+{
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  }
+}
+```
+
+## CI/CD Integration
+
+Add to your CI pipeline:
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+```
+
+## IDE Integration
+
+### VS Code
+
+Install ESLint extension:
+```json
+// .vscode/extensions.json
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint"
+  ]
+}
+```
+
+Enable auto-fix on save:
+```json
+// .vscode/settings.json
+{
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": true
+  },
+  "eslint.validate": [
+    "javascript",
+    "javascriptreact",
+    "typescript",
+    "typescriptreact"
+  ]
+}
+```
+
+### Cursor
+
+Same settings as VS Code (uses VS Code engine).
+
+## Common ESLint Errors and Fixes
+
+### Error: "Promise returned is not awaited"
+
+```typescript
+// ❌ Error
+export const create = mutation({
+  handler: async (ctx, args) => {
+    ctx.db.insert("tasks", args);
+  },
+});
+
+// ✅ Fix
+export const create = mutation({
+  handler: async (ctx, args) => {
+    await ctx.db.insert("tasks", args);
+  },
+});
+```
+
+### Error: "Function is missing argument validators"
+
+```typescript
+// ❌ Error
+export const get = query({
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.id);
+  },
+});
+
+// ✅ Fix
+export const get = query({
+  args: { id: v.id("tasks") },
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.id);
+  },
+});
+```
+
+### Error: "Missing table name"
+
+```typescript
+// ❌ Error (old style)
+await ctx.db.get(taskId);
+
+// ✅ Fix (new style)
+await ctx.db.get("tasks", taskId);
+```
+
+### Error: "Avoid using .collect() without pagination"
+
+```typescript
+// ❌ Error
+const all = await ctx.db.query("tasks").collect();
+
+// ✅ Fix
+const results = await ctx.db.query("tasks").paginate({
+  cursor: null,
+  limit: 100,
+});
+```
+
+## Disabling Rules (When Necessary)
+
+Sometimes you need to disable a rule:
+
+```typescript
+// Disable for one line
+// eslint-disable-next-line @convex-dev/no-query-collect
+const all = await ctx.db.query("tasks").collect();
+
+// Disable for whole file
+/* eslint-disable @convex-dev/no-query-collect */
+
+// Disable in config for specific files
+export default [
+  {
+    files: ["convex/migrations/**"],
+    rules: {
+      "@convex-dev/no-query-collect": "off",
+    },
+  },
+];
+```
+
+**⚠️ Warning:** Only disable rules when you have a good reason. Most Convex ESLint rules exist to prevent real bugs!
+
+## Troubleshooting
+
+### ESLint not finding Convex rules
+
+```bash
+# Make sure plugin is installed
+npm ls @convex-dev/eslint-plugin
+
+# Reinstall if needed
+npm install --save-dev @convex-dev/eslint-plugin
+```
+
+### Rules not applying to convex/ directory
+
+Make sure your ESLint config includes the convex directory:
+
+```javascript
+export default [
+  {
+    files: ["**/*.ts", "**/*.js"],
+    // Rules apply to all files including convex/
+  },
+];
+```
+
+### TypeScript errors in ESLint
+
+Make sure `@typescript-eslint/parser` is installed:
+
+```bash
+npm install --save-dev @typescript-eslint/parser @typescript-eslint/eslint-plugin
+```
+
+## Complete Setup Example
+
+```bash
+# Install everything
+npm install --save-dev \
+  eslint \
+  @convex-dev/eslint-plugin \
+  @typescript-eslint/parser \
+  @typescript-eslint/eslint-plugin \
+  prettier \
+  eslint-config-prettier
+```
+
+```javascript
+// eslint.config.mjs
+import convexPlugin from "@convex-dev/eslint-plugin";
+import tseslint from "@typescript-eslint/eslint-plugin";
+import tsparser from "@typescript-eslint/parser";
+import prettier from "eslint-config-prettier";
+
+export default [
+  // Convex recommended rules
+  ...convexPlugin.configs.recommended,
+
+  // TypeScript rules
+  {
+    files: ["**/*.ts", "**/*.tsx"],
+    languageOptions: {
+      parser: tsparser,
+      parserOptions: {
+        project: "./tsconfig.json",
+      },
+    },
+    plugins: {
+      "@typescript-eslint": tseslint,
+    },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/no-explicit-any": "warn",
+      "@typescript-eslint/no-unused-vars": ["error", {
+        argsIgnorePattern: "^_",
+      }],
+    },
+  },
+
+  // Prettier (must be last)
+  prettier,
+];
+```
+
+```json
+// package.json
+{
+  "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run lint && npm run typecheck"
+  }
+}
+```
+
+## Why This Matters
+
+**Without ESLint:**
+```typescript
+// Ships to production with bugs!
+export const update = mutation({
+  handler: async (ctx, args) => {
+    ctx.db.patch(args.id, args.data); // Forgot await
+    console.log("Updated!");           // Logs before update!
+  }
+});
+```
+
+**With ESLint:**
+```bash
+$ npm run lint
+
+convex/tasks.ts
+  3:5  error  Promises must be awaited  @typescript-eslint/no-floating-promises
+
+✖ 1 problem (1 error, 0 warnings)
+```
+
+You catch the bug before it reaches production!
+
+## Checklist
+
+- [ ] Install `@convex-dev/eslint-plugin`
+- [ ] Configure ESLint (flat config or .eslintrc)
+- [ ] Add lint scripts to package.json
+- [ ] Enable TypeScript strict mode
+- [ ] Set up pre-commit hooks
+- [ ] Configure IDE auto-fix on save
+- [ ] Add linting to CI/CD pipeline
+- [ ] Run `npm run lint` regularly
+- [ ] Fix all ESLint errors before deploying
+
+## Learn More
+
+- [Convex ESLint Documentation](https://docs.convex.dev/eslint)
+- [ESLint Setup Guide](https://stack.convex.dev/eslint-setup)
+- [@convex-dev/eslint-plugin on npm](https://www.npmjs.com/package/@convex-dev/eslint-plugin)
+- [Convex Best Practices](https://docs.convex.dev/understanding/best-practices/)
+
+**Remember:** ESLint is not optional for production Convex apps. It catches bugs that will slip past TypeScript!

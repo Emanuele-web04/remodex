@@ -56,12 +56,22 @@ final class CodexSkillsCachePersistenceTests: XCTestCase {
 
         let listed = try await service.listSkills(cwds: ["/tmp/project"], forceReload: false)
         XCTAssertEqual(listed.count, 2)
+        XCTAssertEqual(
+            service.cachedAutocompleteSkills(for: "/tmp/project", query: "alp", limit: 6)?.map(\.name),
+            ["alpha"]
+        )
 
         let reloadedService = makeService(testName: "persistAcrossReload")
         reloadedService.relayMacDeviceId = "mac-test"
         let cached = reloadedService.cachedSkills(for: "/tmp/project")
+        let cachedAutocomplete = reloadedService.cachedAutocompleteSkills(
+            for: "/tmp/project",
+            query: "alp",
+            limit: 6
+        )
 
         XCTAssertEqual(cached?.map(\.name), Optional(listed.map(\.name)))
+        XCTAssertEqual(cachedAutocomplete?.map(\.name), ["alpha"])
     }
 
     func testCachedSkillsDoNotRestoreForMismatchedRelayMac() async throws {
@@ -91,6 +101,7 @@ final class CodexSkillsCachePersistenceTests: XCTestCase {
         reloadedService.relayMacDeviceId = "mac-b"
 
         XCTAssertNil(reloadedService.cachedSkills(for: "/tmp/project"))
+        XCTAssertNil(reloadedService.cachedAutocompleteSkills(for: "/tmp/project", query: "alp", limit: 6))
     }
 
     func testCachedSkillsRestoreForMatchingServerIdentityWithoutRelayContext() async throws {
@@ -127,8 +138,14 @@ final class CodexSkillsCachePersistenceTests: XCTestCase {
         let reloadedService = makeService(testName: "matchingServerIdentity")
         reloadedService.connectedServerIdentity = "ws://example.test/socket"
         let cached = reloadedService.cachedSkills(for: "/tmp/project")
+        let cachedAutocomplete = reloadedService.cachedAutocompleteSkills(
+            for: "/tmp/project",
+            query: "alp",
+            limit: 6
+        )
 
         XCTAssertEqual(cached?.map(\.name), Optional(listed.map(\.name)))
+        XCTAssertEqual(cachedAutocomplete?.map(\.name), ["alpha"])
     }
 
     func testCachedSkillsDoNotRestoreForMismatchedServerIdentityWithoutRelayContext() async throws {
@@ -158,6 +175,7 @@ final class CodexSkillsCachePersistenceTests: XCTestCase {
         reloadedService.connectedServerIdentity = "ws://example.test/socket-b"
 
         XCTAssertNil(reloadedService.cachedSkills(for: "/tmp/project"))
+        XCTAssertNil(reloadedService.cachedAutocompleteSkills(for: "/tmp/project", query: "alp", limit: 6))
     }
 
     func testInMemorySkillsCacheDoesNotSurviveDirectServerIdentitySwitch() async throws {
@@ -184,11 +202,50 @@ final class CodexSkillsCachePersistenceTests: XCTestCase {
         let listed = try await service.listSkills(cwds: ["/tmp/project"], forceReload: false)
         XCTAssertEqual(listed.map(\.name), ["alpha"])
         XCTAssertEqual(service.cachedSkills(for: "/tmp/project")?.map(\.name), ["alpha"])
+        XCTAssertEqual(
+            service.cachedAutocompleteSkills(for: "/tmp/project", query: "alp", limit: 6)?.map(\.name),
+            ["alpha"]
+        )
 
         service.connectedServerIdentity = "ws://example.test/socket-b"
 
         XCTAssertNil(service.cachedSkills(for: "/tmp/project"))
         XCTAssertFalse(service.isUnsupportedSkillRoot("/tmp/project"))
+        XCTAssertNil(service.cachedAutocompleteSkills(for: "/tmp/project", query: "alp", limit: 6))
+    }
+
+    func testResetSkillsCacheContextChangeClearsAutocompleteCacheForMismatchedRelayMac() async throws {
+        let service = makeService(testName: "resetContextChange")
+        service.relayMacDeviceId = "mac-a"
+        service.requestTransportOverride = { method, _ in
+            switch method {
+            case "skills/list":
+                return self.makeSkillsRPCResponse([
+                    CodexSkillMetadata(
+                        name: "alpha",
+                        description: "Alpha skill",
+                        path: "/tmp/project/alpha/SKILL.md",
+                        scope: "project",
+                        enabled: true
+                    ),
+                ])
+            default:
+                XCTFail("Unexpected method: \(method)")
+                return self.makeSkillsRPCResponse([])
+            }
+        }
+
+        _ = try await service.listSkills(cwds: ["/tmp/project"], forceReload: false)
+        XCTAssertEqual(
+            service.cachedAutocompleteSkills(for: "/tmp/project", query: "alp", limit: 6)?.map(\.name),
+            ["alpha"]
+        )
+
+        service.relayMacDeviceId = "mac-b"
+        service.resetSkillsCacheForConnectionContextChange()
+
+        XCTAssertNil(service.cachedSkills(for: "/tmp/project"))
+        XCTAssertNil(service.cachedAutocompleteSkills(for: "/tmp/project", query: "alp", limit: 6))
     }
 
     func testUnsupportedSkillRootPersistsAcrossServiceReload() {

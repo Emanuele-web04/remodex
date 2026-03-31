@@ -61,6 +61,16 @@ extension CodexService {
             return try await requestTransportOverride(method, params)
         }
 
+        if transportMode == .convexRemote, let convexTransport {
+            let requestID: JSONValue = .string(UUID().uuidString)
+            return try await convexTransport.performRequest(
+                method: method,
+                params: params,
+                requestID: requestID,
+                service: self
+            )
+        }
+
         guard isConnected, webSocketConnection != nil || webSocketTask != nil else {
             throw CodexServiceError.disconnected
         }
@@ -99,6 +109,11 @@ extension CodexService {
 
     // Sends a fire-and-forget RPC notification.
     func sendNotification(method: String, params: JSONValue?) async throws {
+        if transportMode == .convexRemote, let convexTransport {
+            try await convexTransport.performNotification(method: method, params: params, service: self)
+            return
+        }
+
         let notification = RPCMessage(
             jsonrpc: nil,
             id: nil,

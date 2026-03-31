@@ -1,0 +1,87 @@
+---
+description: Design flat, relational schemas with proper indexes instead of deep nesting
+alwaysApply: true
+globs: ["convex/schema.ts"]
+---
+
+# Schema Design Best Practices
+
+Design schemas to be **document-relational**: relatively flat documents with relationships via IDs, not deeply nested structures.
+
+## Key Principles
+
+1. **Keep documents flat**: Avoid deeply nested arrays of objects
+2. **Use relationships**: Link documents via IDs across tables
+3. **Add indexes early**: Index foreign keys (userId, teamId) from the start
+4. **Limit array sizes**: Arrays are capped at 8,192 items—only use when there's a natural limit
+
+## Bad: Deep Nesting
+
+```typescript
+// ❌ Don't do this
+export default defineSchema({
+  users: defineTable({
+    name: v.string(),
+    posts: v.array(v.object({
+      title: v.string(),
+      content: v.string(),
+      comments: v.array(v.object({
+        text: v.string(),
+        author: v.string(),
+      })),
+    })),
+  }),
+});
+```
+
+This makes it hard to update specific posts, limits you to 8,192 posts per user, and prevents efficient queries.
+
+## Good: Relational Design
+
+```typescript
+// ✅ Do this
+export default defineSchema({
+  users: defineTable({
+    name: v.string(),
+    email: v.string(),
+  }).index("by_email", ["email"]),
+
+  posts: defineTable({
+    userId: v.id("users"),
+    title: v.string(),
+    content: v.string(),
+  }).index("by_user", ["userId"])
+    .index("by_user_and_created", ["userId", "createdAt"]),
+
+  comments: defineTable({
+    postId: v.id("posts"),
+    userId: v.id("users"),
+    text: v.string(),
+  }).index("by_post", ["postId"])
+    .index("by_user", ["userId"]),
+});
+```
+
+## When Arrays Are OK
+
+Arrays work well for:
+- Small, bounded collections (e.g., roles, tags)
+- Data that's always loaded together
+- Natural limits (e.g., max 5 favorites)
+
+```typescript
+users: defineTable({
+  name: v.string(),
+  roles: v.array(v.union(v.literal("admin"), v.literal("editor"), v.literal("viewer"))),
+  favoriteColors: v.array(v.string()), // Small list
+}),
+```
+
+## Index Your Relationships
+
+Always add indexes for foreign key lookups:
+```typescript
+.index("by_user", ["userId"])
+.index("by_team", ["teamId"])
+.index("by_parent", ["parentId"])
+```

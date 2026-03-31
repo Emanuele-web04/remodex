@@ -115,6 +115,30 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         XCTAssertEqual(recordedParams?.objectValue?["deviceToken"]?.stringValue, "deadbeef")
     }
 
+    func testCloudAsyncFallbackStillSyncsManagedPushRegistration() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let registrar = MockRemoteNotificationRegistrar()
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: registrar
+        )
+        service.isConnected = true
+        service.isInitialized = true
+        service.transportMode = .cloudAsyncFallback
+        service.relaySessionId = "session-push"
+        service.remoteNotificationDeviceToken = "deadbeef"
+
+        var recordedMethod: String?
+        service.requestTransportOverride = { method, _ in
+            recordedMethod = method
+            return RPCMessage(id: .string(UUID().uuidString), result: .object(["ok": .bool(true)]), includeJSONRPC: false)
+        }
+
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+
+        XCTAssertEqual(recordedMethod, "notifications/push/register")
+    }
+
     func testNotificationOpenStaysPendingUntilThreadBecomesAvailable() async {
         let center = MockUserNotificationCenter(status: .authorized)
         let registrar = MockRemoteNotificationRegistrar()

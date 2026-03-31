@@ -53,7 +53,7 @@ async function main() {
   }
 
   if (command === "run-service") {
-    runMacOSBridgeService();
+    await runMacOSBridgeService();
     return;
   }
 

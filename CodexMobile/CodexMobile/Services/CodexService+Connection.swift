@@ -99,7 +99,7 @@ extension CodexService {
             try await performSecureHandshake()
 
             isConnected = true
-            transportMode = .liveRelay
+            transportMode = .lanRelay
             shouldAutoReconnectOnForeground = false
             connectionRecoveryState = .idle
             lastErrorMessage = nil
@@ -148,7 +148,7 @@ extension CodexService {
         finalizeAllStreamingState()
         messagePersistenceDebounceTask?.cancel()
         messagePersistenceDebounceTask = nil
-        threadListPersistenceDebounceTask?.cancel()
+        threadListPersistenceDebounceTask?.task.cancel()
         threadListPersistenceDebounceTask = nil
         messagePersistence.save(messagesByThread)
         assistantCompletionFingerprintByThread.removeAll()
@@ -160,6 +160,8 @@ extension CodexService {
         hasPresentedServiceTierBridgeUpdatePrompt = false
         supportsThreadFork = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
+        preferredSandboxRequestShape = .sandboxPolicy
+        preferredApprovalPolicyByAccessMode.removeAll()
         hasPresentedMinimumBridgePackageUpdatePrompt = false
         clearAllRunningState()
         readyThreadIDs.removeAll()
@@ -167,6 +169,8 @@ extension CodexService {
         runningThreadWatchByID.removeAll()
         clearTransientConnectionPrompts()
         endBackgroundRunGraceTask(reason: "disconnect")
+        deferredModelListTask?.cancel()
+        deferredModelListTask = nil
         if !preserveReconnectIntent {
             shouldAutoReconnectOnForeground = false
             connectionRecoveryState = .idle
@@ -213,20 +217,25 @@ extension CodexService {
         pendingNotificationOpenThreadID = nil
         lastPushRegistrationSignature = nil
         resetSkillsCacheForConnectionContextChange()
-        threadListPersistenceDebounceTask?.cancel()
+        inFlightThreadResumeTaskByThread.values.forEach { $0.task.cancel() }
+        inFlightThreadResumeTaskByThread.removeAll()
+        inFlightTurnStateSnapshotTaskByThread.values.forEach { $0.task.cancel() }
+        inFlightTurnStateSnapshotTaskByThread.removeAll()
+        lastArchivedThreadsSyncAt = nil
+        threadListPersistenceDebounceTask?.task.cancel()
         persistedThreadListSnapshot = nil
         threadListPersistence.clear()
         clearTransientConnectionPrompts()
     }
 
-    func activateCloudAsyncFallback(serverURL: String, performInitialSync: Bool = true) async throws {
-        if let cloudAsyncFallbackActivationOverride {
-            try await cloudAsyncFallbackActivationOverride(serverURL, performInitialSync)
+    func activateConvexLane(serverURL: String, performInitialSync: Bool = true) async throws {
+        if let convexLaneActivationOverride {
+            try await convexLaneActivationOverride(serverURL, performInitialSync)
             return
         }
 
-        guard let cloudAsyncTransport else {
-            throw CodexCloudAsyncTransportError.unavailable("Off-LAN async transport is not configured.")
+        guard let convexTransport else {
+            throw CodexCloudAsyncTransportError.unavailable("Convex remote transport is not configured.")
         }
 
         let normalizedServerURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -237,7 +246,7 @@ extension CodexService {
         }
         connectedServerIdentity = serverIdentity
 
-        let availability = await cloudAsyncTransport.availability(for: self)
+        let availability = await convexTransport.availability(for: self)
         guard case .available = availability else {
             if case .unavailable(let message) = availability {
                 throw CodexCloudAsyncTransportError.unavailable(message)
@@ -246,7 +255,7 @@ extension CodexService {
         }
 
         await prepareForConnectionAttempt(preserveReconnectIntent: true)
-        transportMode = .cloudAsyncFallback
+        transportMode = .convexRemote
         isConnected = true
         isInitialized = false
         shouldAutoReconnectOnForeground = false
@@ -258,7 +267,7 @@ extension CodexService {
             try await initializeSession()
             trustedReconnectFailureCount = 0
             secureConnectionState = .encrypted
-            secureMacFingerprint = cloudAsyncFallbackCredentials
+            secureMacFingerprint = convexLaneCredentials
                 .map { codexSecureFingerprint(for: $0.macIdentityPublicKey) }
             bridgeUpdatePrompt = nil
             startSyncLoop()
@@ -278,6 +287,103 @@ extension CodexService {
             isInitialized = false
             throw error
         }
+    }
+
+    func scheduleTransportPreferenceReconcile() {
+        transportPreferenceReconcileTask?.cancel()
+        transportPreferenceReconcileTask = Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+
+            while self.isConnecting {
+                if Task.isCancelled {
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+
+            if Task.isCancelled {
+                return
+            }
+
+            await self.applyTransportPreferenceChange()
+            self.transportPreferenceReconcileTask = nil
+        }
+    }
+
+    func applyTransportPreferenceChange() async {
+        guard !isConnecting else {
+            return
+        }
+
+        switch transportPreference {
+        case .convexOnly:
+            guard isConnected,
+                  transportMode == .lanRelay,
+                  let serverURL = transportPreferenceTransitionURL() else {
+                return
+            }
+
+            do {
+                try await activateConvexLane(serverURL: serverURL, performInitialSync: false)
+            } catch {
+                presentConnectionErrorIfNeeded(error)
+            }
+        case .lanOnly:
+            guard isConnected,
+                  transportMode == .convexRemote,
+                  let serverURL = transportPreferenceTransitionURL() else {
+                return
+            }
+
+            do {
+                try await connect(
+                    serverURL: serverURL,
+                    token: "",
+                    role: "iphone",
+                    performInitialSync: false
+                )
+            } catch {
+                presentConnectionErrorIfNeeded(error)
+            }
+        case .automatic:
+            guard isConnected,
+                  transportMode == .convexRemote,
+                  let serverURL = transportPreferenceTransitionURL(),
+                  preferredTransportMode(for: serverURL) == .lanRelay else {
+                return
+            }
+
+            do {
+                try await connect(
+                    serverURL: serverURL,
+                    token: "",
+                    role: "iphone",
+                    performInitialSync: false
+                )
+            } catch {
+                presentConnectionErrorIfNeeded(error)
+            }
+        }
+    }
+
+    func transportPreferenceTransitionURL() -> String? {
+        if let relayURL = normalizedRelayURL {
+            if let sessionId = normalizedRelaySessionId {
+                return "\(relayURL)/\(sessionId)"
+            }
+            return relayURL
+        }
+
+        if let relayURL = preferredTrustedMacRecord?
+            .relayURL?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !relayURL.isEmpty {
+            return relayURL
+        }
+
+        return nil
     }
 
     func forgetTrustedMac(deviceId: String? = nil) {
@@ -423,9 +529,11 @@ extension CodexService {
 
     // Runs the post-connect sync work that is useful but not required to mark the socket usable.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
-        try? await listModels()
-        try? await listThreads()
+        if threads.isEmpty {
+            try? await listThreads(includeArchived: false, forceArchivedRefresh: false)
+        }
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
+            scheduleDeferredModelListRefresh()
             return
         }
         let resolvedPreferredThreadId = normalizedInterruptIdentifier(preferredThreadId)
@@ -435,7 +543,17 @@ extension CodexService {
         if let threadId = activeThreadId
             ?? resolvedPreferredThreadId
             ?? firstLiveThreadID() {
-            _ = await refreshInFlightTurnState(threadId: threadId)
+            // Warm the active thread's server session during bootstrap so the first
+            // user send after a cold launch does not wait on thread/resume.
+            var didRefreshTurnStateFromResume = false
+            if !resumedThreadIDs.contains(threadId) {
+                if let resumeResult = try? await ensureThreadResumedWithSnapshot(threadId: threadId) {
+                    didRefreshTurnStateFromResume = resumeResult.snapshot != nil
+                }
+            }
+            if !didRefreshTurnStateFromResume {
+                _ = await refreshInFlightTurnState(threadId: threadId)
+            }
             if threadHasActiveOrRunningTurn(threadId) {
                 _ = try? await ensureThreadResumed(threadId: threadId, force: true)
                 if activeThreadId == threadId {
@@ -446,12 +564,30 @@ extension CodexService {
                 }
             }
         }
+        scheduleDeferredModelListRefresh()
+    }
+
+    private func scheduleDeferredModelListRefresh() {
+        guard deferredModelListTask == nil else {
+            return
+        }
+
+        deferredModelListTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.deferredModelListTask = nil }
+            try? await self.listModels()
+        }
     }
 
     // Clears volatile runtime state on server switch.
     func resetThreadRuntimeStateForServerSwitch() {
         activeThreadId = nil
         activeTurnId = nil
+        inFlightThreadResumeTaskByThread.values.forEach { $0.task.cancel() }
+        inFlightThreadResumeTaskByThread.removeAll()
+        inFlightTurnStateSnapshotTaskByThread.values.forEach { $0.task.cancel() }
+        inFlightTurnStateSnapshotTaskByThread.removeAll()
+        lastArchivedThreadsSyncAt = nil
         activeTurnIdByThread.removeAll()
         refreshAllThreadTimelineStates()
         threadIdByTurnID.removeAll()
@@ -469,6 +605,8 @@ extension CodexService {
         hasPresentedServiceTierBridgeUpdatePrompt = false
         supportsThreadFork = true
         hasPresentedThreadForkBridgeUpdatePrompt = false
+        preferredSandboxRequestShape = .sandboxPolicy
+        preferredApprovalPolicyByAccessMode.removeAll()
         hasPresentedMinimumBridgePackageUpdatePrompt = false
         clearAllRunningState()
         readyThreadIDs.removeAll()
@@ -593,12 +731,9 @@ extension CodexService {
     ) -> ReceiveErrorDisposition {
         let shouldClearSavedRelaySession = shouldClearSavedRelaySession(for: relayCloseCode)
         let retryableSessionUnavailableMessage = retryableSessionUnavailableMessage(for: relayCloseCode)
-        // Only relay closes that preserve the saved session should stay on the
-        // auto-reconnect path; dead sessions must fall back to QR recovery.
-        let permanentRelayMessage = shouldClearSavedRelaySession
-            ? (permanentRelayDisconnectMessage(for: relayCloseCode)
-                ?? "This relay pairing is no longer valid. Scan a new QR code to reconnect.")
-            : nil
+        // Relay close codes can reflect a stale socket race while pairing is still valid,
+        // so we preserve saved trusted-session credentials unless secure auth proves otherwise.
+        let permanentRelayMessage = permanentRelayDisconnectMessage(for: relayCloseCode)
         let explicitRelayDropMessage = explicitRelayDropMessage(for: relayCloseCode)
         let isBenignDisconnect = isBenignBackgroundDisconnect(error)
         let shouldSuppressMessage = isBenignDisconnect && !isActivelyForegroundedForConnectionUI()
@@ -756,16 +891,61 @@ extension CodexService {
         return error.localizedDescription
     }
 
-    func shouldAttemptCloudAsyncFallback(after error: Error, serverURL: String) -> Bool {
-        guard hasCloudAsyncFallbackCredentials,
+    func preferredTransportMode(for serverURL: String) -> CodexTransportMode? {
+        if let preferredTransportModeOverride {
+            return preferredTransportModeOverride(serverURL)
+        }
+
+        switch transportPreference {
+        case .lanOnly:
+            return .lanRelay
+        case .convexOnly:
+            return .convexRemote
+        case .automatic:
+            break
+        }
+
+        guard let url = try? validateConnectionURL(serverURL) else {
+            return nil
+        }
+
+        guard requiresLocalNetworkAuthorization(for: url) else {
+            return .lanRelay
+        }
+
+        if localNetworkAuthorizationStatus == .denied {
+            return .convexRemote
+        }
+
+        switch localRelayPathAvailabilityForLaneSelection() {
+        case true:
+            return .lanRelay
+        case false:
+            return .convexRemote
+        case nil:
+            return .lanRelay
+        }
+    }
+
+    func shouldUseConvexLane(after error: Error, serverURL: String) -> Bool {
+        guard preferredTransportMode(for: serverURL) == .convexRemote else {
+            return false
+        }
+
+        guard hasConvexLaneCredentials,
               let url = try? validateConnectionURL(serverURL),
               requiresLocalNetworkAuthorization(for: url) else {
             return false
         }
 
-        let localRelayPathAvailability = localRelayPathAvailabilityForCloudFallback()
+        let isLocalNetworkAuthorizationDenied = localNetworkAuthorizationStatus == .denied
+        let localRelayPathAvailability = localRelayPathAvailabilityForLaneSelection()
 
         if secureConnectionState == .rePairRequired || secureConnectionState == .updateRequired {
+            return false
+        }
+
+        if !isLocalNetworkAuthorizationDenied, localRelayPathAvailability == nil {
             return false
         }
 
@@ -980,6 +1160,19 @@ extension CodexService {
         return staleConnectionFragments.contains { normalizedMessage.contains($0) }
     }
 
+    func visibleConnectedConversationErrorMessage(_ message: String?) -> String? {
+        guard let trimmedMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmedMessage.isEmpty else {
+            return nil
+        }
+
+        if shouldSuppressConnectedConversationErrorMessage(trimmedMessage) {
+            return nil
+        }
+
+        return trimmedMessage
+    }
+
     // Distinguishes relay frame-size failures from generic disconnects so reconnect UI can explain them.
     func isOversizedRelayPayloadError(_ error: Error) -> Bool {
         if let nwError = error as? NWError,
@@ -1045,11 +1238,11 @@ extension CodexService {
 
         switch rawValue {
         case 4001:
-            return "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
+            return "This relay session was replaced by another Mac connection. Reconnect to refresh your saved trusted session."
         case 4003:
-            return "This device was replaced by a newer connection. Scan a new QR code to reconnect."
+            return "This device was replaced by a newer connection. Reconnect to refresh your saved trusted session."
         default:
-            return "This relay pairing is no longer valid. Scan a new QR code to reconnect."
+            return "This relay pairing ended. Reconnect to refresh your saved trusted session."
         }
     }
 
@@ -1081,11 +1274,9 @@ extension CodexService {
     }
 
     func shouldClearSavedRelaySession(for closeCode: NWProtocolWebSocket.CloseCode?) -> Bool {
-        guard let rawValue = relayCloseCodeRawValue(closeCode) else {
-            return false
-        }
-
-        return Self.permanentRelayCloseCodeRawValues.contains(rawValue)
+        _ = closeCode
+        // Keep saved trusted-session credentials so reconnect can recover without forcing QR.
+        return false
     }
 
     var isRunningOnSimulator: Bool {
@@ -1208,14 +1399,28 @@ extension CodexService {
                     return
                 }
                 self.hasResolvedLocalRelayPathAvailability = true
+                let didChange = self.hasActiveLocalRelayPath != hasActiveLocalRelayPath
                 self.hasActiveLocalRelayPath = hasActiveLocalRelayPath
+                if didChange,
+                   self.transportPreference == .automatic,
+                   self.transportMode == .convexRemote {
+                    self.scheduleTransportPreferenceReconcile()
+                }
             }
         }
         localRelayPathMonitor = monitor
         monitor.start(queue: localRelayPathMonitorQueue)
     }
 
-    func localRelayPathAvailabilityForCloudFallback() -> Bool? {
-        return localRelayPathAvailabilityOverride?()
+    func localRelayPathAvailabilityForLaneSelection() -> Bool? {
+        if let override = localRelayPathAvailabilityOverride {
+            return override()
+        }
+
+        guard hasResolvedLocalRelayPathAvailability else {
+            return nil
+        }
+
+        return hasActiveLocalRelayPath
     }
 }

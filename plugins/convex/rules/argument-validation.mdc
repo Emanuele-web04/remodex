@@ -1,0 +1,44 @@
+---
+description: All public functions must validate arguments and return types
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Argument Validation
+
+All public `query`, `mutation`, and `action` functions MUST define validators for both arguments and return types. This protects against malicious input and provides type safety.
+
+## Pattern
+
+Always use the `args` and `returns` fields:
+
+```typescript
+export const createTask = mutation({
+  args: {
+    text: v.string(),
+    userId: v.id("users"),
+    priority: v.optional(v.union(
+      v.literal("low"),
+      v.literal("medium"),
+      v.literal("high")
+    )),
+  },
+  returns: v.id("tasks"),
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("tasks", {
+      text: args.text,
+      userId: args.userId,
+      priority: args.priority ?? "medium",
+      completed: false,
+    });
+  },
+});
+```
+
+## Internal Functions
+
+Internal functions (from `internal.*`) can skip validators if they're only called by trusted backend code, but it's still recommended.
+
+## Enforcement
+
+Enable the `@convex-dev/require-argument-validators` ESLint rule to enforce this automatically.

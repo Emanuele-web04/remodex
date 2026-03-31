@@ -181,6 +181,37 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
     }
 
+    func testSendTurnSkipsBusyRefreshReadWhenTerminalStateAlreadyClearsStaleRun() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.runningThreadIDs.insert("thread-queue")
+        service.resumedThreadIDs.insert("thread-queue")
+        service.latestTurnTerminalStateByThread["thread-queue"] = .completed
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-new")]),
+                includeJSONRPC: false
+            )
+        }
+
+        let viewModel = makeViewModel()
+        viewModel.input = "send now"
+
+        viewModel.sendTurn(codex: service, threadID: "thread-queue")
+        await waitForSendCompletion(viewModel)
+
+        XCTAssertEqual(recordedMethods, ["turn/start"])
+        XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
+        XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
+        XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
+    }
+
     func testSendTurnQueuesAfterBusyRefreshConfirmsActiveRun() async {
         let service = makeService()
         service.isConnected = true
@@ -581,6 +612,38 @@ final class TurnViewModelQueueTests: XCTestCase {
         await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["thread/read", "turn/start"])
+        XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? true)
+        XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
+    }
+
+    func testSteerQueuedDraftSkipsBusyRefreshReadWhenTerminalStateAlreadyClearsStaleRun() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.runningThreadIDs.insert("thread-queue")
+        service.resumedThreadIDs.insert("thread-queue")
+        service.latestTurnTerminalStateByThread["thread-queue"] = .completed
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-new")]),
+                includeJSONRPC: false
+            )
+        }
+
+        let viewModel = makeViewModel()
+        let draft = makeDraft(text: "queued")
+        service.queuedTurnDraftsByThread["thread-queue"] = [draft]
+
+        viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
+        await waitForSteerCompletion(viewModel)
+
+        XCTAssertEqual(recordedMethods, ["turn/start"])
+        XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
         XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? true)
         XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
     }

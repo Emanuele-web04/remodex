@@ -205,30 +205,36 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertTrue(service.isRecoverableTransientConnectionError(error))
     }
 
-    func testCloudAsyncFallbackIsBlockedWhileLocalRelayPathIsAvailable() {
-        let service = makeService()
-        service.relayMacDeviceId = "mac-123"
-        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
-        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
-        service.localRelayPathAvailabilityOverride = { true }
+    func testLocalRelayPathAvailabilityUsesMonitoredStateWhenNoOverrideIsInstalled() {
+        let unresolved = makeCloudFallbackService()
+        XCTAssertNil(unresolved.localRelayPathAvailabilityForCloudFallback())
 
-        XCTAssertFalse(
-            service.shouldAttemptCloudAsyncFallback(
-                after: NWError.posix(.ETIMEDOUT),
-                serverURL: "ws://192.168.1.31:9000/relay/session"
-            )
-        )
+        let available = makeCloudFallbackService()
+        available.hasResolvedLocalRelayPathAvailability = true
+        available.hasActiveLocalRelayPath = true
+        XCTAssertEqual(available.localRelayPathAvailabilityForCloudFallback(), true)
+
+        let unavailable = makeCloudFallbackService()
+        unavailable.hasResolvedLocalRelayPathAvailability = true
+        unavailable.hasActiveLocalRelayPath = false
+        XCTAssertEqual(unavailable.localRelayPathAvailabilityForCloudFallback(), false)
     }
 
-    func testCloudAsyncFallbackIsNotBlockedByGenericLocalRelayPathMonitorState() {
-        let service = makeService()
-        service.relayMacDeviceId = "mac-123"
-        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
-        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+    func testLocalRelayPathAvailabilityOverrideTakesPrecedenceOverMonitoredState() {
+        let service = makeCloudFallbackService()
+        service.hasResolvedLocalRelayPathAvailability = true
+        service.hasActiveLocalRelayPath = true
+        service.localRelayPathAvailabilityOverride = { false }
+
+        XCTAssertEqual(service.localRelayPathAvailabilityForCloudFallback(), false)
+    }
+
+    func testCloudAsyncFallbackIsBlockedWhileMonitoredLocalRelayPathIsAvailable() {
+        let service = makeCloudFallbackService()
         service.hasResolvedLocalRelayPathAvailability = true
         service.hasActiveLocalRelayPath = true
 
-        XCTAssertTrue(
+        XCTAssertFalse(
             service.shouldAttemptCloudAsyncFallback(
                 after: NWError.posix(.ETIMEDOUT),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
@@ -251,14 +257,23 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
-    func testCloudAsyncFallbackIsAllowedForLocalRelayTimeoutWhenOffLAN() {
-        let service = makeService()
-        service.relayMacDeviceId = "mac-123"
-        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
-        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
-        service.localRelayPathAvailabilityOverride = { false }
+    func testCloudAsyncFallbackIsAllowedWhileMonitoredLocalRelayPathIsUnavailable() {
+        let service = makeCloudFallbackService()
+        service.hasResolvedLocalRelayPathAvailability = true
+        service.hasActiveLocalRelayPath = false
 
         XCTAssertTrue(
+            service.shouldAttemptCloudAsyncFallback(
+                after: NWError.posix(.ETIMEDOUT),
+                serverURL: "ws://192.168.1.31:9000/relay/session"
+            )
+        )
+    }
+
+    func testCloudAsyncFallbackIsAllowedWhileMonitoredLocalRelayPathStateIsUnresolved() {
+        let service = makeCloudFallbackService()
+
+        XCTAssertFalse(
             service.shouldAttemptCloudAsyncFallback(
                 after: NWError.posix(.ETIMEDOUT),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
@@ -280,11 +295,10 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
-    func testCloudAsyncFallbackIsAllowedForConnectionRefusedOnLocalRelayHost() {
-        let service = makeService()
-        service.relayMacDeviceId = "mac-123"
-        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
-        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
+    func testCloudAsyncFallbackIsAllowedForConnectionRefusedOnLocalRelayHostWhenMonitoredLocalRelayPathIsUnavailable() {
+        let service = makeCloudFallbackService()
+        service.hasResolvedLocalRelayPathAvailability = true
+        service.hasActiveLocalRelayPath = false
 
         XCTAssertTrue(
             service.shouldAttemptCloudAsyncFallback(
@@ -383,6 +397,31 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testVisibleConnectedConversationErrorMessageHidesStaleSavedPairingTimeoutCopy() {
+        let service = makeService()
+        service.isConnected = true
+        service.connectionRecoveryState = .idle
+
+        XCTAssertNil(
+            service.visibleConnectedConversationErrorMessage(
+                "The saved pairing timed out while waiting for the Mac. Scan a new QR code to reconnect."
+            )
+        )
+    }
+
+    func testVisibleConnectedConversationErrorMessageKeepsNonStaleErrorVisible() {
+        let service = makeService()
+        service.isConnected = true
+        service.connectionRecoveryState = .idle
+
+        XCTAssertEqual(
+            service.visibleConnectedConversationErrorMessage(
+                "The secure Remodex payload could not be verified."
+            ),
+            "The secure Remodex payload could not be verified."
+        )
+    }
+
     func testPrepareForConnectionAttemptPreservesFreshQRHandshakeState() async {
         let service = makeService()
         let payload = CodexPairingQRPayload(
@@ -424,6 +463,14 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         let service = CodexService(defaults: defaults)
         service.localRelayPathAvailabilityOverride = nil
         Self.retainedServices.append(service)
+        return service
+    }
+
+    private func makeCloudFallbackService() -> CodexService {
+        let service = makeService()
+        service.relayMacDeviceId = "mac-123"
+        service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
         return service
     }
 }

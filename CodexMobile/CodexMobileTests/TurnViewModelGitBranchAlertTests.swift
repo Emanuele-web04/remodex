@@ -29,11 +29,8 @@ final class TurnViewModelGitBranchAlertTests: XCTestCase {
 
         XCTAssertEqual(alert?.title, "Local commits stay on main")
         XCTAssertTrue(alert?.message.contains("2 local commits") == true)
-        if case .continueGitBranchOperation(let buttonTitle)? = alert?.action {
-            XCTAssertEqual(buttonTitle, "Create Anyway")
-        } else {
-            XCTFail("Expected continueGitBranchOperation action")
-        }
+        XCTAssertEqual(alert?.buttons.map(\.title), ["Cancel", "Create Anyway"])
+        XCTAssertEqual(alert?.buttons.map(\.action), [.dismissOnly, .continueGitBranchOperation])
     }
 
     func testCleanBranchCreateNeedsNoPreflightAlert() {

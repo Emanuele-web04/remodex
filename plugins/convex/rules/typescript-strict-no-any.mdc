@@ -1,0 +1,351 @@
+---
+description: Use TypeScript strict mode and avoid 'any' type. Convex provides full type safety from database to client - use it!
+alwaysApply: true
+globs: ["**/*.ts", "**/*.tsx", "tsconfig.json"]
+---
+
+# TypeScript Strict Mode & No Any
+
+Convex provides **end-to-end type safety** from your database schema to your client code. Don't throw it away by using `any`!
+
+## Enable Strict Mode
+
+### tsconfig.json
+
+```json
+{
+  "compilerOptions": {
+    // Strict mode (required)
+    "strict": true,
+
+    // Additional strictness
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Modern settings
+    "target": "ES2021",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "skipLibCheck": true
+  }
+}
+```
+
+## Never Use `any`
+
+### ❌ Bad: Using any
+
+```typescript
+export const processData = mutation({
+  args: { data: v.any() }, // ❌ No type safety!
+  handler: async (ctx, args) => {
+    const result: any = await doSomething(args.data); // ❌ Lost types!
+    return result;
+  },
+});
+```
+
+**Problems:**
+- No autocomplete
+- No type checking
+- Runtime errors slip through
+- Breaks end-to-end type safety
+
+### ✅ Good: Proper Types
+
+```typescript
+export const processData = mutation({
+  args: {
+    data: v.object({
+      name: v.string(),
+      age: v.number(),
+      tags: v.array(v.string()),
+    }),
+  },
+  returns: v.object({
+    id: v.id("users"),
+    processed: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    // args.data is fully typed!
+    const user = await ctx.db.insert("users", {
+      name: args.data.name,
+      age: args.data.age,
+    });
+
+    return {
+      id: user,
+      processed: true,
+    };
+  },
+});
+```
+
+**Benefits:**
+- Full autocomplete
+- Compile-time errors
+- Safe refactoring
+- Self-documenting code
+
+## Use Generated Types
+
+Convex generates types for your schema:
+
+```typescript
+import { Doc, Id } from "./_generated/dataModel";
+
+// ✅ Use generated types
+export const getTask = query({
+  args: { taskId: v.id("tasks") },
+  returns: v.union(
+    v.object({
+      _id: v.id("tasks"),
+      title: v.string(),
+      completed: v.boolean(),
+    }),
+    v.null()
+  ),
+  handler: async (ctx, args): Promise<Doc<"tasks"> | null> => {
+    return await ctx.db.get(args.taskId);
+  },
+});
+```
+
+## Type Patterns
+
+### Pattern 1: Infer Types from Schema
+
+```typescript
+// Don't duplicate types - infer from validators
+const taskValidator = v.object({
+  title: v.string(),
+  completed: v.boolean(),
+  userId: v.id("users"),
+});
+
+export const createTask = mutation({
+  args: taskValidator,
+  handler: async (ctx, args) => {
+    // args is typed from validator!
+    return await ctx.db.insert("tasks", args);
+  },
+});
+```
+
+### Pattern 2: Custom Types
+
+```typescript
+// Define reusable types
+type TaskStatus = "todo" | "in_progress" | "done";
+
+const statusValidator = v.union(
+  v.literal("todo"),
+  v.literal("in_progress"),
+  v.literal("done")
+);
+
+export const updateStatus = mutation({
+  args: {
+    taskId: v.id("tasks"),
+    status: statusValidator,
+  },
+  handler: async (ctx, args) => {
+    // args.status is TaskStatus (not string)
+    await ctx.db.patch(args.taskId, { status: args.status });
+  },
+});
+```
+
+### Pattern 3: Return Types
+
+```typescript
+// Always define return types
+export const getUser = query({
+  args: { userId: v.id("users") },
+  returns: v.union(
+    v.object({
+      _id: v.id("users"),
+      name: v.string(),
+      email: v.string(),
+    }),
+    v.null()
+  ),
+  handler: async (ctx, args): Promise<Doc<"users"> | null> => {
+    return await ctx.db.get(args.userId);
+  },
+});
+```
+
+## When You Might Need `unknown`
+
+If you truly don't know the type, use `unknown` (not `any`):
+
+```typescript
+// ✅ Better: unknown (must type-check before use)
+export const processWebhook = mutation({
+  args: { payload: v.any() }, // Webhook payloads vary
+  handler: async (ctx, args) => {
+    const payload: unknown = args.payload;
+
+    // Must type-check before using
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      "type" in payload &&
+      typeof payload.type === "string"
+    ) {
+      // Now payload is narrowed
+      if (payload.type === "user.created") {
+        // Handle user created
+      }
+    }
+  },
+});
+```
+
+But prefer proper validation:
+
+```typescript
+// ✅ Best: Proper validation
+const webhookValidator = v.union(
+  v.object({ type: v.literal("user.created"), userId: v.id("users") }),
+  v.object({ type: v.literal("user.deleted"), userId: v.id("users") }),
+);
+
+export const processWebhook = mutation({
+  args: { payload: webhookValidator },
+  handler: async (ctx, args) => {
+    // Fully typed!
+    if (args.payload.type === "user.created") {
+      // ...
+    }
+  },
+});
+```
+
+## ESLint Rule
+
+Add to ESLint config:
+
+```javascript
+rules: {
+  "@typescript-eslint/no-explicit-any": "error", // Fail on any
+  "@typescript-eslint/no-unsafe-assignment": "error",
+  "@typescript-eslint/no-unsafe-member-access": "error",
+  "@typescript-eslint/no-unsafe-call": "error",
+  "@typescript-eslint/no-unsafe-return": "error",
+}
+```
+
+## Common Mistakes
+
+### Mistake 1: Casting to any
+
+```typescript
+// ❌ Bad
+const data = await fetch(url);
+const result = (await data.json()) as any;
+```
+
+```typescript
+// ✅ Good - define the type
+interface ApiResponse {
+  users: Array<{ id: string; name: string }>;
+}
+
+const data = await fetch(url);
+const result = (await data.json()) as ApiResponse;
+```
+
+### Mistake 2: any in function params
+
+```typescript
+// ❌ Bad
+function processUser(user: any) {
+  return user.name; // No type safety!
+}
+```
+
+```typescript
+// ✅ Good
+function processUser(user: Doc<"users">) {
+  return user.name; // Typed!
+}
+```
+
+### Mistake 3: any for "flexibility"
+
+```typescript
+// ❌ Bad - using any for "flexibility"
+export const flexibleUpdate = mutation({
+  args: { id: v.id("tasks"), data: v.any() },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.id, args.data); // Unsafe!
+  },
+});
+```
+
+```typescript
+// ✅ Good - define what's flexible
+export const updateTask = mutation({
+  args: {
+    id: v.id("tasks"),
+    title: v.optional(v.string()),
+    completed: v.optional(v.boolean()),
+    priority: v.optional(v.union(
+      v.literal("low"),
+      v.literal("medium"),
+      v.literal("high")
+    )),
+  },
+  handler: async (ctx, args) => {
+    const updates: Partial<Doc<"tasks">> = {};
+    if (args.title !== undefined) updates.title = args.title;
+    if (args.completed !== undefined) updates.completed = args.completed;
+    if (args.priority !== undefined) updates.priority = args.priority;
+
+    await ctx.db.patch(args.id, updates); // Type-safe!
+  },
+});
+```
+
+## Type Safety Benefits
+
+### Without Strict Types (any everywhere)
+
+```typescript
+// No autocomplete, no safety
+const user: any = await ctx.db.get(userId);
+console.log(user.nam); // Typo! Runtime error ❌
+```
+
+### With Strict Types
+
+```typescript
+const user = await ctx.db.get(userId);
+if (user) {
+  console.log(user.name); // Autocomplete! ✅
+  // console.log(user.nam); // Compile error! ✅
+}
+```
+
+## Checklist
+
+- [ ] `strict: true` in tsconfig.json
+- [ ] No `any` in code (ESLint enforces)
+- [ ] Use `Doc<"tableName">` for database types
+- [ ] Use `Id<"tableName">` for ID types
+- [ ] Define `returns` validators on all functions
+- [ ] Import types from `./_generated/dataModel`
+- [ ] Use `unknown` if type truly unknown (rare)
+- [ ] Enable additional strict options (noUnusedLocals, etc.)
+
+## Learn More
+
+- [TypeScript Handbook](https://www.typescriptlang.org/docs/handbook/intro.html)
+- [Convex Type Safety](https://docs.convex.dev/using/types)
+- [TypeScript ESLint](https://typescript-eslint.io/)

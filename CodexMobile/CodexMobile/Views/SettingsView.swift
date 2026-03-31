@@ -156,7 +156,25 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let error = codex.lastErrorMessage, !error.isEmpty {
+            HStack {
+                Text("Transport")
+                Spacer()
+                Picker("Transport", selection: transportPreferenceSelection) {
+                    ForEach(CodexTransportPreference.allCases, id: \.rawValue) { preference in
+                        Text(preference.displayName).tag(preference)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(settingsAccentColor)
+            }
+
+            Text("Use LAN only, Convex only, or auto fallback without re-pairing.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
+            if let error = codex.visibleConnectedConversationErrorMessage(codex.lastErrorMessage),
+               !error.isEmpty {
                 Text(error)
                     .font(AppFont.caption())
                     .foregroundStyle(.red)
@@ -218,7 +236,6 @@ struct SettingsView: View {
     private func disconnectRelay() {
         Task { @MainActor in
             await codex.disconnect()
-            codex.clearSavedRelaySession()
         }
     }
 
@@ -270,6 +287,13 @@ struct SettingsView: View {
         )
     }
 
+    private var transportPreferenceSelection: Binding<CodexTransportPreference> {
+        Binding(
+            get: { codex.transportPreference },
+            set: { codex.setTransportPreference($0) }
+        )
+    }
+
     // Writes nicknames against the active trusted Mac so switching pairs does not reuse the wrong alias.
     private func sidebarMacNicknameBinding(for presentation: CodexTrustedPairPresentation) -> Binding<String> {
         Binding(
@@ -293,7 +317,7 @@ private struct SettingsSubscriptionCard: View {
             }
 
             if subscriptions.isUsingLocalDevelopmentProOverride {
-                Text("Local debug Pro access is enabled for this build. Subscription and paywall controls are hidden.")
+                Text(subscriptions.subscriptionBypassStatusMessage ?? "Pro access is enabled for this build because required local services are unavailable here. Subscription and paywall controls are hidden.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             } else if subscriptions.hasProAccess {

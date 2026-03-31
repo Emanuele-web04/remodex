@@ -61,10 +61,11 @@ function handleGitRequest(rawMessage, sendResponse) {
 
 async function handleGitMethod(method, params) {
   const cwd = await resolveGitCwd(params);
+  const requestTimeoutMs = resolveRequestTimeoutMs(params);
 
   switch (method) {
     case "git/status":
-      return gitStatus(cwd);
+      return gitStatus(cwd, requestTimeoutMs);
     case "git/diff":
       return gitDiff(cwd);
     case "git/commit":
@@ -94,19 +95,28 @@ async function handleGitMethod(method, params) {
     case "git/remoteUrl":
       return gitRemoteUrl(cwd);
     case "git/branchesWithStatus":
-      return gitBranchesWithStatus(cwd);
+      return gitBranchesWithStatus(cwd, requestTimeoutMs);
     default:
       throw gitError("unknown_method", `Unknown git method: ${method}`);
   }
 }
 
+function resolveRequestTimeoutMs(params) {
+  const rawTimeoutMs = params?.requestTimeoutMs ?? params?.timeoutMs;
+  if (typeof rawTimeoutMs !== "number" || !Number.isFinite(rawTimeoutMs) || rawTimeoutMs <= 0) {
+    return GIT_TIMEOUT_MS;
+  }
+
+  return Math.min(GIT_TIMEOUT_MS, Math.max(1, Math.trunc(rawTimeoutMs)));
+}
+
 // ─── Git Status ───────────────────────────────────────────────
 
-async function gitStatus(cwd) {
+async function gitStatus(cwd, timeoutMs = GIT_TIMEOUT_MS) {
   const [porcelain, branchInfo, repoRoot] = await Promise.all([
-    git(cwd, "status", "--porcelain=v1", "-b"),
-    revListCounts(cwd).catch(() => ({ ahead: 0, behind: 0 })),
-    resolveRepoRoot(cwd).catch(() => null),
+    git(cwd, timeoutMs, "status", "--porcelain=v1", "-b"),
+    revListCounts(cwd, timeoutMs).catch(() => ({ ahead: 0, behind: 0 })),
+    resolveRepoRoot(cwd, timeoutMs).catch(() => null),
   ]);
 
   const lines = porcelain.trim().split("\n").filter(Boolean);
@@ -124,14 +134,14 @@ async function gitStatus(cwd) {
   const { ahead, behind } = branchInfo;
   const detached = branchLine.includes("HEAD detached") || branchLine.includes("no branch");
   const noUpstream = tracking === null && !detached;
-  const publishedToRemote = !detached && !!branch && await remoteBranchExists(cwd, branch).catch(() => false);
-  const localOnlyCommitCount = await countLocalOnlyCommits(cwd, { detached }).catch(() => 0);
+  const publishedToRemote = !detached && !!branch && await remoteBranchExists(cwd, branch, timeoutMs).catch(() => false);
+  const localOnlyCommitCount = await countLocalOnlyCommits(cwd, { detached }, timeoutMs).catch(() => 0);
   const state = computeState(dirty, ahead, behind, detached, noUpstream);
   const canPush = (ahead > 0 || noUpstream) && !detached;
   const diff = await repoDiffTotals(cwd, {
     tracking,
     fileLines,
-  }).catch(() => ({ additions: 0, deletions: 0, binaryFiles: 0 }));
+  }, timeoutMs).catch(() => ({ additions: 0, deletions: 0, binaryFiles: 0 }));
 
   return {
     repoRoot,
@@ -248,14 +258,14 @@ async function gitPull(cwd) {
 
 // ─── Git Branches ─────────────────────────────────────────────
 
-async function gitBranches(cwd) {
+async function gitBranches(cwd, timeoutMs = GIT_TIMEOUT_MS) {
   const [output, repoRoot, localCheckoutRoot] = await Promise.all([
-    git(cwd, "branch", "--no-color"),
-    resolveRepoRoot(cwd).catch(() => null),
-    resolveLocalCheckoutRoot(cwd).catch(() => null),
+    git(cwd, timeoutMs, "branch", "--no-color"),
+    resolveRepoRoot(cwd, timeoutMs).catch(() => null),
+    resolveLocalCheckoutRoot(cwd, timeoutMs).catch(() => null),
   ]);
   const projectRelativePath = resolveProjectRelativePath(cwd, repoRoot);
-  const worktreePathByBranch = await gitWorktreePathByBranch(cwd, { projectRelativePath }).catch(() => ({}));
+  const worktreePathByBranch = await gitWorktreePathByBranch(cwd, { projectRelativePath }, timeoutMs).catch(() => ({}));
   const localCheckoutPath = scopedLocalCheckoutPath(localCheckoutRoot || repoRoot, projectRelativePath);
   const lines = output
     .trim()
@@ -288,7 +298,7 @@ async function gitBranches(cwd) {
   }
 
   const branches = [...branchSet].sort();
-  const defaultBranch = await detectDefaultBranch(cwd, branches);
+  const defaultBranch = await detectDefaultBranch(cwd, branches, timeoutMs);
 
   return {
     branches,
@@ -317,7 +327,7 @@ async function gitCheckout(cwd, params) {
         "Cannot switch branches: you have uncommitted changes."
       );
     }
-    if (err.message?.includes("already used by worktree")) {
+    if (err.message?.includes("already used by worktree") || err.message?.includes("already checked out at")) {
       throw gitError(
         "checkout_branch_in_other_worktree",
         "Cannot switch branches: this branch is already open in another worktree."
@@ -590,16 +600,16 @@ function parseOwnerRepo(remoteUrl) {
 
 // ─── Git Branches With Status ─────────────────────────────────
 
-async function gitBranchesWithStatus(cwd) {
+async function gitBranchesWithStatus(cwd, timeoutMs = GIT_TIMEOUT_MS) {
   const [branchResult, statusResult] = await Promise.all([
-    gitBranches(cwd),
-    gitStatus(cwd),
+    gitBranches(cwd, timeoutMs),
+    gitStatus(cwd, timeoutMs),
   ]);
   return { ...branchResult, status: statusResult };
 }
 
-async function gitWorktreePathByBranch(cwd, options = {}) {
-  const output = await git(cwd, "worktree", "list", "--porcelain");
+async function gitWorktreePathByBranch(cwd, options = {}, timeoutMs = GIT_TIMEOUT_MS) {
+  const output = await git(cwd, timeoutMs, "worktree", "list", "--porcelain");
   return parseWorktreePathByBranch(output, options);
 }
 
@@ -835,9 +845,9 @@ async function assertValidCreatedBranchName(cwd, branchName) {
 }
 
 // Keeps branch creation local-only even when a same-named ref exists on origin.
-async function remoteBranchExists(cwd, branchName) {
+async function remoteBranchExists(cwd, branchName, timeoutMs = GIT_TIMEOUT_MS) {
   try {
-    await git(cwd, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${branchName}`);
+    await git(cwd, timeoutMs, "show-ref", "--verify", "--quiet", `refs/remotes/origin/${branchName}`);
     return true;
   } catch {
     return false;
@@ -927,14 +937,14 @@ function scopedLocalCheckoutPath(checkoutRootPath, projectRelativePath) {
 }
 
 // Computes the local repo delta that still exists on this machine and is not on the remote.
-async function repoDiffTotals(cwd, context) {
-  const baseRef = await resolveRepoDiffBase(cwd, context.tracking);
-  const trackedTotals = await diffTotalsAgainstBase(cwd, baseRef);
+async function repoDiffTotals(cwd, context, timeoutMs = GIT_TIMEOUT_MS) {
+  const baseRef = await resolveRepoDiffBase(cwd, context.tracking, timeoutMs);
+  const trackedTotals = await diffTotalsAgainstBase(cwd, baseRef, timeoutMs);
   const untrackedPaths = context.fileLines
     .filter((line) => line.startsWith("?? "))
     .map((line) => line.substring(3).trim())
     .filter(Boolean);
-  const untrackedTotals = await diffTotalsForUntrackedFiles(cwd, untrackedPaths);
+  const untrackedTotals = await diffTotalsForUntrackedFiles(cwd, untrackedPaths, timeoutMs);
 
   return {
     additions: trackedTotals.additions + untrackedTotals.additions,
@@ -944,17 +954,17 @@ async function repoDiffTotals(cwd, context) {
 }
 
 // Uses upstream when available; otherwise falls back to commits not yet present on any remote.
-async function resolveRepoDiffBase(cwd, tracking) {
+async function resolveRepoDiffBase(cwd, tracking, timeoutMs = GIT_TIMEOUT_MS) {
   if (tracking) {
     try {
-      return (await git(cwd, "merge-base", "HEAD", "@{u}")).trim();
+      return (await git(cwd, timeoutMs, "merge-base", "HEAD", "@{u}")).trim();
     } catch {
       // Fall through to the local-only commit scan if upstream metadata is stale.
     }
   }
 
   const firstLocalOnlyCommit = (
-    await git(cwd, "rev-list", "--reverse", "--topo-order", "HEAD", "--not", "--remotes")
+    await git(cwd, timeoutMs, "rev-list", "--reverse", "--topo-order", "HEAD", "--not", "--remotes")
   )
     .trim()
     .split("\n")
@@ -965,14 +975,14 @@ async function resolveRepoDiffBase(cwd, tracking) {
   }
 
   try {
-    return (await git(cwd, "rev-parse", `${firstLocalOnlyCommit}^`)).trim();
+    return (await git(cwd, timeoutMs, "rev-parse", `${firstLocalOnlyCommit}^`)).trim();
   } catch {
     return EMPTY_TREE_HASH;
   }
 }
 
-async function diffTotalsAgainstBase(cwd, baseRef) {
-  const output = await git(cwd, "diff", "--numstat", baseRef);
+async function diffTotalsAgainstBase(cwd, baseRef, timeoutMs = GIT_TIMEOUT_MS) {
+  const output = await git(cwd, timeoutMs, "diff", "--numstat", baseRef);
   return parseNumstatTotals(output);
 }
 
@@ -980,14 +990,14 @@ async function gitDiffAgainstBase(cwd, baseRef) {
   return git(cwd, "diff", "--binary", "--find-renames", baseRef);
 }
 
-async function diffTotalsForUntrackedFiles(cwd, filePaths) {
+async function diffTotalsForUntrackedFiles(cwd, filePaths, timeoutMs = GIT_TIMEOUT_MS) {
   if (!filePaths.length) {
     return { additions: 0, deletions: 0, binaryFiles: 0 };
   }
 
   const totals = await Promise.all(
     filePaths.map(async (filePath) => {
-      const output = await gitDiffNoIndexNumstat(cwd, filePath);
+      const output = await gitDiffNoIndexNumstat(cwd, filePath, timeoutMs);
       return parseNumstatTotals(output);
     })
   );
@@ -1003,12 +1013,12 @@ async function diffTotalsForUntrackedFiles(cwd, filePaths) {
 }
 
 // Counts commits reachable from HEAD that are not present on any remote ref.
-async function countLocalOnlyCommits(cwd, context) {
+async function countLocalOnlyCommits(cwd, context, timeoutMs = GIT_TIMEOUT_MS) {
   if (context.detached) {
     return 0;
   }
 
-  const remoteRefs = await git(cwd, "for-each-ref", "--format=%(refname)", "refs/remotes");
+  const remoteRefs = await git(cwd, timeoutMs, "for-each-ref", "--format=%(refname)", "refs/remotes");
   const hasAnyRemoteRefs = remoteRefs
     .trim()
     .split("\n")
@@ -1020,7 +1030,7 @@ async function countLocalOnlyCommits(cwd, context) {
     return 0;
   }
 
-  const output = await git(cwd, "rev-list", "--count", "HEAD", "--not", "--remotes");
+  const output = await git(cwd, timeoutMs, "rev-list", "--count", "HEAD", "--not", "--remotes");
   return Number.parseInt(output.trim(), 10) || 0;
 }
 
@@ -1055,12 +1065,12 @@ function ensureTrailingNewline(value) {
   return value.endsWith("\n") ? value : `${value}\n`;
 }
 
-async function gitDiffNoIndexNumstat(cwd, filePath) {
+async function gitDiffNoIndexNumstat(cwd, filePath, timeoutMs = GIT_TIMEOUT_MS) {
   try {
     const { stdout } = await execFileAsync(
       "git",
       ["diff", "--no-index", "--numstat", "--", "/dev/null", filePath],
-      { cwd, timeout: GIT_TIMEOUT_MS }
+      { cwd, timeout: timeoutMs }
     );
     return stdout;
   } catch (err) {
@@ -1101,7 +1111,12 @@ async function gitDiffNoIndexPatch(cwd, filePath) {
 // ─── Helpers ──────────────────────────────────────────────────
 
 function git(cwd, ...args) {
-  return execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS })
+  let timeoutMs = GIT_TIMEOUT_MS;
+  if (typeof args[0] === "number" && Number.isFinite(args[0])) {
+    timeoutMs = Math.min(GIT_TIMEOUT_MS, Math.max(1, Math.trunc(args.shift())));
+  }
+
+  return execFileAsync("git", args, { cwd, timeout: timeoutMs })
     .then(({ stdout }) => stdout)
     .catch((err) => {
       const msg = (err.stderr || err.message || "").trim();
@@ -1110,8 +1125,8 @@ function git(cwd, ...args) {
     });
 }
 
-async function revListCounts(cwd) {
-  const output = await git(cwd, "rev-list", "--left-right", "--count", "HEAD...@{u}");
+async function revListCounts(cwd, timeoutMs = GIT_TIMEOUT_MS) {
+  const output = await git(cwd, timeoutMs, "rev-list", "--left-right", "--count", "HEAD...@{u}");
   const parts = output.trim().split(/\s+/);
   return {
     ahead: parseInt(parts[0], 10) || 0,
@@ -1144,10 +1159,10 @@ function computeState(dirty, ahead, behind, detached, noUpstream) {
   return "up_to_date";
 }
 
-async function detectDefaultBranch(cwd, branches) {
+async function detectDefaultBranch(cwd, branches, timeoutMs = GIT_TIMEOUT_MS) {
   // Try symbolic-ref first
   try {
-    const ref = await git(cwd, "symbolic-ref", "refs/remotes/origin/HEAD");
+    const ref = await git(cwd, timeoutMs, "symbolic-ref", "refs/remotes/origin/HEAD");
     const defaultBranch = ref.trim().replace("refs/remotes/origin/", "");
     // Repo default is metadata about origin, not a promise that the local selector should show it.
     if (defaultBranch) {
@@ -1158,8 +1173,8 @@ async function detectDefaultBranch(cwd, branches) {
   }
 
   // Some repos never record origin/HEAD locally, so prefer the common remote defaults before local fallback.
-  if (await remoteBranchExists(cwd, "main")) return "main";
-  if (await remoteBranchExists(cwd, "master")) return "master";
+  if (await remoteBranchExists(cwd, "main", timeoutMs)) return "main";
+  if (await remoteBranchExists(cwd, "master", timeoutMs)) return "master";
 
   // Fallback: prefer main, then master
   if (branches.includes("main")) return "main";
@@ -1218,14 +1233,14 @@ function isExistingDirectory(candidatePath) {
   }
 }
 
-async function resolveRepoRoot(cwd) {
-  const output = await git(cwd, "rev-parse", "--show-toplevel");
+async function resolveRepoRoot(cwd, timeoutMs = GIT_TIMEOUT_MS) {
+  const output = await git(cwd, timeoutMs, "rev-parse", "--show-toplevel");
   const repoRoot = output.trim();
   return repoRoot || null;
 }
 
-async function resolveLocalCheckoutRoot(cwd) {
-  const output = await git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir");
+async function resolveLocalCheckoutRoot(cwd, timeoutMs = GIT_TIMEOUT_MS) {
+  const output = await git(cwd, timeoutMs, "rev-parse", "--path-format=absolute", "--git-common-dir");
   const commonDir = output.trim();
   if (!commonDir) {
     return null;
@@ -1237,7 +1252,7 @@ async function resolveLocalCheckoutRoot(cwd) {
   }
 
   if (path.basename(normalizedCommonDir) !== ".git") {
-    return await resolveRepoRoot(cwd);
+    return await resolveRepoRoot(cwd, timeoutMs);
   }
 
   const checkoutRoot = normalizeExistingPath(path.dirname(normalizedCommonDir));
@@ -1263,5 +1278,6 @@ module.exports = {
     scopedLocalCheckoutPath,
     scopedWorktreePath,
     resolveBaseBranchName,
+    resolveRequestTimeoutMs,
   },
 };

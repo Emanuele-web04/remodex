@@ -73,6 +73,75 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testTurnStartedWithCompletePayloadSkipsImmediateThreadRead() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([:]),
+                includeJSONRPC: false
+            )
+        }
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertEqual(recordedMethods.filter { $0 == "thread/read" }.count, 0)
+    }
+
+    func testTurnStartedWithoutTurnIDRequestsImmediateThreadRead() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            switch method {
+            case "thread/read":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(threadID),
+                            "title": .string(threadID),
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([:]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+            ])
+        )
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertEqual(recordedMethods.filter { $0 == "thread/read" }.count, 1)
+    }
+
     func testTurnStartedAcceptsTopLevelIDAsTurnID() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -495,12 +564,14 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         )
     }
 
-    func testRelaySessionReplacementClearsSavedPairingAndDisablesReconnect() {
+    func testRelaySessionReplacementKeepsSavedPairingAndDisablesReconnect() {
         let service = makeService()
 
         withSavedRelayPairing(sessionId: "session-\(UUID().uuidString)", relayURL: "wss://relay.test/relay") {
             service.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
             service.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            let previousSessionId = service.relaySessionId
+            let previousRelayURL = service.relayUrl
             service.isConnected = true
             service.isInitialized = true
 
@@ -510,12 +581,12 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             )
 
             XCTAssertFalse(service.isConnected)
-            XCTAssertFalse(service.shouldAutoReconnectOnForeground)
-            XCTAssertNil(service.relaySessionId)
-            XCTAssertNil(service.relayUrl)
+            XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+            XCTAssertEqual(service.relaySessionId, previousSessionId)
+            XCTAssertEqual(service.relayUrl, previousRelayURL)
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
+                "This relay session was replaced by another Mac connection. Reconnect to refresh your saved trusted session."
             )
         }
     }

@@ -1,0 +1,481 @@
+---
+description: Use custom functions for data protection - this is Convex's alternative to Row Level Security (RLS)
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Custom Functions for Data Protection
+
+**Convex's approach to data protection:** Instead of Row Level Security (RLS) like PostgreSQL, use **custom functions** to wrap all queries and mutations with automatic auth and access control.
+
+## Why Custom Functions, Not RLS?
+
+**Traditional databases (PostgreSQL):**
+- Use Row Level Security policies
+- SQL-based access rules
+- Runs at database layer
+- Complex policy syntax
+
+**Convex approach:**
+- Use custom function wrappers
+- TypeScript-based access logic
+- Runs at application layer
+- Full type safety and flexibility
+
+## The Pattern
+
+Instead of writing auth checks in every function:
+
+### ❌ Bad: Repeating Auth Everywhere
+```typescript
+export const getTasks = query({
+  handler: async (ctx) => {
+    // Repeated in every function!
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+    const user = await getUser(ctx, identity);
+
+    return await ctx.db.query("tasks")
+      .withIndex("by_user", q => q.eq("userId", user._id))
+      .collect();
+  },
+});
+
+export const getProjects = query({
+  handler: async (ctx) => {
+    // Same auth code again!
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+    const user = await getUser(ctx, identity);
+
+    return await ctx.db.query("projects")
+      .withIndex("by_user", q => q.eq("userId", user._id))
+      .collect();
+  },
+});
+```
+
+### ✅ Good: Custom Function Wrapper
+```typescript
+// convex/lib/authFunctions.ts
+import { customQuery, customMutation } from "convex-helpers/server/customFunctions";
+import { query, mutation } from "../_generated/server";
+import { getCurrentUser } from "./auth";
+
+// Authenticated query - user automatically in ctx
+export const authedQuery = customQuery(query, {
+  args: {},
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+    return { ctx: { ...ctx, user }, args };
+  },
+});
+
+// Authenticated mutation - user automatically in ctx
+export const authedMutation = customMutation(mutation, {
+  args: {},
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+    return { ctx: { ...ctx, user }, args };
+  },
+});
+
+// Now use everywhere:
+export const getTasks = authedQuery({
+  handler: async (ctx) => {
+    // ctx.user automatically available and typed!
+    return await ctx.db.query("tasks")
+      .withIndex("by_user", q => q.eq("userId", ctx.user._id))
+      .collect();
+  },
+});
+
+export const getProjects = authedQuery({
+  handler: async (ctx) => {
+    // Same pattern, no repeated code
+    return await ctx.db.query("projects")
+      .withIndex("by_user", q => q.eq("userId", ctx.user._id))
+      .collect();
+  },
+});
+```
+
+## Common Data Protection Patterns
+
+### 1. Basic Authentication
+```typescript
+export const authedQuery = customQuery(query, {
+  args: {},
+  input: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_token", q =>
+        q.eq("tokenIdentifier", identity.tokenIdentifier)
+      )
+      .unique();
+
+    if (!user) throw new Error("User not found");
+
+    return { ctx: { ...ctx, user }, args };
+  },
+});
+```
+
+### 2. Role-Based Access Control (RBAC)
+```typescript
+// Admin-only functions
+export const adminQuery = customQuery(query, {
+  args: {},
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    if (user.role !== "admin") {
+      throw new Error("Admin access required");
+    }
+
+    return { ctx: { ...ctx, user }, args };
+  },
+});
+
+// Usage
+export const getAllUsers = adminQuery({
+  handler: async (ctx) => {
+    // Only admins can call this
+    return await ctx.db.query("users").collect();
+  },
+});
+```
+
+### 3. Multi-Tenant Access Control
+```typescript
+export const tenantQuery = customQuery(query, {
+  args: { organizationId: v.id("organizations") },
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    // Verify user belongs to this organization
+    const membership = await ctx.db
+      .query("organizationMembers")
+      .withIndex("by_org_and_user", q =>
+        q.eq("organizationId", args.organizationId)
+         .eq("userId", user._id)
+      )
+      .unique();
+
+    if (!membership) {
+      throw new Error("Not a member of this organization");
+    }
+
+    return {
+      ctx: {
+        ...ctx,
+        user,
+        organizationId: args.organizationId,
+        role: membership.role
+      },
+      args
+    };
+  },
+});
+
+// Usage - automatically scoped to organization
+export const getOrgProjects = tenantQuery({
+  args: { organizationId: v.id("organizations") },
+  handler: async (ctx, args) => {
+    // Only returns projects for this org
+    return await ctx.db
+      .query("projects")
+      .withIndex("by_organization", q =>
+        q.eq("organizationId", ctx.organizationId)
+      )
+      .collect();
+  },
+});
+```
+
+### 4. Resource Ownership
+```typescript
+export const ownerQuery = customQuery(query, {
+  args: { resourceId: v.id("resources") },
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    const resource = await ctx.db.get(args.resourceId);
+    if (!resource) throw new Error("Resource not found");
+
+    if (resource.ownerId !== user._id) {
+      throw new Error("You don't own this resource");
+    }
+
+    return {
+      ctx: { ...ctx, user, resource },
+      args
+    };
+  },
+});
+
+// Usage
+export const getResourceDetails = ownerQuery({
+  args: { resourceId: v.id("resources") },
+  handler: async (ctx, args) => {
+    // ctx.resource already verified as owned by user
+    return ctx.resource;
+  },
+});
+```
+
+### 5. Team/Group Based Access
+```typescript
+export const teamQuery = customQuery(query, {
+  args: { teamId: v.id("teams") },
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    const membership = await ctx.db
+      .query("teamMembers")
+      .withIndex("by_team_and_user", q =>
+        q.eq("teamId", args.teamId)
+         .eq("userId", user._id)
+      )
+      .unique();
+
+    if (!membership) {
+      throw new Error("Not a member of this team");
+    }
+
+    return {
+      ctx: {
+        ...ctx,
+        user,
+        teamId: args.teamId,
+        permissions: membership.permissions
+      },
+      args
+    };
+  },
+});
+
+// Usage
+export const getTeamData = teamQuery({
+  args: { teamId: v.id("teams") },
+  handler: async (ctx) => {
+    // Automatically scoped to team
+    // ctx.permissions available for fine-grained checks
+    return await ctx.db
+      .query("teamData")
+      .withIndex("by_team", q => q.eq("teamId", ctx.teamId))
+      .collect();
+  },
+});
+```
+
+### 6. Read/Write Separation
+```typescript
+// Read operations - more permissive
+export const viewerQuery = customQuery(query, {
+  args: { teamId: v.id("teams") },
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    const member = await ctx.db
+      .query("teamMembers")
+      .withIndex("by_team_and_user", q =>
+        q.eq("teamId", args.teamId).eq("userId", user._id)
+      )
+      .unique();
+
+    // Any team member can read
+    if (!member) throw new Error("Not a team member");
+
+    return { ctx: { ...ctx, user, teamId: args.teamId }, args };
+  },
+});
+
+// Write operations - require specific role
+export const editorMutation = customMutation(mutation, {
+  args: { teamId: v.id("teams") },
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    const member = await ctx.db
+      .query("teamMembers")
+      .withIndex("by_team_and_user", q =>
+        q.eq("teamId", args.teamId).eq("userId", user._id)
+      )
+      .unique();
+
+    // Must be editor or admin to write
+    if (!member || (member.role !== "editor" && member.role !== "admin")) {
+      throw new Error("Editor access required");
+    }
+
+    return { ctx: { ...ctx, user, teamId: args.teamId }, args };
+  },
+});
+```
+
+### 7. Public vs Private Data
+```typescript
+// Public query - no auth required
+export const publicQuery = query;
+
+// Private query - requires auth
+export const privateQuery = authedQuery;
+
+// Example: Blog posts
+export const listPublicPosts = publicQuery({
+  handler: async (ctx) => {
+    return await ctx.db
+      .query("posts")
+      .withIndex("by_published", q => q.eq("published", true))
+      .collect();
+  },
+});
+
+export const listMyDrafts = privateQuery({
+  handler: async (ctx) => {
+    return await ctx.db
+      .query("posts")
+      .withIndex("by_author", q => q.eq("authorId", ctx.user._id))
+      .filter(q => q.eq(q.field("published"), false))
+      .collect();
+  },
+});
+```
+
+## File Organization
+
+**Recommended structure:**
+
+```
+convex/
+├── lib/
+│   ├── auth.ts              # getCurrentUser helper
+│   └── customFunctions.ts   # All custom wrappers
+├── users.ts                 # Public functions
+├── tasks.ts                 # Use authedQuery/authedMutation
+├── admin.ts                 # Use adminQuery/adminMutation
+└── organizations.ts         # Use tenantQuery/tenantMutation
+```
+
+## Benefits vs RLS
+
+| Aspect | Custom Functions (Convex) | Row Level Security (PostgreSQL) |
+|--------|---------------------------|----------------------------------|
+| Language | TypeScript | SQL |
+| Type Safety | Full | Limited |
+| Complexity | Medium | High |
+| Flexibility | Very High | Medium |
+| Testing | Easy (unit tests) | Hard (DB-level) |
+| Debugging | Standard debugging | DB logs |
+| Reusability | High (compose wrappers) | Medium |
+
+## Installation
+
+```bash
+npm install convex-helpers
+```
+
+## Complete Example: Multi-Tenant SaaS
+
+```typescript
+// convex/lib/customFunctions.ts
+import { customQuery, customMutation } from "convex-helpers/server/customFunctions";
+import { query, mutation } from "../_generated/server";
+import { getCurrentUser } from "./auth";
+
+// Base: Authenticated
+export const authedQuery = customQuery(query, {
+  args: {},
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+    return { ctx: { ...ctx, user }, args };
+  },
+});
+
+export const authedMutation = customMutation(mutation, {
+  args: {},
+  input: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+    return { ctx: { ...ctx, user }, args };
+  },
+});
+
+// Org-scoped
+export const orgQuery = customQuery(authedQuery, {
+  args: { orgId: v.id("organizations") },
+  input: async (ctx, args) => {
+    const member = await ctx.db
+      .query("members")
+      .withIndex("by_org_and_user", q =>
+        q.eq("orgId", args.orgId).eq("userId", ctx.user._id)
+      )
+      .unique();
+
+    if (!member) throw new Error("Not a member");
+
+    return {
+      ctx: { ...ctx, orgId: args.orgId, role: member.role },
+      args
+    };
+  },
+});
+
+export const orgMutation = customMutation(authedMutation, {
+  args: { orgId: v.id("organizations") },
+  input: async (ctx, args) => {
+    const member = await ctx.db
+      .query("members")
+      .withIndex("by_org_and_user", q =>
+        q.eq("orgId", args.orgId).eq("userId", ctx.user._id)
+      )
+      .unique();
+
+    if (!member) throw new Error("Not a member");
+
+    return {
+      ctx: { ...ctx, orgId: args.orgId, role: member.role },
+      args
+    };
+  },
+});
+
+// Admin-only (within org)
+export const orgAdminMutation = customMutation(orgMutation, {
+  args: { orgId: v.id("organizations") },
+  input: async (ctx, args) => {
+    if (ctx.role !== "admin") {
+      throw new Error("Admin access required");
+    }
+    return { ctx, args };
+  },
+});
+```
+
+## Key Takeaways
+
+1. **Custom functions ARE Convex's RLS** — This is the recommended pattern
+2. **Define once, use everywhere** — Create wrappers for your access patterns
+3. **Compose wrappers** — Build complex access control by layering
+4. **Type-safe** — Full TypeScript support, unlike SQL policies
+5. **Testable** — Easy to unit test your auth logic
+6. **Flexible** — Can implement any access control pattern
+
+## Checklist
+
+- [ ] Install convex-helpers: `npm install convex-helpers`
+- [ ] Create `convex/lib/customFunctions.ts`
+- [ ] Define `authedQuery` and `authedMutation`
+- [ ] Replace `query` with `authedQuery` in functions needing auth
+- [ ] Replace `mutation` with `authedMutation` in functions needing auth
+- [ ] Add role-based or tenant-based wrappers as needed
+- [ ] Remove repeated auth code from function bodies
+- [ ] Test access control logic
+
+## Learn More
+
+- [Custom Functions in convex-helpers](https://github.com/get-convex/convex-helpers)
+- [Stack: Custom Function Patterns](https://stack.convex.dev)

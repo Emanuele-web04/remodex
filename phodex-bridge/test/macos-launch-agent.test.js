@@ -15,11 +15,13 @@ const {
   resetMacOSBridgePairing,
   resolveMacOSBridgeStartConfig,
   resolveLaunchAgentPlistPath,
+  startMacOSBridgeService,
   runMacOSBridgeService,
   stopMacOSBridgeService,
 } = require("../src/macos-launch-agent");
 const {
   readBridgeStatus,
+  readDaemonConfig,
   readPairingSession,
   writeDaemonConfig,
   writeBridgeStatus,
@@ -51,6 +53,111 @@ test("resolveLaunchAgentPlistPath writes into the user's LaunchAgents folder", (
     }),
     path.join("/Users/tester", "Library", "LaunchAgents", "com.remodex.bridge.plist")
   );
+});
+
+test("resolveMacOSBridgeStartConfig preserves saved relay settings while refreshing stale Convex defaults", () => {
+  withTempDaemonEnv(() => {
+    writeDaemonConfig({
+      relayUrl: "ws://127.0.0.1:9100/relay",
+      pushServiceUrl: "https://relay.example",
+      convexSiteUrl: "https://stale.convex.site",
+      refreshEnabled: true,
+      refreshDebounceMs: 999,
+      codexEndpoint: "ws://codex.example",
+      refreshCommand: "echo refresh",
+    });
+
+    const config = resolveMacOSBridgeStartConfig({
+      env: {
+        HOME: process.env.HOME,
+        REMODEX_DEVICE_STATE_DIR: process.env.REMODEX_DEVICE_STATE_DIR,
+      },
+    });
+
+    assert.equal(config.relayUrl, "ws://127.0.0.1:9100/relay");
+    assert.equal(config.pushServiceUrl, "https://relay.example");
+    assert.equal(config.refreshEnabled, true);
+    assert.equal(config.refreshDebounceMs, 999);
+    assert.equal(config.codexEndpoint, "ws://codex.example");
+    assert.equal(config.refreshCommand, "echo refresh");
+    assert.equal(config.convexSiteUrl, "https://determined-ladybug-18.convex.site");
+  });
+});
+
+test("startMacOSBridgeService rewrites stale Convex defaults into daemon config before launchd restart", { concurrency: false }, async () => {
+  const previousDir = process.env.REMODEX_DEVICE_STATE_DIR;
+  const previousHome = process.env.HOME;
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-launch-agent-"));
+  const daemonEnv = {
+    HOME: rootDir,
+    REMODEX_DEVICE_STATE_DIR: rootDir,
+  };
+  process.env.REMODEX_DEVICE_STATE_DIR = rootDir;
+  process.env.HOME = rootDir;
+
+  try {
+    writeDaemonConfig({
+      relayUrl: "ws://zacks-mac-studio.local:9100/relay",
+      convexSiteUrl: "https://stale.convex.site",
+      refreshEnabled: true,
+    }, { env: daemonEnv });
+
+    const launchCalls = [];
+
+    await startMacOSBridgeService({
+      env: daemonEnv,
+      osImpl: {
+        hostname: () => "Zacks-Mac-Studio",
+        networkInterfaces: () => ({}),
+        homedir: () => rootDir,
+      },
+      execFileSyncImpl(command, args) {
+        launchCalls.push([command, args]);
+        if (command === "scutil") {
+          return "Zacks-Mac-Studio\n";
+        }
+        return "";
+      },
+      createRelayServerImpl() {
+        return {
+          server: {
+            once(eventName, handler) {
+              if (eventName === "listening") {
+                this.onListening = handler;
+              }
+              if (eventName === "error") {
+                this.onError = handler;
+              }
+            },
+            off() {},
+            listen(port, host) {
+              launchCalls.push(["listen", [port, host]]);
+              this.onListening?.();
+            },
+          },
+        };
+      },
+      startBridgeImpl() {},
+    });
+
+    const savedConfig = readDaemonConfig({ env: daemonEnv });
+    assert.equal(savedConfig?.relayUrl, "ws://zacks-mac-studio.local:9100/relay");
+    assert.equal(savedConfig?.convexSiteUrl, "https://determined-ladybug-18.convex.site");
+    assert.equal(savedConfig?.refreshEnabled, true);
+    assert.ok(launchCalls.length > 0);
+  } finally {
+    if (previousDir === undefined) {
+      delete process.env.REMODEX_DEVICE_STATE_DIR;
+    } else {
+      process.env.REMODEX_DEVICE_STATE_DIR = previousDir;
+    }
+    if (previousHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = previousHome;
+    }
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
 });
 
 test("stopMacOSBridgeService clears stale pairing and status files", () => {
@@ -137,21 +244,113 @@ test("resetMacOSBridgePairing stops the daemon before revoking persisted trust",
   });
 });
 
-test("runMacOSBridgeService records a clean error state instead of throwing when daemon config is missing", () => {
-  withTempDaemonEnv(() => {
-    writePairingSession({ sessionId: "stale-session" });
+test("runMacOSBridgeService records a clean error state instead of throwing when daemon config is missing", { concurrency: false }, async () => {
+  await withTempDaemonEnv(async ({ rootDir }) => {
+    const daemonEnv = {
+      HOME: rootDir,
+      REMODEX_DEVICE_STATE_DIR: rootDir,
+    };
+    writePairingSession({ sessionId: "stale-session" }, { env: daemonEnv });
+    let startBridgeCalls = 0;
 
-    assert.doesNotThrow(() => {
-      runMacOSBridgeService({ env: process.env });
+    await assert.doesNotReject(async () => {
+      await runMacOSBridgeService({
+        env: daemonEnv,
+        startBridgeImpl() {
+          startBridgeCalls += 1;
+        },
+      });
     });
 
-    assert.equal(readPairingSession(), null);
-    const status = readBridgeStatus();
-    assert.equal(status?.state, "error");
-    assert.equal(status?.connectionStatus, "error");
-    assert.equal(status?.pid, process.pid);
-    assert.equal(status?.lastError, "No relay URL configured for the macOS bridge service.");
-    assert.equal(typeof status?.updatedAt, "string");
+    assert.equal(startBridgeCalls, 0);
+  });
+});
+
+test("runMacOSBridgeService starts an embedded relay when the saved relay URL points at this Mac", { concurrency: false }, async () => {
+  await withTempDaemonEnv(async ({ rootDir }) => {
+    const daemonEnv = {
+      HOME: rootDir,
+      REMODEX_DEVICE_STATE_DIR: rootDir,
+    };
+    writeDaemonConfig({
+      relayUrl: "ws://zacks-mac-studio.local:9100/relay",
+      convexSiteUrl: "https://stale.convex.site",
+    }, { env: daemonEnv });
+
+    const relayListenCalls = [];
+    let bridgeConfig = null;
+
+    await runMacOSBridgeService({
+      env: daemonEnv,
+      osImpl: {
+        hostname: () => "Zacks-Mac-Studio",
+        networkInterfaces: () => ({}),
+      },
+      execFileSyncImpl() {
+        return "Zacks-Mac-Studio\n";
+      },
+      createRelayServerImpl() {
+        return {
+          server: {
+            once(eventName, handler) {
+              if (eventName === "listening") {
+                this.onListening = handler;
+              }
+              if (eventName === "error") {
+                this.onError = handler;
+              }
+            },
+            off() {},
+            listen(port, host) {
+              relayListenCalls.push({ port, host });
+              this.onListening?.();
+            },
+          },
+        };
+      },
+      startBridgeImpl(options) {
+        bridgeConfig = options.config;
+      },
+    });
+
+    assert.deepEqual(relayListenCalls, [{ port: 9100, host: "0.0.0.0" }]);
+    assert.equal(bridgeConfig?.relayUrl, "ws://zacks-mac-studio.local:9100/relay");
+    assert.equal(bridgeConfig?.convexSiteUrl, "https://determined-ladybug-18.convex.site");
+  });
+});
+
+test("runMacOSBridgeService does not start an embedded relay for external relay URLs", { concurrency: false }, async () => {
+  await withTempDaemonEnv(async ({ rootDir }) => {
+    const daemonEnv = {
+      HOME: rootDir,
+      REMODEX_DEVICE_STATE_DIR: rootDir,
+    };
+    writeDaemonConfig({
+      relayUrl: "wss://relay.example.com/relay",
+    }, { env: daemonEnv });
+
+    let createRelayServerCalls = 0;
+    let bridgeStarted = false;
+
+    await runMacOSBridgeService({
+      env: daemonEnv,
+      createRelayServerImpl() {
+        createRelayServerCalls += 1;
+        return {
+          server: {
+            once() {},
+            off() {},
+            listen() {},
+          },
+        };
+      },
+      startBridgeImpl() {
+        bridgeStarted = true;
+      },
+    });
+
+    assert.equal(createRelayServerCalls, 0);
+    assert.equal(bridgeStarted, true);
   });
 });
 

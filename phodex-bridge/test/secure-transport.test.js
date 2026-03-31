@@ -61,6 +61,26 @@ test("secure transport rejects plaintext JSON-RPC before the secure handshake", 
   assert.equal(controlMessages[0]?.code, "update_required");
 });
 
+test("pairing payload includes the Cloud async shared secret", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const secureTransport = createBridgeSecureTransport({
+    sessionId: "session-pairing",
+    relayUrl: "wss://relay.example/relay",
+    deviceState: {
+      macDeviceId: "mac-pairing",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      cloudAsyncSharedSecret: "shared-secret-base64",
+      trustedPhones: {},
+    },
+  });
+
+  const payload = secureTransport.createPairingPayload();
+
+  assert.equal(payload.v, 3);
+  assert.equal(payload.cloudAsyncSharedSecret, "shared-secret-base64");
+});
+
 test("secure transport round-trips encrypted payloads after a trusted reconnect handshake", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const phoneIdentity = createOkpKeyPair("ed25519");

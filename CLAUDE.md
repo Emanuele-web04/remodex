@@ -37,6 +37,7 @@ This repo is local-first now. Do not reintroduce hosted-service assumptions, rem
 - Preserve reconnect behavior across relaunch when the local host session is still valid.
 - Preserve the QR/local-relay pairing path: do not regress the scanner -> saved pairing -> connect flow by letting onboarding/auto-reconnect race manual scan control.
 - For local relay recovery, keep resumed desktop-thread live mirroring and rollout fallback logic intact so reopened/running threads still recover state even when the rollout file is older than the recent-candidate window.
+- Preserve the intentional mobile paywall bypass for local/personal builds when subscription pricing or required Apple/hosted entitlements are unavailable; do not "fix" the app back into a dead paywall for unsupported personal dev accounts.
 
 ## Build guardrails
 

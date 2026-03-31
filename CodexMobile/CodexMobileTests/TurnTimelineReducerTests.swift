@@ -704,6 +704,85 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["diff-1", "diff-2"])
     }
 
+    func testRemoveDuplicateFileChangeMessagesTurnlessSnapshotYieldsToFinalizedTurnSnapshot() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "diff-local",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Edited Sources/App.swift +1 -0",
+                createdAt: now,
+                turnID: nil,
+                itemID: "local-preview",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "diff-turn-streaming",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Edited Sources/App.swift +2 -1",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "turn-streaming",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "diff-turn-final",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Edited Sources/App.swift +3 -1",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "turn-final",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["diff-turn-final"])
+    }
+
+    func testRemoveDuplicateFileChangeMessagesPreservesDistinctCompletedSnapshotsWithoutOverlap() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "diff-a",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Edited Sources/A.swift +2 -0
+                Edited Sources/B.swift +1 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "turn-diff-a",
+                isStreaming: false
+            ),
+            makeMessage(
+                id: "diff-b",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Edited Sources/C.swift +4 -1
+                Edited Sources/D.swift +0 -2
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "turn-diff-b",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["diff-a", "diff-b"])
+    }
+
     func testAssistantAnchorPrefersActiveTurnThenStreamingFallback() {
         let now = Date()
         let messages = [

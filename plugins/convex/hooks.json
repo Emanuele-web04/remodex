@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "./scripts/pre-commit-checks.sh",
+        "matcher": "\\bgit\\s+commit\\b"
+      }
+    ]
+  }
+}

@@ -17,6 +17,7 @@ const DEFAULT_MID_RUN_REFRESH_THROTTLE_MS = 3_000;
 const DEFAULT_ROLLOUT_LOOKUP_TIMEOUT_MS = 5_000;
 const DEFAULT_ROLLOUT_IDLE_TIMEOUT_MS = 10_000;
 const DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD = 3;
+const DEFAULT_CONVEX_SITE_URL = "https://determined-ladybug-18.convex.site";
 const REFRESH_SCRIPT_PATH = path.join(__dirname, "scripts", "codex-refresh.applescript");
 const NEW_THREAD_DEEP_LINK = "codex://threads/new";
 
@@ -571,6 +572,10 @@ function readBridgeConfig({
       readFirstDefinedEnv(["REMODEX_REFRESH_DEBOUNCE_MS"], String(DEFAULT_DEBOUNCE_MS), env),
       DEFAULT_DEBOUNCE_MS
     ),
+    convexSiteUrl: DEFAULT_CONVEX_SITE_URL,
+    cloudAsyncEnabled: true,
+    cloudAsyncHelperPath: readFirstDefinedEnv(["REMODEX_ICLOUD_HELPER_PATH"], "", env),
+    cloudAsyncContainerId: readFirstDefinedEnv(["REMODEX_ICLOUD_CONTAINER"], "", env),
     codexEndpoint,
     refreshCommand,
     codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),

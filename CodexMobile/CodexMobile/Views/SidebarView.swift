@@ -56,7 +56,11 @@ struct SidebarView: View {
                 groups: groupedThreads,
                 selectedThread: selectedThread,
                 bottomContentInset: 0,
-                timingLabelProvider: { SidebarRelativeTimeFormatter.compactLabel(for: $0) },
+                timingLabelProvider: {
+                    codex.isRestoredThreadListSnapshotAwaitingLiveSync
+                        ? nil
+                        : SidebarRelativeTimeFormatter.compactLabel(for: $0)
+                },
                 diffTotalsByThreadID: diffTotalsByThreadID,
                 runBadgeStateByThreadID: cachedRunBadges,
                 onSelectThread: selectThread,

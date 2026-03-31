@@ -12,6 +12,7 @@ nonisolated enum CodexSecureKeys {
     static let relayUrl = "codex.relay.url"
     static let relayMacDeviceId = "codex.relay.macDeviceId"
     static let relayMacIdentityPublicKey = "codex.relay.macIdentityPublicKey"
+    static let relayCloudAsyncSharedSecret = "codex.relay.cloudAsyncSharedSecret"
     static let relayProtocolVersion = "codex.relay.protocolVersion"
     static let relayLastAppliedBridgeOutboundSeq = "codex.relay.lastAppliedBridgeOutboundSeq"
     static let pushDeviceToken = "codex.push.deviceToken"

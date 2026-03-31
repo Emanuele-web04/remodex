@@ -47,6 +47,43 @@ struct CodexSecureControlWaiter {
     let continuation: CheckedContinuation<String, Error>
 }
 
+typealias CodexThreadTurnStateSnapshot = (
+    interruptibleTurnID: String?,
+    hasInterruptibleTurnWithoutID: Bool,
+    latestTurnID: String?
+)
+
+typealias CodexThreadResumeResult = (
+    thread: CodexThread?,
+    snapshot: CodexThreadTurnStateSnapshot?
+)
+
+struct CodexThreadResumeTaskRecord {
+    let token: UUID
+    let task: Task<CodexThreadResumeResult, Error>
+}
+
+struct CodexThreadTurnStateSnapshotTaskRecord {
+    let token: UUID
+    let task: Task<CodexThreadTurnStateSnapshot?, Never>
+}
+
+struct CodexThreadListPersistenceTaskRecord {
+    let token: UUID
+    let task: Task<Void, Never>
+}
+
+struct CodexConvexLaneCredentials: Sendable {
+    let macDeviceId: String
+    let macIdentityPublicKey: String
+    let sharedSecretBase64: String
+
+    var sharedSecretData: Data? {
+        let data = Data(base64EncodedOrEmpty: sharedSecretBase64)
+        return data.isEmpty ? nil : data
+    }
+}
+
 enum CodexWebSocketTransport {
     case network(NWConnection)
     case manualTCP(NWConnection)
@@ -236,12 +273,12 @@ struct TurnTimelineRenderSnapshot: Equatable {
     }
 }
 
-@MainActor
-@Observable
-final class ThreadTimelineState {
+struct ThreadTimelineState {
     let threadID: String
     var messages: [CodexMessage]
     var messageRevision: Int
+    var busyRepoRevision: Int
+    var revertStateRevision: Int
     var activeTurnID: String?
     var isThreadRunning: Bool
     var latestTurnTerminalState: CodexTurnTerminalState?
@@ -253,6 +290,8 @@ final class ThreadTimelineState {
         self.threadID = threadID
         self.messages = []
         self.messageRevision = 0
+        self.busyRepoRevision = 0
+        self.revertStateRevision = 0
         self.activeTurnID = nil
         self.isThreadRunning = false
         self.latestTurnTerminalState = nil
@@ -282,10 +321,13 @@ final class CodexService {
             persistThreadListSnapshot()
         }
     }
+    var transportMode: CodexTransportMode = .disconnected
     var isConnected = false
     var isConnecting = false
     var isInitialized = false
     var isLoadingThreads = false
+    // Hides sidebar timing labels after restoring a persisted thread snapshot until live data arrives.
+    var isRestoredThreadListSnapshotAwaitingLiveSync = false
     // Tracks the non-blocking bootstrap that hydrates chats/models after the socket is ready.
     var isBootstrappingConnectionSync = false
     var currentOutput = ""
@@ -322,6 +364,11 @@ final class CodexService {
     // Monotonic per-thread revision so views can react to message mutations without hashing full transcripts.
     var messageRevisionByThread: [String: Int] = [:]
     var syncRealtimeEnabled = true
+    var transportPreference: CodexTransportPreference = .automatic {
+        didSet {
+            defaults.set(transportPreference.rawValue, forKey: Self.transportPreferenceDefaultsKey)
+        }
+    }
     var availableModels: [CodexModelOption] = []
     var selectedModelId: String?
     var selectedReasoningEffort: String?
@@ -348,6 +395,10 @@ final class CodexService {
     var supportsServiceTier = true
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
+    // Remembers the runtime's accepted sandbox param shape so hot-path requests avoid repeated retries.
+    var preferredSandboxRequestShape: CodexSandboxRequestShape = .sandboxPolicy
+    // Remembers the accepted approvalPolicy spelling per access mode across request families.
+    var preferredApprovalPolicyByAccessMode: [CodexAccessMode: String] = [:]
     // Seeds brand-new chats with one-shot composer actions like code review.
     var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
     // In-memory identity directory for subagents, keyed by thread id and agent id.
@@ -364,6 +415,7 @@ final class CodexService {
         }
     }
     var relayMacIdentityPublicKey: String?
+    var relayCloudAsyncSharedSecret: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
     // Mirrors the bridge package version currently running on the Mac, if the bridge reports it.
@@ -397,22 +449,33 @@ final class CodexService {
     var usesManualWebSocketTransport = false
     let webSocketQueue = DispatchQueue(label: "CodexMobile.WebSocket", qos: .userInitiated)
     var pendingRequests: [String: CheckedContinuation<RPCMessage, Error>] = [:]
+    // Test hook: intercepts connect attempts without opening a real websocket.
+    @ObservationIgnored var connectAttemptOverride: ((String, String, String?, Bool) async throws -> Void)?
     // Test hook: intercepts outbound RPC requests without requiring a live socket.
     @ObservationIgnored var requestTransportOverride: ((String, JSONValue?) async throws -> RPCMessage)?
+    // Selected off-LAN fallback transport. This may be CloudKit or Convex depending on config.
+    @ObservationIgnored var convexTransport: CodexAsyncRequestTransporting?
+    // Test hook: intercepts Convex lane activation without dialing the real helper/backend.
+    @ObservationIgnored var convexLaneActivationOverride: ((String, Bool) async throws -> Void)?
+    // Test hook: forces lane selection decisions without depending on device network settings.
+    @ObservationIgnored var preferredTransportModeOverride: ((String) -> CodexTransportMode?)?
     // Test hook: stubs trusted-session lookup without performing a real relay HTTP request.
     @ObservationIgnored var trustedSessionResolverOverride: (() async throws -> CodexTrustedSessionResolveResponse)?
     // Keeps the trusted-session HTTP lookup cancellable so manual retry can preempt a stuck resolve.
     @ObservationIgnored var trustedSessionResolveTask: Task<CodexTrustedSessionResolveResponse, Error>?
     @ObservationIgnored var trustedSessionResolveTaskID: UUID?
+    // Coalesces rapid transport picker changes so only the latest preference is applied.
+    @ObservationIgnored var transportPreferenceReconcileTask: Task<Void, Never>?
     var streamingAssistantMessageByTurnID: [String: String] = [:]
     var streamingSystemMessageByItemID: [String: String] = [:]
     /// Rich metadata for command execution tool calls, keyed by itemId.
     var commandExecutionDetailsByItemID: [String: CommandExecutionDetails] = [:]
     // Debounces disk writes while streaming to keep UI responsive.
     var messagePersistenceDebounceTask: Task<Void, Never>?
-    var threadListPersistenceDebounceTask: Task<Void, Never>?
+    var threadListPersistenceDebounceTask: CodexThreadListPersistenceTaskRecord?
     var pendingImmediateSyncTask: Task<Void, Never>?
     var pendingImmediateSyncThreadID: String?
+    var pendingImmediateSyncNeedsThreadList = false
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -420,6 +483,8 @@ final class CodexService {
     // Dedupes concise activity feed lines per thread/turn to avoid visual spam.
     var recentActivityLineByThread: [String: CodexRecentActivityLine] = [:]
     @ObservationIgnored var cachedSkillsByRoot: [String: [CodexSkillMetadata]] = [:]
+    @ObservationIgnored var skillAutocompleteIndexByRoot: [String: [CodexSkillAutocompleteIndexEntry]] = [:]
+    @ObservationIgnored var skillListLoadTaskByRoot: [String: CodexSkillListLoadTaskRecord] = [:]
     @ObservationIgnored var unsupportedSkillRoots: Set<String> = []
     @ObservationIgnored var persistedThreadListSnapshot: CodexThreadListSnapshot?
     @ObservationIgnored var isRestoringPersistedThreadListSnapshot = false
@@ -434,12 +499,16 @@ final class CodexService {
     var hydratedThreadIDs: Set<String> = []
     var loadingThreadIDs: Set<String> = []
     @ObservationIgnored var subagentMetadataLoadingThreadIDs: Set<String> = []
+    @ObservationIgnored var inFlightThreadResumeTaskByThread: [String: CodexThreadResumeTaskRecord] = [:]
+    @ObservationIgnored var inFlightTurnStateSnapshotTaskByThread: [String: CodexThreadTurnStateSnapshotTaskRecord] = [:]
     var resumedThreadIDs: Set<String> = []
     var isAppInForeground = true
+    var lastArchivedThreadsSyncAt: Date?
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
     var postConnectSyncTask: Task<Void, Never>?
+    var deferredModelListTask: Task<Void, Never>?
     // Keeps the phone-side account UI in sync while ChatGPT login is being completed on the Mac.
     var gptAccountLoginSyncTask: Task<Void, Never>?
     var postConnectSyncToken: UUID?
@@ -482,11 +551,19 @@ final class CodexService {
     @ObservationIgnored var firstLiveThreadIDCache: String?
     @ObservationIgnored var subagentIdentityByThreadID: [String: CodexSubagentIdentityEntry] = [:]
     @ObservationIgnored var subagentIdentityByAgentID: [String: CodexSubagentIdentityEntry] = [:]
+    @ObservationIgnored var localRelayPathMonitor: NWPathMonitor?
+    @ObservationIgnored let localRelayPathMonitorQueue = DispatchQueue(
+        label: "CodexMobile.LocalRelayPathMonitor",
+        qos: .utility
+    )
+    @ObservationIgnored var localRelayPathAvailabilityOverride: (() -> Bool?)?
+    @ObservationIgnored var hasResolvedLocalRelayPathAvailability = false
+    var hasActiveLocalRelayPath = false
     // Canonical repo roots keyed by observed working directories from bridge git/status responses.
     var repoRootByWorkingDirectory: [String: String] = [:]
     var knownRepoRoots: Set<String> = []
     // Service-owned per-thread UI state keeps the active chat isolated from unrelated thread mutations.
-    @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
+    var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
     @ObservationIgnored var forkedFromThreadIDByThreadID: [String: String] = [:]
     @ObservationIgnored var renamedThreadNameByThreadID: [String: String] = [:]
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
@@ -502,7 +579,7 @@ final class CodexService {
     let encoder: JSONEncoder
     let decoder: JSONDecoder
     let messagePersistence = CodexMessagePersistence()
-    let aiChangeSetPersistence = AIChangeSetPersistence()
+    let aiChangeSetPersistence: AIChangeSetPersistence
     let threadListPersistence: CodexThreadListPersistence
     let skillsPersistence: CodexSkillsPersistence
     let defaults: UserDefaults
@@ -519,6 +596,16 @@ final class CodexService {
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
     static let persistenceNamespaceDefaultsKey = "codex.persistenceNamespace"
+    static let transportPreferenceDefaultsKey = "codex.transportPreference"
+
+    func setTransportPreference(_ preference: CodexTransportPreference) {
+        guard transportPreference != preference else {
+            return
+        }
+
+        transportPreference = preference
+        scheduleTransportPreferenceReconcile()
+    }
 
     static func persistenceNamespace(for defaults: UserDefaults) -> String {
         if let existing = defaults.string(forKey: persistenceNamespaceDefaultsKey)?
@@ -545,8 +632,10 @@ final class CodexService {
         self.defaults = defaults
         self.threadListPersistence = CodexThreadListPersistence(namespace: persistenceNamespace)
         self.skillsPersistence = CodexSkillsPersistence(namespace: persistenceNamespace)
+        self.aiChangeSetPersistence = AIChangeSetPersistence(namespace: persistenceNamespace)
         self.userNotificationCenter = userNotificationCenter
         self.remoteNotificationRegistrar = remoteNotificationRegistrar
+        self.convexTransport = CodexAsyncTransportFactory.make()
         self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
         self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
         self.lastTrustedMacDeviceId = SecureStore.readString(for: CodexSecureKeys.lastTrustedMacDeviceId)
@@ -625,6 +714,13 @@ final class CodexService {
             self.selectedAccessMode = .onRequest
         }
 
+        if let savedTransportPreference = defaults.string(forKey: Self.transportPreferenceDefaultsKey),
+           let parsedTransportPreference = CodexTransportPreference(rawValue: savedTransportPreference) {
+            self.transportPreference = parsedTransportPreference
+        } else {
+            self.transportPreference = .automatic
+        }
+
         if let persistedGPTAccountSnapshot = loadPersistedGPTAccountSnapshot() {
             self.gptAccountSnapshot = persistedGPTAccountSnapshot
         } else {
@@ -654,6 +750,7 @@ final class CodexService {
         self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
         self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
         self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
+        self.relayCloudAsyncSharedSecret = SecureStore.readString(for: CodexSecureKeys.relayCloudAsyncSharedSecret)
         if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
            let parsedProtocolVersion = Int(rawProtocolVersion) {
             self.relayProtocolVersion = parsedProtocolVersion
@@ -674,18 +771,26 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         persistedThreadListSnapshot = threadListPersistence.load()
+        let persistedArchivedThreadIDs = defaults.stringArray(forKey: Self.locallyArchivedThreadIDsKey) ?? []
+        if persistedThreadListSnapshot?.threads.contains(where: { $0.syncState == .archivedLocal }) == true
+            || !persistedArchivedThreadIDs.isEmpty {
+            lastArchivedThreadsSyncAt = persistedThreadListSnapshot?.savedAt
+        }
         persistedSkillsCacheSnapshot = skillsPersistence.load() ?? CodexSkillsCacheSnapshot(entriesByRoot: [:])
         restorePersistedConnectionContextIfNeeded()
         restorePersistedThreadListSnapshotIfNeeded()
         rebuildThreadLookupCaches()
+        startLocalRelayPathMonitor()
     }
 
     @MainActor deinit {
+        localRelayPathMonitor?.cancel()
+        localRelayPathMonitor = nil
         trustedSessionResolveTask?.cancel()
         trustedSessionResolveTask = nil
         messagePersistenceDebounceTask?.cancel()
         messagePersistenceDebounceTask = nil
-        threadListPersistenceDebounceTask?.cancel()
+        threadListPersistenceDebounceTask?.task.cancel()
         threadListPersistenceDebounceTask = nil
         pendingImmediateSyncTask?.cancel()
         pendingImmediateSyncTask = nil
@@ -699,6 +804,8 @@ final class CodexService {
         runningThreadWatchSyncTask = nil
         postConnectSyncTask?.cancel()
         postConnectSyncTask = nil
+        deferredModelListTask?.cancel()
+        deferredModelListTask = nil
         gptAccountLoginSyncTask?.cancel()
         gptAccountLoginSyncTask = nil
         notificationObserverTokens.forEach(NotificationCenter.default.removeObserver)
@@ -714,6 +821,14 @@ final class CodexService {
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.
     var hasSavedRelaySession: Bool {
         normalizedRelaySessionId != nil && normalizedRelayURL != nil
+    }
+
+    var isConvexLaneActive: Bool {
+        transportMode == .convexRemote
+    }
+
+    var hasConvexLaneCredentials: Bool {
+        convexLaneCredentials?.sharedSecretData != nil
     }
 
     // Normalizes the persisted relay session id before reuse in reconnect flows.
@@ -740,6 +855,31 @@ final class CodexService {
         relayMacIdentityPublicKey?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
+    }
+
+    var normalizedRelayCloudAsyncSharedSecret: String? {
+        relayCloudAsyncSharedSecret?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .nilIfEmpty
+    }
+
+    var convexLaneCredentials: CodexConvexLaneCredentials? {
+        if normalizedRelayMacDeviceId != nil || normalizedRelayMacIdentityPublicKey != nil {
+            if let relayCredentials = relayScopedConvexLaneCredentials,
+               relayCredentials.sharedSecretData != nil {
+                return relayCredentials
+            }
+            return nil
+        }
+        if let trustedCredentials = preferredTrustedMacConvexLaneCredentials,
+           trustedCredentials.sharedSecretData != nil {
+            return trustedCredentials
+        }
+        return nil
+    }
+
+    var cloudAsyncSharedSecretData: Data? {
+        convexLaneCredentials?.sharedSecretData
     }
 
     var normalizedLastTrustedMacDeviceId: String? {
@@ -775,6 +915,49 @@ final class CodexService {
 
     var hasReconnectCandidate: Bool {
         hasSavedRelaySession || hasTrustedMacReconnectCandidate
+    }
+
+    var hasAvailableRequestTransport: Bool {
+        requestTransportOverride != nil
+            || (isConnected && (webSocketConnection != nil || webSocketTask != nil))
+            || isConvexLaneActive
+    }
+
+    private var relayScopedConvexLaneCredentials: CodexConvexLaneCredentials? {
+        guard let macDeviceId = normalizedRelayMacDeviceId,
+              let macIdentityPublicKey = normalizedRelayMacIdentityPublicKey else {
+            return nil
+        }
+
+        let matchingTrustedMac = trustedMacRegistry.records[macDeviceId]
+        let sharedSecret = normalizedRelayCloudAsyncSharedSecret
+            ?? matchingTrustedMac?.cloudAsyncSharedSecret?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty
+        guard let sharedSecret else {
+            return nil
+        }
+
+        return CodexConvexLaneCredentials(
+            macDeviceId: macDeviceId,
+            macIdentityPublicKey: macIdentityPublicKey,
+            sharedSecretBase64: sharedSecret
+        )
+    }
+
+    private var preferredTrustedMacConvexLaneCredentials: CodexConvexLaneCredentials? {
+        guard let trustedMac = preferredTrustedMacRecord,
+              let sharedSecret = trustedMac.cloudAsyncSharedSecret?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .nilIfEmpty else {
+            return nil
+        }
+
+        return CodexConvexLaneCredentials(
+            macDeviceId: trustedMac.macDeviceId,
+            macIdentityPublicKey: trustedMac.macIdentityPublicKey,
+            sharedSecretBase64: sharedSecret
+        )
     }
 
     // Separates transport readiness from post-connect hydration so the UI can explain delays honestly.

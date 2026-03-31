@@ -32,7 +32,10 @@ enum TurnViewWorktreeActions {
                 viewModel.refreshGitBranchTargets(
                     codex: codex,
                     workingDirectory: resolvedProjectPath,
-                    threadID: threadID
+                    threadID: threadID,
+                    requestTimeoutMs: GitActionsService.passiveRequestTimeoutMs,
+                    force: true,
+                    showsLoadingIndicator: false
                 )
             } catch {
                 viewModel.gitSyncAlert = TurnGitSyncAlert(

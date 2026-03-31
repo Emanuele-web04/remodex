@@ -63,7 +63,7 @@ struct TurnView: View {
             isWorktreeProject: isWorktreeProject
         )
         let visibleConversationErrorMessage = turnVisibleConversationErrorMessage(
-            lastErrorMessage: codex.lastErrorMessage,
+            lastErrorMessage: codex.visibleConnectedConversationErrorMessage(codex.lastErrorMessage),
             isConnected: codex.isConnected,
             shouldSuppressConnectedMessage: codex.shouldSuppressConnectedConversationErrorMessage(
                 codex.lastErrorMessage
@@ -246,7 +246,10 @@ struct TurnView: View {
                 viewModel.refreshGitBranchTargets(
                     codex: codex,
                     workingDirectory: gitWorkingDirectory,
-                    threadID: thread.id
+                    threadID: thread.id,
+                    requestTimeoutMs: GitActionsService.passiveRequestTimeoutMs,
+                    force: true,
+                    showsLoadingIndicator: false
                 )
             },
                 onConnectionChanged: { wasConnected, isConnected in
@@ -262,11 +265,14 @@ struct TurnView: View {
                     viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
                     guard showsGitControls else { return }
                     viewModel.refreshGitBranchTargets(
-                    codex: codex,
-                    workingDirectory: gitWorkingDirectory,
-                    threadID: thread.id
-                )
-            },
+                        codex: codex,
+                        workingDirectory: gitWorkingDirectory,
+                        threadID: thread.id,
+                        requestTimeoutMs: GitActionsService.passiveRequestTimeoutMs,
+                        force: true,
+                        showsLoadingIndicator: false
+                    )
+                },
             onScenePhaseChanged: { phase in
                 guard phase != .active else { return }
                 cancelVoiceRecordingIfNeeded()
@@ -750,18 +756,27 @@ struct TurnView: View {
     }
 
     private func prepareThreadIfReady(gitWorkingDirectory: String?) async {
+        viewModel.prepareGitPresentationForDisplayedThread(workingDirectory: gitWorkingDirectory)
         let didPrepare = await codex.prepareThreadForDisplay(threadId: thread.id)
         guard didPrepare, !Task.isCancelled, codex.activeThreadId == thread.id else { return }
-        await codex.refreshContextWindowUsage(threadId: thread.id)
-        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
-        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
-        guard gitWorkingDirectory != nil else { return }
-        viewModel.refreshGitBranchTargets(
-            codex: codex,
-            workingDirectory: gitWorkingDirectory,
-            threadID: thread.id
-        )
+        let threadID = thread.id
+        Task { @MainActor in
+            guard codex.activeThreadId == threadID else { return }
+            await codex.refreshContextWindowUsage(threadId: threadID)
+        }
+        guard let gitWorkingDirectory,
+              viewModel.shouldRefreshGitBranchTargetsOnOpen(workingDirectory: gitWorkingDirectory) else { return }
+        Task { @MainActor in
+            guard codex.activeThreadId == threadID else { return }
+            viewModel.refreshGitBranchTargets(
+                codex: codex,
+                workingDirectory: gitWorkingDirectory,
+                threadID: threadID,
+                requestTimeoutMs: GitActionsService.passiveRequestTimeoutMs,
+                showsLoadingIndicator: false
+            )
+        }
     }
 
     // Shares the same default base branch between the toolbar overlay and the empty-thread Local menu.
@@ -1117,7 +1132,9 @@ struct TurnView: View {
                     viewModel.refreshGitBranchTargets(
                         codex: codex,
                         workingDirectory: gitWorkingDirectory,
-                        threadID: thread.id
+                        threadID: thread.id,
+                        requestTimeoutMs: GitActionsService.passiveRequestTimeoutMs,
+                        force: true
                     )
                 },
                 onStartCodeReviewThread: startCodeReviewThread,

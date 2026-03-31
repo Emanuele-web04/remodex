@@ -8,6 +8,7 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { createRelayServer } = require("../../relay/server");
 const { startBridge } = require("./bridge");
 const { readBridgeConfig } = require("./codex-desktop-refresher");
 const { printQR } = require("./qr");
@@ -31,11 +32,19 @@ const {
 const SERVICE_LABEL = "com.remodex.bridge";
 const DEFAULT_PAIRING_WAIT_TIMEOUT_MS = 10_000;
 const DEFAULT_PAIRING_WAIT_INTERVAL_MS = 200;
+const DEFAULT_LOCAL_RELAY_BIND_HOST = "0.0.0.0";
 
 // Runs the bridge inside launchd while keeping QR rendering in the foreground CLI command.
-function runMacOSBridgeService({ env = process.env } = {}) {
+async function runMacOSBridgeService({
+  env = process.env,
+  osImpl = os,
+  execFileSyncImpl = execFileSync,
+  fsImpl = fs,
+  startBridgeImpl = startBridge,
+  createRelayServerImpl = createRelayServer,
+} = {}) {
   assertDarwinPlatform();
-  const config = readDaemonConfig({ env });
+  const config = resolveMacOSBridgeStartConfig({ env, fsImpl });
   if (!config?.relayUrl) {
     const message = "No relay URL configured for the macOS bridge service.";
     // Clear any stale QR so the CLI does not keep showing a pairing payload for a dead service.
@@ -50,7 +59,27 @@ function runMacOSBridgeService({ env = process.env } = {}) {
     return;
   }
 
-  startBridge({
+  try {
+    await startEmbeddedRelayIfNeeded({
+      config,
+      env,
+      osImpl,
+      execFileSyncImpl,
+      createRelayServerImpl,
+    });
+  } catch (error) {
+    clearPairingSession({ env });
+    writeBridgeStatus({
+      state: "error",
+      connectionStatus: "error",
+      pid: process.pid,
+      lastError: error?.message || "Failed to start the embedded relay.",
+    }, { env });
+    console.error(`[remodex] ${error?.message || "Failed to start the embedded relay."}`);
+    return;
+  }
+
+  startBridgeImpl({
     config,
     printPairingQr: false,
     onPairingPayload(pairingPayload) {
@@ -60,6 +89,166 @@ function runMacOSBridgeService({ env = process.env } = {}) {
       writeBridgeStatus(status, { env });
     },
   });
+}
+
+async function startEmbeddedRelayIfNeeded({
+  config,
+  env = process.env,
+  osImpl = os,
+  execFileSyncImpl = execFileSync,
+  createRelayServerImpl = createRelayServer,
+} = {}) {
+  const relayRuntime = resolveEmbeddedRelayRuntime({
+    relayUrl: config?.relayUrl,
+    env,
+    osImpl,
+    execFileSyncImpl,
+  });
+  if (!relayRuntime) {
+    return null;
+  }
+
+  const { server } = createRelayServerImpl();
+  await new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off?.("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off?.("error", onError);
+      resolve();
+    };
+
+    server.once?.("error", onError);
+    server.once?.("listening", onListening);
+    server.listen(relayRuntime.port, relayRuntime.bindHost);
+  });
+  console.log(
+    `[remodex] embedded relay listening on ws://${relayRuntime.advertisedHost}:${relayRuntime.port}/relay`
+  );
+  return relayRuntime;
+}
+
+function resolveEmbeddedRelayRuntime({
+  relayUrl,
+  env = process.env,
+  osImpl = os,
+  execFileSyncImpl = execFileSync,
+} = {}) {
+  const parsedRelayUrl = safeURLParse(relayUrl);
+  if (!parsedRelayUrl || parsedRelayUrl.protocol !== "ws:") {
+    return null;
+  }
+
+  // Only auto-bind an embedded relay when the URL has an explicit port.
+  // This avoids unexpected privileged-port binds (for example ws://host/relay => :80).
+  if (!parsedRelayUrl.port) {
+    return null;
+  }
+
+  const hostname = parsedRelayUrl.hostname;
+  if (!hostname || !isAdvertisedRelayHostedByThisMac({
+    hostname,
+    osImpl,
+    execFileSyncImpl,
+  })) {
+    return null;
+  }
+
+  return {
+    advertisedHost: hostname,
+    bindHost: resolveEmbeddedRelayBindHost(hostname, env),
+    port: Number(parsedRelayUrl.port),
+  };
+}
+
+function isAdvertisedRelayHostedByThisMac({
+  hostname,
+  osImpl = os,
+  execFileSyncImpl = execFileSync,
+} = {}) {
+  const normalizedHostname = normalizeHostname(hostname);
+  if (!normalizedHostname) {
+    return false;
+  }
+
+  if (isLoopbackHost(normalizedHostname)) {
+    return true;
+  }
+
+  const localCandidates = new Set();
+  const osHostname = normalizeHostname(osImpl.hostname?.() || "");
+  if (osHostname) {
+    localCandidates.add(osHostname);
+  }
+
+  const localHostName = readMacLocalHostName(execFileSyncImpl);
+  if (localHostName) {
+    localCandidates.add(localHostName);
+    localCandidates.add(`${localHostName}.local`);
+  }
+
+  for (const interfaceAddresses of Object.values(osImpl.networkInterfaces?.() || {})) {
+    for (const interfaceAddress of interfaceAddresses || []) {
+      const address = normalizeHostname(interfaceAddress?.address || "");
+      if (address) {
+        localCandidates.add(address);
+      }
+    }
+  }
+
+  return localCandidates.has(normalizedHostname);
+}
+
+function resolveEmbeddedRelayBindHost(hostname, env = process.env) {
+  const override = typeof env.REMODEX_RELAY_BIND_HOST === "string"
+    ? env.REMODEX_RELAY_BIND_HOST.trim()
+    : "";
+  if (override) {
+    return override;
+  }
+
+  const normalizedHostname = normalizeHostname(hostname);
+  if (normalizedHostname === "::1") {
+    return "::1";
+  }
+  if (isLoopbackHost(normalizedHostname)) {
+    return "127.0.0.1";
+  }
+  if (normalizedHostname.includes(":")) {
+    return "::";
+  }
+
+  return DEFAULT_LOCAL_RELAY_BIND_HOST;
+}
+
+function readMacLocalHostName(execFileSyncImpl = execFileSync) {
+  try {
+    return normalizeHostname(
+      execFileSyncImpl("scutil", ["--get", "LocalHostName"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+    );
+  } catch {
+    return "";
+  }
+}
+
+function normalizeHostname(value) {
+  return typeof value === "string" ? value.trim().replace(/\.+$/, "").toLowerCase() : "";
+}
+
+function isLoopbackHost(hostname) {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+}
+
+function safeURLParse(value) {
+  try {
+    return new URL(value);
+  } catch {
+    return null;
+  }
 }
 
 // Prepares config + launchd state and optionally waits for the fresh pairing payload written by the service.
@@ -119,20 +308,24 @@ async function startMacOSBridgeService({
   };
 }
 
-// In a source checkout, prefer the last saved daemon config when the current shell
-// does not provide an explicit relay URL so `remodex up` keeps working after first setup.
+// In a source checkout, preserve the saved relay config when the shell lacks one,
+// but always refresh code-owned defaults like the Convex deployment URL.
 function resolveMacOSBridgeStartConfig({ env = process.env, fsImpl = fs } = {}) {
-  const explicitConfig = readBridgeConfig({ env, fsImpl });
-  if (typeof explicitConfig?.relayUrl === "string" && explicitConfig.relayUrl.trim()) {
-    return explicitConfig;
+  const currentConfig = readBridgeConfig({ env, fsImpl });
+  if (typeof currentConfig?.relayUrl === "string" && currentConfig.relayUrl.trim()) {
+    return currentConfig;
   }
 
   const savedConfig = readDaemonConfig({ env, fsImpl });
   if (typeof savedConfig?.relayUrl === "string" && savedConfig.relayUrl.trim()) {
-    return savedConfig;
+    return {
+      ...currentConfig,
+      ...savedConfig,
+      convexSiteUrl: currentConfig.convexSiteUrl,
+    };
   }
 
-  return explicitConfig;
+  return currentConfig;
 }
 
 function stopMacOSBridgeService({
@@ -195,12 +388,27 @@ function printMacOSBridgeServiceStatus(options = {}) {
   const bridgeState = status.bridgeStatus?.state || "unknown";
   const connectionStatus = status.bridgeStatus?.connectionStatus || "unknown";
   const pairingCreatedAt = status.pairingSession?.createdAt || "none";
+  const helperStatus = status.bridgeStatus?.helperStatus || null;
   console.log(`[remodex] Service label: ${status.label}`);
   console.log(`[remodex] Installed: ${status.installed ? "yes" : "no"}`);
   console.log(`[remodex] Launchd loaded: ${status.launchdLoaded ? "yes" : "no"}`);
   console.log(`[remodex] PID: ${status.launchdPid || status.bridgeStatus?.pid || "unknown"}`);
   console.log(`[remodex] Bridge state: ${bridgeState}`);
   console.log(`[remodex] Connection: ${connectionStatus}`);
+  if (helperStatus) {
+    const helperLabel = helperStatus.displayName || "async helper";
+    console.log(`[remodex] ${helperLabel}: ${helperStatus.running ? "running" : "stopped"}`);
+    console.log(`[remodex] ${helperLabel} available: ${helperStatus.available ? "yes" : "no"}`);
+    if (helperStatus.siteUrl) {
+      console.log(`[remodex] ${helperLabel} site URL: ${helperStatus.siteUrl}`);
+    }
+    if (helperStatus.helperPath) {
+      console.log(`[remodex] ${helperLabel} path: ${helperStatus.helperPath}`);
+    }
+    if (helperStatus.lastError) {
+      console.log(`[remodex] ${helperLabel} last error: ${helperStatus.lastError}`);
+    }
+  }
   console.log(`[remodex] Pairing payload: ${pairingCreatedAt}`);
   console.log(`[remodex] Stdout log: ${status.stdoutLogPath}`);
   console.log(`[remodex] Stderr log: ${status.stderrLogPath}`);

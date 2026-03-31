@@ -166,7 +166,7 @@ struct RevenueCatPaywallView: View {
             Text("Remodex Pro Enabled")
                 .font(AppFont.system(size: 24, weight: .bold))
 
-            Text("Local development Pro access is enabled for this build, so subscription paywalls are bypassed.")
+            Text(subscriptions.subscriptionBypassStatusMessage ?? "Pro access is enabled for this build because required local services are unavailable here, so subscription paywalls are bypassed.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

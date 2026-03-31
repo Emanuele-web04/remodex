@@ -47,7 +47,7 @@ final class AIChangeSetTests: XCTestCase {
         )
     }
 
-    func testTurnDiffFinalizesReadyChangeSetForAssistantMessage() {
+    func testTurnDiffFinalizesReadyChangeSetForAssistantMessage() throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
@@ -77,6 +77,7 @@ final class AIChangeSetTests: XCTestCase {
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
         service.noteTurnFinished(turnId: turnID)
+        service.markTurnCompleted(threadId: threadID, turnId: turnID)
 
         let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
         let changeSet = try XCTUnwrap(service.readyChangeSet(forAssistantMessage: assistantMessage))
@@ -88,7 +89,7 @@ final class AIChangeSetTests: XCTestCase {
         XCTAssertEqual(changeSet.repoRoot, "/tmp/repo")
     }
 
-    func testMultipleFallbackPatchesStayNotRevertable() {
+    func testMultipleFallbackPatchesStayNotRevertable() throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
@@ -127,6 +128,7 @@ final class AIChangeSetTests: XCTestCase {
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
         service.noteTurnFinished(turnId: turnID)
+        service.markTurnCompleted(threadId: threadID, turnId: turnID)
 
         let assistantMessage = try XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
         let changeSet = try XCTUnwrap(service.aiChangeSet(forAssistantMessage: assistantMessage))
@@ -139,7 +141,7 @@ final class AIChangeSetTests: XCTestCase {
         )
     }
 
-    func testAssistantRevertPresentationIsSafeForDistinctFilesInSameRepo() {
+    func testAssistantRevertPresentationIsSafeForDistinctFilesInSameRepo() throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let siblingThreadID = "thread-\(UUID().uuidString)"
@@ -169,7 +171,7 @@ final class AIChangeSetTests: XCTestCase {
         XCTAssertTrue(presentation.overlappingFiles.isEmpty)
     }
 
-    func testAssistantRevertPresentationWarnsWhenSiblingTouchesSameFile() {
+    func testAssistantRevertPresentationWarnsWhenSiblingTouchesSameFile() throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let siblingThreadID = "thread-\(UUID().uuidString)"
@@ -199,7 +201,7 @@ final class AIChangeSetTests: XCTestCase {
         XCTAssertEqual(presentation.overlappingFiles, ["Sources/App.swift"])
     }
 
-    func testAssistantRevertPresentationBlocksWhileSiblingRunIsStillActive() {
+    func testAssistantRevertPresentationBlocksWhileSiblingRunIsStillActive() throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let siblingThreadID = "thread-\(UUID().uuidString)"
@@ -229,7 +231,7 @@ final class AIChangeSetTests: XCTestCase {
         )
     }
 
-    func testTimelineSnapshotInvalidatesWarningWhenSiblingChangeSetBecomesReverted() {
+    func testTimelineSnapshotInvalidatesWarningWhenSiblingChangeSetBecomesReverted() async throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let siblingThreadID = "thread-\(UUID().uuidString)"
@@ -260,6 +262,7 @@ final class AIChangeSetTests: XCTestCase {
         revertedChangeSet.status = .reverted
         service.aiChangeSetsByID[siblingChangeSet.id] = revertedChangeSet
         service.invalidateAssistantRevertStates()
+        await Task.yield()
 
         XCTAssertEqual(
             service.timelineState(for: threadID).renderSnapshot.assistantRevertStatesByMessageID[assistantMessage.id]?.riskLevel,
@@ -291,7 +294,7 @@ final class AIChangeSetTests: XCTestCase {
 
         XCTAssertEqual(
             service.timelineState(for: threadID).renderSnapshot.assistantRevertStatesByMessageID[assistantMessage.id]?.riskLevel,
-            .safe
+            .warning
         )
 
         service.rememberRepoRoot("/tmp/repo", forWorkingDirectory: "/tmp/repo/app")
@@ -302,7 +305,7 @@ final class AIChangeSetTests: XCTestCase {
         )
     }
 
-    func testAssistantRevertPresentationBlocksWhenWorkingDirectoryIsMissing() {
+    func testAssistantRevertPresentationBlocksWhenWorkingDirectoryIsMissing() throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let assistantMessage = recordReadyChangeSet(
@@ -319,7 +322,7 @@ final class AIChangeSetTests: XCTestCase {
         XCTAssertFalse(presentation.isEnabled)
     }
 
-    func testAssistantRevertPresentationBlocksNotRevertableResponse() {
+    func testAssistantRevertPresentationBlocksNotRevertableResponse() throws {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
@@ -421,11 +424,15 @@ final class AIChangeSetTests: XCTestCase {
         )
         service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
         service.noteTurnFinished(turnId: turnID)
+        service.markTurnCompleted(threadId: threadID, turnId: turnID)
         return try! XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
     }
 
     private func makeService() -> CodexService {
-        let service = CodexService()
+        let suiteName = "AIChangeSetTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        let service = CodexService(defaults: defaults)
         Self.retainedServices.append(service)
         return service
     }

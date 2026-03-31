@@ -32,8 +32,21 @@ final class ContentViewModel {
     }
 
     // Throttles sidebar-open sync requests to avoid redundant thread refresh churn.
-    func shouldRequestSidebarFreshSync(isConnected: Bool) -> Bool {
-        guard isConnected else {
+    func shouldRequestSidebarFreshSync(
+        isConnected: Bool,
+        isBootstrappingConnectionSync: Bool,
+        isLoadingThreads: Bool,
+        hasThreads: Bool
+    ) -> Bool {
+        guard isConnected,
+              !isBootstrappingConnectionSync,
+              !isLoadingThreads else {
+            return false
+        }
+
+        // A populated sidebar stays reasonably fresh from the background sync loop,
+        // so reopening it should not force another full thread/list burst.
+        guard !hasThreads else {
             return false
         }
 
@@ -70,7 +83,6 @@ final class ContentViewModel {
     func toggleConnection(codex: CodexService) async {
         if codex.isConnected {
             await codex.disconnect()
-            codex.clearSavedRelaySession()
             return
         }
 
@@ -294,22 +306,21 @@ extension ContentViewModel {
             return
         }
 
-        do {
+        guard let preferredTransportMode = codex.preferredTransportMode(for: serverURL) else {
+            throw CodexServiceError.invalidServerURL(serverURL)
+        }
+
+        switch preferredTransportMode {
+        case .lanRelay:
             try await codex.connect(
                 serverURL: serverURL,
                 token: "",
                 role: "iphone"
             )
-        } catch {
-            if codex.shouldAttemptCloudAsyncFallback(after: error, serverURL: serverURL) {
-                do {
-                    try await codex.activateCloudAsyncFallback(serverURL: serverURL)
-                    return
-                } catch let fallbackError {
-                    throw fallbackError
-                }
-            }
-            throw error
+        case .convexRemote:
+            try await codex.activateConvexLane(serverURL: serverURL)
+        case .disconnected:
+            throw CodexServiceError.invalidInput("No transport lane is available.")
         }
     }
 

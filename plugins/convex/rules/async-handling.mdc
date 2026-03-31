@@ -1,0 +1,31 @@
+---
+description: Always await promises in Convex functions to prevent unexpected behavior
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Async Handling in Convex
+
+Always await all promises in Convex functions. Not awaiting promises (e.g., `await ctx.scheduler.runAfter`, `await ctx.db.patch`, `await ctx.db.insert`) may cause unexpected behavior.
+
+## Examples
+
+**Bad:**
+```typescript
+export const updateUser = mutation({
+  handler: async (ctx, args) => {
+    ctx.db.patch(args.userId, { name: args.name }); // Missing await
+  }
+});
+```
+
+**Good:**
+```typescript
+export const updateUser = mutation({
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.userId, { name: args.name });
+  }
+});
+```
+
+Enable the `no-floating-promises` ESLint rule to catch these errors.

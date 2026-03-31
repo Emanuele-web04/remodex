@@ -1,5 +1,5 @@
 // FILE: TurnGitSyncAlertTests.swift
-// Purpose: Verifies the guided Git sync alerts map backend repo states to the right user decisions.
+// Purpose: Verifies sync-state alerts reflect the current Git reconciliation flow.
 // Layer: Unit Test
 // Exports: TurnGitSyncAlertTests
 // Depends on: XCTest, CodexMobile
@@ -9,69 +9,85 @@ import XCTest
 
 @MainActor
 final class TurnGitSyncAlertTests: XCTestCase {
-    func testBehindOnlyOffersSafeRemoteUpdate() {
+    func testBehindOnlyDoesNotShowAlertBecauseSyncNowAutoPulls() {
         let viewModel = TurnViewModel()
 
-        let alert = viewModel.makeGitSyncAlert(
-            for: GitRepoSyncResult(
-                currentBranch: "feature/sync",
-                trackingBranch: "origin/feature/sync",
-                isDirty: false,
-                aheadCount: 0,
-                behindCount: 2,
-                state: "behind_only",
-                actionTaken: "none",
-                canPush: false,
-                lastFetchAt: nil
+        XCTAssertNil(
+            viewModel.gitSyncAlert(
+                for: makeRepoSyncResult(
+                    branch: "feature/sync",
+                    tracking: "origin/feature/sync",
+                    state: "behind_only",
+                    behind: 2
+                )
             )
         )
-
-        XCTAssertEqual(alert.title, "Remote Update Available")
-        XCTAssertEqual(alert.confirmTitle, "Update Now")
-        XCTAssertEqual(alert.action, .update(confirmStrategy: .none))
     }
 
-    func testDivergedOffersConfirmedPullRebase() {
+    func testDivergedShowsPullRebaseConfirmation() throws {
         let viewModel = TurnViewModel()
 
-        let alert = viewModel.makeGitSyncAlert(
-            for: GitRepoSyncResult(
-                currentBranch: "feature/rebase",
-                trackingBranch: "origin/feature/rebase",
-                isDirty: false,
-                aheadCount: 1,
-                behindCount: 1,
-                state: "diverged",
-                actionTaken: "none",
-                canPush: false,
-                lastFetchAt: nil
+        let alert = try XCTUnwrap(
+            viewModel.gitSyncAlert(
+                for: makeRepoSyncResult(
+                    branch: "feature/rebase",
+                    tracking: "origin/feature/rebase",
+                    state: "diverged",
+                    ahead: 1,
+                    behind: 1
+                )
             )
         )
 
-        XCTAssertEqual(alert.title, "Remote History Diverged")
-        XCTAssertEqual(alert.confirmTitle, "Try Update")
-        XCTAssertEqual(alert.action, .update(confirmStrategy: .rebaseIfDiverged))
+        XCTAssertEqual(alert.title, "Branch diverged from remote")
+        XCTAssertEqual(alert.message, "Local and remote history both moved. Pull with rebase to reconcile them?")
+        XCTAssertEqual(alert.buttons.map(\.title), ["Cancel", "Pull & Rebase"])
+        XCTAssertEqual(alert.buttons.map(\.action), [.dismissOnly, .pullRebase])
     }
 
-    func testDirtyAndBehindStaysInformationalOnly() {
+    func testDirtyAndBehindShowsCautiousPullRebasePrompt() throws {
         let viewModel = TurnViewModel()
 
-        let alert = viewModel.makeGitSyncAlert(
-            for: GitRepoSyncResult(
-                currentBranch: "feature/dirty",
-                trackingBranch: "origin/feature/dirty",
-                isDirty: true,
-                aheadCount: 0,
-                behindCount: 3,
-                state: "dirty_and_behind",
-                actionTaken: "blocked",
-                canPush: false,
-                lastFetchAt: nil
+        let alert = try XCTUnwrap(
+            viewModel.gitSyncAlert(
+                for: makeRepoSyncResult(
+                    branch: "feature/dirty",
+                    tracking: "origin/feature/dirty",
+                    state: "dirty_and_behind",
+                    isDirty: true,
+                    behind: 3
+                )
             )
         )
 
-        XCTAssertEqual(alert.title, "Local Changes + Remote Update")
-        XCTAssertNil(alert.confirmTitle)
-        XCTAssertEqual(alert.action, .dismissOnly)
+        XCTAssertEqual(alert.title, "Local changes need attention")
+        XCTAssertEqual(
+            alert.message,
+            "You have local changes and the remote branch moved ahead. Pull with rebase only if you're ready to reconcile those changes."
+        )
+        XCTAssertEqual(alert.buttons.map(\.title), ["Cancel", "Pull & Rebase"])
+        XCTAssertEqual(alert.buttons.map(\.action), [.dismissOnly, .pullRebase])
+    }
+
+    private func makeRepoSyncResult(
+        branch: String,
+        tracking: String,
+        state: String,
+        isDirty: Bool = false,
+        ahead: Int = 0,
+        behind: Int = 0
+    ) -> GitRepoSyncResult {
+        GitRepoSyncResult(
+            from: [
+                "branch": .string(branch),
+                "tracking": .string(tracking),
+                "dirty": .bool(isDirty),
+                "ahead": .integer(ahead),
+                "behind": .integer(behind),
+                "state": .string(state),
+                "canPush": .bool(false),
+                "publishedToRemote": .bool(true)
+            ]
+        )
     }
 }

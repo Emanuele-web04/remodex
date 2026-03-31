@@ -7,7 +7,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { randomUUID, generateKeyPairSync } = require("crypto");
+const { randomUUID, randomBytes, generateKeyPairSync } = require("crypto");
 const { execFileSync } = require("child_process");
 
 const DEFAULT_STORE_DIR = path.join(os.homedir(), ".remodex");
@@ -114,6 +114,7 @@ function createBridgeDeviceState() {
     macDeviceId: randomUUID(),
     macIdentityPublicKey: base64UrlToBase64(publicJwk.x),
     macIdentityPrivateKey: base64UrlToBase64(privateJwk.d),
+    cloudAsyncSharedSecret: randomBytes(32).toString("base64"),
     trustedPhones: {},
   };
 }
@@ -322,6 +323,8 @@ function normalizeBridgeDeviceState(rawState) {
   const macDeviceId = normalizeNonEmptyString(rawState?.macDeviceId);
   const macIdentityPublicKey = normalizeNonEmptyString(rawState?.macIdentityPublicKey);
   const macIdentityPrivateKey = normalizeNonEmptyString(rawState?.macIdentityPrivateKey);
+  const cloudAsyncSharedSecret = normalizeNonEmptyString(rawState?.cloudAsyncSharedSecret)
+    || randomBytes(32).toString("base64");
 
   if (!macDeviceId || !macIdentityPublicKey || !macIdentityPrivateKey) {
     throw new Error("Bridge device state is incomplete");
@@ -344,6 +347,7 @@ function normalizeBridgeDeviceState(rawState) {
     macDeviceId,
     macIdentityPublicKey,
     macIdentityPrivateKey,
+    cloudAsyncSharedSecret,
     trustedPhones,
   };
 }

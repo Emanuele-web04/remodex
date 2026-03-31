@@ -6,6 +6,23 @@
 
 import Foundation
 
+struct CodexSkillAutocompleteIndexEntry {
+    let skill: CodexSkillMetadata
+    let searchBlob: String
+
+    init(skill: CodexSkillMetadata) {
+        self.skill = skill
+        let name = skill.name.lowercased()
+        let description = skill.description?.lowercased() ?? ""
+        self.searchBlob = description.isEmpty ? name : "\(name)\n\(description)"
+    }
+}
+
+struct CodexSkillListLoadTaskRecord {
+    let token: UUID
+    let task: Task<[CodexSkillMetadata], Error>
+}
+
 extension CodexService {
     // Keeps sidebar/project loading focused on recent conversations without hiding
     // other active project groups when the latest chats all belong to one repo.
@@ -16,18 +33,29 @@ extension CodexService {
         .object(["decision": .string(decision)])
     }
 
-    func listThreads(limit: Int? = nil, autoSelectFirstLiveThread: Bool = true) async throws {
+    func listThreads(
+        limit: Int? = nil,
+        autoSelectFirstLiveThread: Bool = true,
+        includeArchived: Bool = true,
+        forceArchivedRefresh: Bool = true
+    ) async throws {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
         let effectiveLimit = limit ?? recentThreadListLimit
-        let activeThreads = try await fetchServerThreads(limit: effectiveLimit)
-
-        var archivedThreads: [CodexThread] = []
-        do {
-            archivedThreads = try await fetchServerThreads(limit: effectiveLimit, archived: true)
-        } catch {
-            debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
+        let activeThreads: [CodexThread]
+        let archivedThreads: [CodexThread]
+        if includeArchived {
+            async let activeThreadsTask = fetchServerThreads(limit: effectiveLimit)
+            async let archivedThreadsTask = fetchArchivedThreadsIfNeeded(
+                limit: effectiveLimit,
+                forceRefresh: forceArchivedRefresh
+            )
+            activeThreads = try await activeThreadsTask
+            archivedThreads = await archivedThreadsTask
+        } else {
+            activeThreads = try await fetchServerThreads(limit: effectiveLimit)
+            archivedThreads = threads.filter { $0.syncState == .archivedLocal }
         }
 
         reconcileLocalThreadsWithServer(
@@ -364,6 +392,7 @@ extension CodexService {
         }
 
         if let cachedSkills = cachedSkillsByRoot[normalizedRoot] {
+            cacheSkillAutocompleteIndex(for: normalizedRoot, skills: cachedSkills)
             return cachedSkills
         }
 
@@ -372,7 +401,34 @@ extension CodexService {
         }
 
         cachedSkillsByRoot[normalizedRoot] = entry.skills
+        cacheSkillAutocompleteIndex(for: normalizedRoot, skills: entry.skills)
         return entry.skills
+    }
+
+    func cachedAutocompleteSkills(
+        for root: String,
+        query: String,
+        limit: Int
+    ) -> [CodexSkillMetadata]? {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty, limit > 0 else {
+            return nil
+        }
+
+        guard !isUnsupportedSkillRoot(normalizedRoot) else {
+            return nil
+        }
+
+        guard let indexedSkills = skillAutocompleteIndex(for: normalizedRoot) else {
+            return nil
+        }
+
+        let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let filtered = indexedSkills.lazy
+            .filter { $0.searchBlob.contains(normalizedQuery) }
+            .map(\.skill)
+
+        return Array(filtered.prefix(limit))
     }
 
     func isUnsupportedSkillRoot(_ root: String) -> Bool {
@@ -401,6 +457,8 @@ extension CodexService {
 
         unsupportedSkillRoots.insert(normalizedRoot)
         cachedSkillsByRoot.removeValue(forKey: normalizedRoot)
+        skillAutocompleteIndexByRoot.removeValue(forKey: normalizedRoot)
+        skillListLoadTaskByRoot.removeValue(forKey: normalizedRoot)?.task.cancel()
         persistSkillsCacheEntry(
             CodexSkillsCacheEntry(
                 skills: [],
@@ -445,6 +503,20 @@ extension CodexService {
         return currentRelayMacDeviceId == nil && normalizedIdentifier(connectedServerIdentity) == nil
     }
 
+    private func finishSkillListLoadTask(for root: String, token: UUID) {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty else {
+            return
+        }
+
+        guard let currentRecord = skillListLoadTaskByRoot[normalizedRoot],
+              currentRecord.token == token else {
+            return
+        }
+
+        skillListLoadTaskByRoot.removeValue(forKey: normalizedRoot)
+    }
+
     private func persistSkillsCacheEntry(_ entry: CodexSkillsCacheEntry, for root: String) {
         let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedRoot.isEmpty else {
@@ -468,13 +540,51 @@ extension CodexService {
             if isUnsupportedSkillRoot(cacheRoot) {
                 return []
             }
+
+            if let inFlightTask = skillListLoadTaskByRoot[cacheRoot] {
+                return try await inFlightTask.task.value
+            }
+
             if let cachedSkills = cachedSkills(for: cacheRoot) {
                 return cachedSkills
             }
+
+            let taskToken = UUID()
+            let inFlightTask = Task { @MainActor [weak self] in
+                guard let self else {
+                    throw CancellationError()
+                }
+                defer {
+                    self.finishSkillListLoadTask(for: cacheRoot, token: taskToken)
+                }
+                return try await self.loadSkills(
+                    cwds: normalizedCwds,
+                    cacheRoot: cacheRoot,
+                    forceReload: false
+                )
+            }
+            skillListLoadTaskByRoot[cacheRoot] = CodexSkillListLoadTaskRecord(
+                token: taskToken,
+                task: inFlightTask
+            )
+            return try await inFlightTask.value
         }
+
+        return try await loadSkills(
+            cwds: normalizedCwds,
+            cacheRoot: cacheRoot,
+            forceReload: forceReload
+        )
+    }
+
+    private func loadSkills(
+        cwds: [String],
+        cacheRoot: String?,
+        forceReload: Bool
+    ) async throws -> [CodexSkillMetadata] {
         var paramsObject: RPCObject = [:]
-        if !normalizedCwds.isEmpty {
-            paramsObject["cwds"] = .array(normalizedCwds.map { .string($0) })
+        if !cwds.isEmpty {
+            paramsObject["cwds"] = .array(cwds.map { .string($0) })
         }
         if forceReload {
             paramsObject["forceReload"] = .bool(true)
@@ -484,12 +594,12 @@ extension CodexService {
         do {
             response = try await sendRequest(method: "skills/list", params: .object(paramsObject))
         } catch {
-            guard !normalizedCwds.isEmpty,
+            guard !cwds.isEmpty,
                   shouldRetrySkillsListWithCwdFallback(error) else {
                 throw error
             }
 
-            var fallbackParams: RPCObject = ["cwd": .string(normalizedCwds[0])]
+            var fallbackParams: RPCObject = ["cwd": .string(cwds[0])]
             if forceReload {
                 fallbackParams["forceReload"] = .bool(true)
             }
@@ -500,6 +610,10 @@ extension CodexService {
             throw CodexServiceError.invalidResponse("skills/list response missing result.data[].skills")
         }
 
+        guard !Task.isCancelled else {
+            throw CancellationError()
+        }
+
         let dedupedByName = Dictionary(grouping: decodedSkills) { $0.normalizedName }
             .compactMap { _, bucket -> CodexSkillMetadata? in
                 bucket.first(where: { $0.enabled }) ?? bucket.first
@@ -508,6 +622,7 @@ extension CodexService {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         if let cacheRoot {
             cachedSkillsByRoot[cacheRoot] = dedupedByName
+            cacheSkillAutocompleteIndex(for: cacheRoot, skills: dedupedByName)
             unsupportedSkillRoots.remove(cacheRoot)
             persistSkillsCacheEntry(
                 CodexSkillsCacheEntry(
@@ -521,6 +636,31 @@ extension CodexService {
             )
         }
         return dedupedByName
+    }
+
+    private func skillAutocompleteIndex(for root: String) -> [CodexSkillAutocompleteIndexEntry]? {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty else {
+            return nil
+        }
+
+        if let indexedSkills = skillAutocompleteIndexByRoot[normalizedRoot] {
+            return indexedSkills
+        }
+
+        _ = cachedSkills(for: normalizedRoot)
+        return skillAutocompleteIndexByRoot[normalizedRoot]
+    }
+
+    private func cacheSkillAutocompleteIndex(for root: String, skills: [CodexSkillMetadata]) {
+        let normalizedRoot = root.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRoot.isEmpty else {
+            return
+        }
+
+        skillAutocompleteIndexByRoot[normalizedRoot] = skills
+            .filter(\.enabled)
+            .map(CodexSkillAutocompleteIndexEntry.init(skill:))
     }
 
     // Accepts the latest pending approval request.
@@ -724,6 +864,25 @@ extension CodexService {
         }
     }
 
+    private var archivedThreadSyncInterval: TimeInterval { 5 * 60 }
+
+    func fetchArchivedThreadsIfNeeded(limit: Int, forceRefresh: Bool = false) async -> [CodexThread] {
+        if !forceRefresh,
+           let lastArchivedThreadsSyncAt,
+           Date().timeIntervalSince(lastArchivedThreadsSyncAt) < archivedThreadSyncInterval {
+            return threads.filter { $0.syncState == .archivedLocal }
+        }
+
+        do {
+            let archivedThreads = try await fetchServerThreads(limit: limit, archived: true)
+            lastArchivedThreadsSyncAt = Date()
+            return archivedThreads
+        } catch {
+            debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
+            return threads.filter { $0.syncState == .archivedLocal }
+        }
+    }
+
     func createContinuationThread(from archivedThreadId: String) async throws -> CodexThread {
         let continuationRuntimeOverride = threadRuntimeOverride(for: archivedThreadId)
         let continuationThread = try await startThread(runtimeOverride: continuationRuntimeOverride)
@@ -741,19 +900,88 @@ extension CodexService {
         preferredProjectPath: String? = nil,
         modelIdentifierOverride: String? = nil
     ) async throws -> CodexThread? {
+        let result = try await ensureThreadResumedWithSnapshot(
+            threadId: threadId,
+            force: force,
+            preferredProjectPath: preferredProjectPath,
+            modelIdentifierOverride: modelIdentifierOverride
+        )
+        return result.thread
+    }
+
+    func ensureThreadResumedWithSnapshot(
+        threadId: String,
+        force: Bool = false,
+        preferredProjectPath: String? = nil,
+        modelIdentifierOverride: String? = nil
+    ) async throws -> CodexThreadResumeResult {
         guard !threadId.isEmpty else {
-            return nil
+            return (nil, nil)
         }
 
         if !force, resumedThreadIDs.contains(threadId) {
-            return thread(for: threadId)
+            return (thread(for: threadId), nil)
         }
 
+        let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
+        let shouldCoalesceResume = !force
+            && normalizedPreferredProjectPath == nil
+            && modelIdentifierOverride == nil
+        if shouldCoalesceResume,
+           let existingTask = inFlightThreadResumeTaskByThread[threadId] {
+            return try await existingTask.task.value
+        }
+
+        if shouldCoalesceResume {
+            let taskToken = UUID()
+            let resumeTask = Task<CodexThreadResumeResult, Error> { @MainActor [weak self] in
+                guard let self else {
+                    throw CancellationError()
+                }
+                defer {
+                    self.finishThreadResumeTask(threadId: threadId, token: taskToken)
+                }
+                return try await self.performThreadResumeWithSnapshot(
+                    threadId: threadId,
+                    force: force,
+                    preferredProjectPath: normalizedPreferredProjectPath,
+                    modelIdentifierOverride: modelIdentifierOverride
+                )
+            }
+            inFlightThreadResumeTaskByThread[threadId] = CodexThreadResumeTaskRecord(
+                token: taskToken,
+                task: resumeTask
+            )
+            return try await resumeTask.value
+        }
+
+        return try await performThreadResumeWithSnapshot(
+            threadId: threadId,
+            force: force,
+            preferredProjectPath: normalizedPreferredProjectPath,
+            modelIdentifierOverride: modelIdentifierOverride
+        )
+    }
+
+    private func finishThreadResumeTask(threadId: String, token: UUID) {
+        guard let currentTask = inFlightThreadResumeTaskByThread[threadId],
+              currentTask.token == token else {
+            return
+        }
+
+        inFlightThreadResumeTaskByThread.removeValue(forKey: threadId)
+    }
+
+    private func performThreadResumeWithSnapshot(
+        threadId: String,
+        force: Bool = false,
+        preferredProjectPath: String? = nil,
+        modelIdentifierOverride: String? = nil
+    ) async throws -> CodexThreadResumeResult {
         var params: RPCObject = [
             "threadId": .string(threadId),
         ]
-        let resolvedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
-            ?? thread(for: threadId)?.gitWorkingDirectory
+        let resolvedProjectPath = preferredProjectPath ?? thread(for: threadId)?.gitWorkingDirectory
         if let workingDirectory = resolvedProjectPath {
             params["cwd"] = .string(workingDirectory)
         }
@@ -764,10 +992,11 @@ extension CodexService {
 
         guard let resultObject = response.result?.objectValue else {
             resumedThreadIDs.insert(threadId)
-            return nil
+            return (nil, nil)
         }
 
         var resumedThread: CodexThread?
+        var turnStateSnapshot: CodexThreadTurnStateSnapshot?
         if let threadValue = resultObject["thread"],
            var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
             decodedThread.syncState = .live
@@ -794,6 +1023,11 @@ extension CodexService {
                         updateCurrentOutput(for: threadId)
                     }
                 }
+
+                if let snapshot = threadTurnStateSnapshot(from: threadObject) {
+                    _ = applyThreadTurnStateSnapshot(snapshot, to: threadId)
+                    turnStateSnapshot = snapshot
+                }
             }
         } else if let index = threadIndex(for: threadId) {
             threads[index].syncState = .live
@@ -801,7 +1035,7 @@ extension CodexService {
 
         hydratedThreadIDs.insert(threadId)
         resumedThreadIDs.insert(threadId)
-        return resumedThread
+        return (resumedThread, turnStateSnapshot)
     }
 
     func isThreadMissingOnServer(_ threadId: String) async -> Bool {
@@ -828,39 +1062,81 @@ extension CodexService {
             return false
         }
 
-        do {
-            let snapshot = try await readThreadTurnStateSnapshot(threadId: normalizedThreadID)
-
-            if let runningTurnID = snapshot.interruptibleTurnID {
-                markThreadAsRunning(normalizedThreadID)
-                setProtectedRunningFallback(false, for: normalizedThreadID)
-                setActiveTurnID(runningTurnID, for: normalizedThreadID)
-                threadIdByTurnID[runningTurnID] = normalizedThreadID
-                activeTurnId = runningTurnID
-                return true
-            }
-
-            if snapshot.hasInterruptibleTurnWithoutID {
-                markThreadAsRunning(normalizedThreadID)
-                setProtectedRunningFallback(true, for: normalizedThreadID)
-            } else {
-                clearRunningState(for: normalizedThreadID)
-            }
-
-            if let existingTurnID = activeTurnID(for: normalizedThreadID) {
-                setActiveTurnID(nil, for: normalizedThreadID)
-                if threadIdByTurnID[existingTurnID] == normalizedThreadID {
-                    threadIdByTurnID.removeValue(forKey: existingTurnID)
-                }
-                if activeTurnId == existingTurnID {
-                    activeTurnId = nil
-                }
-            }
-            return true
-        } catch {
-            debugSyncLog("in-flight turn refresh failed thread=\(normalizedThreadID): \(error.localizedDescription)")
+        guard let snapshot = await coalescedThreadTurnStateSnapshot(threadId: normalizedThreadID) else {
             return false
         }
+
+        return applyThreadTurnStateSnapshot(snapshot, to: normalizedThreadID)
+    }
+
+    private func coalescedThreadTurnStateSnapshot(threadId: String) async -> CodexThreadTurnStateSnapshot? {
+        if let existingTask = inFlightTurnStateSnapshotTaskByThread[threadId] {
+            return await existingTask.task.value
+        }
+
+        let taskToken = UUID()
+        let snapshotTask = Task<CodexThreadTurnStateSnapshot?, Never> { @MainActor [weak self] in
+            guard let self else {
+                return nil
+            }
+
+            do {
+                return try await self.readThreadTurnStateSnapshot(threadId: threadId)
+            } catch {
+                self.debugSyncLog("in-flight turn refresh failed thread=\(threadId): \(error.localizedDescription)")
+                return nil
+            }
+        }
+        inFlightTurnStateSnapshotTaskByThread[threadId] = CodexThreadTurnStateSnapshotTaskRecord(
+            token: taskToken,
+            task: snapshotTask
+        )
+
+        let snapshot = await snapshotTask.value
+        finishTurnStateSnapshotTask(threadId: threadId, token: taskToken)
+        return snapshot
+    }
+
+    private func finishTurnStateSnapshotTask(threadId: String, token: UUID) {
+        guard let currentTask = inFlightTurnStateSnapshotTaskByThread[threadId],
+              currentTask.token == token else {
+            return
+        }
+
+        inFlightTurnStateSnapshotTaskByThread.removeValue(forKey: threadId)
+    }
+
+    private func applyThreadTurnStateSnapshot(
+        _ snapshot: CodexThreadTurnStateSnapshot,
+        to threadId: String
+    ) -> Bool {
+        if let runningTurnID = snapshot.interruptibleTurnID {
+            markThreadAsRunning(threadId)
+            setProtectedRunningFallback(false, for: threadId)
+            setActiveTurnID(runningTurnID, for: threadId)
+            threadIdByTurnID[runningTurnID] = threadId
+            activeTurnId = runningTurnID
+            return true
+        }
+
+        if snapshot.hasInterruptibleTurnWithoutID {
+            markThreadAsRunning(threadId)
+            setProtectedRunningFallback(true, for: threadId)
+        } else {
+            clearRunningState(for: threadId)
+        }
+
+        if let existingTurnID = activeTurnID(for: threadId) {
+            setActiveTurnID(nil, for: threadId)
+            if threadIdByTurnID[existingTurnID] == threadId {
+                threadIdByTurnID.removeValue(forKey: existingTurnID)
+            }
+            if activeTurnId == existingTurnID {
+                activeTurnId = nil
+            }
+        }
+
+        return true
     }
 
     func sendTurnStart(
@@ -1572,7 +1848,19 @@ extension CodexService {
             return (nil, false, nil)
         }
 
+        guard let snapshot = threadTurnStateSnapshot(from: threadObject) else {
+            return (nil, false, nil)
+        }
+
+        return snapshot
+    }
+
+    func threadTurnStateSnapshot(from threadObject: [String: JSONValue]) -> CodexThreadTurnStateSnapshot? {
         let turnObjects = threadObject["turns"]?.arrayValue?.compactMap { $0.objectValue } ?? []
+        if threadObject["turns"] == nil {
+            return nil
+        }
+
         guard !turnObjects.isEmpty else {
             return (nil, false, nil)
         }

@@ -6,6 +6,12 @@
 
 import Foundation
 
+enum CodexSandboxRequestShape: CaseIterable {
+    case sandboxPolicy
+    case sandbox
+    case minimal
+}
+
 extension CodexService {
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
@@ -21,7 +27,7 @@ extension CodexService {
         baseParams: RPCObject,
         context: String
     ) async throws -> RPCMessage {
-        let policies = selectedAccessMode.approvalPolicyCandidates
+        let policies = orderedApprovalPolicyCandidates(for: selectedAccessMode)
         var lastError: Error?
 
         for (index, policy) in policies.enumerated() {
@@ -29,11 +35,14 @@ extension CodexService {
             params["approvalPolicy"] = .string(policy)
 
             do {
-                return try await sendRequest(method: method, params: .object(params))
+                let response = try await sendRequest(method: method, params: .object(params))
+                preferredApprovalPolicyByAccessMode[selectedAccessMode] = policy
+                return response
             } catch {
                 lastError = error
                 let hasMorePolicies = index < (policies.count - 1)
                 if hasMorePolicies, shouldRetryWithApprovalPolicyFallback(error) {
+                    preferredApprovalPolicyByAccessMode.removeValue(forKey: selectedAccessMode)
                     debugRuntimeLog("\(method) \(context) fallback approvalPolicy=\(policy)")
                     continue
                 }
@@ -301,45 +310,68 @@ extension CodexService {
     }
 
     func sendRequestWithSandboxFallback(method: String, baseParams: RPCObject) async throws -> RPCMessage {
-        var firstAttemptParams = baseParams
-        firstAttemptParams["sandboxPolicy"] = runtimeSandboxPolicyObject(for: selectedAccessMode)
+        let requestShapes = orderedSandboxRequestShapes()
+        var lastError: Error?
 
-        do {
-            debugRuntimeLog("\(method) using sandboxPolicy")
-            return try await sendRequestWithApprovalPolicyFallback(
-                method: method,
-                baseParams: firstAttemptParams,
-                context: "sandboxPolicy"
+        for (index, requestShape) in requestShapes.enumerated() {
+            let params = requestParams(
+                for: requestShape,
+                baseParams: baseParams,
+                accessMode: selectedAccessMode
             )
-        } catch {
-            guard shouldFallbackFromSandboxPolicy(error) else {
-                throw error
+
+            do {
+                debugRuntimeLog("\(method) using \(requestShape.debugLabel)")
+                let response = try await sendRequestWithApprovalPolicyFallback(
+                    method: method,
+                    baseParams: params,
+                    context: requestShape.debugLabel
+                )
+                preferredSandboxRequestShape = requestShape
+                return response
+            } catch {
+                lastError = error
+                let hasMoreShapes = index < (requestShapes.count - 1)
+                guard hasMoreShapes, shouldFallbackFromSandboxPolicy(error) else {
+                    throw error
+                }
             }
         }
 
-        var secondAttemptParams = baseParams
-        secondAttemptParams["sandbox"] = .string(selectedAccessMode.sandboxLegacyValue)
+        throw lastError ?? CodexServiceError.invalidResponse("\(method) failed with unknown sandbox compatibility error")
+    }
 
-        do {
-            debugRuntimeLog("\(method) fallback using sandbox")
-            return try await sendRequestWithApprovalPolicyFallback(
-                method: method,
-                baseParams: secondAttemptParams,
-                context: "sandbox"
-            )
-        } catch {
-            guard shouldFallbackFromSandboxPolicy(error) else {
-                throw error
-            }
+    private func orderedApprovalPolicyCandidates(for accessMode: CodexAccessMode) -> [String] {
+        let candidates = accessMode.approvalPolicyCandidates
+        guard let preferredPolicy = preferredApprovalPolicyByAccessMode[accessMode],
+              candidates.contains(preferredPolicy) else {
+            return candidates
         }
 
-        var finalAttemptParams = baseParams
-        debugRuntimeLog("\(method) fallback using minimal payload")
-        return try await sendRequestWithApprovalPolicyFallback(
-            method: method,
-            baseParams: finalAttemptParams,
-            context: "minimal"
-        )
+        return [preferredPolicy] + candidates.filter { $0 != preferredPolicy }
+    }
+
+    private func orderedSandboxRequestShapes() -> [CodexSandboxRequestShape] {
+        [preferredSandboxRequestShape] + CodexSandboxRequestShape.allCases.filter { $0 != preferredSandboxRequestShape }
+    }
+
+    private func requestParams(
+        for requestShape: CodexSandboxRequestShape,
+        baseParams: RPCObject,
+        accessMode: CodexAccessMode
+    ) -> RPCObject {
+        var params = baseParams
+
+        switch requestShape {
+        case .sandboxPolicy:
+            params["sandboxPolicy"] = runtimeSandboxPolicyObject(for: accessMode)
+        case .sandbox:
+            params["sandbox"] = .string(accessMode.sandboxLegacyValue)
+        case .minimal:
+            break
+        }
+
+        return params
     }
 
     func handleModelListFailure(_ error: Error) {
@@ -371,6 +403,19 @@ extension CodexService {
             || message.contains("expected one of")
             || message.contains("onrequest")
             || message.contains("on-request")
+    }
+}
+
+private extension CodexSandboxRequestShape {
+    var debugLabel: String {
+        switch self {
+        case .sandboxPolicy:
+            return "sandboxPolicy"
+        case .sandbox:
+            return "sandbox"
+        case .minimal:
+            return "minimal"
+        }
     }
 }
 

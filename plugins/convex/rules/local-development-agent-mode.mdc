@@ -1,0 +1,156 @@
+---
+description: Agent mode is for cloud coding agents (Jules, Devin, Cursor Cloud) to avoid conflicts with your dev deployment. Local agents don't need this.
+alwaysApply: true
+globs: [".env.local", ".env", "convex/**/*.ts"]
+---
+
+# Agent Mode (For Cloud Coding Agents)
+
+**Agent Mode** allows cloud-based coding agents to work with Convex without conflicting with your personal development environment.
+
+## What is Agent Mode?
+
+**Purpose:** Prevents cloud coding agents from conflicting with your development work.
+
+**The Problem:**
+When cloud agents (Jules, Devin, Cursor Cloud Agents) run `npx convex dev`, they would normally use your default dev deployment. This conflicts with your own changes!
+
+**The Solution:**
+Agent mode creates an **isolated anonymous development environment** for the agent.
+
+## When to Use Agent Mode
+
+### ✅ Use Agent Mode For:
+
+- **Cloud coding agents** (Jules, Devin, Codex)
+- **Cursor Cloud Agents** (remote agents)
+- **CI/CD environments** where login isn't possible
+- Any automated tool that can't log in
+
+### ❌ Don't Need Agent Mode For:
+
+- **Local development** (Cursor IDE, VS Code)
+- **Claude Code CLI** (local agent)
+- **Your own terminal** (just log in normally)
+- **Local coding assistants** that use your login
+
+**Key:** If the agent runs locally and you're logged in, it doesn't need agent mode!
+
+## Setup
+
+Set the environment variable:
+
+```bash
+# .env.local
+CONVEX_AGENT_MODE=anonymous
+```
+
+Or run directly:
+
+```bash
+CONVEX_AGENT_MODE=anonymous npx convex dev
+```
+
+## How It Works
+
+When a cloud agent runs with `CONVEX_AGENT_MODE=anonymous`:
+
+1. Agent runs `npx convex dev`
+2. Instead of using your dev deployment, it creates an isolated environment
+3. Agent can develop without conflicting with your work
+4. Changes are isolated to the agent's session
+
+## Example: Cursor Cloud Agent
+
+```bash
+# .env.local (for cloud agent)
+CONVEX_AGENT_MODE=anonymous
+
+# Agent runs this
+npx convex dev
+
+# Creates isolated environment, doesn't touch your dev deployment
+```
+
+## Not Needed for Local Development
+
+**For local development (you at your computer):**
+
+```bash
+# Just log in normally
+npx convex dev
+
+# This works fine! Uses your dev deployment.
+# Local agents (Cursor, Claude Code) use this.
+```
+
+**You don't need agent mode** because:
+- You're logged in locally
+- Local agents use your credentials
+- No conflict with yourself
+
+## CI/CD with Agent Mode
+
+Perfect for automated environments:
+
+```yaml
+# .github/workflows/test.yml
+name: Test
+
+on: [push]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CONVEX_AGENT_MODE: anonymous
+    steps:
+      - uses: actions/checkout@v3
+      - run: npm install
+      - run: npx convex dev &
+      - run: npm test
+```
+
+## Beta Feature Notice
+
+⚠️ **Agent mode is currently in beta.**
+
+Future improvements may include:
+- Agents provisioning their own short-lived cloud deployments
+- Better isolation mechanisms
+- Additional agent modes
+
+## Common Misconceptions
+
+### ❌ "I need agent mode for local development"
+
+**No!** Just log in normally:
+```bash
+npx convex dev  # This is fine for local work
+```
+
+### ❌ "Agent mode is for anonymous users in my app"
+
+**No!** Agent mode is for coding agents, not app users.
+
+For anonymous app users, use proper auth with guest/anonymous support.
+
+### ❌ "Agent mode lets me skip authentication"
+
+**No!** Agent mode is about deployment isolation for agents, not skipping auth in your app.
+
+You still need auth in your functions!
+
+## Checklist
+
+- [ ] Only use agent mode for cloud coding agents
+- [ ] Set `CONVEX_AGENT_MODE=anonymous` in agent's environment
+- [ ] Local development doesn't need agent mode
+- [ ] CI/CD can use agent mode for isolation
+- [ ] Still implement proper auth in your functions
+
+## Learn More
+
+- [Agent Mode Documentation](https://docs.convex.dev/cli/agent-mode)
+- [Convex Discord](https://convex.dev/community) - Provide feedback on agent mode
+- [Authentication Setup](https://docs.convex.dev/auth)

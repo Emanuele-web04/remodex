@@ -1,0 +1,66 @@
+---
+description: Only schedule internal functions, never api functions
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Scheduler and Action Safety
+
+Always schedule `internal` functions with `ctx.scheduler`, `ctx.runAfter`, `ctx.runAt`, and `ctx.run*` methods. Never schedule public `api` functions.
+
+## Why
+
+Scheduled functions bypass authentication and argument validation that public APIs expect to receive from clients.
+
+## Pattern
+
+**Bad:**
+```typescript
+import { api } from "./_generated/api";
+
+export const processPayment = action({
+  handler: async (ctx, args) => {
+    // ❌ Don't schedule api functions
+    await ctx.scheduler.runAfter(0, api.users.chargeUser, {
+      userId: args.userId,
+      amount: args.amount,
+    });
+  },
+});
+```
+
+**Good:**
+```typescript
+import { internal } from "./_generated/api";
+
+// Define an internal function
+export const chargeUserInternal = internalMutation({
+  args: { userId: v.id("users"), amount: v.number() },
+  handler: async (ctx, args) => {
+    // ... charging logic ...
+  },
+});
+
+export const processPayment = action({
+  handler: async (ctx, args) => {
+    // ✅ Schedule internal functions
+    await ctx.scheduler.runAfter(0, internal.users.chargeUserInternal, {
+      userId: args.userId,
+      amount: args.amount,
+    });
+  },
+});
+```
+
+## Internal Functions
+
+Use `internalQuery`, `internalMutation`, and `internalAction` for functions that should only be called from backend code:
+
+```typescript
+export const internalHelper = internalMutation({
+  args: { /* ... */ },
+  handler: async (ctx, args) => {
+    // No auth check needed - only callable from backend
+  },
+});
+```

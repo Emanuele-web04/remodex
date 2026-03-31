@@ -263,6 +263,31 @@ final class ContentViewModelReconnectTests: XCTestCase {
         XCTAssertLessThan(reconnectElapsed, 0.75)
     }
 
+    func testToggleConnectionDisconnectPreservesSavedRelaySession() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+
+        service.relaySessionId = "saved-session"
+        service.relayUrl = "wss://relay.local/relay"
+        service.relayMacDeviceId = "mac-\(UUID().uuidString)"
+        service.relayMacIdentityPublicKey = Data(repeating: 21, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 22, count: 32).base64EncodedString()
+        service.isConnected = true
+        service.isInitialized = true
+        service.transportMode = .liveRelay
+
+        await viewModel.toggleConnection(codex: service)
+
+        XCTAssertFalse(service.isConnected)
+        XCTAssertFalse(service.isInitialized)
+        XCTAssertEqual(service.transportMode, .disconnected)
+        XCTAssertEqual(service.relaySessionId, "saved-session")
+        XCTAssertEqual(service.relayUrl, "wss://relay.local/relay")
+        XCTAssertNotNil(service.relayMacDeviceId)
+        XCTAssertNotNil(service.relayMacIdentityPublicKey)
+        XCTAssertNotNil(service.relayCloudAsyncSharedSecret)
+    }
+
     func testManualReconnectIgnoresRapidSecondTapWhileFirstAttemptIsInFlight() async {
         let service = makeService()
         let viewModel = ContentViewModel()
@@ -389,6 +414,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.connectAttemptOverride = { _, _, _, _ in
             throw NWError.posix(.ETIMEDOUT)
         }
+        service.shouldAttemptCloudAsyncFallbackOverride = { _, _ in true }
         service.cloudAsyncFallbackActivationOverride = { _, _ in
             throw expectedError
         }
@@ -401,6 +427,157 @@ final class ContentViewModelReconnectTests: XCTestCase {
         }
     }
 
+    func testConnectUsesConvexOnlyPreferenceWithoutLiveRelayAttempt() async throws {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var connectAttempts = 0
+        var fallbackAttempts = 0
+
+        service.transportPreference = .convexOnly
+        service.connectAttemptOverride = { _, _, _, _ in
+            connectAttempts += 1
+        }
+        service.cloudAsyncFallbackActivationOverride = { _, _ in
+            fallbackAttempts += 1
+        }
+
+        try await viewModel.connect(codex: service, serverURL: "ws://192.168.1.31:9000/relay/session")
+        XCTAssertEqual(connectAttempts, 0)
+        XCTAssertEqual(fallbackAttempts, 1)
+    }
+
+    func testConnectUsesLanOnlyPreferenceWithoutCloudFallbackAttempt() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var fallbackAttempts = 0
+
+        service.transportPreference = .lanOnly
+        service.connectAttemptOverride = { _, _, _, _ in
+            throw NWError.posix(.ETIMEDOUT)
+        }
+        service.cloudAsyncFallbackActivationOverride = { _, _ in
+            fallbackAttempts += 1
+        }
+
+        do {
+            try await viewModel.connect(codex: service, serverURL: "ws://192.168.1.31:9000/relay/session")
+            XCTFail("Expected LAN-only mode to surface the relay error.")
+        } catch {
+            XCTAssertEqual(fallbackAttempts, 0)
+        }
+    }
+
+    func testSetTransportPreferenceSwitchesLiveRelayConnectionToConvexFallback() async {
+        let service = makeService()
+        var fallbackAttempts = 0
+        var receivedURL: String?
+        var receivedPerformInitialSync: Bool?
+
+        service.isConnected = true
+        service.transportMode = .liveRelay
+        service.relayUrl = "ws://192.168.1.31:9000/relay"
+        service.relaySessionId = "session-1"
+        service.cloudAsyncFallbackActivationOverride = { serverURL, performInitialSync in
+            fallbackAttempts += 1
+            receivedURL = serverURL
+            receivedPerformInitialSync = performInitialSync
+        }
+
+        service.setTransportPreference(.convexOnly)
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(service.transportPreference, .convexOnly)
+        XCTAssertEqual(fallbackAttempts, 1)
+        XCTAssertEqual(receivedURL, "ws://192.168.1.31:9000/relay/session-1")
+        XCTAssertEqual(receivedPerformInitialSync, false)
+    }
+
+    func testSetTransportPreferenceReconnectsFromConvexFallbackToLan() async {
+        let service = makeService()
+        var connectAttempts = 0
+        var receivedServerURL: String?
+        var receivedPerformInitialSync: Bool?
+
+        service.isConnected = true
+        service.transportMode = .cloudAsyncFallback
+        service.relayUrl = "ws://192.168.1.31:9000/relay"
+        service.relaySessionId = "session-1"
+        service.connectAttemptOverride = { serverURL, _, _, performInitialSync in
+            connectAttempts += 1
+            receivedServerURL = serverURL
+            receivedPerformInitialSync = performInitialSync
+        }
+
+        service.setTransportPreference(.lanOnly)
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(service.transportPreference, .lanOnly)
+        XCTAssertEqual(connectAttempts, 1)
+        XCTAssertEqual(receivedServerURL, "ws://192.168.1.31:9000/relay/session-1")
+        XCTAssertEqual(receivedPerformInitialSync, false)
+    }
+
+    func testSetTransportPreferenceDefersSwitchUntilConnectionFinishes() async {
+        let service = makeService()
+        var fallbackAttempts = 0
+
+        service.isConnected = true
+        service.isConnecting = true
+        service.transportMode = .liveRelay
+        service.relayUrl = "ws://192.168.1.31:9000/relay"
+        service.relaySessionId = "session-1"
+        service.cloudAsyncFallbackActivationOverride = { _, _ in
+            fallbackAttempts += 1
+        }
+
+        service.setTransportPreference(.convexOnly)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(fallbackAttempts, 0)
+
+        service.isConnecting = false
+        try? await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(fallbackAttempts, 1)
+    }
+
+    func testSetTransportPreferenceRapidToggleAppliesLatestSelectionOnly() async {
+        let service = makeService()
+        var fallbackAttempts = 0
+
+        service.isConnected = true
+        service.transportMode = .liveRelay
+        service.relayUrl = "ws://192.168.1.31:9000/relay"
+        service.relaySessionId = "session-1"
+        service.cloudAsyncFallbackActivationOverride = { _, _ in
+            fallbackAttempts += 1
+        }
+
+        service.setTransportPreference(.convexOnly)
+        service.setTransportPreference(.lanOnly)
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(service.transportPreference, .lanOnly)
+        XCTAssertEqual(fallbackAttempts, 0)
+    }
+
+    func testTransportPreferencePersistsAcrossServiceReinit() async {
+        let suiteName = "ContentViewModelReconnectTests.TransportPreferencePersistence.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.setTransportPreference(.convexOnly)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        Self.retainedServices.append(service)
+
+        let restoredService = CodexService(defaults: defaults)
+        Self.retainedServices.append(restoredService)
+        XCTAssertEqual(restoredService.transportPreference, .convexOnly)
+
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "ContentViewModelReconnectTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
@@ -408,6 +585,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         let service = CodexService(defaults: defaults)
         service.connectAttemptOverride = nil
         service.cloudAsyncFallbackActivationOverride = nil
+        service.shouldAttemptCloudAsyncFallbackOverride = nil
         Self.retainedServices.append(service)
         return service
     }

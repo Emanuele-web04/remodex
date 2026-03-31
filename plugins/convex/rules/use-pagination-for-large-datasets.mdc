@@ -1,0 +1,473 @@
+---
+description: Use cursor-based pagination for large datasets instead of .collect(). Prevents performance issues and provides smooth infinite scroll.
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Use Pagination for Large Datasets
+
+Never use `.collect()` on large or unbounded queries. Use Convex's cursor-based pagination instead.
+
+## The Problem with .collect()
+
+### ❌ Bad: Loading Everything
+
+```typescript
+export const getAllTasks = query({
+  handler: async (ctx) => {
+    // ❌ Loads ALL tasks - slow and breaks with large data
+    return await ctx.db.query("tasks").collect();
+  },
+});
+```
+
+**Problems:**
+- Slow for large datasets (100s-1000s of items)
+- Wastes bandwidth
+- Poor user experience (long loading)
+- Can hit memory limits
+- Doesn't scale
+
+### ✅ Good: Pagination
+
+```typescript
+export const getTasks = query({
+  args: {
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("tasks")
+      .order("desc")
+      .paginate(args.paginationOpts);
+  },
+});
+```
+
+**Benefits:**
+- Fast (only loads what's needed)
+- Scales to millions of items
+- Smooth infinite scroll
+- Reactive updates
+- Better UX
+
+## When to Paginate
+
+### ✅ Always Paginate:
+
+- User-generated content (posts, comments, messages)
+- Activity feeds and timelines
+- Search results
+- Notification lists
+- Any list that could grow unbounded
+- Lists with > 100 items
+
+### ⚠️ Maybe Don't Paginate:
+
+- Small, bounded lists (user's 3 favorite colors)
+- Configuration options (< 20 items)
+- Dropdown menus with limited options
+- Tags or categories (if truly limited)
+
+**Rule of thumb:** If it could grow to 100+ items, paginate!
+
+## Basic Pagination
+
+### Backend: Query with Pagination
+
+```typescript
+import { query } from "./_generated/server";
+import { paginationOptsValidator } from "convex/server";
+
+export const listTasks = query({
+  args: {
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    return await ctx.db
+      .query("tasks")
+      .withIndex("by_user", q => q.eq("userId", user._id))
+      .order("desc")
+      .paginate(args.paginationOpts);
+  },
+});
+```
+
+**Returns:**
+```typescript
+{
+  page: Doc<"tasks">[],        // Current page of results
+  continueCursor: string,      // Cursor for next page
+  isDone: boolean,             // True if no more pages
+}
+```
+
+### Frontend: usePaginatedQuery
+
+```typescript
+import { usePaginatedQuery } from "convex/react";
+import { api } from "../convex/_generated/api";
+
+function TaskList() {
+  const { results, status, loadMore } = usePaginatedQuery(
+    api.tasks.listTasks,
+    {},
+    { initialNumItems: 20 }
+  );
+
+  return (
+    <div>
+      {results?.map(task => (
+        <TaskItem key={task._id} task={task} />
+      ))}
+
+      {status === "CanLoadMore" && (
+        <button onClick={() => loadMore(20)}>Load More</button>
+      )}
+
+      {status === "LoadingMore" && <div>Loading...</div>}
+    </div>
+  );
+}
+```
+
+## Infinite Scroll Pattern
+
+```typescript
+import { useEffect, useRef } from "react";
+
+function InfiniteTaskList() {
+  const { results, status, loadMore } = usePaginatedQuery(
+    api.tasks.listTasks,
+    {},
+    { initialNumItems: 20 }
+  );
+
+  const observerRef = useRef<IntersectionObserver>();
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (observerRef.current) observerRef.current.disconnect();
+
+    observerRef.current = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting && status === "CanLoadMore") {
+        loadMore(20);
+      }
+    });
+
+    if (loadMoreRef.current) {
+      observerRef.current.observe(loadMoreRef.current);
+    }
+
+    return () => observerRef.current?.disconnect();
+  }, [status, loadMore]);
+
+  return (
+    <div>
+      {results?.map(task => (
+        <TaskItem key={task._id} task={task} />
+      ))}
+
+      {status === "CanLoadMore" && (
+        <div ref={loadMoreRef} className="h-20 flex items-center justify-center">
+          Loading more...
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+## Pagination with Filters
+
+```typescript
+export const listTasks = query({
+  args: {
+    status: v.optional(v.union(
+      v.literal("todo"),
+      v.literal("done")
+    )),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    let query = ctx.db
+      .query("tasks")
+      .withIndex("by_user", q => q.eq("userId", user._id));
+
+    // Filter in TypeScript after query
+    const results = await query.order("desc").paginate(args.paginationOpts);
+
+    if (args.status) {
+      return {
+        ...results,
+        page: results.page.filter(task => task.status === args.status),
+      };
+    }
+
+    return results;
+  },
+});
+```
+
+**Note:** For better performance, use compound indexes:
+
+```typescript
+// schema.ts
+tasks: defineTable({
+  userId: v.id("users"),
+  status: v.string(),
+}).index("by_user_and_status", ["userId", "status"])
+
+// Query with index
+export const listTasks = query({
+  args: {
+    status: v.union(v.literal("todo"), v.literal("done")),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    return await ctx.db
+      .query("tasks")
+      .withIndex("by_user_and_status", q =>
+        q.eq("userId", user._id).eq("status", args.status)
+      )
+      .order("desc")
+      .paginate(args.paginationOpts);
+  },
+});
+```
+
+## Reactive Pagination
+
+Convex pagination is **fully reactive**! When data changes, pages update automatically.
+
+### The Challenge (Other Systems)
+
+With offset-based pagination, insertions/deletions cause:
+- Duplicate items across pages
+- Missing items
+- Inconsistent pagination
+
+### Convex Solution
+
+Convex uses **cursor-based pagination** with automatic tracking:
+
+```typescript
+// Items are inserted/deleted while user scrolls
+// Convex automatically handles this!
+
+const { results } = usePaginatedQuery(api.tasks.listTasks, {}, { initialNumItems: 20 });
+
+// Results stay consistent even as data changes
+// No duplicates, no missing items
+```
+
+**How it works:**
+- Cursors track positions, not offsets
+- Pages automatically adjust to data changes
+- Seamless reactive updates
+
+## Advanced: Custom Pagination
+
+For complex cases, use `getPage` from convex-helpers:
+
+```typescript
+import { getPage } from "convex-helpers/server/pagination";
+
+export const customPagination = query({
+  args: {
+    category: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    // Custom query logic
+    const results = await ctx.db
+      .query("posts")
+      .withIndex("by_user", q => q.eq("userId", user._id))
+      .filter(q => q.eq(q.field("category"), args.category))
+      .collect();
+
+    // Apply custom pagination
+    return getPage(results, args.paginationOpts);
+  },
+});
+```
+
+## Search with Pagination
+
+```typescript
+export const searchTasks = query({
+  args: {
+    searchTerm: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    const allTasks = await ctx.db
+      .query("tasks")
+      .withIndex("by_user", q => q.eq("userId", user._id))
+      .collect();
+
+    // Filter by search term
+    const filtered = allTasks.filter(task =>
+      task.title.toLowerCase().includes(args.searchTerm.toLowerCase())
+    );
+
+    // Paginate filtered results
+    return getPage(filtered, args.paginationOpts);
+  },
+});
+```
+
+**Better:** Use Convex's built-in text search when available.
+
+## Pagination Options
+
+```typescript
+interface PaginationOptions {
+  numItems: number;      // How many items per page
+  cursor: string | null; // Cursor from previous page (null for first page)
+  id?: string;          // Optional: Specific ID to paginate from
+}
+
+// Usage
+const page1 = await query.paginate({ numItems: 20, cursor: null });
+const page2 = await query.paginate({ numItems: 20, cursor: page1.continueCursor });
+```
+
+## Common Patterns
+
+### Pattern 1: Load More Button
+
+```typescript
+const { results, status, loadMore } = usePaginatedQuery(
+  api.tasks.list,
+  {},
+  { initialNumItems: 20 }
+);
+
+<button
+  onClick={() => loadMore(20)}
+  disabled={status !== "CanLoadMore"}
+>
+  {status === "LoadingMore" ? "Loading..." : "Load More"}
+</button>
+```
+
+### Pattern 2: Show/Hide Older Items
+
+```typescript
+const [showAll, setShowAll] = useState(false);
+
+const { results } = usePaginatedQuery(
+  api.tasks.list,
+  {},
+  { initialNumItems: showAll ? 100 : 10 }
+);
+
+<button onClick={() => setShowAll(!showAll)}>
+  {showAll ? "Show Less" : "Show All"}
+</button>
+```
+
+### Pattern 3: Paginated Tabs
+
+```typescript
+const [activeTab, setActiveTab] = useState<"todo" | "done">("todo");
+
+const { results } = usePaginatedQuery(
+  api.tasks.listByStatus,
+  { status: activeTab },
+  { initialNumItems: 20 }
+);
+
+// Separate pagination per tab
+```
+
+## Performance Tips
+
+1. **Use Indexes**
+   ```typescript
+   // ✅ Fast
+   .withIndex("by_user", q => q.eq("userId", userId))
+   .paginate(opts)
+
+   // ❌ Slow
+   .filter(q => q.eq(q.field("userId"), userId))
+   .paginate(opts)
+   ```
+
+2. **Reasonable Page Sizes**
+   ```typescript
+   // ✅ Good: 10-50 items per page
+   { initialNumItems: 20 }
+
+   // ❌ Too small: Too many requests
+   { initialNumItems: 5 }
+
+   // ❌ Too large: Slow loading
+   { initialNumItems: 500 }
+   ```
+
+3. **Order Matters**
+   ```typescript
+   // ✅ Use .order() for consistent pagination
+   .query("tasks")
+   .withIndex("by_created")
+   .order("desc")
+   .paginate(opts)
+   ```
+
+## Debugging Pagination
+
+### Check Total Items (Dev Only)
+
+```typescript
+export const debugCount = query({
+  handler: async (ctx) => {
+    const count = (await ctx.db.query("tasks").collect()).length;
+    console.log(`Total tasks: ${count}`);
+    return count;
+  },
+});
+```
+
+### Log Pagination State
+
+```typescript
+const { results, status } = usePaginatedQuery(api.tasks.list, {}, { initialNumItems: 20 });
+
+console.log({
+  itemsLoaded: results?.length,
+  status,
+  canLoadMore: status === "CanLoadMore"
+});
+```
+
+## Checklist
+
+- [ ] Never use `.collect()` on unbounded queries
+- [ ] Use `.paginate()` for lists that could grow large
+- [ ] Set reasonable `initialNumItems` (10-50)
+- [ ] Use `usePaginatedQuery` on frontend
+- [ ] Provide "Load More" or infinite scroll UX
+- [ ] Use indexes for paginated queries
+- [ ] Add `.order()` for consistent results
+- [ ] Test with large datasets (100+ items)
+- [ ] Consider compound indexes for filtered pagination
+
+## Learn More
+
+- [Convex Pagination Docs](https://docs.convex.dev/database/pagination)
+- [Take Control of Pagination](https://stack.convex.dev/pagination)
+- [Fully Reactive Pagination](https://stack.convex.dev/fully-reactive-pagination)
+- [Queries that Scale](https://stack.convex.dev/queries-that-scale)
+- [convex-helpers pagination](https://github.com/get-convex/convex-helpers/blob/main/packages/convex-helpers/server/pagination.ts)

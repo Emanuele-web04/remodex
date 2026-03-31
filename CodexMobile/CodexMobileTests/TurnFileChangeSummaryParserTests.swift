@@ -44,4 +44,22 @@ final class TurnFileChangeSummaryParserTests: XCTestCase {
             TurnFileChangeSummaryParser.dedupeKey(from: completed)
         )
     }
+
+    func testRepeatedParseAndDedupeKeyStayStableForSameText() {
+        let source = """
+        Edited Sources/App.swift +2 -1
+        Edited Sources/Composer.swift +3 -0
+        """
+
+        let expectedSummary = TurnFileChangeSummaryParser.parse(from: source)
+        let expectedKey = TurnFileChangeSummaryParser.dedupeKey(from: source)
+
+        for _ in 0..<5 {
+            XCTAssertEqual(
+                TurnFileChangeSummaryParser.parse(from: source)?.entries,
+                expectedSummary?.entries
+            )
+            XCTAssertEqual(TurnFileChangeSummaryParser.dedupeKey(from: source), expectedKey)
+        }
+    }
 }

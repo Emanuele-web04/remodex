@@ -8,7 +8,7 @@ import CryptoKit
 import Foundation
 
 let codexSecureProtocolVersion = 1
-let codexPairingQRVersion = 2
+let codexPairingQRVersion = 3
 let codexSecureHandshakeTag = "remodex-e2ee-v1"
 let codexSecureHandshakeLabel = "client-auth"
 let codexSecureClockSkewToleranceSeconds: TimeInterval = 60
@@ -37,7 +37,26 @@ struct CodexPairingQRPayload: Codable, Sendable {
     let sessionId: String
     let macDeviceId: String
     let macIdentityPublicKey: String
+    let cloudAsyncSharedSecret: String?
     let expiresAt: Int64
+
+    init(
+        v: Int,
+        relay: String,
+        sessionId: String,
+        macDeviceId: String,
+        macIdentityPublicKey: String,
+        cloudAsyncSharedSecret: String? = nil,
+        expiresAt: Int64
+    ) {
+        self.v = v
+        self.relay = relay
+        self.sessionId = sessionId
+        self.macDeviceId = macDeviceId
+        self.macIdentityPublicKey = macIdentityPublicKey
+        self.cloudAsyncSharedSecret = cloudAsyncSharedSecret
+        self.expiresAt = expiresAt
+    }
 }
 
 struct CodexPhoneIdentityState: Codable, Sendable {
@@ -51,6 +70,7 @@ struct CodexTrustedMacRecord: Codable, Sendable {
     let macIdentityPublicKey: String
     let lastPairedAt: Date
     var relayURL: String? = nil
+    var cloudAsyncSharedSecret: String? = nil
     var displayName: String? = nil
     var lastResolvedSessionId: String? = nil
     var lastResolvedAt: Date? = nil

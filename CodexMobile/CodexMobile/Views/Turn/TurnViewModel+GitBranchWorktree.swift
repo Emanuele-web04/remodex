@@ -5,24 +5,108 @@
 
 import Foundation
 
+private struct TurnGitBranchTargetsCacheEntry {
+    let result: GitBranchesWithStatusResult
+    let cachedAt: Date
+}
+
+private enum TurnGitBranchTargetsCache {
+    static var entriesByWorkingDirectory: [String: TurnGitBranchTargetsCacheEntry] = [:]
+}
+
+private struct TurnGitBranchPresentationRuntimeState {
+    var displayedGitWorkingDirectory: String?
+    var lastGitBranchTargetsRefreshAt: Date = .distantPast
+    var gitBranchTargetsRequestInFlight = false
+}
+
+private enum TurnGitBranchPresentationRuntime {
+    static var stateByOwnerID: [ObjectIdentifier: TurnGitBranchPresentationRuntimeState] = [:]
+}
+
 extension TurnViewModel {
-    func refreshGitBranchTargets(codex: CodexService, workingDirectory: String?, threadID: String) {
-        guard !isLoadingGitBranchTargets else { return }
-        isLoadingGitBranchTargets = true
+    var displayedGitWorkingDirectory: String? {
+        get { gitBranchPresentationRuntimeState.displayedGitWorkingDirectory }
+        set {
+            var state = gitBranchPresentationRuntimeState
+            state.displayedGitWorkingDirectory = newValue
+            gitBranchPresentationRuntimeState = state
+        }
+    }
+
+    var lastGitBranchTargetsRefreshAt: Date {
+        get { gitBranchPresentationRuntimeState.lastGitBranchTargetsRefreshAt }
+        set {
+            var state = gitBranchPresentationRuntimeState
+            state.lastGitBranchTargetsRefreshAt = newValue
+            gitBranchPresentationRuntimeState = state
+        }
+    }
+
+    var gitBranchTargetsRequestInFlight: Bool {
+        get { gitBranchPresentationRuntimeState.gitBranchTargetsRequestInFlight }
+        set {
+            var state = gitBranchPresentationRuntimeState
+            state.gitBranchTargetsRequestInFlight = newValue
+            gitBranchPresentationRuntimeState = state
+        }
+    }
+
+    static func releaseGitBranchPresentationRuntimeState(for viewModel: TurnViewModel) {
+        TurnGitBranchPresentationRuntime.stateByOwnerID.removeValue(forKey: ObjectIdentifier(viewModel))
+    }
+
+    private var gitBranchPresentationRuntimeState: TurnGitBranchPresentationRuntimeState {
+        get {
+            TurnGitBranchPresentationRuntime.stateByOwnerID[ObjectIdentifier(self)] ?? TurnGitBranchPresentationRuntimeState()
+        }
+        set {
+            TurnGitBranchPresentationRuntime.stateByOwnerID[ObjectIdentifier(self)] = newValue
+        }
+    }
+}
+
+extension TurnViewModel {
+    func refreshGitBranchTargets(
+        codex: CodexService,
+        workingDirectory: String?,
+        threadID: String,
+        requestTimeoutMs: UInt64? = nil,
+        force: Bool = false,
+        showsLoadingIndicator: Bool = true
+    ) {
+        let normalizedWorkingDirectory = normalizedGitWorkingDirectory(workingDirectory)
+        guard force || shouldRefreshGitBranchTargetsOnOpen(workingDirectory: normalizedWorkingDirectory) else {
+            return
+        }
+        guard !gitBranchTargetsRequestInFlight else { return }
+        gitBranchTargetsRequestInFlight = true
+        if showsLoadingIndicator {
+            isLoadingGitBranchTargets = true
+        }
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isLoadingGitBranchTargets = false }
+            defer {
+                self.gitBranchTargetsRequestInFlight = false
+                if showsLoadingIndicator {
+                    self.isLoadingGitBranchTargets = false
+                }
+            }
 
-            let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
+            let gitService = GitActionsService(codex: codex, workingDirectory: normalizedWorkingDirectory)
             do {
-                let result = try await gitService.branchesWithStatus()
+                let result = try await gitService.branchesWithStatus(requestTimeoutMs: requestTimeoutMs)
                 applyGitBranchTargets(result)
+                noteGitBranchTargetsRefreshed(
+                    workingDirectory: normalizedWorkingDirectory,
+                    result: result
+                )
                 if let status = result.status {
                     applyObservedGitRepoSync(
                         status,
                         codex: codex,
-                        workingDirectory: workingDirectory,
+                        workingDirectory: normalizedWorkingDirectory,
                         threadID: threadID
                     )
                 }
@@ -130,7 +214,7 @@ extension TurnViewModel {
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
             do {
-                let result = try await gitService.status()
+                let result = try await gitService.status(requestTimeoutMs: GitActionsService.passiveRequestTimeoutMs)
                 applyObservedGitRepoSync(
                     result,
                     codex: codex,
@@ -602,7 +686,106 @@ extension TurnViewModel {
     }
 }
 
-private extension TurnViewModel {
+extension TurnViewModel {
+    func normalizedGitWorkingDirectory(_ workingDirectory: String?) -> String? {
+        let trimmed = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // Keeps branch state warm across thread switches inside the same repo, while clearing stale
+    // branch metadata immediately when the visible repo changes.
+    func prepareGitPresentationForDisplayedThread(workingDirectory: String?) {
+        let normalizedWorkingDirectory = normalizedGitWorkingDirectory(workingDirectory)
+        guard displayedGitWorkingDirectory != normalizedWorkingDirectory else {
+            return
+        }
+
+        displayedGitWorkingDirectory = normalizedWorkingDirectory
+        lastGitBranchTargetsRefreshAt = .distantPast
+
+        guard normalizedWorkingDirectory != nil else {
+            clearGitBranchPresentation()
+            return
+        }
+
+        clearGitBranchPresentation()
+        if let cachedEntry = cachedGitBranchTargets(workingDirectory: normalizedWorkingDirectory) {
+            applyGitBranchTargets(cachedEntry.result)
+            if let status = cachedEntry.result.status {
+                applyGitRepoSync(status)
+            }
+            lastGitBranchTargetsRefreshAt = cachedEntry.cachedAt
+        }
+    }
+
+    func shouldRefreshGitBranchTargetsOnOpen(
+        workingDirectory: String?,
+        now: Date = Date()
+    ) -> Bool {
+        let normalizedWorkingDirectory = normalizedGitWorkingDirectory(workingDirectory)
+        guard normalizedWorkingDirectory != nil else {
+            return false
+        }
+
+        if displayedGitWorkingDirectory != normalizedWorkingDirectory {
+            return true
+        }
+
+        if availableGitBranchTargets.isEmpty
+            || gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || currentGitBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || gitRepoSync == nil {
+            return true
+        }
+
+        return now.timeIntervalSince(lastGitBranchTargetsRefreshAt) >= gitBranchTargetsRefreshMinimumInterval
+    }
+
+    func noteGitBranchTargetsRefreshed(
+        workingDirectory: String?,
+        now: Date = Date(),
+        result: GitBranchesWithStatusResult? = nil
+    ) {
+        let normalizedWorkingDirectory = normalizedGitWorkingDirectory(workingDirectory)
+        displayedGitWorkingDirectory = normalizedWorkingDirectory
+        lastGitBranchTargetsRefreshAt = now
+        guard let normalizedWorkingDirectory,
+              let result else {
+            return
+        }
+
+        TurnGitBranchTargetsCache.entriesByWorkingDirectory[normalizedWorkingDirectory] = TurnGitBranchTargetsCacheEntry(
+            result: result,
+            cachedAt: now
+        )
+    }
+
+    func clearGitBranchPresentation() {
+        isLoadingGitBranchTargets = false
+        gitBranchTargetsRequestInFlight = false
+        isSwitchingGitBranch = false
+        selectedGitBaseBranch = ""
+        currentGitBranch = ""
+        availableGitBranchTargets = []
+        gitBranchesCheckedOutElsewhere = []
+        gitWorktreePathsByBranch = [:]
+        gitLocalCheckoutPath = nil
+        gitDefaultBranch = ""
+        gitRepoSync = nil
+    }
+
+    private func cachedGitBranchTargets(workingDirectory: String?) -> TurnGitBranchTargetsCacheEntry? {
+        guard let normalizedWorkingDirectory = normalizedGitWorkingDirectory(workingDirectory) else {
+            return nil
+        }
+
+        return TurnGitBranchTargetsCache.entriesByWorkingDirectory[normalizedWorkingDirectory]
+    }
+
+    static func resetGitBranchTargetsCacheForTests() {
+        TurnGitBranchTargetsCache.entriesByWorkingDirectory.removeAll()
+    }
+
     // Detects push-like repo transitions that happen outside the toolbar callback path.
     func applyObservedGitRepoSync(
         _ result: GitRepoSyncResult,

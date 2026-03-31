@@ -61,6 +61,8 @@ enum GitActionsError: LocalizedError {
 
 @MainActor
 final class GitActionsService {
+    static let passiveRequestTimeoutMs: UInt64 = 4_000
+
     private let codex: CodexService
     private let workingDirectory: String?
 
@@ -69,8 +71,8 @@ final class GitActionsService {
         self.workingDirectory = Self.normalizedWorkingDirectory(workingDirectory)
     }
 
-    func status() async throws -> GitRepoSyncResult {
-        let json = try await request(method: "git/status")
+    func status(requestTimeoutMs: UInt64? = nil) async throws -> GitRepoSyncResult {
+        let json = try await request(method: "git/status", requestTimeoutMs: requestTimeoutMs)
         let result = GitRepoSyncResult(from: json)
         rememberRepoRoot(from: result)
         return result
@@ -164,8 +166,8 @@ final class GitActionsService {
         return GitRemoteUrlResult(from: json)
     }
 
-    func branchesWithStatus() async throws -> GitBranchesWithStatusResult {
-        let json = try await request(method: "git/branchesWithStatus")
+    func branchesWithStatus(requestTimeoutMs: UInt64? = nil) async throws -> GitBranchesWithStatusResult {
+        let json = try await request(method: "git/branchesWithStatus", requestTimeoutMs: requestTimeoutMs)
         let result = GitBranchesWithStatusResult(from: json)
         rememberRepoRoot(from: result.status)
         return result
@@ -173,7 +175,11 @@ final class GitActionsService {
 
     // MARK: - Private
 
-    private func request(method: String, params: [String: JSONValue] = [:]) async throws -> [String: JSONValue] {
+    private func request(
+        method: String,
+        params: [String: JSONValue] = [:],
+        requestTimeoutMs: UInt64? = nil
+    ) async throws -> [String: JSONValue] {
         guard let workingDirectory else {
             throw GitActionsError.bridgeError(
                 code: "missing_working_directory",
@@ -183,6 +189,9 @@ final class GitActionsService {
 
         var scopedParams = params
         scopedParams["cwd"] = .string(workingDirectory)
+        if let requestTimeoutMs {
+            scopedParams["requestTimeoutMs"] = .integer(Int(clamping: requestTimeoutMs))
+        }
         let rpcParams: JSONValue = .object(scopedParams)
 
         do {

@@ -23,6 +23,9 @@ enum AppEnvironment {
         return defaultRelayURLString
     }
 
+    // Configured off-LAN Convex deployment used by the optional async transport in local-first builds.
+    static let convexSiteURL: URL = URL(string: "https://determined-ladybug-18.convex.site")!
+
     // Reads the public RevenueCat key shipped with the client build.
     static var revenueCatPublicAPIKey: String? {
         resolvedString(forInfoPlistKey: revenueCatPublicAPIKeyInfoPlistKey)

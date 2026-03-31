@@ -16,6 +16,8 @@ const {
 } = require("../src/codex-desktop-refresher");
 const { createThreadRolloutActivityWatcher } = require("../src/rollout-watch");
 
+const EXPECTED_CONVEX_SITE_URL = "https://determined-ladybug-18.convex.site";
+
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -96,11 +98,17 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(macConfig.refreshEnabled, false);
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
+  assert.equal(macConfig.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
   assert.equal(macEndpointConfig.refreshEnabled, false);
+  assert.equal(macEndpointConfig.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
   assert.equal(linuxConfig.refreshEnabled, false);
+  assert.equal(linuxConfig.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
   assert.equal(linuxCommandConfig.refreshEnabled, false);
+  assert.equal(linuxCommandConfig.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
   assert.equal(explicitOnConfig.refreshEnabled, true);
+  assert.equal(explicitOnConfig.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
   assert.equal(explicitOffConfig.refreshEnabled, false);
+  assert.equal(explicitOffConfig.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
 });
 
 test("readBridgeConfig uses only the packaged relay default outside a source checkout", () => {
@@ -121,6 +129,7 @@ test("readBridgeConfig uses only the packaged relay default outside a source che
 
   assert.equal(config.relayUrl, "wss://relay.example/relay");
   assert.equal(config.pushServiceUrl, "");
+  assert.equal(config.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
 });
 
 test("readBridgeConfig uses a packaged push default only when it is explicitly provided", () => {
@@ -144,6 +153,24 @@ test("readBridgeConfig uses a packaged push default only when it is explicitly p
 
   assert.equal(config.relayUrl, "wss://relay.example/relay");
   assert.equal(config.pushServiceUrl, "https://relay.example");
+  assert.equal(config.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
+});
+
+test("readBridgeConfig ignores stale Convex env overrides", () => {
+  const config = readBridgeConfig({
+    env: {
+      REMODEX_CONVEX_SITE_URL: "https://stale.convex.site",
+    },
+    runtimeRoot: "/tmp/remodex-package",
+    fsImpl: {
+      existsSync: () => false,
+      readFileSync: () => {
+        throw new Error("unexpected read");
+      },
+    },
+  });
+
+  assert.equal(config.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
 });
 
 test("readBridgeConfig does not use the hosted fallback inside a source checkout", () => {
@@ -159,6 +186,7 @@ test("readBridgeConfig does not use the hosted fallback inside a source checkout
 
   assert.equal(config.relayUrl, "");
   assert.equal(config.pushServiceUrl, "");
+  assert.equal(config.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
 });
 
 test("readBridgeConfig preserves reverse-proxy subpaths when deriving push URLs", () => {
@@ -175,6 +203,7 @@ test("readBridgeConfig preserves reverse-proxy subpaths when deriving push URLs"
   });
 
   assert.equal(config.pushServiceUrl, "https://relay.example/remodex");
+  assert.equal(config.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
 });
 
 test("readBridgeConfig disables managed push defaults when a self-hosted relay override is set", () => {
@@ -197,6 +226,32 @@ test("readBridgeConfig disables managed push defaults when a self-hosted relay o
 
   assert.equal(config.relayUrl, "wss://self-host.example/relay");
   assert.equal(config.pushServiceUrl, "");
+  assert.equal(config.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
+});
+
+test("readBridgeConfig ignores stale packaged Convex defaults", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-package-"));
+  const srcDir = path.join(tempRoot, "src");
+  fs.mkdirSync(srcDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(srcDir, "private-defaults.json"),
+    JSON.stringify({
+      relayUrl: "wss://relay.example/relay",
+      pushServiceUrl: "https://relay.example",
+      convexSiteUrl: "https://stale.convex.site",
+    }),
+    "utf8"
+  );
+
+  const config = readBridgeConfig({
+    env: {},
+    runtimeRoot: tempRoot,
+    fsImpl: fs,
+  });
+
+  assert.equal(config.relayUrl, "wss://relay.example/relay");
+  assert.equal(config.pushServiceUrl, "https://relay.example");
+  assert.equal(config.convexSiteUrl, EXPECTED_CONVEX_SITE_URL);
 });
 
 test("thread/start falls back once to the new-thread route when thread id is still unknown", async () => {

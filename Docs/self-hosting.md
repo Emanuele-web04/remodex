@@ -163,6 +163,14 @@ npm install
 REMODEX_RELAY="wss://relay.example.com/relay" npm start
 ```
 
+### Optional Convex off-LAN queue
+
+If you want the phone to submit messages while your Mac is not reachable on the local network, the bridge and iOS app use the code-owned Convex deployment URL in source builds.
+
+For source checkouts, the Convex backend lives in [`remodex-convex-sync/`](../remodex-convex-sync). Deploy that package to your own Convex project, then update the code constants in [`CodexMobile/CodexMobile/Services/AppEnvironment.swift`](../CodexMobile/CodexMobile/Services/AppEnvironment.swift) and [`phodex-bridge/src/codex-desktop-refresher.js`](../phodex-bridge/src/codex-desktop-refresher.js) if you are targeting a different deployment.
+
+Convex is optional and does not replace the relay. The QR/bootstrap flow, shared secret, and payload signatures stay the same; Convex only stores encrypted async messages and delivery metadata.
+
 The bridge will print a QR code the first time you trust that Mac, or later if you intentionally reset trust.
 
 That QR carries the relay URL and session information, so the iPhone does not need a hardcoded relay endpoint in the public source build.

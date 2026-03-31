@@ -1,0 +1,475 @@
+---
+description: Handle errors properly in Convex - throw for exceptional cases, return null for expected cases, provide clear error messages
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Error Handling in Convex
+
+Proper error handling makes your app reliable and debuggable. Follow these patterns for Convex functions.
+
+## When to Throw vs Return Null
+
+### Throw Errors: Exceptional Cases
+
+Throw when something unexpected happens or requirements aren't met:
+
+```typescript
+export const updateTask = mutation({
+  args: { taskId: v.id("tasks"), title: v.string() },
+  handler: async (ctx, args) => {
+    // Authentication required (exceptional if missing)
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Not authenticated");
+    }
+
+    const user = await getCurrentUser(ctx);
+    const task = await ctx.db.get(args.taskId);
+
+    // Task must exist
+    if (!task) {
+      throw new Error("Task not found");
+    }
+
+    // User must own the task
+    if (task.userId !== user._id) {
+      throw new Error("Unauthorized: You don't own this task");
+    }
+
+    await ctx.db.patch(args.taskId, { title: args.title });
+  },
+});
+```
+
+### Return Null: Expected Cases
+
+Return null when absence is a normal, expected possibility:
+
+```typescript
+export const getTask = query({
+  args: { taskId: v.id("tasks") },
+  returns: v.union(
+    v.object({
+      _id: v.id("tasks"),
+      title: v.string(),
+    }),
+    v.null()
+  ),
+  handler: async (ctx, args): Promise<Doc<"tasks"> | null> => {
+    // Task might not exist - that's expected
+    return await ctx.db.get(args.taskId);
+  },
+});
+
+// Client handles null gracefully
+const task = useQuery(api.tasks.getTask, { taskId });
+if (!task) {
+  return <div>Task not found</div>;
+}
+```
+
+## Error Message Best Practices
+
+### ✅ Good Error Messages
+
+```typescript
+// Specific, actionable, user-friendly
+throw new Error("Email already registered");
+throw new Error("Invalid file type. Only PNG and JPG allowed");
+throw new Error("Task limit reached (10 per user)");
+throw new Error("Unauthorized: Admin access required");
+throw new Error("Invalid coupon code");
+```
+
+### ❌ Bad Error Messages
+
+```typescript
+// Vague, unhelpful
+throw new Error("Error");
+throw new Error("Failed");
+throw new Error("Invalid input");
+throw new Error("DB error");
+throw new Error("Something went wrong");
+```
+
+## Error Types Pattern
+
+Create structured errors for better handling:
+
+```typescript
+// convex/lib/errors.ts
+export class UnauthorizedError extends Error {
+  constructor(message = "Unauthorized") {
+    super(message);
+    this.name = "UnauthorizedError";
+  }
+}
+
+export class NotFoundError extends Error {
+  constructor(resource: string) {
+    super(`${resource} not found`);
+    this.name = "NotFoundError";
+  }
+}
+
+export class ValidationError extends Error {
+  constructor(field: string, issue: string) {
+    super(`${field}: ${issue}`);
+    this.name = "ValidationError";
+  }
+}
+
+// Usage
+export const deleteTask = mutation({
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+    const task = await ctx.db.get(args.taskId);
+
+    if (!task) {
+      throw new NotFoundError("Task");
+    }
+
+    if (task.userId !== user._id) {
+      throw new UnauthorizedError("You don't own this task");
+    }
+
+    await ctx.db.delete(args.taskId);
+  },
+});
+```
+
+## Client-Side Error Handling
+
+### React Error Boundaries
+
+```typescript
+// ErrorBoundary.tsx
+import { Component, ReactNode } from "react";
+
+class ConvexErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean; error?: Error }
+> {
+  state = { hasError: false, error: undefined };
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div>
+          <h2>Something went wrong</h2>
+          <p>{this.state.error?.message}</p>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+// Usage
+<ConvexErrorBoundary>
+  <TaskList />
+</ConvexErrorBoundary>
+```
+
+### Mutation Error Handling
+
+```typescript
+const createTask = useMutation(api.tasks.create);
+
+const handleCreate = async () => {
+  try {
+    await createTask({ title: "New task" });
+    toast.success("Task created!");
+  } catch (error) {
+    if (error instanceof Error) {
+      toast.error(error.message);
+    } else {
+      toast.error("Failed to create task");
+    }
+  }
+};
+```
+
+## Error Logging
+
+### Send to Error Tracking Service
+
+```typescript
+"use node";
+
+import { action } from "./_generated/server";
+import * as Sentry from "@sentry/node";
+
+export const logError = action({
+  args: {
+    error: v.string(),
+    context: v.optional(v.any()),
+  },
+  handler: async (ctx, args) => {
+    // Log to Sentry
+    Sentry.captureException(new Error(args.error), {
+      extra: args.context,
+    });
+
+    // Also log to Convex logs
+    console.error("Application error:", args.error, args.context);
+  },
+});
+```
+
+### Log in Functions
+
+```typescript
+export const processPayment = mutation({
+  handler: async (ctx, args) => {
+    try {
+      const result = await processStripePayment(args);
+      return result;
+    } catch (error) {
+      // Log error for debugging
+      console.error("Payment processing failed:", {
+        error: error instanceof Error ? error.message : "Unknown error",
+        userId: ctx.user._id,
+        amount: args.amount,
+      });
+
+      // Re-throw with user-friendly message
+      throw new Error("Payment failed. Please try again.");
+    }
+  },
+});
+```
+
+## Validation Errors
+
+Return structured validation errors:
+
+```typescript
+export const createUser = mutation({
+  args: {
+    email: v.string(),
+    age: v.number(),
+  },
+  handler: async (ctx, args) => {
+    // Validate email
+    if (!args.email.includes("@")) {
+      throw new Error("Invalid email address");
+    }
+
+    // Validate age
+    if (args.age < 18) {
+      throw new Error("Must be 18 or older");
+    }
+
+    // Check if email already exists
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_email", q => q.eq("email", args.email))
+      .unique();
+
+    if (existing) {
+      throw new Error("Email already registered");
+    }
+
+    return await ctx.db.insert("users", args);
+  },
+});
+```
+
+## Action Error Handling
+
+Actions can fail in different ways:
+
+```typescript
+"use node";
+
+export const sendEmail = action({
+  args: { to: v.string(), subject: v.string() },
+  handler: async (ctx, args) => {
+    try {
+      const response = await fetch("https://api.sendgrid.com/v3/mail/send", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.SENDGRID_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          to: args.to,
+          from: "noreply@example.com",
+          subject: args.subject,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        console.error("SendGrid error:", error);
+        throw new Error("Failed to send email");
+      }
+
+      return { success: true };
+    } catch (error) {
+      // External API errors
+      console.error("Email sending failed:", error);
+
+      // Don't expose internal details to client
+      throw new Error("Unable to send email. Please try again later.");
+    }
+  },
+});
+```
+
+## Retry Pattern
+
+For transient failures:
+
+```typescript
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts = 3,
+  delayMs = 1000
+): Promise<T> {
+  let lastError: Error;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      console.warn(`Attempt ${attempt} failed:`, lastError.message);
+
+      if (attempt < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, delayMs * attempt));
+      }
+    }
+  }
+
+  throw lastError!;
+}
+
+// Usage in action
+export const fetchExternalData = action({
+  handler: async (ctx) => {
+    return await withRetry(async () => {
+      const response = await fetch("https://api.example.com/data");
+      if (!response.ok) throw new Error("API request failed");
+      return await response.json();
+    });
+  },
+});
+```
+
+## Error Recovery
+
+Provide recovery options:
+
+```typescript
+export const updateProfile = mutation({
+  args: {
+    name: v.string(),
+    bio: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+
+    // Validate name length
+    if (args.name.length < 2) {
+      throw new Error("Name must be at least 2 characters");
+    }
+
+    if (args.name.length > 100) {
+      throw new Error("Name must be less than 100 characters");
+    }
+
+    // Check for profanity (example)
+    if (containsProfanity(args.name)) {
+      throw new Error("Name contains inappropriate content");
+    }
+
+    await ctx.db.patch(user._id, {
+      name: args.name,
+      bio: args.bio,
+    });
+  },
+});
+
+// Client can retry with different name
+const handleUpdate = async (name: string) => {
+  try {
+    await updateProfile({ name });
+  } catch (error) {
+    // Show error, let user fix and retry
+    setError(error.message);
+    // Form stays populated for retry
+  }
+};
+```
+
+## Debugging Tips
+
+### Console Logs
+
+```typescript
+export const complexOperation = mutation({
+  handler: async (ctx, args) => {
+    console.log("Starting operation", { userId: ctx.user._id, args });
+
+    const step1 = await doStep1(ctx);
+    console.log("Step 1 complete", step1);
+
+    const step2 = await doStep2(ctx, step1);
+    console.log("Step 2 complete", step2);
+
+    return step2;
+  },
+});
+
+// View logs in Convex Dashboard
+```
+
+### Error Context
+
+```typescript
+export const processOrder = mutation({
+  handler: async (ctx, args) => {
+    try {
+      const order = await createOrder(ctx, args);
+      await processPayment(ctx, order);
+      await sendConfirmation(ctx, order);
+      return order;
+    } catch (error) {
+      // Include context in error
+      console.error("Order processing failed", {
+        error: error instanceof Error ? error.message : "Unknown",
+        orderId: order?._id,
+        userId: ctx.user._id,
+        step: "payment", // Which step failed
+      });
+      throw error;
+    }
+  },
+});
+```
+
+## Checklist
+
+- [ ] Throw errors for exceptional cases
+- [ ] Return null for expected absences
+- [ ] Use clear, specific error messages
+- [ ] Handle errors in React error boundaries
+- [ ] Log errors to monitoring service
+- [ ] Don't expose internal errors to users
+- [ ] Provide recovery options
+- [ ] Use console.log for debugging
+- [ ] Include context in error logs
+- [ ] Test error paths
+
+## Learn More
+
+- [Convex Error Handling](https://docs.convex.dev/functions/error-handling/)
+- [React Error Boundaries](https://react.dev/reference/react/Component#catching-rendering-errors-with-an-error-boundary)

@@ -1,0 +1,44 @@
+{
+  "name": "convex",
+  "version": "1.0.0",
+  "description": "Official Convex plugin for AI coding agents, with rules, skills, MCP integration, and automation hooks for reactive backends in TypeScript",
+  "author": {
+    "name": "Convex",
+    "email": "support@convex.dev",
+    "url": "https://convex.dev"
+  },
+  "homepage": "https://github.com/get-convex/convex-agent-plugins",
+  "repository": "https://github.com/get-convex/convex-agent-plugins",
+  "license": "MIT",
+  "keywords": [
+    "convex",
+    "backend",
+    "database",
+    "realtime",
+    "typescript",
+    "reactive",
+    "serverless"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks.json",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Convex",
+    "shortDescription": "Official Convex plugin for AI coding agents",
+    "longDescription": "Rules, skills, custom agents, MCP integration, and validation hooks for building reactive backends with TypeScript.",
+    "developerName": "Convex",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://convex.dev",
+    "defaultPrompt": [
+      "Set up a new Convex backend.",
+      "Design a Convex schema with indexes.",
+      "Review this Convex function for auth and validation."
+    ],
+    "logo": "./assets/logo.png"
+  }
+}

@@ -481,21 +481,33 @@ enum TurnTimelineReducer {
 
     // Keeps only the newest matching file-change card when multiple event channels emit the same diff.
     static func removeDuplicateFileChangeMessages(in messages: [CodexMessage]) -> [CodexMessage] {
-        let signatures = messages.map { fileChangeDedupSignature(for: $0) }
+        var parsedArtifactCache: [String: FileChangeTextArtifact] = [:]
+        let signatures = messages.map { fileChangeDedupSignature(for: $0, parsedArtifactCache: &parsedArtifactCache) }
         var supersededIndices: Set<Int> = []
+        var newerSignaturesByIndex: [Int: FileChangeDedupSignature] = [:]
+        var newerSignatureIndicesByKey: [String: Set<Int>] = [:]
+        var newerSignatureIndicesByPath: [String: Set<Int>] = [:]
 
-        for olderIndex in messages.indices {
+        for olderIndex in messages.indices.reversed() {
             guard let olderSignature = signatures[olderIndex] else {
                 continue
             }
 
-            for newerIndex in messages.indices where newerIndex > olderIndex {
-                guard let newerSignature = signatures[newerIndex],
-                      fileChangeMessage(newerSignature, supersedes: olderSignature) else {
-                    continue
-                }
+            if isSupersededFileChangeSignature(
+                olderSignature,
+                newerSignaturesByIndex: newerSignaturesByIndex,
+                newerSignatureIndicesByKey: newerSignatureIndicesByKey,
+                newerSignatureIndicesByPath: newerSignatureIndicesByPath
+            ) {
                 supersededIndices.insert(olderIndex)
-                break
+            }
+
+            newerSignaturesByIndex[olderIndex] = olderSignature
+            if let key = olderSignature.key {
+                newerSignatureIndicesByKey[key, default: []].insert(olderIndex)
+            }
+            for path in olderSignature.paths {
+                newerSignatureIndicesByPath[path, default: []].insert(olderIndex)
             }
         }
 
@@ -593,10 +605,13 @@ enum TurnTimelineReducer {
 
     // Keys file-change cards by turn + rendered payload so repeated turn/diff snapshots collapse to one row.
     // Falls back to full normalized text so even unparseable messages with identical content get deduped.
-    private static func duplicateFileChangeKey(for message: CodexMessage) -> String? {
+    private static func duplicateFileChangeKey(
+        for message: CodexMessage,
+        parsedArtifact: FileChangeTextArtifact
+    ) -> String? {
         let turnLabel = normalizedIdentifier(message.turnId) ?? "turnless"
 
-        if let summaryKey = TurnFileChangeSummaryParser.dedupeKey(from: message.text) {
+        if let summaryKey = parsedArtifact.dedupeKey {
             return "\(turnLabel)|\(summaryKey)"
         }
 
@@ -610,16 +625,19 @@ enum TurnTimelineReducer {
     // Captures the parts of a file-change row that matter for timeline dedupe.
     // Produces a signature even for turnless rows (local/streaming) so a later
     // snapshot with a real turnId can supersede them via path overlap.
-    private static func fileChangeDedupSignature(for message: CodexMessage) -> FileChangeDedupSignature? {
+    private static func fileChangeDedupSignature(
+        for message: CodexMessage,
+        parsedArtifactCache: inout [String: FileChangeTextArtifact]
+    ) -> FileChangeDedupSignature? {
         guard message.role == .system,
               message.kind == .fileChange else {
             return nil
         }
 
+        let parsedArtifact = fileChangeTextArtifact(for: message.text, cache: &parsedArtifactCache)
         let turnId = normalizedIdentifier(message.turnId)
-        let key = duplicateFileChangeKey(for: message)
-
-        let paths = fileChangePaths(from: message.text)
+        let key = duplicateFileChangeKey(for: message, parsedArtifact: parsedArtifact)
+        let paths = parsedArtifact.paths
 
         // Need at least a key or paths to participate in dedup.
         guard key != nil || !paths.isEmpty else {
@@ -637,16 +655,75 @@ enum TurnTimelineReducer {
     // Treats newer file-change snapshots as authoritative only when they describe the
     // same turn (or a turnless→turnful upgrade) and either the same dedupe key or a
     // provisional-to-final snapshot upgrade with matching paths.
-    private static func fileChangePaths(from text: String) -> Set<String> {
-        let parsedPaths = Set(
-            TurnFileChangeSummaryParser.parse(from: text)?
-                .entries
-                .map(\.path) ?? []
-        )
-        guard parsedPaths.isEmpty else {
-            return parsedPaths
+    private static func isSupersededFileChangeSignature(
+        _ older: FileChangeDedupSignature,
+        newerSignaturesByIndex: [Int: FileChangeDedupSignature],
+        newerSignatureIndicesByKey: [String: Set<Int>],
+        newerSignatureIndicesByPath: [String: Set<Int>]
+    ) -> Bool {
+        if let key = older.key,
+           let candidateIndices = newerSignatureIndicesByKey[key] {
+            for candidateIndex in candidateIndices {
+                guard let candidate = newerSignaturesByIndex[candidateIndex] else { continue }
+                if fileChangeMessage(candidate, supersedes: older) {
+                    return true
+                }
+            }
         }
 
+        guard let firstPath = older.paths.first,
+              var candidateIndices = newerSignatureIndicesByPath[firstPath],
+              !candidateIndices.isEmpty else {
+            return false
+        }
+
+        for path in older.paths.dropFirst() {
+            guard let matchingIndices = newerSignatureIndicesByPath[path], !matchingIndices.isEmpty else {
+                return false
+            }
+            candidateIndices.formIntersection(matchingIndices)
+            if candidateIndices.isEmpty {
+                return false
+            }
+        }
+
+        for candidateIndex in candidateIndices {
+            guard let candidate = newerSignaturesByIndex[candidateIndex] else { continue }
+            if fileChangeMessage(candidate, supersedes: older) {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private struct FileChangeTextArtifact {
+        let dedupeKey: String?
+        let paths: Set<String>
+    }
+
+    private static func fileChangeTextArtifact(
+        for text: String,
+        cache: inout [String: FileChangeTextArtifact]
+    ) -> FileChangeTextArtifact {
+        if let cached = cache[text] {
+            return cached
+        }
+
+        let summary = TurnFileChangeSummaryParser.parse(from: text)
+        let summaryPaths = Set(summary?.entries.map(\.path) ?? [])
+        let dedupeSignature = summary.flatMap { summary in
+            dedupeKey(from: summary.entries)
+        }
+        let artifact = FileChangeTextArtifact(
+            dedupeKey: dedupeSignature,
+            paths: summaryPaths.isEmpty ? fallbackFileChangePaths(from: text) : summaryPaths
+        )
+        cache[text] = artifact
+        return artifact
+    }
+
+    private static func fallbackFileChangePaths(from text: String) -> Set<String> {
         var fallbackPaths: Set<String> = []
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -660,6 +737,23 @@ enum TurnTimelineReducer {
         }
 
         return fallbackPaths
+    }
+
+    private static func dedupeKey(from entries: [TurnFileChangeSummaryEntry]) -> String? {
+        let parts = entries
+            .sorted { lhs, rhs in
+                if lhs.path != rhs.path { return lhs.path < rhs.path }
+                if lhs.action?.rawValue != rhs.action?.rawValue {
+                    return (lhs.action?.rawValue ?? "") < (rhs.action?.rawValue ?? "")
+                }
+                if lhs.additions != rhs.additions { return lhs.additions < rhs.additions }
+                return lhs.deletions < rhs.deletions
+            }
+            .map { entry in
+                "\(entry.path)|\(entry.action?.rawValue ?? "")|+\(entry.additions)|-\(entry.deletions)"
+            }
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: "||")
     }
 
     private static func fallbackFileChangePath(from line: String) -> String? {

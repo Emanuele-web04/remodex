@@ -7,7 +7,13 @@
 import Foundation
 
 struct AIChangeSetPersistence {
+    private let namespace: String
     private let fileName = "codex-ai-change-sets-v1.json"
+
+    init(namespace: String? = nil) {
+        let trimmedNamespace = namespace?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.namespace = (trimmedNamespace?.isEmpty == false) ? trimmedNamespace! : "default"
+    }
 
     // Loads the stored change-set ledger from disk. Returns an empty array on failure.
     func load() -> [AIChangeSet] {
@@ -37,6 +43,7 @@ struct AIChangeSetPersistence {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.codexmobile.app"
         return base
             .appendingPathComponent(bundleID, isDirectory: true)
+            .appendingPathComponent(namespace, isDirectory: true)
             .appendingPathComponent(fileName, isDirectory: false)
     }
 

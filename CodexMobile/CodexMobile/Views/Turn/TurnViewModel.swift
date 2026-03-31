@@ -227,8 +227,6 @@ final class TurnViewModel {
     @ObservationIgnored var gitStatusRefreshTask: Task<Void, Never>?
     @ObservationIgnored var pendingGitBranchOperation: GitBranchUserOperation?
     @ObservationIgnored var pendingGitWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?
-    @ObservationIgnored private var cachedSkillSearchIndexByRoot: [String: [TurnSkillSearchIndexEntry]] = [:]
-    @ObservationIgnored var unsupportedSkillsAutocompleteRoots: Set<String> = []
 
     let maxComposerImages = 4
     let maxFileAutocompleteItems = 6
@@ -236,8 +234,16 @@ final class TurnViewModel {
     private let fileAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
     private let skillAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
     let gitStatusRefreshDebounceNanoseconds: UInt64 = 350_000_000
+    let gitBranchTargetsRefreshMinimumInterval: TimeInterval = 12
 
     init() {}
+
+    deinit {
+        MainActor.assumeIsolated {
+            cancelTransientTasks()
+            pendingGitWorktreeOpenHandler = nil
+        }
+    }
 
     // MARK: - Cached Timeline Projection
 
@@ -598,10 +604,15 @@ final class TurnViewModel {
 
         let normalizedRoot = root
         skillAutocompleteQuery = query
-        isSkillAutocompleteVisible = true
-        let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[normalizedRoot] != nil || codex.cachedSkills(for: normalizedRoot) != nil
-        let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(normalizedRoot) || codex.isUnsupportedSkillRoot(normalizedRoot)
-        isSkillAutocompleteLoading = !hasCachedSkillIndex && !rootIsUnsupported
+        let cachedResults = codex.cachedAutocompleteSkills(
+            for: normalizedRoot,
+            query: query,
+            limit: maxSkillAutocompleteItems
+        )
+        let rootIsUnsupported = codex.isUnsupportedSkillRoot(normalizedRoot)
+        skillAutocompleteItems = cachedResults ?? []
+        isSkillAutocompleteVisible = !rootIsUnsupported
+        isSkillAutocompleteLoading = cachedResults == nil && !rootIsUnsupported
         skillAutocompleteDebounceTask?.cancel()
 
         let expectedQuery = query
@@ -618,9 +629,7 @@ final class TurnViewModel {
             guard !Task.isCancelled else { return }
 
             do {
-                if (unsupportedSkillsAutocompleteRoots.contains(normalizedRoot) || codex.isUnsupportedSkillRoot(normalizedRoot)),
-                   cachedSkillSearchIndexByRoot[normalizedRoot] == nil,
-                   codex.cachedSkills(for: normalizedRoot) == nil {
+                if codex.isUnsupportedSkillRoot(normalizedRoot) {
                     guard self.skillAutocompleteQuery == expectedQuery else { return }
                     self.skillAutocompleteItems = []
                     self.isSkillAutocompleteLoading = false
@@ -628,37 +637,35 @@ final class TurnViewModel {
                     return
                 }
 
-                let indexedSkills: [TurnSkillSearchIndexEntry]
-                if let cachedIndex = self.cachedSkillSearchIndexByRoot[normalizedRoot] {
-                    indexedSkills = cachedIndex
-                } else if let cachedSkills = codex.cachedSkills(for: normalizedRoot) {
-                    indexedSkills = cachedSkills
-                        .filter { $0.enabled }
-                        .map(TurnSkillSearchIndexEntry.init(skill:))
-                    self.cachedSkillSearchIndexByRoot[normalizedRoot] = indexedSkills
-                } else {
-                    let listedSkills = try await codex.listSkills(cwds: [normalizedRoot], forceReload: false)
+                if let cachedResults = codex.cachedAutocompleteSkills(
+                    for: normalizedRoot,
+                    query: expectedQuery,
+                    limit: maxSkillAutocompleteItems
+                ) {
                     guard !Task.isCancelled else { return }
-                    indexedSkills = listedSkills
-                        .filter { $0.enabled }
-                        .map(TurnSkillSearchIndexEntry.init(skill:))
-                    self.cachedSkillSearchIndexByRoot[normalizedRoot] = indexedSkills
+                    guard self.skillAutocompleteQuery == expectedQuery else { return }
+                    self.skillAutocompleteItems = cachedResults
+                    self.isSkillAutocompleteLoading = false
+                    self.isSkillAutocompleteVisible = true
+                    return
                 }
 
+                _ = try await codex.listSkills(cwds: [normalizedRoot], forceReload: false)
                 guard !Task.isCancelled else { return }
                 guard self.skillAutocompleteQuery == expectedQuery else { return }
 
-                self.skillAutocompleteItems = self.filteredSkillAutocompleteItems(
-                    for: expectedQuery,
-                    indexedSkills: indexedSkills
-                )
+                let results = codex.cachedAutocompleteSkills(
+                    for: normalizedRoot,
+                    query: expectedQuery,
+                    limit: maxSkillAutocompleteItems
+                ) ?? []
+                self.skillAutocompleteItems = results
                 self.isSkillAutocompleteLoading = false
                 self.isSkillAutocompleteVisible = true
             } catch {
                 guard self.skillAutocompleteQuery == expectedQuery else { return }
 
                 if Self.isMethodNotFoundRPCError(error) {
-                    self.unsupportedSkillsAutocompleteRoots.insert(normalizedRoot)
                     codex.markUnsupportedSkillRoot(normalizedRoot)
                 }
 
@@ -1597,18 +1604,6 @@ final class TurnViewModel {
             || message.contains("code -32601")
     }
 
-    // Filters pre-indexed skills using a single normalized search blob to reduce per-keystroke work.
-    private func filteredSkillAutocompleteItems(
-        for query: String,
-        indexedSkills: [TurnSkillSearchIndexEntry]
-    ) -> [CodexSkillMetadata] {
-        let needle = query.lowercased()
-        let filtered = indexedSkills.lazy
-            .filter { $0.searchBlob.contains(needle) }
-            .map(\.skill)
-        return Array(filtered.prefix(maxSkillAutocompleteItems))
-    }
-
     private func normalizedAutocompleteRoot(for thread: CodexThread) -> String? {
         if let normalizedProjectPath = thread.normalizedProjectPath {
             return normalizedProjectPath
@@ -1635,6 +1630,11 @@ final class TurnViewModel {
               codex.activeTurnID(for: threadID) == nil,
               codex.runningThreadIDs.contains(threadID) else {
             return wasBusy
+        }
+
+        if codex.latestTurnTerminalState(for: threadID) != nil {
+            codex.clearRunningState(for: threadID)
+            return false
         }
 
         _ = await codex.refreshInFlightTurnState(threadId: threadID)
@@ -2019,14 +2019,8 @@ final class TurnViewModel {
                         if let status = pullResult.status {
                             applyGitRepoSync(status)
                         }
-                    } else if result.state == "diverged" || result.state == "dirty_and_behind" {
-                        gitSyncAlert = TurnGitSyncAlert(
-                            title: result.state == "diverged" ? "Branch diverged from remote" : "Local changes need attention",
-                            message: result.state == "diverged"
-                                ? "Local and remote history both moved. Pull with rebase to reconcile them?"
-                                : "You have local changes and the remote branch moved ahead. Pull with rebase only if you're ready to reconcile those changes.",
-                            action: .pullRebase
-                        )
+                    } else if let syncAlert = gitSyncAlert(for: result) {
+                        gitSyncAlert = syncAlert
                     }
 
                 case .commit:
@@ -2116,6 +2110,25 @@ final class TurnViewModel {
         }
     }
 
+    func gitSyncAlert(for result: GitRepoSyncResult) -> TurnGitSyncAlert? {
+        switch result.state {
+        case "diverged":
+            return TurnGitSyncAlert(
+                title: "Branch diverged from remote",
+                message: "Local and remote history both moved. Pull with rebase to reconcile them?",
+                action: .pullRebase
+            )
+        case "dirty_and_behind":
+            return TurnGitSyncAlert(
+                title: "Local changes need attention",
+                message: "You have local changes and the remote branch moved ahead. Pull with rebase only if you're ready to reconcile those changes.",
+                action: .pullRebase
+            )
+        default:
+            return nil
+        }
+    }
+
     func inlineCommitAndPush(codex: CodexService, workingDirectory: String?, threadID: String) {
         guard !isRunningGitAction else { return }
         runningGitAction = .commitAndPush
@@ -2193,22 +2206,6 @@ struct TurnTrailingSkillAutocompleteToken: Equatable {
 private struct TurnTrailingToken: Equatable {
     let query: String
     let tokenRange: Range<String.Index>
-}
-
-private struct TurnSkillSearchIndexEntry: Equatable {
-    let skill: CodexSkillMetadata
-    let searchBlob: String
-
-    init(skill: CodexSkillMetadata) {
-        self.skill = skill
-        let name = skill.name.lowercased()
-        let description = skill.description?.lowercased() ?? ""
-        if description.isEmpty {
-            self.searchBlob = name
-        } else {
-            self.searchBlob = "\(name)\n\(description)"
-        }
-    }
 }
 
 private extension String {

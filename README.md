@@ -329,6 +329,10 @@ REMODEX_PUSH_SERVICE_URL="https://relay.example" \
 remodex up
 ```
 
+Convex off-LAN async messaging is code-owned in source builds. If you change deployments, update the code constants in `CodexMobile/CodexMobile/Services/AppEnvironment.swift` and `phodex-bridge/src/codex-desktop-refresher.js` together.
+
+If you use Convex, the phone and bridge still exchange only encrypted payloads and signatures. Convex stores the async queue and delivery metadata; it does not replace the local relay or the trusted-pairing flow.
+
 On the relay/VPS side, keep push disabled until you actually want it. The HTTP push endpoints are off by default and only turn on when you set `REMODEX_ENABLE_PUSH_SERVICE=true`.
 
 ## Pairing and Safety

@@ -1,0 +1,11 @@
+{
+  "convex": {
+    "command": "npx",
+    "args": [
+      "-y",
+      "convex@latest",
+      "mcp",
+      "start"
+    ]
+  }
+}

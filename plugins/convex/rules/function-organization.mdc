@@ -1,0 +1,78 @@
+---
+description: Keep query/mutation/action wrappers thin, put logic in TypeScript functions
+alwaysApply: true
+globs: ["convex/**/*.ts", "convex/**/*.js"]
+---
+
+# Function Organization
+
+Most business logic should live in plain TypeScript functions. Keep `query`, `mutation`, and `action` wrappers thin—they should primarily handle arguments and call shared logic.
+
+## Pattern
+
+**Bad:**
+```typescript
+export const createPost = mutation({
+  args: { title: v.string(), content: v.string() },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new Error("Not authenticated");
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_token", q => q.eq("tokenIdentifier", identity.tokenIdentifier))
+      .unique();
+
+    if (!user) throw new Error("User not found");
+
+    // ... 50 more lines of logic ...
+  },
+});
+```
+
+**Good:**
+```typescript
+// convex/lib/auth.ts
+export async function getCurrentUser(ctx: QueryCtx | MutationCtx) {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) throw new Error("Not authenticated");
+
+  const user = await ctx.db
+    .query("users")
+    .withIndex("by_token", q => q.eq("tokenIdentifier", identity.tokenIdentifier))
+    .unique();
+
+  if (!user) throw new Error("User not found");
+  return user;
+}
+
+// convex/posts.ts
+export const createPost = mutation({
+  args: { title: v.string(), content: v.string() },
+  handler: async (ctx, args) => {
+    const user = await getCurrentUser(ctx);
+    return await createPostInternal(ctx, user._id, args);
+  },
+});
+
+async function createPostInternal(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  args: { title: string; content: string }
+) {
+  // ... logic here ...
+  return await ctx.db.insert("posts", {
+    userId,
+    title: args.title,
+    content: args.content,
+    createdAt: Date.now(),
+  });
+}
+```
+
+## Benefits
+
+1. **Testable**: Plain functions can be unit tested
+2. **Reusable**: Share logic between mutations/actions
+3. **Readable**: Easier to understand the flow
+4. **Type-safe**: Better TypeScript inference

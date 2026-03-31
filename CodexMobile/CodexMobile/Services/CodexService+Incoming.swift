@@ -402,7 +402,10 @@ extension CodexService {
         if activeThreadId == nil {
             activeThreadId = thread.id
         }
-        requestImmediateSync(threadId: thread.id)
+        guard !shouldSkipInitialDisplayHydration(threadId: thread.id) else {
+            return
+        }
+        requestImmediateActiveThreadSync(threadId: thread.id)
     }
 
     // Mirrors desktop behavior: when server pushes a thread rename, update local
@@ -444,7 +447,7 @@ extension CodexService {
                 )
             }
             threads = sortThreads(threads)
-            requestImmediateSync(threadId: threadId)
+            requestImmediateSync(threadId: threadId, includeThreadList: false)
             return
         }
 
@@ -458,7 +461,7 @@ extension CodexService {
         threads[existingIndex].title = nil
         threads[existingIndex].name = nil
         threads = sortThreads(threads)
-        requestImmediateSync(threadId: threadId)
+        requestImmediateSync(threadId: threadId, includeThreadList: false)
     }
 
     private func handleTurnStarted(_ paramsObject: IncomingParamsObject?) {
@@ -487,7 +490,11 @@ extension CodexService {
             activeTurnId = turnID
         }
 
-        requestImmediateSync(threadId: threadId ?? activeThreadId)
+        // A complete turn/started payload already seeds local running state and the active turn id.
+        // Avoid an immediate thread/read on the hot send path unless the event is too sparse to trust.
+        if threadId == nil || turnID == nil {
+            requestImmediateActiveThreadSync(threadId: threadId ?? activeThreadId)
+        }
     }
 
     private func handleTurnCompleted(_ paramsObject: IncomingParamsObject?) {
@@ -513,7 +520,7 @@ extension CodexService {
                 markFailedIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
             }
-            requestImmediateSync(threadId: threadId)
+            requestImmediateSync(threadId: threadId, includeThreadList: false)
 
             guard let turnFailureMessage else {
                 return

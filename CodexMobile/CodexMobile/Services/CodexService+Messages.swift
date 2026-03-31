@@ -21,13 +21,20 @@ extension CodexService {
     // Returns the service-owned timeline state for a single thread.
     func timelineState(for threadId: String) -> ThreadTimelineState {
         if let existing = threadTimelineStateByThread[threadId] {
+            let messageRevision = messageRevisionByThread[threadId] ?? 0
+            if existing.messageRevision != messageRevision
+                || existing.busyRepoRevision != busyRepoRootsRevision
+                || existing.revertStateRevision != assistantRevertStateRevision {
+                refreshThreadTimelineState(for: threadId)
+                return threadTimelineStateByThread[threadId] ?? existing
+            }
             return existing
         }
 
         let state = ThreadTimelineState(threadID: threadId)
         threadTimelineStateByThread[threadId] = state
         refreshThreadTimelineState(for: threadId)
-        return state
+        return threadTimelineStateByThread[threadId] ?? state
     }
 
     // Prunes service-owned render caches so removed/archived threads do not keep stale snapshots alive.
@@ -77,7 +84,7 @@ extension CodexService {
             currentOutput = latestAssistantText
         }
 
-        guard let state = threadTimelineStateByThread[threadId],
+        guard var state = threadTimelineStateByThread[threadId],
               let rawMessages = messagesByThread[threadId],
               let updatedMessageIndex = resolvedMessageIndex(
                   threadId: threadId,
@@ -99,6 +106,8 @@ extension CodexService {
 
         state.messages = rawMessages
         state.messageRevision = revision
+        state.busyRepoRevision = busyRepoRootsRevision
+        state.revertStateRevision = assistantRevertStateRevision
         state.renderSnapshot = TurnTimelineRenderSnapshot(
             threadID: threadId,
             messages: projectedMessages,
@@ -110,6 +119,7 @@ extension CodexService {
             assistantRevertStatesByMessageID: state.renderSnapshot.assistantRevertStatesByMessageID,
             repoRefreshSignal: state.renderSnapshot.repoRefreshSignal
         )
+        threadTimelineStateByThread[threadId] = state
     }
 
     // Returns the currently running turn id for a specific thread, if any.
@@ -308,11 +318,23 @@ extension CodexService {
         // Skipping that first hydration avoids extra RPC contention when another
         // thread is already running and the user simply wants a blank composer.
         if shouldSkipInitialDisplayHydration(threadId: threadId) {
+            prewarmSkillAutocompleteCache(for: threadId)
             return true
         }
 
+        // Reopening an idle thread with cached local history should stay local-first.
+        // Warm the server session in the background so tapping into an old thread does
+        // not stall on thread/resume before the cached timeline can render.
+        if canUseWarmIdleDisplayPreparation(threadId: threadId) {
+            warmIdleThreadDisplaySessionIfNeeded(threadId: threadId)
+            prewarmSkillAutocompleteCache(for: threadId)
+            return true
+        }
+
+        let didRefreshTurnStateFromResume: Bool
         do {
-            try await ensureThreadResumed(threadId: threadId)
+            let resumeResult = try await ensureThreadResumedWithSnapshot(threadId: threadId)
+            didRefreshTurnStateFromResume = resumeResult.snapshot != nil
         } catch {
             if shouldTreatAsThreadNotFound(error) {
                 handleMissingThread(threadId)
@@ -323,9 +345,13 @@ extension CodexService {
             return false
         }
 
-        // Rehydrate in-flight turn metadata after reconnect/background transitions.
-        // Without this refresh, stop-state can disappear until a new live event arrives.
-        _ = await refreshInFlightTurnState(threadId: threadId)
+        // Rehydrate in-flight turn metadata only when we already have local evidence
+        // the thread may still be live or needs protected stop-state recovery.
+        if !didRefreshTurnStateFromResume
+            && (threadHasActiveOrRunningTurn(threadId)
+                || protectedRunningFallbackThreadIDs.contains(threadId)) {
+            _ = await refreshInFlightTurnState(threadId: threadId)
+        }
         guard !Task.isCancelled else {
             return false
         }
@@ -342,8 +368,97 @@ extension CodexService {
         guard !Task.isCancelled, activeThreadId == threadId else {
             return false
         }
-        requestImmediateActiveThreadSync(threadId: threadId)
+        if threadHasActiveOrRunningTurn(threadId) || !hydratedThreadIDs.contains(threadId) {
+            requestImmediateActiveThreadSync(threadId: threadId)
+        }
+        prewarmSkillAutocompleteCache(for: threadId)
         return true
+    }
+
+    private func canUseWarmIdleDisplayPreparation(threadId: String) -> Bool {
+        guard thread(for: threadId)?.syncState != .archivedLocal else {
+            return false
+        }
+
+        if loadingThreadIDs.contains(threadId) {
+            return false
+        }
+
+        if threadHasActiveOrRunningTurn(threadId) {
+            return false
+        }
+
+        if protectedRunningFallbackThreadIDs.contains(threadId) {
+            return false
+        }
+
+        if resumedThreadIDs.contains(threadId) && hydratedThreadIDs.contains(threadId) {
+            return true
+        }
+
+        return !messages(for: threadId).isEmpty
+    }
+
+    // Starts a best-effort resume pass without delaying cached idle-thread presentation.
+    private func warmIdleThreadDisplaySessionIfNeeded(threadId: String) {
+        guard !resumedThreadIDs.contains(threadId) else {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            do {
+                _ = try await self.ensureThreadResumedWithSnapshot(threadId: threadId)
+                guard !Task.isCancelled, self.activeThreadId == threadId else { return }
+                self.updateCurrentOutput(for: threadId)
+
+                if self.threadHasActiveOrRunningTurn(threadId) {
+                    self.requestImmediateActiveThreadSync(threadId: threadId)
+                }
+            } catch {
+                if self.shouldTreatAsThreadNotFound(error) {
+                    self.handleMissingThread(threadId)
+                }
+            }
+        }
+    }
+
+    func prewarmSkillAutocompleteCache(for threadId: String) {
+        guard let root = normalizedSkillAutocompleteRoot(for: threadId),
+              !isUnsupportedSkillRoot(root) else {
+            return
+        }
+
+        if cachedSkills(for: root) != nil {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.listSkills(cwds: [root], forceReload: false)
+            } catch {
+                // Best-effort prewarm only.
+            }
+        }
+    }
+
+    private func normalizedSkillAutocompleteRoot(for threadId: String) -> String? {
+        guard let thread = thread(for: threadId) else {
+            return nil
+        }
+
+        if let normalizedProjectPath = thread.normalizedProjectPath {
+            return normalizedProjectPath
+        }
+
+        guard let rawCwd = thread.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawCwd.isEmpty else {
+            return nil
+        }
+
+        return rawCwd
     }
 
     // Detects a brand-new local thread that has no timeline to hydrate yet.
@@ -2355,14 +2470,20 @@ extension CodexService {
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
     func refreshThreadTimelineState(for threadId: String) {
-        let state = timelineState(for: threadId)
+        var state = threadTimelineStateByThread[threadId] ?? ThreadTimelineState(threadID: threadId)
         let messages = messagesByThread[threadId] ?? []
         let revision = messageRevisionByThread[threadId] ?? 0
         let activeTurnID = activeTurnIdByThread[threadId]
         let isThreadRunning = activeTurnID != nil || runningThreadIDs.contains(threadId)
         let stoppedTurnIDs = rebuildStoppedTurnIDs(for: threadId, messages: messages)
         let latestTurnTerminalState = latestTurnTerminalStateByThread[threadId]
-        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        let projectedMessages: [CodexMessage]
+        if state.messageRevision == revision {
+            // Busy/revert refreshes can rebuild snapshots without timeline changes.
+            projectedMessages = state.renderSnapshot.messages
+        } else {
+            projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        }
         let repoRefreshSignal = buildRepoRefreshSignal(for: messages)
         latestRepoAffectingMessageSignalByThread[threadId] = repoRefreshSignal
         let assistantRevertStates = assistantRevertStates(
@@ -2375,6 +2496,8 @@ extension CodexService {
 
         state.messages = messages
         state.messageRevision = revision
+        state.busyRepoRevision = busyRepoRootsRevision
+        state.revertStateRevision = assistantRevertStateRevision
         state.activeTurnID = activeTurnID
         state.isThreadRunning = isThreadRunning
         state.latestTurnTerminalState = latestTurnTerminalState
@@ -2391,6 +2514,7 @@ extension CodexService {
             assistantRevertStatesByMessageID: assistantRevertStates,
             repoRefreshSignal: repoRefreshSignal
         )
+        threadTimelineStateByThread[threadId] = state
     }
 
     // Refreshes every known timeline state when repo-busy status changes across threads.

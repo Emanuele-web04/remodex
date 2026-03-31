@@ -1,0 +1,16 @@
+{
+  "name": "remodex-convex-sync",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Convex-backed async message queue for Remodex off-LAN transport.",
+  "scripts": {
+    "dev": "convex dev",
+    "deploy": "convex deploy"
+  },
+  "dependencies": {
+    "convex": "^1.25.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

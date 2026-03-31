@@ -25,16 +25,22 @@ nonisolated struct CodexThreadListPersistence {
     // Loads the stored thread list snapshot from disk. Returns nil on failure.
     nonisolated func load() -> CodexThreadListSnapshot? {
         let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
         guard let data = try? Data(contentsOf: storeURL) else {
             return nil
         }
 
-        return try? decoder.decode(CodexThreadListSnapshot.self, from: data)
+        if let snapshot = try? decoder.decode(CodexThreadListSnapshot.self, from: data) {
+            return snapshot
+        }
+
+        return try? JSONDecoder().decode(CodexThreadListSnapshot.self, from: data)
     }
 
     // Persists the thread list snapshot atomically to avoid partial writes.
     nonisolated func save(_ snapshot: CodexThreadListSnapshot) {
         let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
         guard let data = try? encoder.encode(snapshot) else {
             return
         }

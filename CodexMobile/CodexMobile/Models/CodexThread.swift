@@ -412,7 +412,23 @@ extension CodexThread {
     // Supports both seconds and milliseconds timestamps.
     private nonisolated static func decodeUnixTimestamp(_ rawValue: Double) -> Date {
         let secondsValue = rawValue > 10_000_000_000 ? rawValue / 1000 : rawValue
-        return Date(timeIntervalSince1970: secondsValue)
+        let unixDate = Date(timeIntervalSince1970: secondsValue)
+        let earliestPlausibleThreadDate = Date(timeIntervalSince1970: 1_262_304_000) // 2010-01-01
+        let latestPlausibleThreadDate = Date(timeIntervalSince1970: 4_102_444_800) // 2100-01-01
+
+        // Older persisted snapshots encoded thread dates with Foundation's
+        // reference-date epoch (2001-01-01). When those numeric values are read
+        // back as Unix timestamps, the sidebar shows bogus 1990s-era ages until
+        // a live sync overwrites them. Repair only implausibly old values.
+        if unixDate < earliestPlausibleThreadDate {
+            let referenceDate = Date(timeIntervalSinceReferenceDate: secondsValue)
+            if referenceDate >= earliestPlausibleThreadDate,
+               referenceDate <= latestPlausibleThreadDate {
+                return referenceDate
+            }
+        }
+
+        return unixDate
     }
 
     private nonisolated static func decodeStringIfPresent(

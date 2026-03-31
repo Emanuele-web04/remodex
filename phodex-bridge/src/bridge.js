@@ -29,6 +29,8 @@ const {
 const { createBridgePackageVersionStatusReader } = require("./package-version-status");
 const { createPushNotificationServiceClient } = require("./push-notification-service-client");
 const { createPushNotificationTracker } = require("./push-notification-tracker");
+const { createConvexHelperClient } = require("./convex-helper-client");
+const { createICloudHelperClient } = require("./icloud-helper-client");
 const {
   loadOrCreateBridgeDeviceState,
   resolveBridgeRelaySession,
@@ -89,6 +91,23 @@ function startBridge({
     pushServiceClient,
     previewMaxChars: config.pushPreviewMaxChars,
   });
+  const asyncHelperClient = createAsyncHelperClient({
+    config,
+    helperPath: config.cloudAsyncHelperPath,
+    containerId: config.cloudAsyncContainerId,
+    convexSiteUrl: config.convexSiteUrl,
+    getDeviceState: () => deviceState,
+    deviceStateDir: process.env.REMODEX_DEVICE_STATE_DIR || "",
+    logPrefix: "[remodex]",
+    onAsyncRequest(message) {
+      handleAsyncHelperRequest(message);
+    },
+    onStatusChange() {
+      if (lastPublishedBridgeStatus) {
+        publishBridgeStatus(lastPublishedBridgeStatus);
+      }
+    },
+  });
   const readBridgePackageVersionStatus = createBridgePackageVersionStatusReader();
 
   // Keep the local Codex runtime alive across transient relay disconnects.
@@ -104,6 +123,7 @@ function startBridge({
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
   const bridgeManagedCodexRequestWaiters = new Map();
+  const asyncResponseSendersByRequestId = new Map();
   const forwardedRequestMethodsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
   const trackedForwardedRequestMethods = new Set([
@@ -167,6 +187,7 @@ function startBridge({
     pid: process.pid,
     lastError: "",
   });
+  asyncHelperClient.start();
 
   codex.onError((error) => {
     publishBridgeStatus({
@@ -395,11 +416,17 @@ function startBridge({
     if (handleBridgeManagedCodexResponse(message)) {
       return;
     }
+    if (routeAsyncCodexResponseIfNeeded(message)) {
+      return;
+    }
     updatePendingAuthLoginFromCodexMessage(message);
     trackCodexHandshakeState(message);
     desktopRefresher.handleOutbound(message);
     pushNotificationTracker.handleOutbound(message);
     rememberThreadFromMessage("codex", message);
+    if (asyncResponseSendersByRequestId.size > 0 && socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
     secureTransport.queueOutboundApplicationMessage(
       sanitizeRelayBoundCodexMessage(message),
       sendRelayWireMessage
@@ -423,6 +450,8 @@ function startBridge({
     desktopRefresher.handleTransportReset();
     failBridgeManagedCodexRequests(new Error("Codex transport closed before the bridge request completed."));
     forwardedRequestMethodsById.clear();
+    asyncResponseSendersByRequestId.clear();
+    asyncHelperClient.stop();
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
       socket.close();
     }
@@ -433,53 +462,87 @@ function startBridge({
     clearReconnectTimer();
     clearRelayWatchdog();
     clearBridgeStatusHeartbeat();
+    asyncHelperClient.stop();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
     clearReconnectTimer();
     clearRelayWatchdog();
     clearBridgeStatusHeartbeat();
+    asyncHelperClient.stop();
   }));
 
   // Routes decrypted app payloads through the same bridge handlers as before.
-  function handleApplicationMessage(rawMessage) {
+  function handleApplicationMessage(rawMessage, responseSender = sendApplicationResponse) {
     if (handleBridgeManagedHandshakeMessage(rawMessage)) {
       return;
     }
-    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse)) {
+    if (handleBridgeManagedAccountRequest(rawMessage, responseSender)) {
       return;
     }
-    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse)) {
+    if (voiceHandler.handleVoiceRequest(rawMessage, responseSender)) {
       return;
     }
-    if (handleThreadContextRequest(rawMessage, sendApplicationResponse)) {
+    if (handleThreadContextRequest(rawMessage, responseSender)) {
       return;
     }
-    if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
+    if (handleWorkspaceRequest(rawMessage, responseSender)) {
       return;
     }
-    if (notificationsHandler.handleNotificationsRequest(rawMessage, sendApplicationResponse)) {
+    if (notificationsHandler.handleNotificationsRequest(rawMessage, responseSender)) {
       return;
     }
-    if (handleDesktopRequest(rawMessage, sendApplicationResponse, {
+    if (handleDesktopRequest(rawMessage, responseSender, {
       bundleId: config.codexBundleId,
       appPath: config.codexAppPath,
     })) {
       return;
     }
-    if (handleGitRequest(rawMessage, sendApplicationResponse)) {
+    if (handleGitRequest(rawMessage, responseSender)) {
       return;
     }
     desktopRefresher.handleInbound(rawMessage);
     rolloutLiveMirror?.observeInbound(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", rawMessage);
+    rememberAsyncResponseSender(rawMessage, responseSender);
     codex.send(rawMessage);
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
     secureTransport.queueOutboundApplicationMessage(rawMessage, sendRelayWireMessage);
+  }
+
+  function handleAsyncHelperRequest(message) {
+    const rawMessage = readString(message?.payloadText);
+    const recordName = readString(message?.recordName);
+    const requestId = readString(message?.requestId);
+    if (!rawMessage || !recordName) {
+      return;
+    }
+    try {
+      handleApplicationMessage(rawMessage, (payloadText) => {
+        asyncHelperClient.sendResponse({
+          recordName,
+          requestId,
+          payloadText,
+        });
+      });
+      if (!requestId) {
+        asyncHelperClient.sendResponse({
+          recordName,
+          requestId: "",
+          payloadText: "",
+        });
+      }
+    } catch (error) {
+      asyncHelperClient.sendError({
+        recordName,
+        requestId,
+        message: (error && error.message) || "Bridge request failed.",
+      });
+    }
   }
 
   // ─── Bridge-owned auth snapshot ─────────────────────────────
@@ -946,9 +1009,41 @@ function startBridge({
     bridgeManagedCodexRequestWaiters.clear();
   }
 
+  function rememberAsyncResponseSender(rawMessage, responseSender) {
+    if (responseSender === sendApplicationResponse) {
+      return;
+    }
+    const parsed = safeParseJSON(rawMessage);
+    const requestId = parsed?.id;
+    const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
+    if (!method || requestId == null) {
+      return;
+    }
+    asyncResponseSendersByRequestId.set(String(requestId), responseSender);
+  }
+
+  function routeAsyncCodexResponseIfNeeded(rawMessage) {
+    const parsed = safeParseJSON(rawMessage);
+    const responseId = parsed?.id;
+    if (responseId == null) {
+      return false;
+    }
+    const responseSender = asyncResponseSendersByRequestId.get(String(responseId));
+    if (typeof responseSender !== "function") {
+      return false;
+    }
+    asyncResponseSendersByRequestId.delete(String(responseId));
+    responseSender(rawMessage);
+    return true;
+  }
+
   function publishBridgeStatus(status) {
-    lastPublishedBridgeStatus = status;
-    onBridgeStatus?.(status);
+    const nextStatus = {
+      ...status,
+      helperStatus: asyncHelperClient.currentStatus(),
+    };
+    lastPublishedBridgeStatus = nextStatus;
+    onBridgeStatus?.(nextStatus);
   }
 
   // Refreshes the relay's trusted-mac index after the QR bootstrap locks in a phone identity.
@@ -963,6 +1058,39 @@ function startBridge({
       registration: buildMacRegistration(nextDeviceState),
     }));
   }
+}
+
+function createAsyncHelperClient({
+  config,
+  helperPath,
+  containerId,
+  convexSiteUrl,
+  getDeviceState,
+  deviceStateDir,
+  logPrefix,
+  onAsyncRequest,
+  onStatusChange,
+}) {
+  if (readString(convexSiteUrl)) {
+    return createConvexHelperClient({
+      enabled: true,
+      siteUrl: convexSiteUrl,
+      getDeviceState,
+      logPrefix,
+      onAsyncRequest,
+      onStatusChange,
+    });
+  }
+
+  return createICloudHelperClient({
+    enabled: Boolean(config.cloudAsyncEnabled),
+    helperPath,
+    containerId,
+    deviceStateDir,
+    logPrefix,
+    onAsyncRequest,
+    onStatusChange,
+  });
 }
 
 // Registers the canonical Mac identity and the one trusted iPhone allowed for auto-resolve.
