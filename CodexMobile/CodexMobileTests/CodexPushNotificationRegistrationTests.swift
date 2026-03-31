@@ -124,7 +124,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         )
         service.isConnected = true
         service.isInitialized = true
-        service.transportMode = .cloudAsyncFallback
+        service.transportMode = .convexRemote
         service.relaySessionId = "session-push"
         service.remoteNotificationDeviceToken = "deadbeef"
 

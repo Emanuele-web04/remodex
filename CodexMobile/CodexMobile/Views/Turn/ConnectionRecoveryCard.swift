@@ -1,7 +1,7 @@
 // FILE: ConnectionRecoveryCard.swift
-// Purpose: Shows a compact reconnect card above the composer using the shared glass accessory style.
+// Purpose: Shows compact recovery guidance above the composer using the shared glass accessory style.
 // Layer: View Component
-// Exports: ConnectionRecoveryCard, ConnectionRecoverySnapshot, ConnectionRecoveryStatus
+// Exports: ConnectionRecoveryCard, ConnectionRecoverySnapshot, ConnectionRecoveryStatus, ConnectionRecoveryTrailingStyle
 // Depends on: SwiftUI, PlanAccessoryCard, AppFont
 
 import SwiftUI
@@ -9,6 +9,8 @@ import SwiftUI
 enum ConnectionRecoveryStatus: Equatable {
     case interrupted
     case reconnecting
+    case actionRequired
+    case syncing
 
     var label: String {
         switch self {
@@ -16,6 +18,10 @@ enum ConnectionRecoveryStatus: Equatable {
             return "Interrupted"
         case .reconnecting:
             return "Reconnecting"
+        case .actionRequired:
+            return "Action Needed"
+        case .syncing:
+            return "Syncing"
         }
     }
 
@@ -25,30 +31,46 @@ enum ConnectionRecoveryStatus: Equatable {
             return .orange
         case .reconnecting:
             return Color(.plan)
+        case .actionRequired:
+            return .orange
+        case .syncing:
+            return Color(.plan)
         }
     }
+}
+
+enum ConnectionRecoveryTrailingStyle: Equatable {
+    case action(String)
+    case progress
+    case none
 }
 
 struct ConnectionRecoverySnapshot: Equatable {
     let title: String
     let summary: String
+    let detail: String?
     let status: ConnectionRecoveryStatus
-    let actionTitle: String?
+    let trailingStyle: ConnectionRecoveryTrailingStyle
 
     init(
         title: String = "Connection",
         summary: String,
+        detail: String? = nil,
         status: ConnectionRecoveryStatus,
-        actionTitle: String?
+        trailingStyle: ConnectionRecoveryTrailingStyle
     ) {
         self.title = title
         self.summary = summary
+        self.detail = detail
         self.status = status
-        self.actionTitle = actionTitle
+        self.trailingStyle = trailingStyle
     }
 
     var isActionable: Bool {
-        actionTitle != nil
+        if case .action = trailingStyle {
+            return true
+        }
+        return false
     }
 }
 
@@ -72,7 +94,7 @@ struct ConnectionRecoveryCard: View {
         .opacity(snapshot.isActionable ? 1 : 0.94)
         .accessibilityLabel(snapshot.title)
         .accessibilityValue(snapshot.status.label)
-        .accessibilityHint(snapshot.isActionable ? "Reconnects the bridge session" : "Reconnect is already in progress")
+        .accessibilityHint(snapshot.isActionable ? "Opens the suggested recovery action" : "Shows the current recovery status")
     }
 
     private var leadingMarker: some View {
@@ -104,23 +126,36 @@ struct ConnectionRecoveryCard: View {
     }
 
     private var summaryRow: some View {
-        Text(snapshot.summary)
-            .font(AppFont.subheadline(weight: .medium))
-            .foregroundStyle(.primary)
-            .lineLimit(2)
-            .multilineTextAlignment(.leading)
+        VStack(alignment: .leading, spacing: snapshot.detail == nil ? 0 : 4) {
+            Text(snapshot.summary)
+                .font(AppFont.subheadline(weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            if let detail = snapshot.detail {
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+            }
+        }
     }
 
     private var trailingContent: some View {
         Group {
-            if let actionTitle = snapshot.actionTitle {
+            switch snapshot.trailingStyle {
+            case .action(let actionTitle):
                 Text(actionTitle)
                     .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(snapshot.status.tint)
-            } else {
+            case .progress:
                 ProgressView()
                     .controlSize(.mini)
                     .tint(snapshot.status.tint)
+            case .none:
+                EmptyView()
             }
         }
         .frame(minWidth: 58, alignment: .trailing)

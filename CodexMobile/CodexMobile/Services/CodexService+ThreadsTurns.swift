@@ -720,25 +720,7 @@ extension CodexService {
 enum CodexThreadStartProjectBinding {
     // Normalizes project paths before sending them to thread/start.
     static func normalizedProjectPath(_ rawValue: String?) -> String? {
-        guard let rawValue else {
-            return nil
-        }
-
-        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
-        }
-
-        if trimmed == "/" {
-            return trimmed
-        }
-
-        var normalized = trimmed
-        while normalized.hasSuffix("/") {
-            normalized.removeLast()
-        }
-
-        return normalized.isEmpty ? "/" : normalized
+        CodexThread.normalizedFilesystemProjectPath(rawValue)
     }
 
     static func makeThreadStartParams(
@@ -991,17 +973,18 @@ extension CodexService {
         let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
 
         guard let resultObject = response.result?.objectValue else {
-            resumedThreadIDs.insert(threadId)
             return (nil, nil)
         }
 
         var resumedThread: CodexThread?
         var turnStateSnapshot: CodexThreadTurnStateSnapshot?
+        var didApplyResume = false
         if let threadValue = resultObject["thread"],
            var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
+            didApplyResume = true
             decodedThread.syncState = .live
             upsertThread(decodedThread)
-            resumedThread = decodedThread
+            resumedThread = thread(for: threadId) ?? decodedThread
 
             if let threadObject = threadValue.objectValue {
                 let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
@@ -1030,11 +1013,14 @@ extension CodexService {
                 }
             }
         } else if let index = threadIndex(for: threadId) {
+            didApplyResume = true
             threads[index].syncState = .live
         }
 
-        hydratedThreadIDs.insert(threadId)
-        resumedThreadIDs.insert(threadId)
+        if didApplyResume {
+            hydratedThreadIDs.insert(threadId)
+            resumedThreadIDs.insert(threadId)
+        }
         return (resumedThread, turnStateSnapshot)
     }
 

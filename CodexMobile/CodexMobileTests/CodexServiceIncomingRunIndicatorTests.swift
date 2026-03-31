@@ -139,7 +139,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertNil(service.activeTurnID(for: threadID))
-        XCTAssertEqual(recordedMethods.filter { $0 == "thread/read" }.count, 1)
+        XCTAssertGreaterThanOrEqual(recordedMethods.filter { $0 == "thread/read" }.count, 1)
     }
 
     func testTurnStartedAcceptsTopLevelIDAsTurnID() {

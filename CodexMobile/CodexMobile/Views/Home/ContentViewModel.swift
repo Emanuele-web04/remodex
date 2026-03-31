@@ -167,12 +167,28 @@ final class ContentViewModel {
         }
     }
 
-    // Attempts one automatic connection on app launch using saved relay session.
-    func attemptAutoConnectOnLaunchIfNeeded(codex: CodexService) async {
+    /// Injected pairing JSON first (launch args, env, or simulator code path), then saved-session reconnect.
+    func performLaunchConnectSequence(codex: CodexService, e2ePairing: CodexE2EPairingLaunchConfiguration) async {
         guard !hasAttemptedInitialAutoConnect else {
             return
         }
         hasAttemptedInitialAutoConnect = true
+
+        if e2ePairing.isPairingBypassActive, let raw = e2ePairing.resolvedPairingJSON {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                switch validatePairingQRCode(trimmed) {
+                case .success(let payload):
+                    await connectToRelay(pairingPayload: payload, codex: codex)
+                    return
+                case .bridgeUpdateRequired(let prompt):
+                    codex.bridgeUpdatePrompt = prompt
+                    return
+                case .scanError:
+                    break
+                }
+            }
+        }
 
         guard !codex.isConnected, !codex.isConnecting else {
             return
@@ -191,6 +207,11 @@ final class ContentViewModel {
         } catch {
             // Keep the saved pairing so temporary Mac/relay outages can recover on the next retry.
         }
+    }
+
+    // Attempts one automatic connection on app launch using saved relay session.
+    func attemptAutoConnectOnLaunchIfNeeded(codex: CodexService) async {
+        await performLaunchConnectSequence(codex: codex, e2ePairing: .disabled)
     }
 
     // Reconnects after benign background disconnects.

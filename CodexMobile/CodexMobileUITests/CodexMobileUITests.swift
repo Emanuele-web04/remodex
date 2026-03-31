@@ -11,16 +11,28 @@ final class CodexMobileUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testTurnTimelineScrollingPerformance() {
-        let app = XCUIApplication()
+    private func launchFixtureApp(
+        _ app: XCUIApplication,
+        extraArguments: [String] = []
+    ) {
         app.launchArguments += [
             "-CodexUITestsFixture",
-            "-CodexUITestsMessageCount", "1200",
-        ]
+        ] + extraArguments
         app.launch()
+        XCTAssertTrue(
+            app.wait(for: .runningForeground, timeout: 45),
+            "App did not reach foreground in time for UI testing (accessibility readiness)."
+        )
+    }
+
+    func testTurnTimelineScrollingPerformance() {
+        let app = XCUIApplication()
+        launchFixtureApp(app, extraArguments: [
+            "-CodexUITestsMessageCount", "1200",
+        ])
 
         let timeline = app.scrollViews["turn.timeline.scrollview"]
-        XCTAssertTrue(timeline.waitForExistence(timeout: 5))
+        XCTAssertTrue(timeline.waitForExistence(timeout: 20))
 
         measure(metrics: [XCTOSSignpostMetric.scrollingAndDecelerationMetric]) {
             timeline.swipeUp(velocity: .fast)
@@ -32,14 +44,12 @@ final class CodexMobileUITests: XCTestCase {
 
     func testTurnStreamingAppendPerformance() {
         let app = XCUIApplication()
-        app.launchArguments += [
-            "-CodexUITestsFixture",
+        launchFixtureApp(app, extraArguments: [
             "-CodexUITestsMessageCount", "500",
             "-CodexUITestsAutoStream",
-        ]
-        app.launch()
+        ])
 
-        XCTAssertTrue(app.scrollViews["turn.timeline.scrollview"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.scrollViews["turn.timeline.scrollview"].waitForExistence(timeout: 20))
 
         measure(metrics: [XCTClockMetric(), XCTCPUMetric(), XCTMemoryMetric()]) {
             // Wait window where fixture appends streaming chunks into the active timeline.

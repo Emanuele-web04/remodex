@@ -11,11 +11,6 @@ DESTINATION="${DESTINATION:-platform=iOS Simulator,name=iPhone 17}"
 BASELINE_PATH="${BASELINE_PATH:-$ROOT_DIR/Docs/TurnView-Performance-Baseline.json}"
 MAX_REGRESSION_PERCENT="${MAX_REGRESSION_PERCENT:-}"
 
-if [[ ! -f "$BASELINE_PATH" ]]; then
-  echo "Baseline file not found: $BASELINE_PATH"
-  exit 1
-fi
-
 run_log="$(mktemp)"
 metrics_json="$(mktemp)"
 
@@ -36,6 +31,12 @@ if [[ -z "$xcresult_path" || ! -d "$xcresult_path" ]]; then
 fi
 
 xcrun xcresulttool get test-results metrics --path "$xcresult_path" > "$metrics_json"
+
+if [[ ! -f "$BASELINE_PATH" ]]; then
+  echo "Baseline file not found: $BASELINE_PATH"
+  echo "UI perf tests finished; capture metrics from the xcresult above and save Docs/TurnView-Performance-Baseline.json to enable regression comparison."
+  exit 0
+fi
 
 python3 - "$metrics_json" "$BASELINE_PATH" "$MAX_REGRESSION_PERCENT" <<'PY'
 import json

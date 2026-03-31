@@ -33,24 +33,24 @@ final class TurnViewRecoveryUITests: XCTestCase {
         let service = makeService()
         service.isConnected = false
 
-        let reason = classifyVoiceFailure(CodexServiceError.disconnected, codex: service)
-        let presentation = voiceRecoveryPresentation(for: reason)
+        let reason = service.classifyVoiceFailure(CodexServiceError.disconnected)
+        let presentation = makeCodexVoiceRecoveryPresentation(for: reason)
 
         XCTAssertEqual(reason, .reconnectRequired)
-        XCTAssertEqual(presentation.snapshot.actionTitle, "Reconnect")
+        XCTAssertEqual(presentation.snapshot.trailingStyle, .action("Reconnect"))
         XCTAssertEqual(presentation.action, .reconnect)
-        XCTAssertEqual(presentation.snapshot.status, .needsAction)
+        XCTAssertEqual(presentation.snapshot.status, .interrupted)
     }
 
     func testMicrophonePermissionDeniedBuildsOpenSettingsAction() {
         let service = makeService()
         service.isConnected = true
 
-        let reason = classifyVoiceFailure(GPTVoiceTranscriptionError.microphonePermissionDenied, codex: service)
-        let presentation = voiceRecoveryPresentation(for: reason)
+        let reason = service.classifyVoiceFailure(GPTVoiceTranscriptionError.microphonePermissionDenied)
+        let presentation = makeCodexVoiceRecoveryPresentation(for: reason)
 
         XCTAssertEqual(reason, .microphonePermissionRequired)
-        XCTAssertEqual(presentation.snapshot.actionTitle, "Open Settings")
+        XCTAssertEqual(presentation.snapshot.trailingStyle, .action("Open Settings"))
         XCTAssertEqual(presentation.action, .openSystemSettings)
         XCTAssertEqual(presentation.snapshot.summary, "Microphone access is off for Remodex.")
     }
@@ -65,11 +65,13 @@ final class TurnViewRecoveryUITests: XCTestCase {
             tokenReady: false
         )
 
-        let reason = classifyVoiceFailure(CodexServiceError.invalidInput("voice unavailable"), codex: service)
-        let presentation = voiceRecoveryPresentation(for: reason)
+        let reason = service.classifyVoiceFailure(
+            CodexServiceError.invalidInput("Please sign in to chatgpt on your Mac to continue.")
+        )
+        let presentation = makeCodexVoiceRecoveryPresentation(for: reason)
 
         XCTAssertEqual(reason, .macLoginRequired)
-        XCTAssertEqual(presentation.snapshot.actionTitle, "How To Fix")
+        XCTAssertEqual(presentation.snapshot.trailingStyle, .action("How To Fix"))
         XCTAssertEqual(presentation.action, .showSetupHelp)
         XCTAssertEqual(presentation.snapshot.summary, "Sign in to ChatGPT on your Mac to use voice mode.")
     }
@@ -84,11 +86,13 @@ final class TurnViewRecoveryUITests: XCTestCase {
             tokenReady: false
         )
 
-        let reason = classifyVoiceFailure(CodexServiceError.invalidInput("voice unavailable"), codex: service)
-        let presentation = voiceRecoveryPresentation(for: reason)
+        let reason = service.classifyVoiceFailure(
+            CodexServiceError.invalidInput("waiting for voice sync from your Mac.")
+        )
+        let presentation = makeCodexVoiceRecoveryPresentation(for: reason)
 
         XCTAssertEqual(reason, .voiceSyncInProgress)
-        XCTAssertNil(presentation.snapshot.actionTitle)
+        XCTAssertEqual(presentation.snapshot.trailingStyle, .progress)
         XCTAssertEqual(presentation.action, .none)
         XCTAssertEqual(presentation.snapshot.status, .syncing)
     }

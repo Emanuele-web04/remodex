@@ -48,7 +48,7 @@ struct TurnConversationContainerView: View {
         stoppedTurnIDs: Set<String>,
         assistantRevertStatesByMessageID: [String: AssistantRevertPresentation],
         errorMessage: String?,
-        connectionRecoveryAccessory: AnyView?,
+        composerRecoveryAccessory: AnyView?,
         shouldAnchorToAssistantResponse: Binding<Bool>,
         isScrolledToBottom: Binding<Bool>,
         isComposerFocused: Bool,
@@ -72,7 +72,7 @@ struct TurnConversationContainerView: View {
         self.stoppedTurnIDs = stoppedTurnIDs
         self.assistantRevertStatesByMessageID = assistantRevertStatesByMessageID
         self.errorMessage = errorMessage
-        self.composerRecoveryAccessory = connectionRecoveryAccessory
+        self.composerRecoveryAccessory = composerRecoveryAccessory
         self.shouldAnchorToAssistantResponse = shouldAnchorToAssistantResponse
         self.isScrolledToBottom = isScrolledToBottom
         self.isComposerFocused = isComposerFocused
@@ -101,14 +101,13 @@ struct TurnConversationContainerView: View {
         return cachedMessageLayout
     }
 
-    // Avoids showing the generic "new chat" empty state behind a pinned accessory-only conversation.
+    // Keeps accessory-only chats informative instead of showing a blank viewport.
     private var timelineEmptyState: AnyView {
-        let layout = messageLayout
-        guard layout.timelineMessages.isEmpty else {
+        guard messageLayout.timelineMessages.isEmpty else {
             return emptyState
         }
 
-        if let pinnedStructuredUserInputMessage = layout.pinnedStructuredUserInputMessage {
+        if let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage {
             let questionCount = pinnedStructuredUserInputMessage.structuredUserInputRequest?.questions.count ?? 0
             let title = questionCount == 1 ? "One answer needed" : "Answers needed"
             let summary: String
@@ -130,7 +129,7 @@ struct TurnConversationContainerView: View {
             )
         }
 
-        if let pinnedTaskPlanMessage = layout.pinnedTaskPlanMessage {
+        if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
             let snapshot = PlanAccessorySnapshot(message: pinnedTaskPlanMessage)
             let summary = snapshot.summary.trimmingCharacters(in: .whitespacesAndNewlines)
             return AnyView(
@@ -232,7 +231,6 @@ struct TurnConversationContainerView: View {
     // Keeps the active plan discoverable without covering the message timeline.
     private var composerWithPinnedPlanAccessory: some View {
         let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage
-        let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage
 
         return VStack(spacing: 8) {
             if let pinnedTaskPlanMessage {
@@ -244,7 +242,7 @@ struct TurnConversationContainerView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            if let pinnedStructuredUserInputMessage {
+            if let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage {
                 StructuredUserInputAccessory(message: pinnedStructuredUserInputMessage) {
                     isShowingPinnedStructuredUserInputSheet = true
                 }
@@ -260,8 +258,8 @@ struct TurnConversationContainerView: View {
 
             composer
         }
-        .animation(.easeInOut(duration: 0.18), value: pinnedTaskPlanMessage?.id)
-        .animation(.easeInOut(duration: 0.18), value: pinnedStructuredUserInputMessage?.id)
+        .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedTaskPlanMessage?.id)
+        .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedStructuredUserInputMessage?.id)
     }
 
     // Rebuilds the plan/timeline split only when the thread or timeline token really changed.
@@ -277,6 +275,7 @@ struct TurnConversationContainerView: View {
         cachedMessageLayout = Self.buildMessageLayout(from: messages)
     }
 
+    // Auto-opens a newly pending prompt once per request id so reconnect-replayed questions do not stay buried.
     private func autoPresentStructuredUserInputIfNeeded() {
         guard let pinnedStructuredUserInputMessage = messageLayout.pinnedStructuredUserInputMessage else {
             return
@@ -329,36 +328,6 @@ struct TurnConversationLayout: Equatable {
     )
 }
 
-extension CodexMessage {
-    var isPlanSystemMessage: Bool {
-        role == .system && kind == .plan
-    }
-
-    var shouldDisplayPinnedStructuredUserInputAccessory: Bool {
-        role == .system
-            && kind == .userInputPrompt
-            && structuredUserInputRequest != nil
-    }
-
-    // Hides terminal 3/3-style plans so only genuinely active plans stay pinned above the composer.
-    var shouldDisplayPinnedPlanAccessory: Bool {
-        guard isPlanSystemMessage else {
-            return false
-        }
-
-        if isStreaming {
-            return true
-        }
-
-        let steps = planState?.steps ?? []
-        guard !steps.isEmpty else {
-            return false
-        }
-
-        return steps.contains { $0.status != .completed }
-    }
-}
-
 private struct AccessoryBackedEmptyState: View {
     let systemImage: String
     let tint: Color
@@ -404,72 +373,33 @@ private struct AccessoryBackedEmptyState: View {
     }
 }
 
-private struct StructuredUserInputAccessory: View {
-    let message: CodexMessage
-    let onTap: () -> Void
-
-    private var questionCount: Int {
-        message.structuredUserInputRequest?.questions.count ?? 0
+extension CodexMessage {
+    var isPlanSystemMessage: Bool {
+        role == .system && kind == .plan
     }
 
-    var body: some View {
-        Button(action: onTap) {
-            PlanModeCardContainer(title: "Input needed", showsProgress: false) {
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(questionCount == 1 ? "Codex needs one answer" : "Codex needs \(questionCount) answers")
-                            .font(AppFont.subheadline(weight: .medium))
-                            .foregroundStyle(.primary)
+    var shouldDisplayPinnedStructuredUserInputAccessory: Bool {
+        role == .system
+            && kind == .userInputPrompt
+            && structuredUserInputRequest != nil
+    }
 
-                        Text("Open the prompt to review the plan and respond.")
-                            .font(AppFont.caption())
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer(minLength: 0)
-
-                    Image(systemName: "chevron.up.circle.fill")
-                        .font(AppFont.system(size: 20, weight: .semibold))
-                        .foregroundStyle(Color(.plan))
-                }
-            }
+    // Hides terminal 3/3-style plans so only genuinely active plans stay pinned above the composer.
+    var shouldDisplayPinnedPlanAccessory: Bool {
+        guard isPlanSystemMessage else {
+            return false
         }
-        .buttonStyle(.plain)
-    }
-}
 
-private struct StructuredUserInputSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
-    let requestMessage: CodexMessage
-    let planMessage: CodexMessage?
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if let planMessage {
-                        PlanSystemCard(message: planMessage)
-                    }
-
-                    if let request = requestMessage.structuredUserInputRequest {
-                        StructuredUserInputCard(request: request)
-                    }
-                }
-                .padding(16)
-            }
-            .background(Color(.systemBackground))
-            .navigationTitle("Questions")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
+        if isStreaming {
+            return true
         }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+
+        let steps = planState?.steps ?? []
+        guard !steps.isEmpty else {
+            return false
+        }
+
+        return steps.contains { $0.status != .completed }
     }
+
 }

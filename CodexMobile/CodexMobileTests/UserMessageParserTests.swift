@@ -1,4 +1,5 @@
 // FILE: UserMessageParserTests.swift
+// Parser is helper coverage; timeline uses TurnMessageComponents/regex for rendered mentions.
 // Purpose: Verifies leading user-message file mentions keep full filenames, including spaces.
 // Layer: Unit Test
 // Exports: UserMessageParserTests

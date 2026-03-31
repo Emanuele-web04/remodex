@@ -38,6 +38,9 @@ security_best_practices_report.md
 /initial-route-atom-*.js
 /use-navigate-to-local-conversation-*.js
 
+# Local agent / run logs (do not commit)
+logs/
+
 # Temp files
 $TMP_PLACEHOLDER
 

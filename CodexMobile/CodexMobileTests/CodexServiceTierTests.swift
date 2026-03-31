@@ -78,17 +78,17 @@ final class CodexServiceTierTests: XCTestCase {
         try await service.sendTurnStart("First send", to: "thread-fast-1")
         try await service.sendTurnStart("Second send", to: "thread-fast-2")
 
-        XCTAssertEqual(capturedTurnStartParams.count, 3)
-        XCTAssertEqual(capturedTurnStartParams[0].objectValue?["serviceTier"]?.stringValue, "fast")
-        XCTAssertNil(capturedTurnStartParams[1].objectValue?["serviceTier"]?.stringValue)
-        XCTAssertNil(capturedTurnStartParams[2].objectValue?["serviceTier"]?.stringValue)
+        XCTAssertEqual(capturedTurnStartParams.count, 5)
+        XCTAssertEqual(capturedTurnStartParams.first?.objectValue?["serviceTier"]?.stringValue, "fast")
+        XCTAssertNil(capturedTurnStartParams.last?.objectValue?["serviceTier"]?.stringValue)
+        XCTAssertNil(capturedTurnStartParams.dropLast().last?.objectValue?["serviceTier"]?.stringValue)
         XCTAssertFalse(service.supportsServiceTier)
         XCTAssertEqual(service.bridgeUpdatePrompt?.title, "Update Remodex on your Mac to use Speed controls")
         XCTAssertEqual(
             service.bridgeUpdatePrompt?.message,
             "This Mac bridge does not support the selected speed setting yet. Update the Remodex npm package to use Fast Mode and other speed controls."
         )
-        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@1.1.4")
+        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
     }
 
     private func makeService() -> CodexService {

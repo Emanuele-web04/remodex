@@ -100,11 +100,9 @@ nonisolated struct CodexMessagePersistence {
         return newKey
     }
 
-    // Structured input cards are live request state, not durable history; dropping them
-    // here prevents stale prompts from resurfacing after reconnects or relaunches.
-    private nonisolated func sanitizedForPersistence(_ value: [String: [CodexMessage]]) -> [String: [CodexMessage]] {
-        value.mapValues { messages in
-            messages.filter { $0.kind != .userInputPrompt }
-        }
+    // Keep pending structured prompts on disk so reconnects and relaunches can still surface
+    // a request the server is waiting on; lifecycle cleanup removes them once the request resolves.
+    private func sanitizedForPersistence(_ value: [String: [CodexMessage]]) -> [String: [CodexMessage]] {
+        value
     }
 }

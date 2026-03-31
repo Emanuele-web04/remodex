@@ -91,6 +91,135 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertFalse(service.gptVoiceRequiresLogin)
     }
 
+    func testRefreshBridgeVersionStatePresentsOptionalBridgeUpdateWhenLatestIsNewer() async {
+        let service = makeService()
+        service.isConnected = true
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
+
+        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.7")
+        XCTAssertEqual(service.latestBridgePackageVersion, "1.3.8")
+        XCTAssertEqual(
+            service.bridgeUpdatePrompt?.title,
+            "A newer Remodex update is available on your Mac"
+        )
+        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
+        XCTAssertEqual(service.gptAccountSnapshot.status, .unknown)
+    }
+
+    func testRefreshBridgeVersionStateDoesNotPresentOptionalBridgeUpdateWithoutForegroundFlag() async {
+        let service = makeService()
+        service.isConnected = true
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshBridgeVersionState()
+
+        XCTAssertNil(service.bridgeUpdatePrompt)
+    }
+
+    func testRefreshBridgeVersionStateDoesNotRepeatOptionalBridgeUpdateForSameLatestVersion() async {
+        let service = makeService()
+        service.isConnected = true
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
+        let firstPrompt = service.bridgeUpdatePrompt
+
+        service.bridgeUpdatePrompt = nil
+        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
+
+        XCTAssertNotNil(firstPrompt)
+        XCTAssertNil(service.bridgeUpdatePrompt)
+    }
+
+    func testForegroundReturnRefreshesBridgeVersionAndPresentsOptionalUpdatePrompt() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.syncRealtimeEnabled = false
+        service.isAppInForeground = false
+
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "account/status/read")
+            XCTAssertNil(params)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "status": .string("authenticated"),
+                    "authMethod": .string("chatgpt"),
+                    "loginInFlight": .bool(false),
+                    "needsReauth": .bool(false),
+                    "tokenReady": .bool(true),
+                    "bridgeVersion": .string("1.3.7"),
+                    "bridgeLatestVersion": .string("1.3.8"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        service.setForegroundState(true)
+        await yieldMainActor(times: 3)
+
+        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.7")
+        XCTAssertEqual(service.latestBridgePackageVersion, "1.3.8")
+        XCTAssertEqual(
+            service.bridgeUpdatePrompt?.title,
+            "A newer Remodex update is available on your Mac"
+        )
+    }
+
     func testStartOrResumeGPTLoginUsesChatGPTVariantAndCachesPendingURL() async throws {
         let service = makeService()
         service.isConnected = true
@@ -489,6 +618,84 @@ final class CodexGPTAccountTests: XCTestCase {
         }) { error in
             XCTAssertEqual(error.localizedDescription, "WebSocket not connected")
         }
+    }
+
+    func testUnsupportedVoiceBridgeAuthMarksBridgeSessionAsUnsupported() {
+        let service = makeService()
+        let error = CodexServiceError.rpcError(
+            RPCError(
+                code: -32600,
+                message: "Invalid request: unknown variant `voice/resolveAuth`, expected one of `initialize`, `thread/start`"
+            )
+        )
+
+        XCTAssertTrue(service.consumeUnsupportedVoiceBridgeAuth(error))
+        XCTAssertFalse(service.supportsBridgeVoiceAuth)
+        XCTAssertEqual(service.classifyVoiceFailure(error), .bridgeSessionUnsupported)
+    }
+
+    func testResolvedVoiceRecoveryClearsBannerOnceVoiceAuthIsHealthy() {
+        let service = makeService()
+        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
+            status: .authenticated,
+            authMethod: .chatgpt,
+            email: "voice@example.com",
+            displayName: nil,
+            planType: "plus",
+            loginInFlight: false,
+            needsReauth: false,
+            expiresAt: nil,
+            tokenReady: true,
+            updatedAt: .now
+        )
+
+        XCTAssertNil(service.resolveVoiceRecoveryReason(.voiceSyncInProgress))
+        XCTAssertNil(service.resolveVoiceRecoveryReason(.macLoginRequired))
+        XCTAssertNil(service.resolveVoiceRecoveryReason(.macReauthenticationRequired))
+    }
+
+    func testVoiceMissingTokenWhileAuthenticatedIsClassifiedAsSyncing() {
+        let service = makeService()
+        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
+            status: .authenticated,
+            authMethod: .chatgpt,
+            email: "voice@example.com",
+            displayName: nil,
+            planType: "plus",
+            loginInFlight: false,
+            needsReauth: false,
+            expiresAt: nil,
+            tokenReady: false,
+            tokenUnavailableSince: .now,
+            updatedAt: .now
+        )
+
+        let error = CodexServiceError.rpcError(
+            RPCError(
+                code: -32000,
+                message: "No ChatGPT session token available. Sign in to ChatGPT on the Mac.",
+                data: .object([
+                    "errorCode": .string("token_missing"),
+                ])
+            )
+        )
+
+        XCTAssertEqual(service.classifyVoiceFailure(error), .voiceSyncInProgress)
+    }
+
+    func testVoiceAuthUnavailableIsClassifiedAsReconnectRequired() {
+        let service = makeService()
+        let error = CodexServiceError.rpcError(
+            RPCError(
+                code: -32000,
+                message: "Could not read ChatGPT session from the Mac runtime. Is the bridge running?",
+                data: .object([
+                    "errorCode": .string("auth_unavailable"),
+                ])
+            )
+        )
+
+        XCTAssertEqual(service.classifyVoiceFailure(error), .reconnectRequired)
     }
 
     func testSuccessfulLoginKeepsPollingUntilVoiceTokenIsReady() async throws {

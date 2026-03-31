@@ -55,6 +55,7 @@
 		CA1905713AAEF29FBA8E5945 /* CodexAccessModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD1E239E37C08F56697FC60D /* CodexAccessModeTests.swift */; };
 		C3A4B5C6D7E8F90123456780 /* CodexCloudAsyncFallbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3A4B5C6D7E8F90123456781 /* CodexCloudAsyncFallbackTests.swift */; };
 		C3A4B5C6D7E8F90123456782 /* CodexConvexAsyncTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3A4B5C6D7E8F90123456783 /* CodexConvexAsyncTransportTests.swift */; };
+		E2E0C0DE1C0DE1C0DE1C0DE1 /* CodexE2EPairingLaunchConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2E0C0DE1C0DE1C0DE1C0DE2 /* CodexE2EPairingLaunchConfigurationTests.swift */; };
 		C2D3E4F5061728394A5B6C7D /* CodeCommentDirectiveParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2D3E4F5061728394A5B6C7E /* CodeCommentDirectiveParserTests.swift */; };
 		D27B9CA5F0B60ECA8AF38016 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */; };
@@ -130,6 +131,7 @@
 		C1A2B3C4D5E6F708192A3B4F /* CodexCloudAsyncRuntimeSupportTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexCloudAsyncRuntimeSupportTests.swift; sourceTree = "<group>"; };
 		C3A4B5C6D7E8F90123456781 /* CodexCloudAsyncFallbackTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexCloudAsyncFallbackTests.swift; sourceTree = "<group>"; };
 		C3A4B5C6D7E8F90123456783 /* CodexConvexAsyncTransportTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexConvexAsyncTransportTests.swift; sourceTree = "<group>"; };
+		E2E0C0DE1C0DE1C0DE1C0DE2 /* CodexE2EPairingLaunchConfigurationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexE2EPairingLaunchConfigurationTests.swift; sourceTree = "<group>"; };
 		C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingCommandExecutionTests.swift; sourceTree = "<group>"; };
 		C2D3E4F5061728394A5B6C7E /* CodeCommentDirectiveParserTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodeCommentDirectiveParserTests.swift; sourceTree = "<group>"; };
 		C9E159B2FD57ABF57099721C /* TurnFileChangeSummaryParserTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnFileChangeSummaryParserTests.swift; sourceTree = "<group>"; };
@@ -209,6 +211,7 @@
 				C1A2B3C4D5E6F708192A3B4F /* CodexCloudAsyncRuntimeSupportTests.swift */,
 				C3A4B5C6D7E8F90123456781 /* CodexCloudAsyncFallbackTests.swift */,
 				C3A4B5C6D7E8F90123456783 /* CodexConvexAsyncTransportTests.swift */,
+				E2E0C0DE1C0DE1C0DE1C0DE2 /* CodexE2EPairingLaunchConfigurationTests.swift */,
 				C2D3E4F5061728394A5B6C7E /* CodeCommentDirectiveParserTests.swift */,
 				8F1A2B3C4D5E6F708192A3B7 /* CodexSecurePairingStateTests.swift */,
 				8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */,
@@ -491,6 +494,7 @@
 				C1A2B3C4D5E6F708192A3B4E /* CodexCloudAsyncRuntimeSupportTests.swift in Sources */,
 				C3A4B5C6D7E8F90123456780 /* CodexCloudAsyncFallbackTests.swift in Sources */,
 				C3A4B5C6D7E8F90123456782 /* CodexConvexAsyncTransportTests.swift in Sources */,
+				E2E0C0DE1C0DE1C0DE1C0DE1 /* CodexE2EPairingLaunchConfigurationTests.swift in Sources */,
 				C2D3E4F5061728394A5B6C7D /* CodeCommentDirectiveParserTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

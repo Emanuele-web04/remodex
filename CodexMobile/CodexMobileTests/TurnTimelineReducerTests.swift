@@ -1353,6 +1353,80 @@ final class TurnTimelineReducerTests: XCTestCase {
     }
 }
 
+final class TurnScrollStateTrackerTests: XCTestCase {
+    func testUserDragImmediatelySwitchesFollowBottomToManual() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .followBottom),
+            .manual
+        )
+    }
+
+    func testUserDragKeepsAssistantAnchorModeUntilAnchorCompletes() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .anchorAssistantResponse),
+            .anchorAssistantResponse
+        )
+    }
+
+    func testUserDragEndingAtBottomRestoresFollowBottom() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterUserDragEnded(
+                currentMode: .manual,
+                isScrolledToBottom: true
+            ),
+            .followBottom
+        )
+    }
+
+    func testUserDragEndingAwayFromBottomKeepsManualMode() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterUserDragEnded(
+                currentMode: .manual,
+                isScrolledToBottom: false
+            ),
+            .manual
+        )
+    }
+
+    func testCorrectsBottomForMeaningfulContentGrowthWhenPinned() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
+                previousHeight: 320,
+                newHeight: 356,
+                isPinnedToBottom: true
+            )
+        )
+    }
+
+    func testCorrectsBottomForMeaningfulContentShrinkWhenPinned() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
+                previousHeight: 356,
+                newHeight: 320,
+                isPinnedToBottom: true
+            )
+        )
+    }
+
+    func testIgnoresTinyHeightDriftAndManualMode() {
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
+                previousHeight: 320,
+                newHeight: 320.5,
+                isPinnedToBottom: true
+            )
+        )
+
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
+                previousHeight: 356,
+                newHeight: 320,
+                isPinnedToBottom: false
+            )
+        )
+    }
+}
+
 private enum MarkdownSegment {
     case text(String)
     case codeBlock(language: String?, code: String)

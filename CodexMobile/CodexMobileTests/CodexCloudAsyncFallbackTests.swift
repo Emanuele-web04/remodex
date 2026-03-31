@@ -56,7 +56,7 @@ final class CodexCloudAsyncFallbackTests: XCTestCase {
         let relayURL = "wss://relay.local/relay"
         let sharedSecret = Data(repeating: 7, count: 32).base64EncodedString()
 
-        service.cloudAsyncTransport = transport
+        service.convexTransport = transport
         service.relayUrl = relayURL
         service.relayMacDeviceId = macDeviceID
         service.relayMacIdentityPublicKey = Data(repeating: 8, count: 32).base64EncodedString()
@@ -68,9 +68,9 @@ final class CodexCloudAsyncFallbackTests: XCTestCase {
             command: "npm install -g remodex@latest"
         )
 
-        try await service.activateCloudAsyncFallback(serverURL: "\(relayURL)/session-123", performInitialSync: false)
+        try await service.activateConvexLane(serverURL: "\(relayURL)/session-123", performInitialSync: false)
 
-        XCTAssertEqual(service.transportMode, .cloudAsyncFallback)
+        XCTAssertEqual(service.transportMode, .convexRemote)
         XCTAssertTrue(service.isConnected)
         XCTAssertTrue(service.isInitialized)
         XCTAssertEqual(service.trustedReconnectFailureCount, 0)

@@ -17,7 +17,7 @@ final class CodexConvexAsyncTransportTests: XCTestCase {
         }
         let transport = makeTransport(executor: executor)
 
-        let availability = await transport.availability(hasCloudAsyncFallbackCredentials: true)
+        let availability = await transport.availability(hasConvexLaneCredentials: true)
 
         assertAvailable(availability)
         XCTAssertEqual(probe.requestPaths(), ["/async/health"])
@@ -39,7 +39,7 @@ final class CodexConvexAsyncTransportTests: XCTestCase {
         }
         let transport = makeTransport(executor: executor)
 
-        let availability = await transport.availability(hasCloudAsyncFallbackCredentials: true)
+        let availability = await transport.availability(hasConvexLaneCredentials: true)
 
         assertUnavailable(availability, expectedMessage: "Convex async transport reported it is unavailable.")
         XCTAssertEqual(probe.requestPaths(), ["/async/health"])
@@ -61,7 +61,7 @@ final class CodexConvexAsyncTransportTests: XCTestCase {
         }
         let transport = makeTransport(executor: executor)
 
-        let availability = await transport.availability(hasCloudAsyncFallbackCredentials: true)
+        let availability = await transport.availability(hasConvexLaneCredentials: true)
 
         assertUnavailable(availability, expectedMessage: "Convex async transport reported an unexpected provider.")
         XCTAssertEqual(probe.requestPaths(), ["/async/health"])
@@ -77,7 +77,7 @@ final class CodexConvexAsyncTransportTests: XCTestCase {
         }
         let transport = makeTransport(executor: executor)
 
-        let availability = await transport.availability(hasCloudAsyncFallbackCredentials: true)
+        let availability = await transport.availability(hasConvexLaneCredentials: true)
 
         assertUnavailable(availability, expectedMessage: "Could not reach Convex for off-LAN async messaging.")
         XCTAssertEqual(probe.requestPaths(), ["/async/health"])
@@ -93,7 +93,7 @@ final class CodexConvexAsyncTransportTests: XCTestCase {
         }
         let transport = makeTransport(executor: executor)
 
-        let availability = await transport.availability(hasCloudAsyncFallbackCredentials: false)
+        let availability = await transport.availability(hasConvexLaneCredentials: false)
 
         assertUnavailable(
             availability,

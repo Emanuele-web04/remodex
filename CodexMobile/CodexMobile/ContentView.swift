@@ -10,6 +10,7 @@ import UIKit
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
+    @Environment(\.codexE2EPairingLaunchConfiguration) private var e2ePairingLaunchConfiguration
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
 
@@ -40,7 +41,10 @@ struct ContentView: View {
                 guard hasSeenOnboarding, !isShowingManualScanner else {
                     return
                 }
-                await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
+                await viewModel.performLaunchConnectSequence(
+                    codex: codex,
+                    e2ePairing: e2ePairingLaunchConfiguration
+                )
             }
             .onChange(of: showSettings) { _, show in
                 if show {

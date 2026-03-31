@@ -36,18 +36,34 @@ private struct CodexUITestLaunchConfiguration {
 
 private struct CodexDebugLaunchConfiguration {
     private static let forceProAccessDefaultsKey = "codex.subscription.debugForceProAccess"
+    private static let hasSeenOnboardingKey = "codex.hasSeenOnboarding"
 
     let forceProAccess: Bool
+    let skipOnboarding: Bool
 
     static let current = Self(arguments: ProcessInfo.processInfo.arguments)
 
     init(arguments: [String]) {
         forceProAccess = arguments.contains("-CodexDebugForceProAccess")
+#if DEBUG
+#if targetEnvironment(simulator)
+        skipOnboarding = arguments.contains("-CodexSkipOnboarding")
+#else
+        skipOnboarding = false
+#endif
+#else
+        skipOnboarding = false
+#endif
     }
 
     func apply() {
 #if DEBUG
         UserDefaults.standard.set(forceProAccess, forKey: Self.forceProAccessDefaultsKey)
+#if targetEnvironment(simulator)
+        if skipOnboarding {
+            UserDefaults.standard.set(true, forKey: Self.hasSeenOnboardingKey)
+        }
+#endif
 #endif
     }
 }
@@ -67,7 +83,7 @@ private struct CodexUITestTimelineFixtureView: View {
 
     let configuration: CodexUITestLaunchConfiguration
 
-    @State private var messages: [CodexMessage]
+    @State private var messages: [CodexMessage] = []
     @State private var timelineChangeToken = 0
     @State private var shouldAnchorToAssistantResponse = false
     @State private var isScrolledToBottom = true
@@ -75,13 +91,6 @@ private struct CodexUITestTimelineFixtureView: View {
 
     init(configuration: CodexUITestLaunchConfiguration) {
         self.configuration = configuration
-        _messages = State(
-            initialValue: Self.buildMessages(
-                threadID: Self.fixtureThreadID,
-                count: configuration.messageCount,
-                includesStreamingTail: configuration.autoStream
-            )
-        )
     }
 
     var body: some View {
@@ -96,12 +105,12 @@ private struct CodexUITestTimelineFixtureView: View {
                 stoppedTurnIDs: [],
                 assistantRevertStatesByMessageID: [:],
                 errorMessage: nil,
-                connectionRecoveryAccessory: nil,
+                composerRecoveryAccessory: nil,
                 shouldAnchorToAssistantResponse: $shouldAnchorToAssistantResponse,
                 isScrolledToBottom: $isScrolledToBottom,
                 isComposerFocused: false,
                 isComposerAutocompletePresented: false,
-                emptyState: AnyView(Color.clear),
+                emptyState: AnyView(fixtureLoadingEmptyState),
                 composer: AnyView(fixtureComposer),
                 repositoryLoadingToastOverlay: AnyView(EmptyView()),
                 usageToastOverlay: AnyView(EmptyView()),
@@ -114,12 +123,32 @@ private struct CodexUITestTimelineFixtureView: View {
             .navigationTitle("UI Test Fixture")
             .navigationBarTitleDisplayMode(.inline)
         }
-        .task(id: configuration.autoStream) {
-            guard configuration.autoStream else {
-                return
+        .task(id: "\(configuration.messageCount)-\(configuration.autoStream)") {
+            if messages.isEmpty {
+                let built = await Task.detached {
+                    Self.buildMessages(
+                        threadID: Self.fixtureThreadID,
+                        count: configuration.messageCount,
+                        includesStreamingTail: configuration.autoStream
+                    )
+                }.value
+                messages = built
             }
-            await runStreamingFixture()
+            if configuration.autoStream {
+                await runStreamingFixture()
+            }
         }
+    }
+
+    private var fixtureLoadingEmptyState: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+            Text("Loading timeline fixture...")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("turn.timeline.fixture.loading")
     }
 
     private var fixtureComposer: some View {
@@ -282,8 +311,18 @@ struct CodexMobileApp: App {
         self.uiTestLaunchConfiguration = uiTestLaunchConfiguration
         self.processLaunchConfiguration = processLaunchConfiguration
         CodexDebugLaunchConfiguration.current.apply()
+#if DEBUG
+#if targetEnvironment(simulator)
+        let launchArgs = ProcessInfo.processInfo.arguments
+        if launchArgs.contains("-CodexSkipOnboarding")
+            || CodexE2EPairingLaunchConfiguration.simulatorSkipsOnboardingForCodeInjection {
+            UserDefaults.standard.set(true, forKey: "codex.hasSeenOnboarding")
+        }
+#endif
+#endif
         let shouldSkipRevenueCatBootstrap =
-            processLaunchConfiguration.isRunningUnitTests
+            uiTestLaunchConfiguration.isEnabled
+            || processLaunchConfiguration.isRunningUnitTests
             || SubscriptionService.shouldBypassSubscriptionGatesForCurrentBuild
         self.shouldSkipRevenueCatBootstrap = shouldSkipRevenueCatBootstrap
 
@@ -309,6 +348,7 @@ struct CodexMobileApp: App {
                 ContentView()
                     .environment(codexService)
                     .environment(subscriptionService)
+                    .environment(\.codexE2EPairingLaunchConfiguration, CodexE2EPairingLaunchConfiguration.current)
                     .task {
                         guard !shouldSkipRevenueCatBootstrap else {
                             return

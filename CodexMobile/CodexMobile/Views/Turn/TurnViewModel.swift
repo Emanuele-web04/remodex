@@ -151,6 +151,7 @@ final class TurnViewModel {
     // MARK: - Git state
 
     var runningGitAction: TurnGitActionKind? = nil
+    var inlineCommitAndPushPhase: InlineCommitAndPushPhase? = nil
     var isRunningGitAction: Bool { runningGitAction != nil }
     var isShowingNothingToCommitAlert = false
     var gitSyncAlert: TurnGitSyncAlert? = nil
@@ -1605,15 +1606,7 @@ final class TurnViewModel {
     }
 
     private func normalizedAutocompleteRoot(for thread: CodexThread) -> String? {
-        if let normalizedProjectPath = thread.normalizedProjectPath {
-            return normalizedProjectPath
-        }
-
-        guard let rawCwd = thread.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawCwd.isEmpty else {
-            return nil
-        }
-        return rawCwd
+        thread.gitWorkingDirectory
     }
 
     private func fileAutocompleteCancellationToken(for threadID: String) -> String {
@@ -1642,7 +1635,9 @@ final class TurnViewModel {
     }
 
     private func isThreadBusy(codex: CodexService, threadID: String) -> Bool {
-        codex.activeTurnID(for: threadID) != nil || codex.runningThreadIDs.contains(threadID)
+        codex.activeTurnID(for: threadID) != nil
+            || codex.runningThreadIDs.contains(threadID)
+            || codex.protectedRunningFallbackThreadIDs.contains(threadID)
     }
 
     // Queues normal follow-ups while a run is active; explicit steer stays behind the queued-draft action.
@@ -2132,14 +2127,19 @@ final class TurnViewModel {
     func inlineCommitAndPush(codex: CodexService, workingDirectory: String?, threadID: String) {
         guard !isRunningGitAction else { return }
         runningGitAction = .commitAndPush
+        inlineCommitAndPushPhase = .committing
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.runningGitAction = nil }
+            defer {
+                self.runningGitAction = nil
+                self.inlineCommitAndPushPhase = nil
+            }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
             do {
                 _ = try await gitService.commit(message: nil)
+                inlineCommitAndPushPhase = .pushing
                 let pushResult = try await gitService.push()
                 handleSuccessfulPush(
                     pushResult,

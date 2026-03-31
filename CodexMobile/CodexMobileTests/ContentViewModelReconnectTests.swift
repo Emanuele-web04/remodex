@@ -274,7 +274,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.relayCloudAsyncSharedSecret = Data(repeating: 22, count: 32).base64EncodedString()
         service.isConnected = true
         service.isInitialized = true
-        service.transportMode = .liveRelay
+        service.transportMode = .lanRelay
 
         await viewModel.toggleConnection(codex: service)
 
@@ -411,11 +411,8 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.relayMacDeviceId = "mac-123"
         service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
         service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
-        service.connectAttemptOverride = { _, _, _, _ in
-            throw NWError.posix(.ETIMEDOUT)
-        }
-        service.shouldAttemptCloudAsyncFallbackOverride = { _, _ in true }
-        service.cloudAsyncFallbackActivationOverride = { _, _ in
+        service.transportPreference = .convexOnly
+        service.convexLaneActivationOverride = { _, _ in
             throw expectedError
         }
 
@@ -437,7 +434,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.connectAttemptOverride = { _, _, _, _ in
             connectAttempts += 1
         }
-        service.cloudAsyncFallbackActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { _, _ in
             fallbackAttempts += 1
         }
 
@@ -455,7 +452,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.connectAttemptOverride = { _, _, _, _ in
             throw NWError.posix(.ETIMEDOUT)
         }
-        service.cloudAsyncFallbackActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { _, _ in
             fallbackAttempts += 1
         }
 
@@ -474,10 +471,10 @@ final class ContentViewModelReconnectTests: XCTestCase {
         var receivedPerformInitialSync: Bool?
 
         service.isConnected = true
-        service.transportMode = .liveRelay
+        service.transportMode = .lanRelay
         service.relayUrl = "ws://192.168.1.31:9000/relay"
         service.relaySessionId = "session-1"
-        service.cloudAsyncFallbackActivationOverride = { serverURL, performInitialSync in
+        service.convexLaneActivationOverride = { serverURL, performInitialSync in
             fallbackAttempts += 1
             receivedURL = serverURL
             receivedPerformInitialSync = performInitialSync
@@ -500,7 +497,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         var receivedPerformInitialSync: Bool?
 
         service.isConnected = true
-        service.transportMode = .cloudAsyncFallback
+        service.transportMode = .convexRemote
         service.relayUrl = "ws://192.168.1.31:9000/relay"
         service.relaySessionId = "session-1"
         service.connectAttemptOverride = { serverURL, _, _, performInitialSync in
@@ -525,10 +522,10 @@ final class ContentViewModelReconnectTests: XCTestCase {
 
         service.isConnected = true
         service.isConnecting = true
-        service.transportMode = .liveRelay
+        service.transportMode = .lanRelay
         service.relayUrl = "ws://192.168.1.31:9000/relay"
         service.relaySessionId = "session-1"
-        service.cloudAsyncFallbackActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { _, _ in
             fallbackAttempts += 1
         }
 
@@ -546,10 +543,10 @@ final class ContentViewModelReconnectTests: XCTestCase {
         var fallbackAttempts = 0
 
         service.isConnected = true
-        service.transportMode = .liveRelay
+        service.transportMode = .lanRelay
         service.relayUrl = "ws://192.168.1.31:9000/relay"
         service.relaySessionId = "session-1"
-        service.cloudAsyncFallbackActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { _, _ in
             fallbackAttempts += 1
         }
 
@@ -559,6 +556,107 @@ final class ContentViewModelReconnectTests: XCTestCase {
 
         XCTAssertEqual(service.transportPreference, .lanOnly)
         XCTAssertEqual(fallbackAttempts, 0)
+    }
+
+    func testPerformLaunchConnectSequenceConnectsValidE2EPairingJSON() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var connectedURLs: [String] = []
+        viewModel.connectOverride = { _, serverURL in
+            connectedURLs.append(serverURL)
+        }
+
+        // JSON numbers must not contain underscores (Swift numeric literals are not valid JSON).
+        let json = """
+        {"v":\(codexPairingQRVersion),"relay":"wss://relay.example","sessionId":"session-abc","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(9_000_000_000_000)}
+        """
+        let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: json)
+
+        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+
+        XCTAssertEqual(connectedURLs, ["wss://relay.example/session-abc"])
+        XCTAssertEqual(service.relaySessionId, "session-abc")
+        XCTAssertEqual(service.relayUrl, "wss://relay.example")
+    }
+
+    func testPerformLaunchConnectSequenceSetsBridgeUpdatePromptWithoutConnecting() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var connectAttempts = 0
+        viewModel.connectOverride = { _, _ in
+            connectAttempts += 1
+        }
+
+        let json = """
+        {"v":\(codexPairingQRVersion + 1),"relay":"wss://relay.example","sessionId":"session-abc","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(9_000_000_000_000)}
+        """
+        let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: json)
+
+        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+
+        XCTAssertEqual(connectAttempts, 0)
+        XCTAssertNotNil(service.bridgeUpdatePrompt)
+    }
+
+    func testPerformLaunchConnectSequenceFallsBackToSavedSessionWhenE2EInvalid() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var connectedURLs: [String] = []
+        viewModel.connectOverride = { _, serverURL in
+            connectedURLs.append(serverURL)
+        }
+
+        service.relaySessionId = "saved-session"
+        service.relayUrl = "wss://relay.local/relay"
+
+        let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: "not valid pairing json")
+
+        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+
+        XCTAssertEqual(connectedURLs, ["wss://relay.local/relay/saved-session"])
+        XCTAssertNil(service.bridgeUpdatePrompt)
+    }
+
+    func testPerformLaunchConnectSequenceSkipsE2EWhenBypassInactive() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var connectedURLs: [String] = []
+        viewModel.connectOverride = { _, serverURL in
+            connectedURLs.append(serverURL)
+        }
+
+        service.relaySessionId = "saved-session"
+        service.relayUrl = "wss://relay.local/relay"
+
+        let json = """
+        {"v":\(codexPairingQRVersion),"relay":"wss://other.example","sessionId":"other-session","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(9_000_000_000_000)}
+        """
+        let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: false, pairingJSON: json)
+
+        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+
+        XCTAssertEqual(connectedURLs, ["wss://relay.local/relay/saved-session"])
+        XCTAssertEqual(service.relayUrl, "wss://relay.local/relay")
+        XCTAssertEqual(service.relaySessionId, "saved-session")
+    }
+
+    func testPerformLaunchConnectSequenceSecondCallIsNoOp() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        var connectAttempts = 0
+        viewModel.connectOverride = { _, _ in
+            connectAttempts += 1
+        }
+
+        let json = """
+        {"v":\(codexPairingQRVersion),"relay":"wss://relay.example","sessionId":"session-abc","macDeviceId":"mac-123","macIdentityPublicKey":"pub-key","expiresAt":\(9_000_000_000_000)}
+        """
+        let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: json)
+
+        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+
+        XCTAssertEqual(connectAttempts, 1)
     }
 
     func testTransportPreferencePersistsAcrossServiceReinit() async {
@@ -584,8 +682,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         let service = CodexService(defaults: defaults)
         service.connectAttemptOverride = nil
-        service.cloudAsyncFallbackActivationOverride = nil
-        service.shouldAttemptCloudAsyncFallbackOverride = nil
+        service.convexLaneActivationOverride = nil
         Self.retainedServices.append(service)
         return service
     }

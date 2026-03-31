@@ -207,17 +207,17 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
 
     func testLocalRelayPathAvailabilityUsesMonitoredStateWhenNoOverrideIsInstalled() {
         let unresolved = makeCloudFallbackService()
-        XCTAssertNil(unresolved.localRelayPathAvailabilityForCloudFallback())
+        XCTAssertNil(unresolved.localRelayPathAvailabilityForLaneSelection())
 
         let available = makeCloudFallbackService()
         available.hasResolvedLocalRelayPathAvailability = true
         available.hasActiveLocalRelayPath = true
-        XCTAssertEqual(available.localRelayPathAvailabilityForCloudFallback(), true)
+        XCTAssertEqual(available.localRelayPathAvailabilityForLaneSelection(), true)
 
         let unavailable = makeCloudFallbackService()
         unavailable.hasResolvedLocalRelayPathAvailability = true
         unavailable.hasActiveLocalRelayPath = false
-        XCTAssertEqual(unavailable.localRelayPathAvailabilityForCloudFallback(), false)
+        XCTAssertEqual(unavailable.localRelayPathAvailabilityForLaneSelection(), false)
     }
 
     func testLocalRelayPathAvailabilityOverrideTakesPrecedenceOverMonitoredState() {
@@ -226,7 +226,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.hasActiveLocalRelayPath = true
         service.localRelayPathAvailabilityOverride = { false }
 
-        XCTAssertEqual(service.localRelayPathAvailabilityForCloudFallback(), false)
+        XCTAssertEqual(service.localRelayPathAvailabilityForLaneSelection(), false)
     }
 
     func testCloudAsyncFallbackIsBlockedWhileMonitoredLocalRelayPathIsAvailable() {
@@ -235,7 +235,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.hasActiveLocalRelayPath = true
 
         XCTAssertFalse(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: NWError.posix(.ETIMEDOUT),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
             )
@@ -250,7 +250,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.localNetworkAuthorizationStatus = .denied
 
         XCTAssertTrue(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: NWError.posix(.ETIMEDOUT),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
             )
@@ -263,7 +263,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.hasActiveLocalRelayPath = false
 
         XCTAssertTrue(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: NWError.posix(.ETIMEDOUT),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
             )
@@ -274,7 +274,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         let service = makeCloudFallbackService()
 
         XCTAssertFalse(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: NWError.posix(.ETIMEDOUT),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
             )
@@ -288,7 +288,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
 
         XCTAssertFalse(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: CodexSecureTransportError.invalidHandshake("bad pairing"),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
             )
@@ -301,7 +301,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.hasActiveLocalRelayPath = false
 
         XCTAssertTrue(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: NWError.posix(.ECONNREFUSED),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
             )
@@ -315,7 +315,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
 
         XCTAssertFalse(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: CodexServiceError.invalidInput("WebSocket closed during connect (4002)"),
                 serverURL: "ws://192.168.1.31:9000/relay/session"
             )
@@ -329,7 +329,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
 
         XCTAssertFalse(
-            service.shouldAttemptCloudAsyncFallback(
+            service.shouldUseConvexLane(
                 after: NWError.posix(.ETIMEDOUT),
                 serverURL: "wss://relay.example/relay/session"
             )
@@ -338,7 +338,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
 
     func testHandleReceiveErrorResetsTransportModeToDisconnected() {
         let service = makeService()
-        service.transportMode = .liveRelay
+        service.transportMode = .lanRelay
         service.isConnected = true
         service.isInitialized = true
 

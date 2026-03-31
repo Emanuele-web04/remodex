@@ -87,21 +87,10 @@ final class BoundedCache<Key: Hashable, Value> {
 }
 
 enum TurnTextCacheKey {
-    private static let sampleByteCount = 24
-    private static let hexDigits = Array("0123456789abcdef")
-
     static func fingerprint(for text: String) -> String {
-        let utf8 = text.utf8
-        let byteCount = utf8.count
-        let middleStart = max((byteCount / 2) - (sampleByteCount / 2), 0)
-        let lastStart = max(byteCount - sampleByteCount, 0)
-
-        return [
-            String(byteCount),
-            hexSample(in: utf8, startOffset: 0, length: sampleByteCount),
-            hexSample(in: utf8, startOffset: middleStart, length: sampleByteCount),
-            hexSample(in: utf8, startOffset: lastStart, length: sampleByteCount),
-        ].joined(separator: "|")
+        var h = Hasher()
+        h.combine(text)
+        return "\(text.utf8.count)|\(h.finalize())"
     }
 
     static func key(messageID: String, kind: String, text: String) -> String {
@@ -122,29 +111,6 @@ enum TurnTextCacheKey {
             hasher.combine(entry.deletions)
         }
         return String(hasher.finalize())
-    }
-
-    private static func hexSample(
-        in utf8: String.UTF8View,
-        startOffset: Int,
-        length: Int
-    ) -> String {
-        guard !utf8.isEmpty else { return "" }
-
-        let clampedLength = min(length, utf8.count)
-        let clampedStart = min(max(startOffset, 0), max(utf8.count - clampedLength, 0))
-        let startIndex = utf8.index(utf8.startIndex, offsetBy: clampedStart)
-        let endIndex = utf8.index(startIndex, offsetBy: clampedLength)
-
-        var result = String()
-        result.reserveCapacity(clampedLength * 2)
-
-        for byte in utf8[startIndex..<endIndex] {
-            result.append(hexDigits[Int(byte >> 4)])
-            result.append(hexDigits[Int(byte & 0x0F)])
-        }
-
-        return result
     }
 }
 

@@ -92,7 +92,11 @@ extension CodexService {
         if isForeground {
             if isConnected && isInitialized {
                 startSyncLoop()
-                requestImmediateSync(threadId: activeThreadId, includeThreadList: false)
+                requestImmediateSync(threadId: activeThreadId)
+                // Re-check bridge-managed state when the app becomes active again.
+                Task { @MainActor [weak self] in
+                    await self?.refreshBridgeManagedState(allowAvailableBridgeUpdatePrompt: true)
+                }
             } else {
                 stopSyncLoop()
             }
@@ -580,7 +584,9 @@ extension CodexService {
 
     // Treats thread as active if either turn mapping or runtime running fallback is present.
     func threadHasActiveOrRunningTurn(_ threadId: String) -> Bool {
-        activeTurnID(for: threadId) != nil || runningThreadIDs.contains(threadId)
+        activeTurnID(for: threadId) != nil
+            || runningThreadIDs.contains(threadId)
+            || protectedRunningFallbackThreadIDs.contains(threadId)
     }
 
     // Keeps short-lived background execution alive when a run is still in flight.

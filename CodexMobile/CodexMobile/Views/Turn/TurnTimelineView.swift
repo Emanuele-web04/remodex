@@ -6,12 +6,6 @@
 
 import SwiftUI
 
-private enum TurnAutoScrollMode {
-    case followBottom
-    case anchorAssistantResponse
-    case manual
-}
-
 struct AssistantBlockAccessoryState: Equatable {
     let copyText: String?
     let showsRunningIndicator: Bool
@@ -84,6 +78,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .onTapGesture {
                     onTapOutsideComposer()
                 }
+                .simultaneousGesture(emptyStateKeyboardDismissGesture)
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     footer()
                 }
@@ -151,8 +146,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             scheduleFollowBottomScroll(using: proxy)
                         }
                     }
-                    if new.contentHeight > old.contentHeight,
-                       shouldPinTimelineToBottomDuringGeometryChange {
+                    if TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(
+                        previousHeight: old.contentHeight,
+                        newHeight: new.contentHeight,
+                        isPinnedToBottom: shouldPinTimelineToBottomDuringGeometryChange
+                    ) {
                         scheduleFollowBottomScroll(using: proxy)
                     }
                     if new.isAtBottom != old.isAtBottom {
@@ -349,10 +347,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
 
         return footerContent
-            .simultaneousGesture(
-                composerKeyboardDismissGesture,
-                including: isComposerAutocompletePresented ? .none : .all
-            )
+            // Let the composer own vertical drags so internal text scrolling
+            // does not compete with keyboard-dismiss gestures on the footer.
             .overlay(alignment: .top) {
                 if shouldShowScrollToLatestButton, let scrollToBottomAction {
                     Button {
@@ -377,15 +373,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             .animation(.easeInOut(duration: 0.2), value: shouldShowScrollToLatestButton)
     }
 
-    // Keeps the WhatsApp-style upward swipe dismissal available across the whole footer,
-    // including accessory rows and bars that sit outside the text view itself.
-    private var composerKeyboardDismissGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
+    // Restores swipe-to-dismiss in brand-new chats without putting a drag
+    // recognizer back on top of the composer footer itself.
+    private var emptyStateKeyboardDismissGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
             .onChanged { value in
                 guard isComposerFocused else { return }
-                // Let nested autocomplete panels keep the drag so their own ScrollViews
-                // can scroll without the footer dismissing the keyboard underneath them.
-                guard !isComposerAutocompletePresented else { return }
                 guard abs(value.translation.height) > abs(value.translation.width) else { return }
                 guard value.translation.height < -20 else { return }
                 onTapOutsideComposer()
@@ -459,15 +452,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         userScrollCooldownUntil = nil
         followBottomScrollTask?.cancel()
         followBottomScrollTask = nil
-        if autoScrollMode != .anchorAssistantResponse, !isScrolledToBottom {
-            autoScrollMode = .manual
-        }
+        autoScrollMode = TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: autoScrollMode)
     }
 
     // Preserves user-controlled deceleration for a short cooldown before auto-follow can resume.
     private func handleUserScrollDragEnded() {
         isUserDraggingScroll = false
         userScrollCooldownUntil = TurnScrollStateTracker.cooldownDeadline()
+        autoScrollMode = TurnScrollStateTracker.modeAfterUserDragEnded(
+            currentMode: autoScrollMode,
+            isScrolledToBottom: isScrolledToBottom
+        )
     }
 
     // Mirrors user-driven scroll phases without pausing auto-follow during programmatic animations.

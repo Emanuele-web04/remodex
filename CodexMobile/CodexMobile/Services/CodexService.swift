@@ -4,6 +4,7 @@
 // Exports: CodexService, CodexApprovalRequest
 // Depends on: Foundation, Observation, RPCMessage, CodexThread, CodexMessage, UserNotifications
 
+import CryptoKit
 import Foundation
 import Network
 import Observation
@@ -211,6 +212,7 @@ enum CodexNotificationPayloadKeys {
     static let threadId = "threadId"
     static let turnId = "turnId"
     static let result = "result"
+    static let requestId = "requestId"
 }
 
 // Tracks the real terminal outcome of a run, including user interruption.
@@ -313,6 +315,15 @@ struct AssistantRevertStateCacheEntry {
 final class CodexService {
     static let minimumSupportedBridgePackageVersion = "1.3.5"
 
+    private static let uiTestTimelineFixtureIdentity: CodexPhoneIdentityState = {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        return CodexPhoneIdentityState(
+            phoneDeviceId: "com.codexmobile.uitest.timeline",
+            phoneIdentityPrivateKey: privateKey.rawRepresentation.base64EncodedString(),
+            phoneIdentityPublicKey: privateKey.publicKey.rawRepresentation.base64EncodedString()
+        )
+    }()
+
     // --- Public state ---------------------------------------------------------
 
     var threads: [CodexThread] = [] {
@@ -393,6 +404,8 @@ final class CodexService {
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
+    // Runtime compatibility flag for the bridge-owned `voice/resolveAuth` voice flow.
+    var supportsBridgeVoiceAuth = true
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
     // Remembers the runtime's accepted sandbox param shape so hot-path requests avoid repeated retries.
@@ -433,6 +446,8 @@ final class CodexService {
     var hasPresentedServiceTierBridgeUpdatePrompt = false
     var hasPresentedThreadForkBridgeUpdatePrompt = false
     var hasPresentedMinimumBridgePackageUpdatePrompt = false
+    // Remembers the latest optional npm update we already surfaced so foreground refreshes stay non-spammy.
+    var lastPresentedAvailableBridgePackageVersion: String?
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.
@@ -527,6 +542,7 @@ final class CodexService {
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]
+    var structuredUserInputNotificationDedupedAt: [String: Date] = [:]
     var notificationCenterDelegateProxy: CodexNotificationCenterDelegateProxy?
     var notificationObserverTokens: [NSObjectProtocol] = []
     var remoteNotificationDeviceToken: String?
@@ -622,10 +638,15 @@ final class CodexService {
     init(
         encoder: JSONEncoder = JSONEncoder(),
         decoder: JSONDecoder = JSONDecoder(),
-        defaults: UserDefaults = .standard,
+        defaults injectedDefaults: UserDefaults = .standard,
         userNotificationCenter: CodexUserNotificationCentering = UNUserNotificationCenter.current(),
         remoteNotificationRegistrar: CodexRemoteNotificationRegistering = CodexApplicationRemoteNotificationRegistrar.shared
     ) {
+        let uiTestFixture = ProcessInfo.processInfo.arguments.contains("-CodexUITestsFixture")
+        let defaults = uiTestFixture
+            ? (UserDefaults(suiteName: "com.codexmobile.uitest.timelineFixture") ?? injectedDefaults)
+            : injectedDefaults
+
         let persistenceNamespace = Self.persistenceNamespace(for: defaults)
         self.encoder = encoder
         self.decoder = decoder
@@ -635,23 +656,33 @@ final class CodexService {
         self.aiChangeSetPersistence = AIChangeSetPersistence(namespace: persistenceNamespace)
         self.userNotificationCenter = userNotificationCenter
         self.remoteNotificationRegistrar = remoteNotificationRegistrar
-        self.convexTransport = CodexAsyncTransportFactory.make()
-        self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
-        self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
-        self.lastTrustedMacDeviceId = SecureStore.readString(for: CodexSecureKeys.lastTrustedMacDeviceId)
-        let loadedMessages = messagePersistence.load().mapValues { messages in
-            messages.map { message in
-                var value = message
-                // Streaming cannot survive app relaunch; clear stale flags loaded from disk.
-                value.isStreaming = false
-                return value
+        self.convexTransport = uiTestFixture ? nil : CodexAsyncTransportFactory.make()
+        self.phoneIdentityState = uiTestFixture ? Self.uiTestTimelineFixtureIdentity : codexPhoneIdentityStateFromSecureStore()
+        self.trustedMacRegistry = uiTestFixture ? .empty : codexTrustedMacRegistryFromSecureStore()
+        self.lastTrustedMacDeviceId = uiTestFixture ? nil : SecureStore.readString(for: CodexSecureKeys.lastTrustedMacDeviceId)
+        let loadedMessages: [String: [CodexMessage]]
+        if uiTestFixture {
+            loadedMessages = [:]
+        } else {
+            loadedMessages = messagePersistence.load().mapValues { messages in
+                messages.map { message in
+                    var value = message
+                    // Streaming cannot survive app relaunch; clear stale flags loaded from disk.
+                    value.isStreaming = false
+                    return value
+                }
             }
         }
         CodexMessageOrderCounter.seed(from: loadedMessages)
         self.messagesByThread = loadedMessages
         rebuildSubagentIdentityDirectory()
 
-        let loadedChangeSets = aiChangeSetPersistence.load()
+        let loadedChangeSets: [AIChangeSet]
+        if uiTestFixture {
+            loadedChangeSets = []
+        } else {
+            loadedChangeSets = aiChangeSetPersistence.load()
+        }
         self.aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
             partialResult[changeSet.id] = changeSet
         }
@@ -746,41 +777,61 @@ final class CodexService {
         }
 
         // Restore relay session from Keychain
-        self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
-        self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
-        self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
-        self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
-        self.relayCloudAsyncSharedSecret = SecureStore.readString(for: CodexSecureKeys.relayCloudAsyncSharedSecret)
-        if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
-           let parsedProtocolVersion = Int(rawProtocolVersion) {
-            self.relayProtocolVersion = parsedProtocolVersion
-        } else {
+        if uiTestFixture {
+            self.relaySessionId = nil
+            self.relayUrl = nil
+            self.relayMacDeviceId = nil
+            self.relayMacIdentityPublicKey = nil
+            self.relayCloudAsyncSharedSecret = nil
             self.relayProtocolVersion = codexSecureProtocolVersion
+            self.remoteNotificationDeviceToken = nil
+        } else {
+            self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
+            self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
+            self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
+            self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
+            self.relayCloudAsyncSharedSecret = SecureStore.readString(for: CodexSecureKeys.relayCloudAsyncSharedSecret)
+            if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
+               let parsedProtocolVersion = Int(rawProtocolVersion) {
+                self.relayProtocolVersion = parsedProtocolVersion
+            } else {
+                self.relayProtocolVersion = codexSecureProtocolVersion
+            }
+            if let rawLastAppliedSeq = SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
+               let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
+                self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
+            }
+            self.remoteNotificationDeviceToken = SecureStore.readString(for: CodexSecureKeys.pushDeviceToken)
+            if let relayMacDeviceId,
+               let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
+                self.secureConnectionState = .trustedMac
+                self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+            } else if let trustedMac = preferredTrustedMacRecord {
+                self.secureConnectionState = .liveSessionUnresolved
+                self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
+            }
         }
-        if let rawLastAppliedSeq = SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
-           let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
-            self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
+        if uiTestFixture {
+            persistedThreadListSnapshot = nil
+        } else {
+            persistedThreadListSnapshot = threadListPersistence.load()
         }
-        self.remoteNotificationDeviceToken = SecureStore.readString(for: CodexSecureKeys.pushDeviceToken)
-        if let relayMacDeviceId,
-           let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
-            self.secureConnectionState = .trustedMac
-            self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
-        } else if let trustedMac = preferredTrustedMacRecord {
-            self.secureConnectionState = .liveSessionUnresolved
-            self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
-        }
-        persistedThreadListSnapshot = threadListPersistence.load()
         let persistedArchivedThreadIDs = defaults.stringArray(forKey: Self.locallyArchivedThreadIDsKey) ?? []
         if persistedThreadListSnapshot?.threads.contains(where: { $0.syncState == .archivedLocal }) == true
             || !persistedArchivedThreadIDs.isEmpty {
             lastArchivedThreadsSyncAt = persistedThreadListSnapshot?.savedAt
         }
-        persistedSkillsCacheSnapshot = skillsPersistence.load() ?? CodexSkillsCacheSnapshot(entriesByRoot: [:])
+        if uiTestFixture {
+            persistedSkillsCacheSnapshot = CodexSkillsCacheSnapshot(entriesByRoot: [:])
+        } else {
+            persistedSkillsCacheSnapshot = skillsPersistence.load() ?? CodexSkillsCacheSnapshot(entriesByRoot: [:])
+        }
         restorePersistedConnectionContextIfNeeded()
         restorePersistedThreadListSnapshotIfNeeded()
         rebuildThreadLookupCaches()
-        startLocalRelayPathMonitor()
+        if !uiTestFixture {
+            startLocalRelayPathMonitor()
+        }
     }
 
     @MainActor deinit {
@@ -829,6 +880,15 @@ final class CodexService {
 
     var hasConvexLaneCredentials: Bool {
         convexLaneCredentials?.sharedSecretData != nil
+    }
+
+    /// Legacy name for tests and cloud async transport: relay- or trusted-mac–scoped Convex lane credentials.
+    var cloudAsyncFallbackCredentials: CodexConvexLaneCredentials? {
+        convexLaneCredentials
+    }
+
+    var hasCloudAsyncFallbackCredentials: Bool {
+        hasConvexLaneCredentials
     }
 
     // Normalizes the persisted relay session id before reuse in reconnect flows.
