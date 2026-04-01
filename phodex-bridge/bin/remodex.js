@@ -6,6 +6,7 @@
 // Depends on: ../src
 
 const {
+  getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
   readBridgeConfig,
@@ -21,6 +22,7 @@ const {
 const { version } = require("../package.json");
 
 const defaultDeps = {
+  getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
   readBridgeConfig,
@@ -47,10 +49,10 @@ async function main({
   exitImpl = process.exit,
   deps = defaultDeps,
 } = {}) {
-  const command = argv[2] || "up";
+  const { command, jsonOutput, watchThreadId } = parseCliArgs(argv.slice(2));
 
   if (isVersionCommand(command)) {
-    consoleImpl.log(version);
+    emitVersion({ jsonOutput, consoleImpl });
     return;
   }
 
@@ -86,10 +88,20 @@ async function main({
       exitImpl,
     });
     deps.readBridgeConfig();
-    await deps.startMacOSBridgeService({
+    const result = await deps.startMacOSBridgeService({
       waitForPairing: false,
     });
-    consoleImpl.log("[remodex] macOS bridge service is running.");
+    emitResult({
+      payload: {
+        ok: true,
+        currentVersion: version,
+        plistPath: result?.plistPath,
+        pairingSession: result?.pairingSession,
+      },
+      message: "[remodex] macOS bridge service is running.",
+      jsonOutput,
+      consoleImpl,
+    });
     return;
   }
 
@@ -100,10 +112,20 @@ async function main({
       exitImpl,
     });
     deps.readBridgeConfig();
-    await deps.startMacOSBridgeService({
+    const result = await deps.startMacOSBridgeService({
       waitForPairing: false,
     });
-    consoleImpl.log("[remodex] macOS bridge service restarted.");
+    emitResult({
+      payload: {
+        ok: true,
+        currentVersion: version,
+        plistPath: result?.plistPath,
+        pairingSession: result?.pairingSession,
+      },
+      message: "[remodex] macOS bridge service restarted.",
+      jsonOutput,
+      consoleImpl,
+    });
     return;
   }
 
@@ -114,7 +136,15 @@ async function main({
       exitImpl,
     });
     deps.stopMacOSBridgeService();
-    consoleImpl.log("[remodex] macOS bridge service stopped.");
+    emitResult({
+      payload: {
+        ok: true,
+        currentVersion: version,
+      },
+      message: "[remodex] macOS bridge service stopped.",
+      jsonOutput,
+      consoleImpl,
+    });
     return;
   }
 
@@ -124,6 +154,13 @@ async function main({
       consoleImpl,
       exitImpl,
     });
+    if (jsonOutput) {
+      emitJson({
+        ...deps.getMacOSBridgeServiceStatus(),
+        currentVersion: version,
+      });
+      return;
+    }
     deps.printMacOSBridgeServiceStatus();
     return;
   }
@@ -132,10 +169,28 @@ async function main({
     try {
       if (platform === "darwin") {
         deps.resetMacOSBridgePairing();
-        consoleImpl.log("[remodex] Stopped the macOS bridge service and cleared the saved pairing state. Run `remodex up` to pair again.");
+        emitResult({
+          payload: {
+            ok: true,
+            currentVersion: version,
+            platform: "darwin",
+          },
+          message: "[remodex] Stopped the macOS bridge service and cleared the saved pairing state. Run `remodex up` to pair again.",
+          jsonOutput,
+          consoleImpl,
+        });
       } else {
         deps.resetBridgePairing();
-        consoleImpl.log("[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.");
+        emitResult({
+          payload: {
+            ok: true,
+            currentVersion: version,
+            platform,
+          },
+          message: "[remodex] Cleared the saved pairing state. Run `remodex up` to pair again.",
+          jsonOutput,
+          consoleImpl,
+        });
       }
     } catch (error) {
       consoleImpl.error(`[remodex] ${(error && error.message) || "Failed to clear the saved pairing state."}`);
@@ -147,9 +202,17 @@ async function main({
   if (command === "resume") {
     try {
       const state = deps.openLastActiveThread();
-      consoleImpl.log(
-        `[remodex] Opened last active thread: ${state.threadId} (${state.source || "unknown"})`
-      );
+      emitResult({
+        payload: {
+          ok: true,
+          currentVersion: version,
+          threadId: state.threadId,
+          source: state.source || "unknown",
+        },
+        message: `[remodex] Opened last active thread: ${state.threadId} (${state.source || "unknown"})`,
+        jsonOutput,
+        consoleImpl,
+      });
     } catch (error) {
       consoleImpl.error(`[remodex] ${(error && error.message) || "Failed to reopen the last thread."}`);
       exitImpl(1);
@@ -159,7 +222,7 @@ async function main({
 
   if (command === "watch") {
     try {
-      deps.watchThreadRollout(argv[3] || "");
+      deps.watchThreadRollout(watchThreadId);
     } catch (error) {
       consoleImpl.error(`[remodex] ${(error && error.message) || "Failed to watch the thread rollout."}`);
       exitImpl(1);
@@ -170,9 +233,62 @@ async function main({
   consoleImpl.error(`Unknown command: ${command}`);
   consoleImpl.error(
     "Usage: remodex up | remodex run | remodex start | remodex restart | remodex stop | remodex status | "
-    + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version"
+    + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
+    + "append --json to start/restart/stop/status/reset-pairing/resume for machine-readable output"
   );
   exitImpl(1);
+}
+
+function parseCliArgs(rawArgs) {
+  const positionals = [];
+  let jsonOutput = false;
+
+  for (const arg of rawArgs) {
+    if (arg === "--json") {
+      jsonOutput = true;
+      continue;
+    }
+
+    positionals.push(arg);
+  }
+
+  return {
+    command: positionals[0] || "up",
+    jsonOutput,
+    watchThreadId: positionals[1] || "",
+  };
+}
+
+function emitVersion({
+  jsonOutput = false,
+  consoleImpl = console,
+} = {}) {
+  if (jsonOutput) {
+    emitJson({
+      currentVersion: version,
+    });
+    return;
+  }
+
+  consoleImpl.log(version);
+}
+
+function emitResult({
+  payload,
+  message,
+  jsonOutput = false,
+  consoleImpl = console,
+} = {}) {
+  if (jsonOutput) {
+    emitJson(payload);
+    return;
+  }
+
+  consoleImpl.log(message);
+}
+
+function emitJson(payload) {
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
 }
 
 function assertMacOSCommand(name, {

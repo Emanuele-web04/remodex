@@ -18,6 +18,7 @@ const {
   stopMacOSBridgeService,
 } = require("../src/macos-launch-agent");
 const {
+  writeDaemonConfig,
   readBridgeStatus,
   readPairingSession,
   writeBridgeStatus,
@@ -155,6 +156,7 @@ test("runMacOSBridgeService records a clean error state instead of throwing when
 
 test("getMacOSBridgeServiceStatus reports launchd + runtime metadata together", () => {
   withTempDaemonEnv(({ rootDir }) => {
+    writeDaemonConfig({ relayUrl: "ws://127.0.0.1:9000/relay" });
     writePairingSession({ sessionId: "session-2" });
     writeBridgeStatus({ state: "running", connectionStatus: "connected", pid: 55 });
 
@@ -172,6 +174,7 @@ test("getMacOSBridgeServiceStatus reports launchd + runtime metadata together", 
 
     assert.equal(status.launchdLoaded, true);
     assert.equal(status.launchdPid, 55);
+    assert.equal(status.daemonConfig?.relayUrl, "ws://127.0.0.1:9000/relay");
     assert.equal(status.bridgeStatus?.connectionStatus, "connected");
     assert.equal(status.pairingSession?.pairingPayload?.sessionId, "session-2");
   });
