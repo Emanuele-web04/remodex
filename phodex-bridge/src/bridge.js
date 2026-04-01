@@ -990,7 +990,8 @@ function buildMacRegistration(deviceState) {
       publicKey: normalizeNonEmptyString(publicKey),
     }))
     .filter(phone => phone.deviceId && phone.publicKey);
-  const primaryTrustedPhone = trustedPhones[0] || null;
+  // Keep the legacy single-phone fields pointed at the newest pairing.
+  const primaryTrustedPhone = trustedPhones[trustedPhones.length - 1] || null;
   return {
     macDeviceId: normalizeNonEmptyString(deviceState?.macDeviceId),
     macIdentityPublicKey: normalizeNonEmptyString(deviceState?.macIdentityPublicKey),
