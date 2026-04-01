@@ -10,9 +10,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const {
+  createCipheriv,
   createDecipheriv,
+  createPrivateKey,
   generateKeyPairSync,
   randomBytes,
+  sign,
 } = require("node:crypto");
 
 const {
@@ -408,7 +411,101 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
       }
     });
   });
+
+  await t.test("decrypts Convex claim ciphertext using the trusted phone identity", async () => {
+    const macState = makeDeviceState();
+    const phone = generateKeyPairSync("ed25519");
+    const phonePublicJwk = phone.publicKey.export({ format: "jwk" });
+    const phonePrivateJwk = phone.privateKey.export({ format: "jwk" });
+    const phoneDeviceId = `phone-${cryptoId()}`;
+    const deviceState = {
+      ...macState,
+      trustedPhones: {
+        [phoneDeviceId]: base64UrlToBase64(phonePublicJwk.x),
+      },
+    };
+
+    const plaintext = JSON.stringify({
+      id: "req-cipher-1",
+      method: "thread/list",
+      params: {},
+    });
+    const sharedSecret = Buffer.from(deviceState.cloudAsyncSharedSecret, "base64");
+    const encrypted = encryptAesGcmPayload(Buffer.from(plaintext, "utf8"), sharedSecret);
+    const phonePrivateKey = createPrivateKey({
+      key: {
+        crv: "Ed25519",
+        d: phonePrivateJwk.d,
+        kty: "OKP",
+        x: phonePublicJwk.x,
+      },
+      format: "jwk",
+    });
+    const signature = sign(null, encrypted, phonePrivateKey).toString("base64");
+
+    await withDeviceState(deviceState, async () => {
+      const requests = [];
+      const asyncRequests = [];
+      let claimReturnedMessage = false;
+      const fetchImpl = createFetchRecorder({
+        "/remodex/health": () =>
+          jsonResponse({ status: "ok", provider: "convex" }),
+        "/remodex/messages/outbound/claim": () => {
+          if (claimReturnedMessage) {
+            return emptyResponse(204);
+          }
+          claimReturnedMessage = true;
+          return jsonResponse({
+            message: {
+              recordName: "convex-record-1",
+              requestId: "req-cipher-1",
+              fromDeviceId: phoneDeviceId,
+              toDeviceId: deviceState.macDeviceId,
+              ciphertext: encrypted.toString("base64"),
+              signature,
+            },
+          });
+        },
+      }, requests);
+
+      const originalFetch = global.fetch;
+      global.fetch = fetchImpl;
+      let client;
+      try {
+        client = createConvexHelperClient({
+          enabled: true,
+          siteUrl: EXPECTED_CONVEX_SITE_URL,
+          pollIntervalMs: 50,
+          leaseDurationMs: 25,
+          getDeviceState: () => deviceState,
+          onAsyncRequest(message) {
+            asyncRequests.push({ ...message });
+          },
+        });
+        client.start();
+        await waitFor(() => asyncRequests.length > 0);
+        client.stop();
+        await waitFor(() => !client.currentStatus().running);
+
+        assert.equal(asyncRequests.length, 1);
+        assert.equal(asyncRequests[0].payloadText, plaintext);
+        assert.equal(asyncRequests[0].recordName, "convex-record-1");
+        assert.equal(asyncRequests[0].requestId, "req-cipher-1");
+      } finally {
+        client?.stop();
+        global.fetch = originalFetch;
+      }
+    });
+  });
 });
+
+function encryptAesGcmPayload(plaintext, sharedSecret) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", sharedSecret, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, encrypted, tag]);
+}
 
 function createFetchRecorder(responders, requests) {
   return async (input, options = {}) => {

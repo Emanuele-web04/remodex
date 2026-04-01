@@ -9,10 +9,14 @@ const os = require("os");
 const path = require("path");
 const {
   createCipheriv,
+  createDecipheriv,
   createPrivateKey,
+  createPublicKey,
   randomBytes,
   sign,
+  verify,
 } = require("crypto");
+const { getTrustedPhonePublicKey } = require("./secure-device-state");
 
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_LEASE_DURATION_MS = 15000;
@@ -27,6 +31,7 @@ function createConvexHelperClient({
   onStatusChange = null,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   leaseDurationMs = DEFAULT_LEASE_DURATION_MS,
+  getDeviceState = null,
 } = {}) {
   const normalizedEnabled = Boolean(enabled);
   const normalizedSiteUrl = normalizeSiteUrl(siteUrl);
@@ -167,7 +172,7 @@ function createConvexHelperClient({
       throw new Error(normalizeErrorMessage(responseBody.error, "Convex claim request reported failure."));
     }
 
-    const message = unwrapMessage(responseBody);
+    const message = unwrapMessage(responseBody, getDeviceState);
     if (!message) {
       return null;
     }
@@ -412,7 +417,7 @@ function createConvexHelperClient({
   };
 }
 
-function unwrapMessage(value) {
+function unwrapMessage(value, getDeviceState) {
   if (!isPlainObject(value)) {
     return null;
   }
@@ -435,14 +440,117 @@ function unwrapMessage(value) {
       continue;
     }
 
+    const payloadText = resolveClaimedPayloadText(candidate, getDeviceState);
+    if (!normalizeString(payloadText)) {
+      continue;
+    }
+
     return {
       recordName,
       requestId: normalizeString(candidate.requestId),
-      payloadText: stringOrEmpty(candidate.payloadText),
+      payloadText,
     };
   }
 
   return null;
+}
+
+function resolveDeviceStateForAsyncClaim(getDeviceState) {
+  if (typeof getDeviceState === "function") {
+    try {
+      const state = getDeviceState();
+      if (state && isPlainObject(state)) {
+        return state;
+      }
+    } catch {
+      // Fall back to on-disk state when the live snapshot is unavailable.
+    }
+  }
+  return readDeviceState();
+}
+
+function readOptionalConvexString(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : "";
+}
+
+function resolveClaimedPayloadText(candidate, getDeviceState) {
+  const inlinePayload = stringOrEmpty(candidate.payloadText);
+  const ciphertext = readOptionalConvexString(candidate.ciphertext);
+  const signature = readOptionalConvexString(candidate.signature);
+  const fromDeviceId = normalizeString(candidate.fromDeviceId);
+
+  if (ciphertext && signature && fromDeviceId) {
+    const deviceState = resolveDeviceStateForAsyncClaim(getDeviceState);
+    if (!deviceState) {
+      throw new Error("Convex async claim could not load bridge device state for decryption.");
+    }
+
+    const phonePublicKey = getTrustedPhonePublicKey(deviceState, fromDeviceId);
+    if (!phonePublicKey) {
+      throw new Error(
+        `Convex async claim is from an unknown phone device (${fromDeviceId}); refusing ciphertext.`
+      );
+    }
+
+    const cipherBuffer = Buffer.from(ciphertext, "base64");
+    if (!cipherBuffer.length) {
+      throw new Error("Convex async claim ciphertext was empty after decoding.");
+    }
+
+    if (!verifyPhonePayloadSignature(cipherBuffer, signature, phonePublicKey)) {
+      throw new Error("Convex async claim signature verification failed for the trusted phone.");
+    }
+
+    const sharedSecret = readSharedSecret(deviceState);
+    const plaintext = decryptAesGcmCombined(cipherBuffer, sharedSecret);
+    return plaintext.toString("utf8");
+  }
+
+  return inlinePayload;
+}
+
+function decryptAesGcmCombined(ciphertextBuffer, sharedSecret) {
+  if (ciphertextBuffer.length < 12 + 16) {
+    throw new Error("Convex ciphertext was too short to decrypt.");
+  }
+
+  const iv = ciphertextBuffer.subarray(0, 12);
+  const authTag = ciphertextBuffer.subarray(ciphertextBuffer.length - 16);
+  const encrypted = ciphertextBuffer.subarray(12, ciphertextBuffer.length - 16);
+  const decipher = createDecipheriv("aes-256-gcm", sharedSecret, iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]);
+}
+
+function verifyPhonePayloadSignature(ciphertextBuffer, signatureBase64, phonePublicKeyBase64) {
+  let publicKey;
+  try {
+    publicKey = createPublicKey({
+      key: {
+        crv: "Ed25519",
+        x: base64ToBase64Url(phonePublicKeyBase64),
+        kty: "OKP",
+      },
+      format: "jwk",
+    });
+  } catch {
+    return false;
+  }
+
+  const signature = Buffer.from(normalizeString(signatureBase64), "base64");
+  if (!signature.length) {
+    return false;
+  }
+
+  try {
+    return verify(null, ciphertextBuffer, publicKey, signature);
+  } catch {
+    return false;
+  }
 }
 
 function buildResponseBody(recordName, payloadText) {
