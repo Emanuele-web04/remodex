@@ -1,0 +1,265 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConfigRequirementsReadResponse",
+  "type": "object",
+  "properties": {
+    "requirements": {
+      "description": "Null if no requirements are configured (e.g. no requirements.toml/MDM entries).",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConfigRequirements"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "AskForApproval": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "untrusted",
+            "on-failure",
+            "on-request",
+            "never"
+          ]
+        },
+        {
+          "type": "object",
+          "required": [
+            "granular"
+          ],
+          "properties": {
+            "granular": {
+              "type": "object",
+              "required": [
+                "mcp_elicitations",
+                "rules",
+                "sandbox_approval"
+              ],
+              "properties": {
+                "mcp_elicitations": {
+                  "type": "boolean"
+                },
+                "request_permissions": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "rules": {
+                  "type": "boolean"
+                },
+                "sandbox_approval": {
+                  "type": "boolean"
+                },
+                "skill_approval": {
+                  "default": false,
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "title": "GranularAskForApproval"
+        }
+      ]
+    },
+    "ConfigRequirements": {
+      "type": "object",
+      "properties": {
+        "allowedApprovalPolicies": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/AskForApproval"
+          }
+        },
+        "allowedSandboxModes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/SandboxMode"
+          }
+        },
+        "allowedWebSearchModes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/WebSearchMode"
+          }
+        },
+        "enforceResidency": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResidencyRequirement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "featureRequirements": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "NetworkDomainPermission": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny"
+      ]
+    },
+    "NetworkRequirements": {
+      "type": "object",
+      "properties": {
+        "allowLocalBinding": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowUnixSockets": {
+          "description": "Legacy compatibility view derived from `unix_sockets`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowUpstreamProxy": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedDomains": {
+          "description": "Legacy compatibility view derived from `domains`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "dangerouslyAllowAllUnixSockets": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "dangerouslyAllowNonLoopbackProxy": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "deniedDomains": {
+          "description": "Legacy compatibility view derived from `domains`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "domains": {
+          "description": "Canonical network permission map for `experimental_network`.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/definitions/NetworkDomainPermission"
+          }
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "httpPort": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "managedAllowedDomainsOnly": {
+          "description": "When true, only managed allowlist entries are respected while managed network enforcement is active.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "socksPort": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "unixSockets": {
+          "description": "Canonical unix socket permission map for `experimental_network`.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "$ref": "#/definitions/NetworkUnixSocketPermission"
+          }
+        }
+      }
+    },
+    "NetworkUnixSocketPermission": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "none"
+      ]
+    },
+    "ResidencyRequirement": {
+      "type": "string",
+      "enum": [
+        "us"
+      ]
+    },
+    "SandboxMode": {
+      "type": "string",
+      "enum": [
+        "read-only",
+        "workspace-write",
+        "danger-full-access"
+      ]
+    },
+    "WebSearchMode": {
+      "type": "string",
+      "enum": [
+        "disabled",
+        "cached",
+        "live"
+      ]
+    }
+  }
+}

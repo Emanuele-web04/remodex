@@ -75,12 +75,22 @@ nonisolated enum SecureStore {
             return
         }
 
-        deleteValue(for: key)
-
         var query = baseQuery(for: key)
         query[kSecValueData as String] = value
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
 
-        SecItemAdd(query as CFDictionary, nil)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            let updateQuery = baseQuery(for: key)
+            let attributes: [String: Any] = [
+                kSecValueData as String: value,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
+            ]
+            SecItemUpdate(updateQuery as CFDictionary, attributes as CFDictionary)
+        } else if status != errSecSuccess {
+            // Log non-success status for debugging keychain issues.
+            NSLog("[SecureStore] SecItemAdd failed for key=%@ status=%d", key, status)
+        }
     }
 
     // Convenience wrapper for small Codable payloads kept in Keychain.

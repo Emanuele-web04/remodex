@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FsWatchResponse",
+  "description": "Created watch handle returned by `fs/watch`.",
+  "type": "object",
+  "required": [
+    "path",
+    "watchId"
+  ],
+  "properties": {
+    "path": {
+      "description": "Canonicalized path associated with the watch.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        }
+      ]
+    },
+    "watchId": {
+      "description": "Connection-scoped watch identifier used for `fs/unwatch` and `fs/changed`.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "AbsolutePathBuf": {
+      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
+      "type": "string"
+    }
+  }
+}

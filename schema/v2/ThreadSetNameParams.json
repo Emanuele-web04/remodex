@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadSetNameParams",
+  "type": "object",
+  "required": [
+    "name",
+    "threadId"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  }
+}

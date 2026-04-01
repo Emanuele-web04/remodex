@@ -1,0 +1,165 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecCommandApprovalParams",
+  "type": "object",
+  "required": [
+    "callId",
+    "command",
+    "conversationId",
+    "cwd",
+    "parsedCmd"
+  ],
+  "properties": {
+    "approvalId": {
+      "description": "Identifier for this specific approval callback.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "callId": {
+      "description": "Use to correlate this with [codex_protocol::protocol::ExecCommandBeginEvent] and [codex_protocol::protocol::ExecCommandEndEvent].",
+      "type": "string"
+    },
+    "command": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "conversationId": {
+      "$ref": "#/definitions/ThreadId"
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "parsedCmd": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ParsedCommand"
+      }
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "ParsedCommand": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "cmd",
+            "name",
+            "path",
+            "type"
+          ],
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "description": "(Best effort) Path to the file being read by the command. When possible, this is an absolute path, though when relative, it should be resolved against the `cwd`` that will be used to run the command to derive the absolute path.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "read"
+              ],
+              "title": "ReadParsedCommandType"
+            }
+          },
+          "title": "ReadParsedCommand"
+        },
+        {
+          "type": "object",
+          "required": [
+            "cmd",
+            "type"
+          ],
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "list_files"
+              ],
+              "title": "ListFilesParsedCommandType"
+            }
+          },
+          "title": "ListFilesParsedCommand"
+        },
+        {
+          "type": "object",
+          "required": [
+            "cmd",
+            "type"
+          ],
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "query": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "search"
+              ],
+              "title": "SearchParsedCommandType"
+            }
+          },
+          "title": "SearchParsedCommand"
+        },
+        {
+          "type": "object",
+          "required": [
+            "cmd",
+            "type"
+          ],
+          "properties": {
+            "cmd": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "unknown"
+              ],
+              "title": "UnknownParsedCommandType"
+            }
+          },
+          "title": "UnknownParsedCommand"
+        }
+      ]
+    },
+    "ThreadId": {
+      "type": "string"
+    }
+  }
+}

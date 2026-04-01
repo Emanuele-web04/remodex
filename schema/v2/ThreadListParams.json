@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadListParams",
+  "type": "object",
+  "properties": {
+    "archived": {
+      "description": "Optional archived filter; when set to true, only archived threads are returned. If false or null, only non-archived threads are returned.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "cursor": {
+      "description": "Opaque pagination cursor returned by a previous call.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cwd": {
+      "description": "Optional cwd filter; when set, only threads whose session cwd exactly matches this path are returned.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "description": "Optional page size; defaults to a reasonable server-side value.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "modelProviders": {
+      "description": "Optional provider filter; when set, only sessions recorded under these providers are returned. When present but empty, includes all providers.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "searchTerm": {
+      "description": "Optional substring filter for the extracted thread title.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "sortKey": {
+      "description": "Optional sort key; defaults to created_at.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ThreadSortKey"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "sourceKinds": {
+      "description": "Optional source filter; when set, only sessions from these source kinds are returned. When omitted or empty, defaults to interactive sources.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ThreadSourceKind"
+      }
+    }
+  },
+  "definitions": {
+    "ThreadSortKey": {
+      "type": "string",
+      "enum": [
+        "created_at",
+        "updated_at"
+      ]
+    },
+    "ThreadSourceKind": {
+      "type": "string",
+      "enum": [
+        "cli",
+        "vscode",
+        "exec",
+        "appServer",
+        "subAgent",
+        "subAgentReview",
+        "subAgentCompact",
+        "subAgentThreadSpawn",
+        "subAgentOther",
+        "unknown"
+      ]
+    }
+  }
+}

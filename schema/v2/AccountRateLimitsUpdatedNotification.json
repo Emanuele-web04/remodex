@@ -1,0 +1,135 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AccountRateLimitsUpdatedNotification",
+  "type": "object",
+  "required": [
+    "rateLimits"
+  ],
+  "properties": {
+    "rateLimits": {
+      "$ref": "#/definitions/RateLimitSnapshot"
+    }
+  },
+  "definitions": {
+    "CreditsSnapshot": {
+      "type": "object",
+      "required": [
+        "hasCredits",
+        "unlimited"
+      ],
+      "properties": {
+        "balance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hasCredits": {
+          "type": "boolean"
+        },
+        "unlimited": {
+          "type": "boolean"
+        }
+      }
+    },
+    "PlanType": {
+      "type": "string",
+      "enum": [
+        "free",
+        "go",
+        "plus",
+        "pro",
+        "team",
+        "self_serve_business_usage_based",
+        "business",
+        "enterprise_cbp_usage_based",
+        "enterprise",
+        "edu",
+        "unknown"
+      ]
+    },
+    "RateLimitSnapshot": {
+      "type": "object",
+      "properties": {
+        "credits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CreditsSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limitId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limitName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planType": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "RateLimitWindow": {
+      "type": "object",
+      "required": [
+        "usedPercent"
+      ],
+      "properties": {
+        "resetsAt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "usedPercent": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "windowDurationMins": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      }
+    }
+  }
+}

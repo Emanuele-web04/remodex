@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DynamicToolCallResponse",
+  "type": "object",
+  "required": [
+    "contentItems",
+    "success"
+  ],
+  "properties": {
+    "contentItems": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/DynamicToolCallOutputContentItem"
+      }
+    },
+    "success": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "DynamicToolCallOutputContentItem": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "inputText"
+              ],
+              "title": "InputTextDynamicToolCallOutputContentItemType"
+            }
+          },
+          "title": "InputTextDynamicToolCallOutputContentItem"
+        },
+        {
+          "type": "object",
+          "required": [
+            "imageUrl",
+            "type"
+          ],
+          "properties": {
+            "imageUrl": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "inputImage"
+              ],
+              "title": "InputImageDynamicToolCallOutputContentItemType"
+            }
+          },
+          "title": "InputImageDynamicToolCallOutputContentItem"
+        }
+      ]
+    }
+  }
+}

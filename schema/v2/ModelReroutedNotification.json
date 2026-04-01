@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ModelReroutedNotification",
+  "type": "object",
+  "required": [
+    "fromModel",
+    "reason",
+    "threadId",
+    "toModel",
+    "turnId"
+  ],
+  "properties": {
+    "fromModel": {
+      "type": "string"
+    },
+    "reason": {
+      "$ref": "#/definitions/ModelRerouteReason"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "toModel": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ModelRerouteReason": {
+      "type": "string",
+      "enum": [
+        "highRiskCyberActivity"
+      ]
+    }
+  }
+}

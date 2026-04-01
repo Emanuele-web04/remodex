@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RequestId",
+  "anyOf": [
+    {
+      "type": "string"
+    },
+    {
+      "type": "integer",
+      "format": "int64"
+    }
+  ]
+}

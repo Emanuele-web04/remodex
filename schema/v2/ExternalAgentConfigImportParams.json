@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExternalAgentConfigImportParams",
+  "type": "object",
+  "required": [
+    "migrationItems"
+  ],
+  "properties": {
+    "migrationItems": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ExternalAgentConfigMigrationItem"
+      }
+    }
+  },
+  "definitions": {
+    "ExternalAgentConfigMigrationItem": {
+      "type": "object",
+      "required": [
+        "description",
+        "itemType"
+      ],
+      "properties": {
+        "cwd": {
+          "description": "Null or empty means home-scoped migration; non-empty means repo-scoped migration.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "itemType": {
+          "$ref": "#/definitions/ExternalAgentConfigMigrationItemType"
+        }
+      }
+    },
+    "ExternalAgentConfigMigrationItemType": {
+      "type": "string",
+      "enum": [
+        "AGENTS_MD",
+        "CONFIG",
+        "SKILLS",
+        "MCP_SERVER_CONFIG"
+      ]
+    }
+  }
+}

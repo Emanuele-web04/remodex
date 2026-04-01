@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LoginAccountResponse",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "apiKey"
+          ],
+          "title": "ApiKeyv2::LoginAccountResponseType"
+        }
+      },
+      "title": "ApiKeyv2::LoginAccountResponse"
+    },
+    {
+      "type": "object",
+      "required": [
+        "authUrl",
+        "loginId",
+        "type"
+      ],
+      "properties": {
+        "authUrl": {
+          "description": "URL the client should open in a browser to initiate the OAuth flow.",
+          "type": "string"
+        },
+        "loginId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "chatgpt"
+          ],
+          "title": "Chatgptv2::LoginAccountResponseType"
+        }
+      },
+      "title": "Chatgptv2::LoginAccountResponse"
+    },
+    {
+      "type": "object",
+      "required": [
+        "loginId",
+        "type",
+        "userCode",
+        "verificationUrl"
+      ],
+      "properties": {
+        "loginId": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "chatgptDeviceCode"
+          ],
+          "title": "ChatgptDeviceCodev2::LoginAccountResponseType"
+        },
+        "userCode": {
+          "description": "One-time code the user must enter after signing in.",
+          "type": "string"
+        },
+        "verificationUrl": {
+          "description": "URL the client should open in a browser to complete device code authorization.",
+          "type": "string"
+        }
+      },
+      "title": "ChatgptDeviceCodev2::LoginAccountResponse"
+    },
+    {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "chatgptAuthTokens"
+          ],
+          "title": "ChatgptAuthTokensv2::LoginAccountResponseType"
+        }
+      },
+      "title": "ChatgptAuthTokensv2::LoginAccountResponse"
+    }
+  ]
+}

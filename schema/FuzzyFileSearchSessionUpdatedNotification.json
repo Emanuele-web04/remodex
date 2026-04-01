@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FuzzyFileSearchSessionUpdatedNotification",
+  "type": "object",
+  "required": [
+    "files",
+    "query",
+    "sessionId"
+  ],
+  "properties": {
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FuzzyFileSearchResult"
+      }
+    },
+    "query": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "FuzzyFileSearchMatchType": {
+      "type": "string",
+      "enum": [
+        "file",
+        "directory"
+      ]
+    },
+    "FuzzyFileSearchResult": {
+      "description": "Superset of [`codex_file_search::FileMatch`]",
+      "type": "object",
+      "required": [
+        "file_name",
+        "match_type",
+        "path",
+        "root",
+        "score"
+      ],
+      "properties": {
+        "file_name": {
+          "type": "string"
+        },
+        "indices": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        },
+        "match_type": {
+          "$ref": "#/definitions/FuzzyFileSearchMatchType"
+        },
+        "path": {
+          "type": "string"
+        },
+        "root": {
+          "type": "string"
+        },
+        "score": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

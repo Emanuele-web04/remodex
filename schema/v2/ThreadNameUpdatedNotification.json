@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadNameUpdatedNotification",
+  "type": "object",
+  "required": [
+    "threadId"
+  ],
+  "properties": {
+    "threadId": {
+      "type": "string"
+    },
+    "threadName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

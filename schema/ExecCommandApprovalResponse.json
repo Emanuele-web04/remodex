@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExecCommandApprovalResponse",
+  "type": "object",
+  "required": [
+    "decision"
+  ],
+  "properties": {
+    "decision": {
+      "$ref": "#/definitions/ReviewDecision"
+    }
+  },
+  "definitions": {
+    "NetworkPolicyAmendment": {
+      "type": "object",
+      "required": [
+        "action",
+        "host"
+      ],
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/NetworkPolicyRuleAction"
+        },
+        "host": {
+          "type": "string"
+        }
+      }
+    },
+    "NetworkPolicyRuleAction": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "deny"
+      ]
+    },
+    "ReviewDecision": {
+      "description": "User's decision in response to an ExecApprovalRequest.",
+      "oneOf": [
+        {
+          "description": "User has approved this command and the agent should execute it.",
+          "type": "string",
+          "enum": [
+            "approved"
+          ]
+        },
+        {
+          "description": "User has approved this command and wants to apply the proposed execpolicy amendment so future matching commands are permitted.",
+          "type": "object",
+          "required": [
+            "approved_execpolicy_amendment"
+          ],
+          "properties": {
+            "approved_execpolicy_amendment": {
+              "type": "object",
+              "required": [
+                "proposed_execpolicy_amendment"
+              ],
+              "properties": {
+                "proposed_execpolicy_amendment": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "title": "ApprovedExecpolicyAmendmentReviewDecision"
+        },
+        {
+          "description": "User has approved this request and wants future prompts in the same session-scoped approval cache to be automatically approved for the remainder of the session.",
+          "type": "string",
+          "enum": [
+            "approved_for_session"
+          ]
+        },
+        {
+          "description": "User chose to persist a network policy rule (allow/deny) for future requests to the same host.",
+          "type": "object",
+          "required": [
+            "network_policy_amendment"
+          ],
+          "properties": {
+            "network_policy_amendment": {
+              "type": "object",
+              "required": [
+                "network_policy_amendment"
+              ],
+              "properties": {
+                "network_policy_amendment": {
+                  "$ref": "#/definitions/NetworkPolicyAmendment"
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "title": "NetworkPolicyAmendmentReviewDecision"
+        },
+        {
+          "description": "User has denied this command and the agent should not execute it, but it should continue the session and try something else.",
+          "type": "string",
+          "enum": [
+            "denied"
+          ]
+        },
+        {
+          "description": "User has denied this command and the agent should not do anything until the user's next command.",
+          "type": "string",
+          "enum": [
+            "abort"
+          ]
+        }
+      ]
+    }
+  }
+}

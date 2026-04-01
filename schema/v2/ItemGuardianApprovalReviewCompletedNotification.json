@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ItemGuardianApprovalReviewCompletedNotification",
+  "description": "[UNSTABLE] Temporary notification payload for guardian automatic approval review. This shape is expected to change soon.\n\nTODO(ccunningham): Attach guardian review state to the reviewed tool item's lifecycle instead of sending separate standalone review notifications so the app-server API can persist and replay review state via `thread/read`.",
+  "type": "object",
+  "required": [
+    "review",
+    "targetItemId",
+    "threadId",
+    "turnId"
+  ],
+  "properties": {
+    "action": true,
+    "review": {
+      "$ref": "#/definitions/GuardianApprovalReview"
+    },
+    "targetItemId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "GuardianApprovalReview": {
+      "description": "[UNSTABLE] Temporary guardian approval review payload used by `item/autoApprovalReview/*` notifications. This shape is expected to change soon.",
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "rationale": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "riskLevel": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GuardianRiskLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "riskScore": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "status": {
+          "$ref": "#/definitions/GuardianApprovalReviewStatus"
+        }
+      }
+    },
+    "GuardianApprovalReviewStatus": {
+      "description": "[UNSTABLE] Lifecycle state for a guardian approval review.",
+      "type": "string",
+      "enum": [
+        "inProgress",
+        "approved",
+        "denied",
+        "aborted"
+      ]
+    },
+    "GuardianRiskLevel": {
+      "description": "[UNSTABLE] Risk level assigned by guardian approval review.",
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    }
+  }
+}

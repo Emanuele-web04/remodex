@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CommandExecResizeParams",
+  "description": "Resize a running PTY-backed `command/exec` session.",
+  "type": "object",
+  "required": [
+    "processId",
+    "size"
+  ],
+  "properties": {
+    "processId": {
+      "description": "Client-supplied, connection-scoped `processId` from the original `command/exec` request.",
+      "type": "string"
+    },
+    "size": {
+      "description": "New PTY size in character cells.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/CommandExecTerminalSize"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "CommandExecTerminalSize": {
+      "description": "PTY size in character cells for `command/exec` PTY sessions.",
+      "type": "object",
+      "required": [
+        "cols",
+        "rows"
+      ],
+      "properties": {
+        "cols": {
+          "description": "Terminal width in character cells.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "rows": {
+          "description": "Terminal height in character cells.",
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

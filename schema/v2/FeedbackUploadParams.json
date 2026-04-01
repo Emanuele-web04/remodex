@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FeedbackUploadParams",
+  "type": "object",
+  "required": [
+    "classification",
+    "includeLogs"
+  ],
+  "properties": {
+    "classification": {
+      "type": "string"
+    },
+    "extraLogFiles": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "includeLogs": {
+      "type": "boolean"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "threadId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

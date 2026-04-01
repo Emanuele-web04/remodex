@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConfigWarningNotification",
+  "type": "object",
+  "required": [
+    "summary"
+  ],
+  "properties": {
+    "details": {
+      "description": "Optional extra guidance or error details.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "path": {
+      "description": "Optional path to the config file that triggered the warning.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "range": {
+      "description": "Optional range for the error location inside the config file.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TextRange"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "summary": {
+      "description": "Concise summary of the warning.",
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "TextPosition": {
+      "type": "object",
+      "required": [
+        "column",
+        "line"
+      ],
+      "properties": {
+        "column": {
+          "description": "1-based column number (in Unicode scalar values).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "line": {
+          "description": "1-based line number.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TextRange": {
+      "type": "object",
+      "required": [
+        "end",
+        "start"
+      ],
+      "properties": {
+        "end": {
+          "$ref": "#/definitions/TextPosition"
+        },
+        "start": {
+          "$ref": "#/definitions/TextPosition"
+        }
+      }
+    }
+  }
+}

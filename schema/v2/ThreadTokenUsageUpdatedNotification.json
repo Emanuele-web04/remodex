@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadTokenUsageUpdatedNotification",
+  "type": "object",
+  "required": [
+    "threadId",
+    "tokenUsage",
+    "turnId"
+  ],
+  "properties": {
+    "threadId": {
+      "type": "string"
+    },
+    "tokenUsage": {
+      "$ref": "#/definitions/ThreadTokenUsage"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ThreadTokenUsage": {
+      "type": "object",
+      "required": [
+        "last",
+        "total"
+      ],
+      "properties": {
+        "last": {
+          "$ref": "#/definitions/TokenUsageBreakdown"
+        },
+        "modelContextWindow": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "total": {
+          "$ref": "#/definitions/TokenUsageBreakdown"
+        }
+      }
+    },
+    "TokenUsageBreakdown": {
+      "type": "object",
+      "required": [
+        "cachedInputTokens",
+        "inputTokens",
+        "outputTokens",
+        "reasoningOutputTokens",
+        "totalTokens"
+      ],
+      "properties": {
+        "cachedInputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "inputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "outputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reasoningOutputTokens": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "totalTokens": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    }
+  }
+}

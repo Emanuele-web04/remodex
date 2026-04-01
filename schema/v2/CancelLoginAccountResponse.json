@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CancelLoginAccountResponse",
+  "type": "object",
+  "required": [
+    "status"
+  ],
+  "properties": {
+    "status": {
+      "$ref": "#/definitions/CancelLoginAccountStatus"
+    }
+  },
+  "definitions": {
+    "CancelLoginAccountStatus": {
+      "type": "string",
+      "enum": [
+        "canceled",
+        "notFound"
+      ]
+    }
+  }
+}

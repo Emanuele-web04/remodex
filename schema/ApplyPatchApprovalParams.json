@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ApplyPatchApprovalParams",
+  "type": "object",
+  "required": [
+    "callId",
+    "conversationId",
+    "fileChanges"
+  ],
+  "properties": {
+    "callId": {
+      "description": "Use to correlate this with [codex_protocol::protocol::PatchApplyBeginEvent] and [codex_protocol::protocol::PatchApplyEndEvent].",
+      "type": "string"
+    },
+    "conversationId": {
+      "$ref": "#/definitions/ThreadId"
+    },
+    "fileChanges": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/FileChange"
+      }
+    },
+    "grantRoot": {
+      "description": "When set, the agent is asking the user to allow writes under this root for the remainder of the session (unclear if this is honored today).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "description": "Optional explanatory reason (e.g. request for extra write access).",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "FileChange": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "type"
+          ],
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "add"
+              ],
+              "title": "AddFileChangeType"
+            }
+          },
+          "title": "AddFileChange"
+        },
+        {
+          "type": "object",
+          "required": [
+            "content",
+            "type"
+          ],
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "delete"
+              ],
+              "title": "DeleteFileChangeType"
+            }
+          },
+          "title": "DeleteFileChange"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "unified_diff"
+          ],
+          "properties": {
+            "move_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "update"
+              ],
+              "title": "UpdateFileChangeType"
+            },
+            "unified_diff": {
+              "type": "string"
+            }
+          },
+          "title": "UpdateFileChange"
+        }
+      ]
+    },
+    "ThreadId": {
+      "type": "string"
+    }
+  }
+}

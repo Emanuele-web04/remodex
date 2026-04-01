@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ThreadReadParams",
+  "type": "object",
+  "required": [
+    "threadId"
+  ],
+  "properties": {
+    "includeTurns": {
+      "description": "When true, include turns and their items from rollout history.",
+      "default": false,
+      "type": "boolean"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  }
+}

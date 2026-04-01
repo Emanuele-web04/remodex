@@ -1,0 +1,191 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ListMcpServerStatusResponse",
+  "type": "object",
+  "required": [
+    "data"
+  ],
+  "properties": {
+    "data": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/McpServerStatus"
+      }
+    },
+    "nextCursor": {
+      "description": "Opaque cursor to pass to the next call to continue after the last item. If None, there are no more items to return.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "McpAuthStatus": {
+      "type": "string",
+      "enum": [
+        "unsupported",
+        "notLoggedIn",
+        "bearerToken",
+        "oAuth"
+      ]
+    },
+    "McpServerStatus": {
+      "type": "object",
+      "required": [
+        "authStatus",
+        "name",
+        "resourceTemplates",
+        "resources",
+        "tools"
+      ],
+      "properties": {
+        "authStatus": {
+          "$ref": "#/definitions/McpAuthStatus"
+        },
+        "name": {
+          "type": "string"
+        },
+        "resourceTemplates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ResourceTemplate"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Resource"
+          }
+        },
+        "tools": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/Tool"
+          }
+        }
+      }
+    },
+    "Resource": {
+      "description": "A known resource that the server is capable of reading.",
+      "type": "object",
+      "required": [
+        "name",
+        "uri"
+      ],
+      "properties": {
+        "_meta": true,
+        "annotations": true,
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icons": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        },
+        "mimeType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "size": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uri": {
+          "type": "string"
+        }
+      }
+    },
+    "ResourceTemplate": {
+      "description": "A template description for resources available on the server.",
+      "type": "object",
+      "required": [
+        "name",
+        "uriTemplate"
+      ],
+      "properties": {
+        "annotations": true,
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mimeType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uriTemplate": {
+          "type": "string"
+        }
+      }
+    },
+    "Tool": {
+      "description": "Definition for a tool the client can call.",
+      "type": "object",
+      "required": [
+        "inputSchema",
+        "name"
+      ],
+      "properties": {
+        "_meta": true,
+        "annotations": true,
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "icons": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        },
+        "outputSchema": true,
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

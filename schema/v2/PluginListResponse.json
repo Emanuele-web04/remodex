@@ -1,0 +1,289 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PluginListResponse",
+  "type": "object",
+  "required": [
+    "marketplaces"
+  ],
+  "properties": {
+    "featuredPluginIds": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "marketplaceLoadErrors": {
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/MarketplaceLoadErrorInfo"
+      }
+    },
+    "marketplaces": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PluginMarketplaceEntry"
+      }
+    },
+    "remoteSyncError": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "AbsolutePathBuf": {
+      "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
+      "type": "string"
+    },
+    "MarketplaceInterface": {
+      "type": "object",
+      "properties": {
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "MarketplaceLoadErrorInfo": {
+      "type": "object",
+      "required": [
+        "marketplacePath",
+        "message"
+      ],
+      "properties": {
+        "marketplacePath": {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "PluginAuthPolicy": {
+      "type": "string",
+      "enum": [
+        "ON_INSTALL",
+        "ON_USE"
+      ]
+    },
+    "PluginInstallPolicy": {
+      "type": "string",
+      "enum": [
+        "NOT_AVAILABLE",
+        "AVAILABLE",
+        "INSTALLED_BY_DEFAULT"
+      ]
+    },
+    "PluginInterface": {
+      "type": "object",
+      "required": [
+        "capabilities",
+        "screenshots"
+      ],
+      "properties": {
+        "brandColor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "composerIcon": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "defaultPrompt": {
+          "description": "Starter prompts for the plugin. Capped at 3 entries with a maximum of 128 characters per entry.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "developerName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "displayName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "logo": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "longDescription": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "privacyPolicyUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "screenshots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/AbsolutePathBuf"
+          }
+        },
+        "shortDescription": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "termsOfServiceUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "websiteUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PluginMarketplaceEntry": {
+      "type": "object",
+      "required": [
+        "name",
+        "path",
+        "plugins"
+      ],
+      "properties": {
+        "interface": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MarketplaceInterface"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        },
+        "plugins": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PluginSummary"
+          }
+        }
+      }
+    },
+    "PluginSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "type"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "local"
+              ],
+              "title": "LocalPluginSourceType"
+            }
+          },
+          "title": "LocalPluginSource"
+        }
+      ]
+    },
+    "PluginSummary": {
+      "type": "object",
+      "required": [
+        "authPolicy",
+        "enabled",
+        "id",
+        "installPolicy",
+        "installed",
+        "name",
+        "source"
+      ],
+      "properties": {
+        "authPolicy": {
+          "$ref": "#/definitions/PluginAuthPolicy"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "installPolicy": {
+          "$ref": "#/definitions/PluginInstallPolicy"
+        },
+        "installed": {
+          "type": "boolean"
+        },
+        "interface": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginInterface"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/PluginSource"
+        }
+      }
+    }
+  }
+}

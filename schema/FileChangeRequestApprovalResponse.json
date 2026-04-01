@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FileChangeRequestApprovalResponse",
+  "type": "object",
+  "required": [
+    "decision"
+  ],
+  "properties": {
+    "decision": {
+      "$ref": "#/definitions/FileChangeApprovalDecision"
+    }
+  },
+  "definitions": {
+    "FileChangeApprovalDecision": {
+      "oneOf": [
+        {
+          "description": "User approved the file changes.",
+          "type": "string",
+          "enum": [
+            "accept"
+          ]
+        },
+        {
+          "description": "User approved the file changes and future changes to the same files should run without prompting.",
+          "type": "string",
+          "enum": [
+            "acceptForSession"
+          ]
+        },
+        {
+          "description": "User denied the file changes. The agent will continue the turn.",
+          "type": "string",
+          "enum": [
+            "decline"
+          ]
+        },
+        {
+          "description": "User denied the file changes. The turn will also be immediately interrupted.",
+          "type": "string",
+          "enum": [
+            "cancel"
+          ]
+        }
+      ]
+    }
+  }
+}

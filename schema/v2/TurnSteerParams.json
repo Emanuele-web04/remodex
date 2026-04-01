@@ -1,0 +1,189 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TurnSteerParams",
+  "type": "object",
+  "required": [
+    "expectedTurnId",
+    "input",
+    "threadId"
+  ],
+  "properties": {
+    "expectedTurnId": {
+      "description": "Required active turn id precondition. The request fails when it does not match the currently active turn.",
+      "type": "string"
+    },
+    "input": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UserInput"
+      }
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ByteRange": {
+      "type": "object",
+      "required": [
+        "end",
+        "start"
+      ],
+      "properties": {
+        "end": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        },
+        "start": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TextElement": {
+      "type": "object",
+      "required": [
+        "byteRange"
+      ],
+      "properties": {
+        "byteRange": {
+          "description": "Byte range in the parent `text` buffer that this element occupies.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ByteRange"
+            }
+          ]
+        },
+        "placeholder": {
+          "description": "Optional human-readable placeholder for the element, displayed in the UI.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "UserInput": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "text",
+            "type"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "text_elements": {
+              "description": "UI-defined spans within `text` used to render or persist special elements.",
+              "default": [],
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/TextElement"
+              }
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text"
+              ],
+              "title": "TextUserInputType"
+            }
+          },
+          "title": "TextUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "url"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "image"
+              ],
+              "title": "ImageUserInputType"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "title": "ImageUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "path",
+            "type"
+          ],
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "localImage"
+              ],
+              "title": "LocalImageUserInputType"
+            }
+          },
+          "title": "LocalImageUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "path",
+            "type"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "skill"
+              ],
+              "title": "SkillUserInputType"
+            }
+          },
+          "title": "SkillUserInput"
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "path",
+            "type"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "mention"
+              ],
+              "title": "MentionUserInputType"
+            }
+          },
+          "title": "MentionUserInput"
+        }
+      ]
+    }
+  }
+}
