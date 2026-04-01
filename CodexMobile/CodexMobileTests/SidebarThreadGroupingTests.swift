@@ -172,7 +172,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         ]
         let noProjectGroup = SidebarThreadGroup(
             id: "project:__no_project__",
-            label: "No Project",
+            label: "Cloud",
             kind: .project,
             sortDate: now,
             projectPath: nil,

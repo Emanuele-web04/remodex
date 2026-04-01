@@ -9,6 +9,13 @@ import XCTest
 
 @MainActor
 final class CodexThreadRenamePersistenceTests: XCTestCase {
+    private func makeService(defaults: UserDefaults) -> CodexService {
+        let service = CodexService(defaults: defaults)
+        // Isolated defaults have no transport; disable sync so parallel XCTest runs do not schedule bridge RPC.
+        service.syncRealtimeEnabled = false
+        return service
+    }
+
     func testRenamePersistsAcrossServiceReload() {
         let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
@@ -17,7 +24,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         }
         defaults.removePersistentDomain(forName: suiteName)
 
-        let service = CodexService(defaults: defaults)
+        let service = makeService(defaults: defaults)
         service.threads = [
             CodexThread(
                 id: "thread-1",
@@ -28,7 +35,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
 
         service.renameThread("thread-1", name: "Renamed Thread")
 
-        let reloadedService = CodexService(defaults: defaults)
+        let reloadedService = makeService(defaults: defaults)
         reloadedService.upsertThread(
             CodexThread(
                 id: "thread-1",
@@ -49,7 +56,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         }
         defaults.removePersistentDomain(forName: suiteName)
 
-        let service = CodexService(defaults: defaults)
+        let service = makeService(defaults: defaults)
         service.threads = [
             CodexThread(
                 id: "thread-1",
@@ -61,7 +68,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         service.renameThread("thread-1", name: "Renamed Thread")
         service.deleteThread("thread-1")
 
-        let reloadedService = CodexService(defaults: defaults)
+        let reloadedService = makeService(defaults: defaults)
         reloadedService.upsertThread(
             CodexThread(
                 id: "thread-1",
@@ -81,7 +88,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         }
         defaults.removePersistentDomain(forName: suiteName)
 
-        let service = CodexService(defaults: defaults)
+        let service = makeService(defaults: defaults)
         service.threads = [
             CodexThread(
                 id: "thread-1",
@@ -92,7 +99,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
 
         service.renameThread("thread-1", name: "Phone Rename")
 
-        let reloadedService = CodexService(defaults: defaults)
+        let reloadedService = makeService(defaults: defaults)
         reloadedService.upsertThread(
             CodexThread(
                 id: "thread-1",
@@ -104,7 +111,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
 
         XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Phone Rename")
 
-        let secondReloadedService = CodexService(defaults: defaults)
+        let secondReloadedService = makeService(defaults: defaults)
         secondReloadedService.upsertThread(
             CodexThread(
                 id: "thread-1",
@@ -124,7 +131,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         }
         defaults.removePersistentDomain(forName: suiteName)
 
-        let service = CodexService(defaults: defaults)
+        let service = makeService(defaults: defaults)
         service.threads = [
             CodexThread(
                 id: "thread-1",
@@ -135,7 +142,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
 
         service.renameThread("thread-1", name: "Phone Rename")
 
-        let reloadedService = CodexService(defaults: defaults)
+        let reloadedService = makeService(defaults: defaults)
         reloadedService.upsertThread(
             CodexThread(
                 id: "thread-1",
@@ -146,7 +153,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
 
         XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Phone Rename")
 
-        let secondReloadedService = CodexService(defaults: defaults)
+        let secondReloadedService = makeService(defaults: defaults)
         secondReloadedService.upsertThread(
             CodexThread(
                 id: "thread-1",
@@ -166,7 +173,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         }
         defaults.removePersistentDomain(forName: suiteName)
 
-        let service = CodexService(defaults: defaults)
+        let service = makeService(defaults: defaults)
         service.threads = [
             CodexThread(
                 id: "thread-1",
@@ -177,7 +184,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
 
         service.renameThread("thread-1", name: "Phone Rename")
 
-        let reloadedService = CodexService(defaults: defaults)
+        let reloadedService = makeService(defaults: defaults)
         reloadedService.upsertThread(
             CodexThread(
                 id: "thread-1",
