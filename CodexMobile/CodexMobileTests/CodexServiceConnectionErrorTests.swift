@@ -126,6 +126,26 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testBrokenPipeGetsFriendlyFailureCopy() {
+        let service = CodexService()
+
+        XCTAssertEqual(
+            service.userFacingConnectFailureMessage(NWError.posix(.EPIPE)),
+            "Connection was interrupted. Tap Reconnect to try again."
+        )
+    }
+
+    func testTurnErrorSuppressesBrokenPipeWhileAutoReconnectIsRunning() {
+        let service = CodexService()
+        let error = NWError.posix(.EPIPE)
+        service.isAppInForeground = true
+        service.shouldAutoReconnectOnForeground = true
+        service.connectionRecoveryState = .retrying(attempt: 1, message: "Reconnecting...")
+
+        XCTAssertTrue(service.shouldSuppressRecoverableConnectionError(error))
+        XCTAssertEqual(service.userFacingTurnErrorMessage(from: error), "")
+    }
+
     func testConnectTimeSessionUnavailableCloseIsRetryable() {
         let service = CodexService()
         let error = CodexServiceError.invalidInput("WebSocket closed during connect (4002)")
@@ -135,6 +155,62 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
             service.userFacingConnectFailureMessage(error),
             "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
         )
+    }
+
+    func testLanAddressStillRequiresLocalNetworkAuthorization() {
+        let service = CodexService()
+        let url = URL(string: "ws://192.168.1.31:9000/relay/session")!
+
+        XCTAssertTrue(service.requiresLocalNetworkAuthorization(for: url))
+        XCTAssertTrue(service.prefersDirectRelayTransport(for: url))
+    }
+
+    func testTailscaleAddressPrefersDirectRelayTransportWithoutLocalNetworkPrompt() {
+        let service = CodexService()
+        let url = URL(string: "ws://100.122.27.82:9000/relay/session")!
+
+        XCTAssertTrue(service.prefersDirectRelayTransport(for: url))
+        XCTAssertFalse(service.requiresLocalNetworkAuthorization(for: url))
+    }
+
+    func testTailscaleMagicDNSHostPrefersDirectRelayTransportWithoutLocalNetworkPrompt() {
+        let service = CodexService()
+        let url = URL(string: "ws://my-mac.tail-scale.ts.net:9000/relay/session")!
+
+        XCTAssertTrue(service.prefersDirectRelayTransport(for: url))
+        XCTAssertFalse(service.requiresLocalNetworkAuthorization(for: url))
+    }
+
+    func testDirectRelaySocketTimeoutRemainsRetryable() {
+        let service = CodexService()
+        let error = CodexServiceError.invalidInput(
+            "Connection timed out after 12s while opening the direct relay socket."
+        )
+
+        XCTAssertTrue(service.isRecoverableTransientConnectionError(error))
+        XCTAssertEqual(
+            service.userFacingConnectFailureMessage(error),
+            "Connection timed out. Check server/network."
+        )
+    }
+
+    func testPrepareForConnectionAttemptPreservesFreshQRHandshakeState() async {
+        let service = CodexService()
+        let payload = CodexPairingQRPayload(
+            v: codexPairingQRVersion,
+            relay: "ws://100.122.27.82:9000/relay",
+            sessionId: "session-123",
+            macDeviceId: "mac-123",
+            macIdentityPublicKey: Data(repeating: 1, count: 32).base64EncodedString(),
+            expiresAt: 1_800_000_000_000
+        )
+
+        service.rememberRelayPairing(payload)
+        XCTAssertEqual(service.secureConnectionState, .handshaking)
+
+        await service.prepareForConnectionAttempt(preserveReconnectIntent: true)
+
+        XCTAssertEqual(service.secureConnectionState, .handshaking)
     }
 
     func testPrepareForConnectionAttemptKeepsThreadStateWhenSocketAlreadyDropped() async {

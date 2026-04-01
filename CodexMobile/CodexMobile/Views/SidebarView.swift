@@ -161,13 +161,12 @@ struct SidebarView: View {
         } message: {
             Text("All active chats in this project will be archived.")
         }
-        .confirmationDialog(
+        .alert(
             "Delete \"\(threadPendingDeletion?.displayTitle ?? "conversation")\"?",
             isPresented: Binding(
                 get: { threadPendingDeletion != nil },
                 set: { if !$0 { threadPendingDeletion = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             Button("Delete", role: .destructive) {
                 if let thread = threadPendingDeletion {

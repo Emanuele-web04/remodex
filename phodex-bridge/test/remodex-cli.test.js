@@ -1,21 +1,15 @@
 // FILE: remodex-cli.test.js
-// Purpose: Verifies the public CLI exposes a simple version command for support/debugging.
+// Purpose: Verifies the public CLI exposes version, service control, and machine-readable status output.
 // Layer: Integration-lite test
 // Exports: node:test suite
-// Depends on: node:test, node:assert/strict, child_process, fs, os, path, ../package.json, ../src/daemon-state
+// Depends on: node:test, node:assert/strict, child_process, path, ../package.json, ../bin/remodex
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("child_process");
-const fs = require("fs");
-const os = require("os");
 const path = require("path");
 const { version } = require("../package.json");
-const {
-  writeBridgeStatus,
-  writeDaemonConfig,
-  writePairingSession,
-} = require("../src/daemon-state");
+const { main } = require("../bin/remodex");
 
 test("remodex --version prints the package version", () => {
   const cliPath = path.join(__dirname, "..", "bin", "remodex.js");
@@ -26,53 +20,102 @@ test("remodex --version prints the package version", () => {
   assert.equal(output, version);
 });
 
-test("remodex status --json exposes daemon metadata for companion apps", {
-  skip: process.platform !== "darwin",
-}, () => {
-  const cliPath = path.join(__dirname, "..", "bin", "remodex.js");
+test("remodex restart reuses the macOS service start flow", async () => {
+  const calls = [];
+  const messages = [];
 
-  withTempDaemonEnv(({ rootDir }) => {
-    writeDaemonConfig({ relayUrl: "ws://127.0.0.1:9000/relay" });
-    writeBridgeStatus({ state: "running", connectionStatus: "connected", pid: 77 });
-    writePairingSession({ sessionId: "session-json", relay: "ws://127.0.0.1:9000/relay" });
-
-    const output = execFileSync(process.execPath, [cliPath, "status", "--json"], {
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        HOME: rootDir,
-        REMODEX_DEVICE_STATE_DIR: rootDir,
+  await main({
+    argv: ["node", "remodex", "restart"],
+    platform: "darwin",
+    consoleImpl: {
+      log(message) {
+        messages.push(message);
       },
-    }).trim();
-    const payload = JSON.parse(output);
-
-    assert.equal(payload.currentVersion, version);
-    assert.equal(payload.daemonConfig?.relayUrl, "ws://127.0.0.1:9000/relay");
-    assert.equal(payload.bridgeStatus?.connectionStatus, "connected");
-    assert.equal(payload.pairingSession?.pairingPayload?.sessionId, "session-json");
+      error(message) {
+        messages.push(message);
+      },
+    },
+    exitImpl(code) {
+      throw new Error(`unexpected exit ${code}`);
+    },
+    deps: {
+      readBridgeConfig() {
+        calls.push("read-config");
+      },
+      async startMacOSBridgeService(options) {
+        calls.push(["start-service", options]);
+        return {
+          plistPath: "/tmp/remodex.plist",
+          pairingSession: { relay: "ws://127.0.0.1:9000/relay" },
+        };
+      },
+    },
   });
+
+  assert.deepEqual(calls, [
+    "read-config",
+    ["start-service", { waitForPairing: false }],
+  ]);
+  assert.deepEqual(messages, [
+    "[remodex] macOS bridge service restarted.",
+  ]);
 });
 
-function withTempDaemonEnv(run) {
-  const previousDir = process.env.REMODEX_DEVICE_STATE_DIR;
-  const previousHome = process.env.HOME;
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-test-"));
-  process.env.REMODEX_DEVICE_STATE_DIR = rootDir;
-  process.env.HOME = rootDir;
+test("remodex status --json exposes daemon metadata for companion apps", async () => {
+  const writes = [];
+  const originalWrite = process.stdout.write;
+
+  process.stdout.write = (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  };
 
   try {
-    return run({ rootDir });
+    await main({
+      argv: ["node", "remodex", "status", "--json"],
+      platform: "darwin",
+      consoleImpl: {
+        log() {},
+        error(message) {
+          throw new Error(`unexpected error: ${message}`);
+        },
+      },
+      exitImpl(code) {
+        throw new Error(`unexpected exit ${code}`);
+      },
+      deps: {
+        getMacOSBridgeServiceStatus() {
+          return {
+            daemonConfig: {
+              relayUrl: "ws://127.0.0.1:9000/relay",
+            },
+            bridgeStatus: {
+              connectionStatus: "connected",
+              pid: 77,
+            },
+            pairingSession: {
+              pairingPayload: {
+                relay: "ws://127.0.0.1:9000/relay",
+                sessionId: "session-json",
+              },
+            },
+          };
+        },
+        printMacOSBridgeServiceStatus() {
+          throw new Error("status printer should not run for --json");
+        },
+      },
+    });
   } finally {
-    if (previousDir === undefined) {
-      delete process.env.REMODEX_DEVICE_STATE_DIR;
-    } else {
-      process.env.REMODEX_DEVICE_STATE_DIR = previousDir;
-    }
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
-    fs.rmSync(rootDir, { recursive: true, force: true });
+    process.stdout.write = originalWrite;
   }
-}
+
+  const payload = JSON.parse(writes.join("").trim());
+  assert.equal(payload.currentVersion, version);
+  assert.equal(payload.daemonConfig?.relayUrl, "ws://127.0.0.1:9000/relay");
+  assert.equal(payload.bridgeStatus?.connectionStatus, "connected");
+  assert.equal(payload.pairingSession?.pairingPayload?.sessionId, "session-json");
+});

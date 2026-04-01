@@ -185,12 +185,27 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
 
 extension CodexThread {
     // --- UI helpers -----------------------------------------------------------
+    static let defaultDisplayTitle = "New Thread"
     private static let noProjectGroupKey = "__no_project__"
+
+    // Old rollouts may still persist "Conversation", so treat both labels as the same placeholder.
+    static func isGenericPlaceholderTitle(_ value: String?) -> Bool {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return false
+        }
+
+        return ["Conversation", defaultDisplayTitle].contains {
+            trimmed.localizedCaseInsensitiveCompare($0) == .orderedSame
+        }
+    }
+
     var displayTitle: String {
         let cleanedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAgentLabel = agentDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedPreview = preview?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveTitle = Self.isGenericPlaceholderTitle(cleanedTitle) ? nil : cleanedTitle
 
         // Prefer explicit thread name (AI/user rename) over server title fallback.
         if let cleanedName, !cleanedName.isEmpty {
@@ -198,22 +213,22 @@ extension CodexThread {
         }
 
         if let cleanedAgentLabel, !cleanedAgentLabel.isEmpty {
-            if cleanedTitle == nil || cleanedTitle?.localizedCaseInsensitiveCompare("Conversation") == .orderedSame {
+            if cleanedTitle == nil || Self.isGenericPlaceholderTitle(cleanedTitle) {
                 return cleanedAgentLabel
             }
         }
 
-        guard let cleanedTitle, !cleanedTitle.isEmpty else {
+        guard let effectiveTitle, !effectiveTitle.isEmpty else {
             if let cleanedPreview, !cleanedPreview.isEmpty {
                 let firstCharacter = cleanedPreview.prefix(1).uppercased()
                 let remainingCharacters = cleanedPreview.dropFirst()
                 return firstCharacter + remainingCharacters
             }
 
-            return "Conversation"
+            return Self.defaultDisplayTitle
         }
 
-        return cleanedTitle
+        return effectiveTitle
     }
 
     var isSubagent: Bool {
@@ -235,7 +250,7 @@ extension CodexThread {
         for candidate in [name, title] {
             guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !trimmed.isEmpty,
-                  trimmed.localizedCaseInsensitiveCompare("Conversation") != .orderedSame else {
+                  !Self.isGenericPlaceholderTitle(trimmed) else {
                 continue
             }
             return trimmed
@@ -306,13 +321,7 @@ extension CodexThread {
         if let normalizedProjectPath {
             return normalizedProjectPath
         }
-
-        guard let cwd else {
-            return nil
-        }
-
-        let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return nil
     }
 
     // Stable key for grouping threads by project.
@@ -350,6 +359,11 @@ extension CodexThread {
         }
 
         return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "laptopcomputer" : "arrow.triangle.branch"
+    }
+
+    // Shared path gate for every flow that needs to decide whether a cwd represents a real local project.
+    static func normalizedFilesystemProjectPath(_ value: String?) -> String? {
+        normalizeProjectPath(value)
     }
 
     // --- Date parsing ---------------------------------------------------------
@@ -476,8 +490,8 @@ extension CodexThread {
             return nil
         }
 
-        if trimmed == "/" {
-            return trimmed
+        if let normalizedRootPath = normalizedFilesystemRootPath(trimmed) {
+            return normalizedRootPath
         }
 
         var normalized = trimmed
@@ -485,7 +499,75 @@ extension CodexThread {
             normalized.removeLast()
         }
 
-        return normalized.isEmpty ? "/" : normalized
+        if normalized.isEmpty {
+            return "/"
+        }
+
+        guard isLikelyFilesystemPath(normalized) else {
+            return nil
+        }
+
+        return normalized
+    }
+
+    // Preserves valid filesystem roots that would otherwise be mangled by generic trailing-slash trimming.
+    private static func normalizedFilesystemRootPath(_ value: String) -> String? {
+        if value == "/" {
+            return "/"
+        }
+
+        if value.first == "~", value.dropFirst().allSatisfy({ $0 == "/" }) {
+            return "~/"
+        }
+
+        let utf16View = value.utf16
+        guard utf16View.count >= 3 else {
+            return nil
+        }
+
+        let startIndex = utf16View.startIndex
+        let first = utf16View[startIndex]
+        let second = utf16View[utf16View.index(after: startIndex)]
+        let thirdIndex = utf16View.index(startIndex, offsetBy: 2)
+        let third = utf16View[thirdIndex]
+        let isDriveLetter = (65...90).contains(first) || (97...122).contains(first)
+        guard isDriveLetter, second == 58, third == 92 || third == 47 else {
+            return nil
+        }
+
+        let remainder = value.dropFirst(3)
+        guard remainder.allSatisfy({ $0 == "/" || $0 == "\\" }) else {
+            return nil
+        }
+
+        let drive = UnicodeScalar(first).map(String.init) ?? "C"
+        return "\(drive):/"
+    }
+
+    // Rejects pseudo-buckets like `server` or `_default` so only real local paths create project groups.
+    private static func isLikelyFilesystemPath(_ value: String) -> Bool {
+        if value == "/" {
+            return true
+        }
+
+        if value.hasPrefix("/") || value.hasPrefix("~/") {
+            return true
+        }
+
+        let utf16View = value.utf16
+        guard utf16View.count >= 3 else {
+            return false
+        }
+
+        let first = utf16View[utf16View.startIndex]
+        let second = utf16View[utf16View.index(after: utf16View.startIndex)]
+        let third = utf16View[utf16View.index(utf16View.startIndex, offsetBy: 2)]
+        let isDriveLetter = (65...90).contains(first) || (97...122).contains(first)
+        if isDriveLetter, second == 58, third == 92 || third == 47 {
+            return true
+        }
+
+        return value.hasPrefix("\\\\")
     }
 
     private static func projectBaseDisplayName(for normalizedProjectPath: String) -> String {

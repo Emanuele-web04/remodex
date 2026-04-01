@@ -8,6 +8,7 @@ import UIKit
 
 struct SettingsView: View {
     @Environment(CodexService.self) private var codex
+    @Environment(SubscriptionService.self) private var subscriptions
 
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
     @State private var isShowingMacNameSheet = false
@@ -22,6 +23,9 @@ struct SettingsView: View {
                 SettingsArchivedChatsCard()
                 SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
+                SettingsGPTAccountCard()
+                SettingsSubscriptionCard()
+                SettingsBridgeVersionCard()
                 runtimeDefaultsSection
                 SettingsAboutCard()
                 SettingsUsageCard()
@@ -39,6 +43,12 @@ struct SettingsView: View {
                     systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
                 )
             }
+        }
+        .task {
+            guard subscriptions.bootstrapState == .idle else {
+                return
+            }
+            await subscriptions.bootstrap()
         }
     }
 
@@ -266,6 +276,52 @@ struct SettingsView: View {
             get: { SidebarMacNicknameStore.nickname(for: presentation.deviceId) },
             set: { SidebarMacNicknameStore.setNickname($0, for: presentation.deviceId) }
         )
+    }
+}
+
+private struct SettingsSubscriptionCard: View {
+    @Environment(SubscriptionService.self) private var subscriptions
+    @State private var isPresentingPaywall = false
+
+    var body: some View {
+        SettingsCard(title: "Remodex Pro") {
+            HStack {
+                Text("Status")
+                Spacer()
+                Text(subscriptions.hasProAccess ? "Active" : "Free")
+                    .foregroundStyle(subscriptions.hasProAccess ? .green : .secondary)
+            }
+
+            if subscriptions.hasProAccess {
+                Text("Your Pro access is active. You can still restore purchases or manage your subscription from Apple.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Open the custom paywall to choose a monthly or yearly plan.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            SettingsButton(subscriptions.hasProAccess ? "View Pro" : "Upgrade to Pro") {
+                isPresentingPaywall = true
+            }
+
+            SettingsButton(subscriptions.isRestoring ? "Restoring..." : "Restore Purchases", isLoading: subscriptions.isRestoring) {
+                Task {
+                    await subscriptions.restorePurchases()
+                }
+            }
+            .disabled(subscriptions.isPurchasing)
+
+            if let error = subscriptions.lastErrorMessage, !error.isEmpty {
+                Text(error)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
+            }
+        }
+        .sheet(isPresented: $isPresentingPaywall) {
+            RevenueCatPaywallView()
+        }
     }
 }
 
@@ -520,6 +576,277 @@ private struct SettingsNotificationsCard: View {
     }
 }
 
+private struct SettingsGPTAccountCard: View {
+    @Environment(CodexService.self) private var codex
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isLoggingOut = false
+    @State private var isShowingMacLoginInfo = false
+
+    var body: some View {
+        let snapshot = codex.gptAccountSnapshot
+
+        SettingsCard(title: "ChatGPT") {
+            HStack(spacing: 10) {
+                Image(systemName: statusIconName(for: snapshot))
+                    .foregroundStyle(statusIconColor(for: snapshot))
+                Text("Status")
+                Spacer()
+                SettingsStatusPill(label: snapshot.statusLabel)
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    isShowingMacLoginInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(AppFont.subheadline(weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("How ChatGPT voice works on your Mac")
+            }
+
+            if let detail = snapshot.detailText {
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let hint = hintText(for: snapshot) {
+                Text(hint)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let errorMessage = codex.gptAccountErrorMessage,
+               !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(errorMessage)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
+            }
+
+            if snapshot.canLogout {
+                SettingsButton("Log out", role: .destructive, isLoading: isLoggingOut) {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    logout()
+                }
+            }
+        }
+        .task {
+            await codex.refreshGPTAccountState()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                await codex.refreshGPTAccountState()
+            }
+        }
+        .sheet(isPresented: $isShowingMacLoginInfo) {
+            GPTVoiceSetupSheet()
+        }
+    }
+
+    private func hintText(for snapshot: CodexGPTAccountSnapshot) -> String? {
+        if snapshot.needsReauth {
+            return "The paired Mac bridge needs a fresh ChatGPT sign-in before voice transcription can run again."
+        }
+        if snapshot.isAuthenticated && snapshot.isVoiceTokenReady {
+            return "Voice transcription uses the ChatGPT session already active on your paired Mac."
+        }
+        if snapshot.isAuthenticated {
+            return "Finishing voice setup on your paired Mac bridge..."
+        }
+        if snapshot.hasActiveLogin && codex.isConnected {
+            return "Finish the ChatGPT sign-in flow in the browser on your Mac, then come back here."
+        }
+        if snapshot.hasActiveLogin {
+            return "Reconnect to your paired Mac bridge to finish ChatGPT sign-in."
+        }
+        if !codex.isConnected {
+            return "Connect to your paired Mac bridge first."
+        }
+        return "Voice transcription uses the ChatGPT account already signed in on your paired Mac."
+    }
+
+    private func statusIconName(for snapshot: CodexGPTAccountSnapshot) -> String {
+        switch snapshot.status {
+        case .authenticated:
+            return snapshot.needsReauth ? "exclamationmark.triangle.fill" : "checkmark.shield.fill"
+        case .loginPending:
+            return "arrow.up.forward.app.fill"
+        case .expired:
+            return "exclamationmark.triangle.fill"
+        case .notLoggedIn, .unknown:
+            return "person.crop.circle.badge.plus"
+        case .unavailable:
+            return "wifi.slash"
+        }
+    }
+
+    private func statusIconColor(for snapshot: CodexGPTAccountSnapshot) -> Color {
+        switch snapshot.status {
+        case .authenticated:
+            return snapshot.needsReauth ? .orange : .green
+        case .loginPending:
+            return .orange
+        case .expired:
+            return .red
+        case .notLoggedIn, .unknown, .unavailable:
+            return .secondary
+        }
+    }
+
+    private func logout() {
+        guard !isLoggingOut else { return }
+        isLoggingOut = true
+        codex.gptAccountErrorMessage = nil
+
+        Task { @MainActor in
+            await codex.logoutGPTAccount()
+            await codex.refreshGPTAccountState()
+            isLoggingOut = false
+        }
+    }
+}
+
+private struct SettingsBridgeVersionCard: View {
+    @Environment(CodexService.self) private var codex
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        SettingsCard(title: "Bridge Version") {
+            HStack(spacing: 10) {
+                Text("Status")
+                Spacer()
+                SettingsStatusPill(label: versionStatusLabel)
+            }
+
+            settingsVersionRow(
+                title: "Installed on Mac",
+                value: installedVersionLabel,
+                valueStyle: installedValueStyle
+            )
+
+            settingsVersionRow(
+                title: "Latest available",
+                value: latestVersionLabel,
+                valueStyle: .primary
+            )
+
+            if let guidance = guidanceText {
+                Text(guidance)
+                    .font(AppFont.caption())
+                    .foregroundStyle(guidanceColor)
+            }
+        }
+        .task {
+            await codex.refreshBridgeVersionState()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                await codex.refreshBridgeVersionState()
+            }
+        }
+    }
+
+    private var installedVersionLabel: String {
+        normalizedVersion(codex.bridgeInstalledVersion) ?? "Unknown"
+    }
+
+    private var latestVersionLabel: String {
+        normalizedVersion(codex.latestBridgePackageVersion) ?? "Unknown"
+    }
+
+    private var guidanceText: String? {
+        guard let installedVersion else {
+            return "Connect to a Mac bridge to read the installed package version."
+        }
+
+        guard let latestVersion else {
+            return "Installed version detected. The latest published package is unavailable right now."
+        }
+
+        if installedVersion == latestVersion {
+            return "The installed bridge matches the latest published package."
+        }
+
+        if installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending {
+            return "A newer Remodex package is available on npm."
+        }
+
+        return "This Mac is running a different build than the current npm latest."
+    }
+
+    private var versionStatusLabel: String {
+        guard let installedVersion else {
+            return "Unknown"
+        }
+
+        guard let latestVersion else {
+            return "Installed"
+        }
+
+        if installedVersion == latestVersion {
+            return "Up to date"
+        }
+
+        if installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending {
+            return "Update available"
+        }
+
+        return "Different build"
+    }
+
+    private var guidanceColor: Color {
+        guard let installedVersion,
+              let latestVersion,
+              installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending else {
+            return .secondary
+        }
+
+        return .orange
+    }
+
+    private var installedValueStyle: Color {
+        guard let installedVersion,
+              let latestVersion,
+              installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending else {
+            return .primary
+        }
+
+        return .orange
+    }
+
+    private var installedVersion: String? {
+        normalizedVersion(codex.bridgeInstalledVersion)
+    }
+
+    private var latestVersion: String? {
+        normalizedVersion(codex.latestBridgePackageVersion)
+    }
+
+    private func normalizedVersion(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+
+        return trimmed
+    }
+
+    private func settingsVersionRow(title: String, value: String, valueStyle: Color) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+            Spacer()
+            Text(value)
+                .font(AppFont.mono(.subheadline))
+                .foregroundStyle(valueStyle)
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+        }
+    }
+}
+
 private struct SettingsArchivedChatsCard: View {
     @Environment(CodexService.self) private var codex
 
@@ -552,12 +879,101 @@ private struct SettingsArchivedChatsCard: View {
 }
 
 private struct SettingsAboutCard: View {
+    @State private var isShowingAbout = false
+
     var body: some View {
         SettingsCard(title: "About") {
             Text("Chats are End-to-end encrypted between your iPhone and Mac. The relay only sees ciphertext and connection metadata after the secure handshake completes.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                isShowingAbout = true
+            } label: {
+                settingsAccessoryRow(
+                    title: "How Remodex Works",
+                    leading: {
+                        Image(systemName: "info.circle")
+                            .font(AppFont.subheadline(weight: .medium))
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                if let url = URL(string: "https://x.com/emanueledpt") {
+                    UIApplication.shared.open(url)
+                }
+            } label: {
+                settingsAccessoryRow(
+                    title: "Chat & Support",
+                    leading: {
+                        Image("x-icon")
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 14, height: 14)
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                UIApplication.shared.open(AppEnvironment.privacyPolicyURL)
+            } label: {
+                settingsAccessoryRow(
+                    title: "Privacy Policy",
+                    leading: {
+                        Image(systemName: "hand.raised")
+                            .font(AppFont.subheadline(weight: .medium))
+                    }
+                )
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                UIApplication.shared.open(AppEnvironment.termsOfUseURL)
+            } label: {
+                settingsAccessoryRow(
+                    title: "Terms of Use",
+                    leading: {
+                        Image(systemName: "doc.text")
+                            .font(AppFont.subheadline(weight: .medium))
+                    }
+                )
+            }
+            .buttonStyle(.plain)
         }
+        .fullScreenCover(isPresented: $isShowingAbout) {
+            AboutRemodexView()
+        }
+    }
+
+    // Keeps settings rows visually consistent while allowing SF Symbols or asset icons.
+    private func settingsAccessoryRow<Leading: View>(
+        title: String,
+        @ViewBuilder leading: () -> Leading
+    ) -> some View {
+        HStack(spacing: 8) {
+            leading()
+            Text(title)
+                .font(AppFont.subheadline(weight: .medium))
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(AppFont.caption(weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .foregroundStyle(.primary)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        )
     }
 }
 

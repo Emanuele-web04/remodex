@@ -70,7 +70,7 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
             )
         )
 
-        XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Conversation")
+        XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "New Thread")
     }
 
     func testExplicitServerRenameDoesNotOverridePersistedLocalRename() {

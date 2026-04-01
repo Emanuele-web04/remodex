@@ -49,7 +49,7 @@ struct SkillMentionChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "bolt.horizontal.circle")
+            Image(systemName: "square.stack.3d.up")
                 .font(AppFont.system(size: 9, weight: .semibold))
                 .foregroundStyle(Color.indigo)
 
@@ -295,12 +295,22 @@ enum UserMessageParser {
                 break
             }
 
-            mentions.append(String(workingText[mentionRange]))
+            let mention = String(workingText[mentionRange])
+            guard isAllowedFileMentionToken(mention) else {
+                break
+            }
+
+            mentions.append(mention)
             remainingText = workingText[fullMatchRange.upperBound...]
         }
 
         let body = String(remainingText).trimmingCharacters(in: .whitespacesAndNewlines)
 
         return UserMessageParsed(mentions: mentions, body: body)
+    }
+
+    // Keeps legacy `@filename` support while rejecting known Swift attribute syntax.
+    private static func isAllowedFileMentionToken(_ mention: String) -> Bool {
+        TurnFileMentionHeuristics.isAllowedInlineMentionToken(mention)
     }
 }

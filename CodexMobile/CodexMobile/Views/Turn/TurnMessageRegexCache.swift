@@ -78,4 +78,97 @@ enum TurnMessageRegexCache {
         let fullRange = NSRange(location: 0, length: (text as NSString).length)
         return regex.stringByReplacingMatches(in: text, range: fullRange, withTemplate: template)
     }
+
+    static func removingTrailingLineColumnSuffix(from token: String) -> String {
+        guard let regex = trailingLineColumn else {
+            return token
+        }
+
+        let fullRange = NSRange(location: 0, length: (token as NSString).length)
+        guard let match = regex.firstMatch(in: token, range: fullRange),
+              match.range.location != NSNotFound,
+              let range = Range(match.range, in: token) else {
+            return token
+        }
+
+        var normalizedToken = token
+        normalizedToken.removeSubrange(range)
+        return normalizedToken
+    }
+}
+
+// Shared heuristics for deciding whether an `@token` is plausibly a file/path
+// reference instead of copied terminal syntax such as `@scope/pkg:build`.
+enum TurnFileMentionHeuristics {
+    // Keeps common extensionless files mentionable without reopening the door to arbitrary
+    // terminal handles such as `@workspace` or `@remodex`.
+    private static let allowedExtensionlessFileNames: Set<String> = [
+        ".env",
+        ".env.example",
+        ".gitignore",
+        ".node-version",
+        ".nvmrc",
+        "Brewfile",
+        "Cartfile",
+        "Dangerfile",
+        "Dockerfile",
+        "Gemfile",
+        "LICENSE",
+        "Makefile",
+        "Podfile",
+        "Procfile",
+        "README",
+        "Rakefile",
+    ]
+
+    static func isAllowedAutocompleteQuery(_ query: String) -> Bool {
+        isAllowedFileLikeToken(query)
+    }
+
+    static func isAllowedInlineMentionToken(_ token: String) -> Bool {
+        isAllowedFileLikeToken(token)
+    }
+
+    private static func isAllowedFileLikeToken(_ token: String) -> Bool {
+        let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else {
+            return false
+        }
+
+        guard !containsUnsupportedColonSyntax(trimmedToken) else {
+            return false
+        }
+
+        if looksPathLike(trimmedToken) {
+            return true
+        }
+
+        if allowedExtensionlessFileNames.contains(trimmedToken) {
+            return true
+        }
+
+        return false
+    }
+
+    private static func looksPathLike(_ token: String) -> Bool {
+        let normalizedToken = TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: token)
+        return normalizedToken.contains("/")
+            || normalizedToken.contains("\\")
+            || normalizedToken.contains(".")
+    }
+
+    // Keeps `foo.swift:42` valid while rejecting task labels like `pkg/build:watch`.
+    private static func containsUnsupportedColonSyntax(_ token: String) -> Bool {
+        var normalizedToken = TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: token)
+        if hasWindowsDrivePrefix(normalizedToken) {
+            normalizedToken.removeFirst(2)
+        }
+        return normalizedToken.contains(":")
+    }
+
+    private static func hasWindowsDrivePrefix(_ token: String) -> Bool {
+        guard token.count >= 3 else { return false }
+        let characters = Array(token)
+        return characters[0].isLetter && characters[1] == ":" && (characters[2] == "\\" || characters[2] == "/")
+    }
 }

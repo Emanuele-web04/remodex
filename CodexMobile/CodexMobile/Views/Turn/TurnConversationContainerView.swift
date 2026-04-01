@@ -16,8 +16,11 @@ struct TurnConversationContainerView: View {
     let stoppedTurnIDs: Set<String>
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
     let errorMessage: String?
+    let composerRecoveryAccessory: AnyView?
     let shouldAnchorToAssistantResponse: Binding<Bool>
     let isScrolledToBottom: Binding<Bool>
+    let isComposerFocused: Bool
+    let isComposerAutocompletePresented: Bool
     let emptyState: AnyView
     let composer: AnyView
     let repositoryLoadingToastOverlay: AnyView
@@ -42,16 +45,27 @@ struct TurnConversationContainerView: View {
         return cachedMessageLayout
     }
 
-    // Avoids showing the generic "new chat" empty state behind a pinned plan-only accessory.
+    // Keeps accessory-only chats informative instead of showing a blank viewport.
     private var timelineEmptyState: AnyView {
-        guard messageLayout.pinnedTaskPlanMessage != nil,
-              messageLayout.timelineMessages.isEmpty else {
+        guard messageLayout.timelineMessages.isEmpty else {
             return emptyState
         }
-        return AnyView(
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        )
+
+        if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
+            let snapshot = PlanAccessorySnapshot(message: pinnedTaskPlanMessage)
+            let summary = snapshot.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            return AnyView(
+                AccessoryBackedEmptyState(
+                    systemImage: snapshot.status.symbolName,
+                    tint: snapshot.status.tint,
+                    title: snapshot.status == .inProgress ? "Plan in progress" : "Plan ready",
+                    summary: summary.isEmpty ? "Codex has prepared a plan for this chat." : summary,
+                    detail: "Open the plan card above the composer to review the current steps."
+                )
+            )
+        }
+
+        return emptyState
     }
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -68,8 +82,11 @@ struct TurnConversationContainerView: View {
                 assistantRevertStatesByMessageID: assistantRevertStatesByMessageID,
                 isRetryAvailable: !isThreadRunning,
                 errorMessage: errorMessage,
+                hidesErrorMessage: composerRecoveryAccessory != nil,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
                 isScrolledToBottom: isScrolledToBottom,
+                isComposerFocused: isComposerFocused,
+                isComposerAutocompletePresented: isComposerAutocompletePresented,
                 onRetryUserMessage: onRetryUserMessage,
                 onTapAssistantRevert: onTapAssistantRevert,
                 onTapSubagent: onTapSubagent,
@@ -120,6 +137,12 @@ struct TurnConversationContainerView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+            if let composerRecoveryAccessory {
+                composerRecoveryAccessory
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             composer
         }
         .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedTaskPlanMessage?.id)
@@ -145,8 +168,12 @@ struct TurnConversationContainerView: View {
         var pinnedTaskPlanMessage: CodexMessage?
 
         for message in messages {
-            if message.isPlanSystemMessage {
+            if message.shouldDisplayPinnedPlanAccessory {
                 pinnedTaskPlanMessage = message
+            } else if message.shouldDisplayInlinePlanResult {
+                timelineMessages.append(message)
+            } else if message.isPlanSystemMessage {
+                continue
             } else {
                 timelineMessages.append(message)
             }
@@ -169,8 +196,82 @@ private struct TimelineMessageLayout: Equatable {
     )
 }
 
-private extension CodexMessage {
+private struct AccessoryBackedEmptyState: View {
+    let systemImage: String
+    let tint: Color
+    let title: String
+    let summary: String
+    let detail: String
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Spacer()
+
+            VStack(spacing: 14) {
+                Image(systemName: systemImage)
+                    .font(AppFont.system(size: 24, weight: .semibold))
+                    .foregroundStyle(tint)
+                    .frame(width: 56, height: 56)
+                    .background(
+                        Circle()
+                            .fill(tint.opacity(0.12))
+                    )
+
+                Text(title)
+                    .font(AppFont.title3(weight: .semibold))
+                    .multilineTextAlignment(.center)
+
+                Text(summary)
+                    .font(AppFont.body())
+                    .foregroundStyle(.primary.opacity(0.9))
+                    .multilineTextAlignment(.center)
+
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: 320)
+            .padding(.horizontal, 24)
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+}
+
+extension CodexMessage {
     var isPlanSystemMessage: Bool {
         role == .system && kind == .plan
+    }
+
+    // Hides terminal 3/3-style plans so only genuinely active plans stay pinned above the composer.
+    var shouldDisplayPinnedPlanAccessory: Bool {
+        guard isPlanSystemMessage,
+              resolvedPlanPresentation?.isProgressAccessory == true else {
+            return false
+        }
+
+        if isStreaming {
+            return true
+        }
+
+        let steps = planState?.steps ?? []
+        guard !steps.isEmpty else {
+            return false
+        }
+
+        return steps.contains { $0.status != .completed }
+    }
+
+    var shouldDisplayInlinePlanResult: Bool {
+        guard isPlanSystemMessage,
+              resolvedPlanPresentation?.isInlineResultVisible == true,
+              !shouldDisplayPinnedPlanAccessory else {
+            return false
+        }
+
+        return proposedPlan != nil
     }
 }

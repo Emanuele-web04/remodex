@@ -10,6 +10,25 @@
 
 import Foundation
 
+/// Explicit cache flush hook for memory-pressure/manual recovery paths.
+/// Normal thread switching should keep these hot caches warm.
+enum TurnCacheManager {
+    @MainActor static func resetAll() {
+        MarkdownParseCacheReset.reset()
+        MarkdownRenderableTextCache.reset()
+        MessageRowRenderModelCache.reset()
+        CommandExecutionStatusCache.reset()
+        FileChangeSystemRenderCache.reset()
+        PerFileDiffChunkCache.reset()
+        CodeCommentDirectiveContentCache.reset()
+        ThinkingDisclosureContentCache.reset()
+        DiffBlockDetectionCache.reset()
+        FileChangeGroupingCache.reset()
+        MermaidMarkdownContentCache.reset()
+        MermaidMarkdownContentCache.resetRenderedSnapshots()
+    }
+}
+
 // Thread-safe bounded cache that evicts roughly half its entries when full instead of discarding everything.
 final class BoundedCache<Key: Hashable, Value> {
     private let maxEntries: Int
@@ -60,12 +79,72 @@ final class BoundedCache<Key: Hashable, Value> {
     private func evictIfNeeded() {
         guard storage.count >= maxEntries else { return }
         let evictCount = maxEntries / 2
-        var removed = 0
-        for key in storage.keys {
-            guard removed < evictCount else { break }
+        let keysToRemove = Array(storage.keys.prefix(evictCount))
+        for key in keysToRemove {
             storage.removeValue(forKey: key)
-            removed += 1
         }
+    }
+}
+
+enum TurnTextCacheKey {
+    private static let sampleByteCount = 24
+    private static let hexDigits = Array("0123456789abcdef")
+
+    static func fingerprint(for text: String) -> String {
+        let utf8 = text.utf8
+        let byteCount = utf8.count
+        let middleStart = max((byteCount / 2) - (sampleByteCount / 2), 0)
+        let lastStart = max(byteCount - sampleByteCount, 0)
+
+        return [
+            String(byteCount),
+            hexSample(in: utf8, startOffset: 0, length: sampleByteCount),
+            hexSample(in: utf8, startOffset: middleStart, length: sampleByteCount),
+            hexSample(in: utf8, startOffset: lastStart, length: sampleByteCount),
+        ].joined(separator: "|")
+    }
+
+    static func key(messageID: String, kind: String, text: String) -> String {
+        "\(messageID)|\(kind)|\(fingerprint(for: text))"
+    }
+
+    static func key(namespace: String, text: String) -> String {
+        "\(namespace)|\(fingerprint(for: text))"
+    }
+
+    static func entriesFingerprint(_ entries: [TurnFileChangeSummaryEntry]) -> String {
+        var hasher = Hasher()
+        hasher.combine(entries.count)
+        for entry in entries {
+            hasher.combine(entry.path)
+            hasher.combine(entry.action)
+            hasher.combine(entry.additions)
+            hasher.combine(entry.deletions)
+        }
+        return String(hasher.finalize())
+    }
+
+    private static func hexSample(
+        in utf8: String.UTF8View,
+        startOffset: Int,
+        length: Int
+    ) -> String {
+        guard !utf8.isEmpty else { return "" }
+
+        let clampedLength = min(length, utf8.count)
+        let clampedStart = min(max(startOffset, 0), max(utf8.count - clampedLength, 0))
+        let startIndex = utf8.index(utf8.startIndex, offsetBy: clampedStart)
+        let endIndex = utf8.index(startIndex, offsetBy: clampedLength)
+
+        var result = String()
+        result.reserveCapacity(clampedLength * 2)
+
+        for byte in utf8[startIndex..<endIndex] {
+            result.append(hexDigits[Int(byte >> 4)])
+            result.append(hexDigits[Int(byte & 0x0F)])
+        }
+
+        return result
     }
 }
 
@@ -77,7 +156,12 @@ enum MarkdownRenderableTextCache {
         profile: MarkdownRenderProfile,
         builder: () -> String
     ) -> String {
-        cache.getOrSet("\(profile.cacheKey)|\(raw.hashValue)", builder: builder)
+        let key = TurnTextCacheKey.key(namespace: profile.cacheKey, text: raw)
+        return cache.getOrSet(key, builder: builder)
+    }
+
+    static func reset() {
+        cache.removeAll()
     }
 }
 
@@ -94,6 +178,7 @@ struct MessageRowRenderModel {
     let fileChangeGroups: [FileChangeGroup]
     let thinkingContent: ThinkingDisclosureContent?
     let thinkingText: String?
+    let thinkingActivityPreview: String?
     let commandStatus: CommandExecutionStatusModel?
 
     static let empty = MessageRowRenderModel(
@@ -103,6 +188,7 @@ struct MessageRowRenderModel {
         fileChangeGroups: [],
         thinkingContent: nil,
         thinkingText: nil,
+        thinkingActivityPreview: nil,
         commandStatus: nil
     )
 }
@@ -111,7 +197,7 @@ enum MessageRowRenderModelCache {
     private static let cache = BoundedCache<String, MessageRowRenderModel>(maxEntries: 512)
 
     static func model(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
-        let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(message.isStreaming)|\(displayText.hashValue)"
+        let key = "\(message.id)|\(message.kind.rawValue)|\(message.role.rawValue)|\(message.isStreaming)|\(TurnTextCacheKey.fingerprint(for: displayText))"
         return cache.getOrSet(key) { buildModel(for: message, displayText: displayText) }
     }
 
@@ -136,6 +222,7 @@ enum MessageRowRenderModelCache {
                 fileChangeGroups: [],
                 thinkingContent: nil,
                 thinkingText: nil,
+                thinkingActivityPreview: nil,
                 commandStatus: nil
             )
         case .user:
@@ -144,6 +231,9 @@ enum MessageRowRenderModelCache {
             switch message.kind {
             case .thinking:
                 let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(from: message.text)
+                let thinkingActivityPreview = thinkingText.isEmpty
+                    ? nil
+                    : ThinkingDisclosureParser.compactActivityPreview(fromNormalizedText: thinkingText)
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
                     mermaidContent: nil,
@@ -153,6 +243,7 @@ enum MessageRowRenderModelCache {
                         ? ThinkingDisclosureContent(sections: [], fallbackText: "")
                         : ThinkingDisclosureContentCache.content(messageID: message.id, text: thinkingText),
                     thinkingText: thinkingText,
+                    thinkingActivityPreview: thinkingActivityPreview,
                     commandStatus: nil
                 )
             case .fileChange:
@@ -169,8 +260,11 @@ enum MessageRowRenderModelCache {
                     fileChangeGroups: FileChangeGroupingCache.grouped(messageID: message.id, entries: allEntries),
                     thinkingContent: nil,
                     thinkingText: nil,
+                    thinkingActivityPreview: nil,
                     commandStatus: nil
                 )
+            case .toolActivity:
+                return .empty
             case .commandExecution:
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
@@ -179,6 +273,7 @@ enum MessageRowRenderModelCache {
                     fileChangeGroups: [],
                     thinkingContent: nil,
                     thinkingText: nil,
+                    thinkingActivityPreview: nil,
                     commandStatus: CommandExecutionStatusCache.status(messageID: message.id, text: displayText)
                 )
             case .subagentAction, .plan, .userInputPrompt, .chat:
@@ -192,12 +287,14 @@ enum CommandExecutionStatusCache {
     private static let cache = BoundedCache<String, CommandExecutionStatusModel>(maxEntries: 256)
 
     static func status(messageID: String, text: String) -> CommandExecutionStatusModel? {
-        let key = "\(messageID)|\(text.hashValue)"
+        let key = TurnTextCacheKey.key(messageID: messageID, kind: "command-status", text: text)
         if let cached = cache.get(key) { return cached }
         guard let parsed = parse(text) else { return nil }
         cache.set(key, value: parsed)
         return parsed
     }
+
+    static func reset() { cache.removeAll() }
 
     private static func parse(_ text: String) -> CommandExecutionStatusModel? {
         let words = text.split(whereSeparator: \.isWhitespace)
@@ -221,8 +318,10 @@ enum CommandExecutionStatusCache {
 enum FileChangeSystemRenderCache {
     private static let cache = BoundedCache<String, FileChangeRenderState>(maxEntries: 256)
 
+    static func reset() { cache.removeAll() }
+
     static func renderState(messageID: String, sourceText: String) -> FileChangeRenderState {
-        cache.getOrSet("\(messageID)|\(sourceText.hashValue)") {
+        cache.getOrSet(TurnTextCacheKey.key(messageID: messageID, kind: "file-change-render", text: sourceText)) {
             let summary = TurnFileChangeSummaryParser.parse(from: sourceText)
             let actionEntries = summary?.entries.filter { $0.action != nil } ?? []
             let bodyText = actionEntries.isEmpty
@@ -399,8 +498,11 @@ enum PerFileDiffParser {
 enum PerFileDiffChunkCache {
     private static let cache = BoundedCache<String, [PerFileDiffChunk]>(maxEntries: 128)
 
+    static func reset() { cache.removeAll() }
+
     static func chunks(messageID: String, bodyText: String, entries: [TurnFileChangeSummaryEntry]) -> [PerFileDiffChunk] {
-        cache.getOrSet("\(messageID)|\(bodyText.hashValue)") {
+        let key = "\(TurnTextCacheKey.key(messageID: messageID, kind: "per-file-diff", text: bodyText))|\(TurnTextCacheKey.entriesFingerprint(entries))"
+        return cache.getOrSet(key) {
             PerFileDiffParser.parse(bodyText: bodyText, entries: entries)
         }
     }
@@ -411,8 +513,10 @@ enum PerFileDiffChunkCache {
 enum CodeCommentDirectiveContentCache {
     private static let cache = BoundedCache<String, CodeCommentDirectiveContent>(maxEntries: 256)
 
+    static func reset() { cache.removeAll() }
+
     static func content(messageID: String, text: String) -> CodeCommentDirectiveContent {
-        cache.getOrSet("\(messageID)|\(text.hashValue)") {
+        cache.getOrSet(TurnTextCacheKey.key(messageID: messageID, kind: "code-comment", text: text)) {
             CodeCommentDirectiveParser.parse(from: text)
         }
     }
@@ -423,8 +527,10 @@ enum CodeCommentDirectiveContentCache {
 enum ThinkingDisclosureContentCache {
     private static let cache = BoundedCache<String, ThinkingDisclosureContent>(maxEntries: 256)
 
+    static func reset() { cache.removeAll() }
+
     static func content(messageID: String, text: String) -> ThinkingDisclosureContent {
-        cache.getOrSet("\(messageID)|\(text.hashValue)") {
+        cache.getOrSet(TurnTextCacheKey.key(messageID: messageID, kind: "thinking", text: text)) {
             ThinkingDisclosureParser.parse(from: text)
         }
     }
@@ -433,7 +539,9 @@ enum ThinkingDisclosureContentCache {
 // ─── Diff Block Detection Cache ─────────────────────────────────────
 
 enum DiffBlockDetectionCache {
-    private static let cache = BoundedCache<Int, Bool>(maxEntries: 512)
+    private static let cache = BoundedCache<String, Bool>(maxEntries: 512)
+
+    static func reset() { cache.removeAll() }
 
     static func isDiffBlock(code: String, profile: MarkdownRenderProfile) -> Bool {
         switch profile {
@@ -441,7 +549,8 @@ enum DiffBlockDetectionCache {
             break
         }
 
-        return cache.getOrSet(code.hashValue) {
+        let key = TurnTextCacheKey.key(namespace: "\(profile.cacheKey)|diff-block", text: code)
+        return cache.getOrSet(key) {
             TurnDiffLineKind.detectVerifiedPatch(in: code)
         }
     }
@@ -457,6 +566,8 @@ struct FileChangeGroup: Identifiable {
 
 enum FileChangeGroupingCache {
     private static let cache = BoundedCache<String, [FileChangeGroup]>(maxEntries: 256)
+
+    static func reset() { cache.removeAll() }
 
     static func grouped(messageID: String, entries: [TurnFileChangeSummaryEntry]) -> [FileChangeGroup] {
         var hasher = Hasher()

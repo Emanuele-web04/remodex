@@ -339,7 +339,10 @@ extension CodexService {
             }
             updateCurrentOutput(for: threadId)
         }
-        requestImmediateSync(threadId: threadId)
+        guard !Task.isCancelled, activeThreadId == threadId else {
+            return false
+        }
+        requestImmediateActiveThreadSync(threadId: threadId)
         return true
     }
 
@@ -487,7 +490,8 @@ extension CodexService {
         threadId: String,
         text: String,
         turnId: String? = nil,
-        attachments: [CodexImageAttachment] = []
+        attachments: [CodexImageAttachment] = [],
+        fileMentions: [String] = []
     ) -> String {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty || !attachments.isEmpty else {
@@ -498,6 +502,7 @@ extension CodexService {
             threadId: threadId,
             role: .user,
             text: trimmedText,
+            fileMentions: fileMentions,
             turnId: turnId,
             isStreaming: false,
             deliveryState: .pending,
@@ -513,7 +518,8 @@ extension CodexService {
     func appendConfirmedMirroredUserMessage(
         threadId: String,
         turnId: String?,
-        text: String
+        text: String,
+        fileMentions: [String] = []
     ) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedIncomingText = Self.normalizedMessageText(trimmedText)
@@ -538,6 +544,11 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].turnId = turnId
                 didMutate = true
             }
+            // Optional chaining turns `isEmpty` into `Bool?`, so compare explicitly here.
+            if messagesByThread[threadId]?[existingIndex].fileMentions.isEmpty == true, !fileMentions.isEmpty {
+                messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
+                didMutate = true
+            }
             guard didMutate else {
                 return
             }
@@ -551,6 +562,7 @@ extension CodexService {
                 threadId: threadId,
                 role: .user,
                 text: trimmedText,
+                fileMentions: fileMentions,
                 turnId: turnId,
                 deliveryState: .confirmed
             )
@@ -584,7 +596,7 @@ extension CodexService {
                     let candidate = threadMessages[index]
                     guard candidate.role == .system,
                           candidate.kind == .fileChange,
-                          candidate.turnId == resolvedTurnId else {
+                          (candidate.turnId == resolvedTurnId || candidate.turnId == nil) else {
                         return false
                     }
                     let candidatePathKeys = normalizedFileChangePathKeys(from: candidate.text)
@@ -593,7 +605,8 @@ extension CodexService {
             } else if isSnapshotPayload,
                       let existingID = uniqueFileChangeMessageIDForTurn(
                           threadId: threadId,
-                          turnId: resolvedTurnId
+                          turnId: resolvedTurnId,
+                          allowsTurnlessFallback: true
                       ) {
                 targetIndex = threadMessages.firstIndex(where: { $0.id == existingID })
             }
@@ -663,7 +676,8 @@ extension CodexService {
         text: String? = nil,
         explanation: String? = nil,
         steps: [CodexPlanStep]? = nil,
-        isStreaming: Bool
+        isStreaming: Bool,
+        planPresentation: CodexPlanPresentation
     ) {
         if let itemId, !itemId.isEmpty {
             upsertStreamingSystemItemMessage(
@@ -696,7 +710,8 @@ extension CodexService {
         guard let messageIndex = findLatestPlanMessageIndex(
             threadId: threadId,
             turnId: turnId,
-            itemId: itemId
+            itemId: itemId,
+            planPresentation: planPresentation
         ) else {
             return
         }
@@ -710,6 +725,11 @@ extension CodexService {
             planState.steps = steps
         }
         messagesByThread[threadId]?[messageIndex].planState = planState
+        messagesByThread[threadId]?[messageIndex].planPresentation = resolvedPlanPresentation(
+            requested: planPresentation,
+            turnId: turnId
+        )
+        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
         persistMessages()
         updateCurrentOutput(for: threadId)
     }
@@ -1039,6 +1059,86 @@ extension CodexService {
         )
     }
 
+    // Routes generic technical activity through its own compact system row instead of thinking.
+    func appendToolActivityLine(
+        threadId: String,
+        turnId: String?,
+        line: String
+    ) {
+        let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedLine.isEmpty else {
+            return
+        }
+
+        let isTurnActive = isTurnActiveForThinkingActivity(threadId: threadId, turnId: turnId)
+        let existingMessages = messagesByThread[threadId] ?? []
+        let targetIndex = toolActivityTargetIndex(in: existingMessages, turnId: turnId)
+
+        let hasExplicitTurnId = turnId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        if !isTurnActive, targetIndex == nil, !hasExplicitTurnId {
+            return
+        }
+
+        if let targetIndex {
+            var threadMessages = existingMessages
+            let existingText = threadMessages[targetIndex].text
+            let mergedText = mergeToolActivityText(
+                existing: existingText,
+                incoming: trimmedLine,
+                isStreaming: isTurnActive
+            )
+            guard mergedText != existingText else {
+                return
+            }
+
+            threadMessages[targetIndex].text = mergedText
+            threadMessages[targetIndex].isStreaming = threadMessages[targetIndex].isStreaming || isTurnActive
+            if threadMessages[targetIndex].turnId == nil, let turnId, !turnId.isEmpty {
+                threadMessages[targetIndex].turnId = turnId
+            }
+            messagesByThread[threadId] = threadMessages
+            persistMessages()
+            updateCurrentOutput(for: threadId)
+            return
+        }
+
+        appendSystemMessage(
+            threadId: threadId,
+            text: trimmedLine,
+            turnId: turnId,
+            kind: .toolActivity,
+            isStreaming: isTurnActive
+        )
+    }
+
+    // Reuses only the latest tool-activity row inside the current system segment so
+    // late legacy events do not rewrite rows that now sit above assistant content.
+    func toolActivityTargetIndex(in messages: [CodexMessage], turnId: String?) -> Int? {
+        for index in messages.indices.reversed() {
+            let candidate = messages[index]
+            if candidate.role == .assistant || candidate.role == .user {
+                break
+            }
+
+            guard candidate.role == .system, candidate.kind == .toolActivity else {
+                continue
+            }
+
+            if let turnId, !turnId.isEmpty {
+                if candidate.turnId == turnId || candidate.turnId == nil {
+                    return index
+                }
+                continue
+            }
+
+            if candidate.isStreaming {
+                return index
+            }
+        }
+
+        return nil
+    }
+
     private func normalizeWorkingDirectoryForPushReset(_ rawValue: String?) -> String? {
         guard let rawValue else {
             return nil
@@ -1061,7 +1161,7 @@ extension CodexService {
         return normalized.isEmpty ? "/" : normalized
     }
 
-    // Creates/updates a streaming system item message (thinking/fileChange/commandExecution).
+    // Creates/updates a streaming system item message (thinking/toolActivity/fileChange/commandExecution).
     func upsertStreamingSystemItemMessage(
         threadId: String,
         turnId: String?,
@@ -1079,6 +1179,9 @@ extension CodexService {
             : Set<String>()
         let incomingCommandKey = kind == .commandExecution
             ? commandExecutionPreviewKey(from: text)
+            : nil
+        let incomingToolActivityKey = kind == .toolActivity
+            ? toolActivityPreviewKey(from: text)
             : nil
         let messageID: String?
         if let existingMessageID = streamingSystemMessageByItemID[key] {
@@ -1106,13 +1209,36 @@ extension CodexService {
                 streamingSystemMessageByItemID[syntheticKey] = existingMessageID
             }
             messageID = existingMessageID
+        } else if kind == .toolActivity,
+                  let resolvedTurnId, !resolvedTurnId.isEmpty,
+                  let incomingToolActivityKey {
+            let matchingRows = (messagesByThread[threadId] ?? []).filter { candidate in
+                guard candidate.role == .system,
+                      candidate.kind == .toolActivity,
+                      candidate.turnId == resolvedTurnId,
+                      let candidateKey = toolActivityPreviewKey(from: candidate.text),
+                      canReuseLiveToolActivityRow(candidate, incomingItemId: itemId) else {
+                    return false
+                }
+                return candidateKey == incomingToolActivityKey
+            }
+
+            if matchingRows.count == 1, let existingMessageID = matchingRows.first?.id {
+                streamingSystemMessageByItemID[key] = existingMessageID
+                if let syntheticKey {
+                    streamingSystemMessageByItemID[syntheticKey] = existingMessageID
+                }
+                messageID = existingMessageID
+            } else {
+                messageID = nil
+            }
         } else if kind == .fileChange,
                   let resolvedTurnId, !resolvedTurnId.isEmpty,
                   !incomingFileChangePathKeys.isEmpty,
                   let existingMessageID = messagesByThread[threadId]?.reversed().first(where: { candidate in
                       guard candidate.role == .system,
                             candidate.kind == .fileChange,
-                            candidate.turnId == resolvedTurnId else {
+                            (candidate.turnId == resolvedTurnId || candidate.turnId == nil) else {
                           return false
                       }
                       let candidateKeys = normalizedFileChangePathKeys(from: candidate.text)
@@ -1131,7 +1257,8 @@ extension CodexService {
                   isFileChangeSnapshotPayload(text),
                   let existingMessageID = uniqueFileChangeMessageIDForTurn(
                       threadId: threadId,
-                      turnId: resolvedTurnId
+                      turnId: resolvedTurnId,
+                      allowsTurnlessFallback: true
                   ) {
             // Fallback: if payload has no extractable path and there's only one file-change row
             // in this turn, treat it as the same row instead of creating duplicates.
@@ -1148,15 +1275,21 @@ extension CodexService {
            let index = findMessageIndex(threadId: threadId, messageId: messageID) {
             let incoming = text
             let incomingTrimmed = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isFileChangeSnapshot = kind == .fileChange
+                && isFileChangeSnapshotPayload(incomingTrimmed)
             if !incomingTrimmed.isEmpty {
                 let existing = messagesByThread[threadId]?[index].text ?? ""
                 let existingTrimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
                 if kind == .commandExecution {
                     // Command status rows are snapshots ("running" -> "completed"), not deltas.
                     messagesByThread[threadId]?[index].text = incomingTrimmed
+                } else if kind == .toolActivity {
+                    messagesByThread[threadId]?[index].text = mergeToolActivityText(
+                        existing: existing,
+                        incoming: incoming,
+                        isStreaming: isStreaming
+                    )
                 } else {
-                    let isFileChangeSnapshot = kind == .fileChange
-                        && isFileChangeSnapshotPayload(incomingTrimmed)
                     if isStreamingPlaceholder(incomingTrimmed, for: kind)
                         && !existingTrimmed.isEmpty
                         && !isStreamingPlaceholder(existingTrimmed, for: kind) {
@@ -1195,7 +1328,8 @@ extension CodexService {
                             keepIndex: refreshedIndex,
                             kind: .fileChange,
                             turnId: resolvedTurnId,
-                            fileChangePathKeys: incomingFileChangePathKeys
+                            fileChangePathKeys: incomingFileChangePathKeys,
+                            isAuthoritativeFileChangeSnapshot: isFileChangeSnapshot
                         )
                     } else if kind == .commandExecution,
                               let incomingCommandKey {
@@ -1205,6 +1339,15 @@ extension CodexService {
                             kind: .commandExecution,
                             turnId: resolvedTurnId,
                             commandKey: incomingCommandKey
+                        )
+                    } else if kind == .toolActivity,
+                              let incomingToolActivityKey {
+                        pruneDuplicateSystemRows(
+                            in: &threadMessages,
+                            keepIndex: refreshedIndex,
+                            kind: .toolActivity,
+                            turnId: resolvedTurnId,
+                            toolActivityKey: incomingToolActivityKey
                         )
                     }
                 }
@@ -1375,6 +1518,37 @@ extension CodexService {
         return command.isEmpty ? nil : command
     }
 
+    // Uses normalized visible lines so live/history tool rows can rebind without
+    // relying on fragile placeholder text or raw item ids.
+    private func toolActivityPreviewKey(from text: String) -> String? {
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter {
+                !$0.isEmpty
+                    && !isStreamingPlaceholder($0, for: .toolActivity)
+            }
+            .map { $0.lowercased() }
+
+        guard !lines.isEmpty else {
+            return nil
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    // Allows text-based reuse only for provisional rows; stable item ids must stay distinct.
+    private func canReuseLiveToolActivityRow(_ candidate: CodexMessage, incomingItemId: String) -> Bool {
+        let candidateItemId = normalizedStreamingItemID(candidate.itemId)
+        let incomingItemId = normalizedStreamingItemID(incomingItemId)
+
+        if let candidateItemId, let incomingItemId, candidateItemId == incomingItemId {
+            return true
+        }
+
+        return !Self.hasStableToolActivityIdentity(candidateItemId)
+    }
+
     private func isFileChangeSnapshotPayload(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -1419,11 +1593,68 @@ extension CodexService {
         return false
     }
 
-    private func uniqueFileChangeMessageIDForTurn(threadId: String, turnId: String) -> String? {
+    // Coalesces generic tool activity lines so the timeline keeps one stable row per tool item.
+    func mergeToolActivityText(existing: String, incoming: String, isStreaming: Bool) -> String {
+        let existingTrimmed = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingTrimmed = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if incomingTrimmed.isEmpty {
+            return existingTrimmed
+        }
+        if existingTrimmed.isEmpty || isStreamingPlaceholder(existingTrimmed, for: .toolActivity) {
+            return incomingTrimmed
+        }
+        if isStreamingPlaceholder(incomingTrimmed, for: .toolActivity) {
+            return existingTrimmed
+        }
+
+        let incomingLines = incomingTrimmed
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !incomingLines.isEmpty else {
+            return existingTrimmed
+        }
+
+        var mergedLines = existingTrimmed
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for line in incomingLines where !mergedLines.contains(where: {
+            $0.caseInsensitiveCompare(line) == .orderedSame
+        }) {
+            if !isStreaming,
+               let existingIndex = mergedLines.firstIndex(where: { candidate in
+                   let existingTokens = candidate.split(whereSeparator: \.isWhitespace)
+                   let incomingTokens = line.split(whereSeparator: \.isWhitespace)
+                   guard existingTokens.count >= 2, incomingTokens.count >= 2 else {
+                       return false
+                   }
+                   return existingTokens.dropFirst().joined(separator: " ")
+                       .caseInsensitiveCompare(incomingTokens.dropFirst().joined(separator: " ")) == .orderedSame
+               }) {
+                mergedLines[existingIndex] = line
+            } else {
+                mergedLines.append(line)
+            }
+        }
+
+        return mergedLines.isEmpty ? incomingTrimmed : mergedLines.joined(separator: "\n")
+    }
+
+    private func uniqueFileChangeMessageIDForTurn(
+        threadId: String,
+        turnId: String,
+        allowsTurnlessFallback: Bool = false
+    ) -> String? {
         let candidates = (messagesByThread[threadId] ?? []).filter { candidate in
             candidate.role == .system
                 && candidate.kind == .fileChange
-                && candidate.turnId == turnId
+                && (
+                    candidate.turnId == turnId
+                        || (allowsTurnlessFallback && candidate.turnId == nil)
+                )
         }
         guard candidates.count == 1 else {
             return nil
@@ -1437,7 +1668,9 @@ extension CodexService {
         kind: CodexMessageKind,
         turnId: String,
         fileChangePathKeys: Set<String> = Set<String>(),
-        commandKey: String? = nil
+        isAuthoritativeFileChangeSnapshot: Bool = false,
+        commandKey: String? = nil,
+        toolActivityKey: String? = nil
     ) {
         guard threadMessages.indices.contains(keepIndex) else { return }
         let keepID = threadMessages[keepIndex].id
@@ -1446,21 +1679,38 @@ extension CodexService {
         threadMessages.removeAll { candidate in
             guard candidate.id != keepID,
                   candidate.role == .system,
-                  candidate.kind == kind,
-                  candidate.turnId == turnId else {
+                  candidate.kind == kind else {
                 return false
             }
 
             if kind == .fileChange {
+                let sameTurn = candidate.turnId == turnId
+                let canPruneTurnlessFallback = isAuthoritativeFileChangeSnapshot
+                    && candidate.turnId == nil
+                guard sameTurn || canPruneTurnlessFallback else {
+                    return false
+                }
+
                 if !fileChangePathKeys.isEmpty {
                     let candidateKeys = normalizedFileChangePathKeys(from: candidate.text)
+                    if isAuthoritativeFileChangeSnapshot {
+                        return candidateKeys.isSubset(of: fileChangePathKeys)
+                    }
                     return !candidateKeys.isDisjoint(with: fileChangePathKeys)
                 }
                 return candidate.text.trimmingCharacters(in: .whitespacesAndNewlines) == keepText
             }
 
+            guard candidate.turnId == turnId else {
+                return false
+            }
+
             if kind == .commandExecution, let commandKey {
                 return commandExecutionPreviewKey(from: candidate.text) == commandKey
+            }
+
+            if kind == .toolActivity, let toolActivityKey {
+                return toolActivityPreviewKey(from: candidate.text) == toolActivityKey
             }
 
             return false
@@ -1599,6 +1849,7 @@ extension CodexService {
         text: String?
     ) {
         let key = streamingItemMessageKey(threadId: threadId, itemId: itemId)
+        let completedMessageID = streamingSystemMessageByItemID[key]
         upsertStreamingSystemItemMessage(
             threadId: threadId,
             turnId: turnId,
@@ -1608,14 +1859,28 @@ extension CodexService {
             isStreaming: false
         )
 
-        if let messageID = streamingSystemMessageByItemID[key],
+        if let messageID = completedMessageID ?? streamingSystemMessageByItemID[key],
            let index = findMessageIndex(threadId: threadId, messageId: messageID) {
             messagesByThread[threadId]?[index].isStreaming = false
             messagesByThread[threadId]?[index].kind = kind
+
+            if kind == .toolActivity,
+               let finalText = messagesByThread[threadId]?[index].text,
+               isStreamingPlaceholder(finalText, for: .toolActivity) {
+                messagesByThread[threadId]?.removeAll { $0.id == messageID }
+                updateCurrentOutput(for: threadId)
+            }
+
             persistMessages()
         }
 
-        streamingSystemMessageByItemID.removeValue(forKey: key)
+        if let completedMessageID = completedMessageID ?? streamingSystemMessageByItemID[key] {
+            streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter { _, value in
+                value != completedMessageID
+            }
+        } else {
+            streamingSystemMessageByItemID.removeValue(forKey: key)
+        }
     }
 
     // Completes synthetic turn-based stream entries when no itemId exists.
@@ -1728,6 +1993,7 @@ extension CodexService {
         if messagesByThread[threadId]?[messageIndex].itemId == nil, let itemId {
             messagesByThread[threadId]?[messageIndex].itemId = itemId
         }
+        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
 
         persistMessages()
         updateStreamingAssistantOutput(for: threadId, messageId: messageID, rawMessageIndex: messageIndex)
@@ -1752,6 +2018,60 @@ extension CodexService {
         }
 
         if let resolvedTurnId,
+           itemId == nil,
+           !threadHasActiveOrRunningTurn(threadId) {
+            let completedAssistantIndices = completedAssistantMessageIndices(
+                threadId: threadId,
+                turnId: resolvedTurnId
+            )
+
+            if completedAssistantIndices.count == 1,
+               let targetIndex = completedAssistantIndices.first {
+                let currentAssistant = messagesByThread[threadId]?[targetIndex]
+                if let currentAssistant,
+                   Self.shouldReplaceClosedAssistantMessage(
+                        currentAssistant,
+                        with: CodexMessage(
+                            threadId: threadId,
+                            role: .assistant,
+                            text: trimmedText,
+                            turnId: resolvedTurnId,
+                            itemId: nil,
+                            isStreaming: false,
+                            deliveryState: .confirmed,
+                            orderIndex: currentAssistant.orderIndex
+                        )
+                   ) {
+                    messagesByThread[threadId]?[targetIndex].text = trimmedText
+                    messagesByThread[threadId]?[targetIndex].isStreaming = false
+                    if messagesByThread[threadId]?[targetIndex].turnId == nil {
+                        messagesByThread[threadId]?[targetIndex].turnId = resolvedTurnId
+                    }
+                    refreshDerivedPlanMetadata(threadId: threadId, messageIndex: targetIndex)
+                    resolvedAssistantMessageId = messagesByThread[threadId]?[targetIndex].id
+                }
+                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+                if let resolvedAssistantMessageId {
+                    persistMessages()
+                    noteAssistantMessage(
+                        threadId: threadId,
+                        turnId: resolvedTurnId,
+                        assistantMessageId: resolvedAssistantMessageId
+                    )
+                    updateCurrentOutput(for: threadId)
+                }
+                return
+            }
+
+            if !completedAssistantIndices.isEmpty {
+                // Late legacy completions without item identity are ambiguous once a closed
+                // turn already has assistant bubbles. Ignore them instead of appending a duplicate.
+                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+                return
+            }
+        }
+
+        if let resolvedTurnId,
            let messageID = ensureStreamingAssistantMessage(threadId: threadId, turnId: resolvedTurnId, itemId: itemId),
            let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
             let existingText = messagesByThread[threadId]?[messageIndex].text ?? ""
@@ -1769,6 +2089,7 @@ extension CodexService {
             if messagesByThread[threadId]?[messageIndex].turnId == nil {
                 messagesByThread[threadId]?[messageIndex].turnId = resolvedTurnId
             }
+            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
             resolvedAssistantMessageId = messagesByThread[threadId]?[messageIndex].id
         } else {
             if let itemId,
@@ -1780,6 +2101,7 @@ extension CodexService {
                 if messagesByThread[threadId]?[existingItemIndex].turnId == nil {
                     messagesByThread[threadId]?[existingItemIndex].turnId = resolvedTurnId
                 }
+                refreshDerivedPlanMetadata(threadId: threadId, messageIndex: existingItemIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[existingItemIndex].id
             } else if let duplicateIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
                 candidate.role == .assistant
@@ -1798,6 +2120,7 @@ extension CodexService {
                 if messagesByThread[threadId]?[duplicateIndex].turnId == nil {
                     messagesByThread[threadId]?[duplicateIndex].turnId = resolvedTurnId
                 }
+                refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id
             } else {
                 let newMessage = CodexMessage(
@@ -1911,6 +2234,12 @@ extension CodexService {
         clearRunningState(for: threadId)
         clearRunningThreadWatch(threadId)
         let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
+        let shouldFinalizePlanSteps: Bool = {
+            if let resolvedTurnId {
+                return terminalStateByTurnID[resolvedTurnId] == .completed
+            }
+            return latestTurnTerminalStateByThread[threadId] == .completed
+        }()
 
         if let resolvedTurnId {
             let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: resolvedTurnId)
@@ -1951,18 +2280,79 @@ extension CodexService {
         // Close both turn-bound and orphan system stream rows, but keep reasoning content visible.
         if var threadMessages = messagesByThread[threadId] {
             var didMutate = false
+            let belongsToCompletedTurn: (CodexMessage) -> Bool = { message in
+                if let resolvedTurnId {
+                    return message.turnId == resolvedTurnId || message.turnId == nil
+                }
+                return message.isStreaming
+            }
+
             for index in threadMessages.indices where threadMessages[index].role == .system
                 && threadMessages[index].isStreaming {
-                let belongsToTurn: Bool
-                if let resolvedTurnId {
-                    belongsToTurn = threadMessages[index].turnId == resolvedTurnId
-                        || threadMessages[index].turnId == nil
-                } else {
-                    belongsToTurn = true
-                }
+                let belongsToTurn = belongsToCompletedTurn(threadMessages[index])
                 guard belongsToTurn else { continue }
                 threadMessages[index].isStreaming = false
                 didMutate = true
+            }
+
+            for index in threadMessages.indices where threadMessages[index].role == .system
+                && threadMessages[index].kind == .plan {
+                let belongsToTurn = belongsToCompletedTurn(threadMessages[index])
+                guard belongsToTurn else { continue }
+
+                switch threadMessages[index].resolvedPlanPresentation {
+                case .resultCompletedItem:
+                    let nextPresentation: CodexPlanPresentation = shouldFinalizePlanSteps ? .resultReady : .resultClosed
+                    if threadMessages[index].planPresentation != nextPresentation {
+                        threadMessages[index].planPresentation = nextPresentation
+                    }
+                    refreshDerivedPlanMetadata(in: &threadMessages, index: index)
+                    didMutate = true
+                case .resultStreaming:
+                    if threadMessages[index].planPresentation != .resultClosed {
+                        threadMessages[index].planPresentation = .resultClosed
+                        threadMessages[index].proposedPlan = nil
+                        didMutate = true
+                    }
+                default:
+                    break
+                }
+            }
+
+            // Successful completions can land before the server publishes a final
+            // "all steps completed" plan snapshot, so normalize stale progress steps here.
+            if shouldFinalizePlanSteps {
+                let fallbackPlanIndex: Int? = {
+                    guard resolvedTurnId == nil else { return nil }
+                    return threadMessages.indices.reversed().first(where: { index in
+                        let candidate = threadMessages[index]
+                        return candidate.role == .system
+                            && candidate.kind == .plan
+                            && candidate.resolvedPlanPresentation == .progress
+                            && candidate.planState?.steps.contains(where: { $0.status != .completed }) == true
+                    })
+                }()
+
+                for index in threadMessages.indices where threadMessages[index].role == .system
+                    && threadMessages[index].kind == .plan {
+                    let belongsToTurn = belongsToCompletedTurn(threadMessages[index])
+                        || fallbackPlanIndex == index
+                    guard belongsToTurn,
+                          threadMessages[index].resolvedPlanPresentation == .progress,
+                          let planState = threadMessages[index].planState,
+                          !planState.steps.isEmpty,
+                          planState.steps.contains(where: { $0.status != .completed }) else {
+                        continue
+                    }
+
+                    threadMessages[index].planState = CodexPlanState(
+                        explanation: planState.explanation,
+                        steps: planState.steps.map { step in
+                            CodexPlanStep(id: step.id, step: step.step, status: .completed)
+                        }
+                    )
+                    didMutate = true
+                }
             }
 
             let priorCount = threadMessages.count
@@ -2319,14 +2709,45 @@ extension CodexService {
     }
 
     func appendMessage(_ message: CodexMessage) {
+        var normalizedMessage = message
+        normalizedMessage.proposedPlan = derivedProposedPlan(for: normalizedMessage)
         if message.isStreaming {
             // Keep sidebar run state independent from timeline scanning cost.
             markThreadAsRunning(message.threadId)
         }
-        messagesByThread[message.threadId, default: []].append(message)
+        messagesByThread[message.threadId, default: []].append(normalizedMessage)
         messagesByThread[message.threadId]?.sort(by: { $0.orderIndex < $1.orderIndex })
         persistMessages()
         updateCurrentOutput(for: message.threadId)
+    }
+
+    private func refreshDerivedPlanMetadata(threadId: String, messageIndex: Int) {
+        guard let message = messagesByThread[threadId]?[messageIndex] else {
+            return
+        }
+
+        messagesByThread[threadId]?[messageIndex].proposedPlan = derivedProposedPlan(for: message)
+    }
+
+    private func refreshDerivedPlanMetadata(in messages: inout [CodexMessage], index: Int) {
+        guard messages.indices.contains(index) else {
+            return
+        }
+
+        messages[index].proposedPlan = derivedProposedPlan(for: messages[index])
+    }
+
+    private func derivedProposedPlan(for message: CodexMessage) -> CodexProposedPlan? {
+        if message.role == .system && message.kind == .plan {
+            guard let presentation = message.resolvedPlanPresentation,
+                  presentation == .resultCompletedItem || presentation == .resultReady else {
+                return nil
+            }
+
+            return CodexProposedPlanParser.parsePlanItem(from: message.text)
+        }
+
+        return CodexProposedPlanParser.parse(from: message.text)
     }
 
     func findMessageIndex(threadId: String, messageId: String) -> Int? {
@@ -2363,7 +2784,12 @@ extension CodexService {
         return findMessageIndex(threadId: threadId, messageId: messageId)
     }
 
-    func findLatestPlanMessageIndex(threadId: String, turnId: String?, itemId: String?) -> Int? {
+    func findLatestPlanMessageIndex(
+        threadId: String,
+        turnId: String?,
+        itemId: String?,
+        planPresentation: CodexPlanPresentation
+    ) -> Int? {
         if let itemId, !itemId.isEmpty {
             if let directIndex = messagesByThread[threadId]?.indices.reversed().first(where: { index in
                 let candidate = messagesByThread[threadId]?[index]
@@ -2381,13 +2807,34 @@ extension CodexService {
                 return candidate?.role == .system
                     && candidate?.kind == .plan
                     && candidate?.turnId == turnId
+                    && candidate?.resolvedPlanPresentation == planPresentation
             })
         }
 
         return messagesByThread[threadId]?.indices.reversed().first(where: { index in
             let candidate = messagesByThread[threadId]?[index]
-            return candidate?.role == .system && candidate?.kind == .plan
+            return candidate?.role == .system
+                && candidate?.kind == .plan
+                && candidate?.resolvedPlanPresentation == planPresentation
         })
+    }
+
+    private func resolvedPlanPresentation(
+        requested: CodexPlanPresentation,
+        turnId: String?
+    ) -> CodexPlanPresentation {
+        guard requested == .resultCompletedItem else {
+            return requested
+        }
+
+        switch turnTerminalState(for: turnId) {
+        case .completed:
+            return .resultReady
+        case .failed, .stopped:
+            return .resultClosed
+        case nil:
+            return .resultCompletedItem
+        }
     }
 
     func findLatestSubagentActionMessageIndex(threadId: String, turnId: String?, itemId: String?) -> Int? {
@@ -2490,6 +2937,19 @@ extension CodexService {
         "\(streamingMessageKey(threadId: threadId, turnId: turnId))|item:\(itemId)"
     }
 
+    func completedAssistantMessageIndices(threadId: String, turnId: String) -> [Int] {
+        guard let threadMessages = messagesByThread[threadId] else {
+            return []
+        }
+
+        return threadMessages.indices.filter { index in
+            let candidate = threadMessages[index]
+            return candidate.role == .assistant
+                && candidate.turnId == turnId
+                && !candidate.isStreaming
+        }
+    }
+
     func streamingItemMessageKey(threadId: String, itemId: String) -> String {
         "\(threadId)|item:\(itemId)"
     }
@@ -2515,6 +2975,8 @@ extension CodexService {
         switch kind {
         case .thinking:
             return "Thinking..."
+        case .toolActivity:
+            return "Working…"
         case .fileChange:
             return "Applying file changes..."
         case .commandExecution:

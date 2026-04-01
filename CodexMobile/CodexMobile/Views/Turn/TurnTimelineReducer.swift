@@ -17,8 +17,9 @@ enum TurnTimelineReducer {
     static func project(messages: [CodexMessage]) -> TurnTimelineProjection {
         let visibleMessages = removeHiddenSystemMarkers(in: messages)
         let reordered = enforceIntraTurnOrder(in: visibleMessages)
-        let collapsedThinking = collapseConsecutiveThinkingMessages(in: reordered)
-        let dedupedFileChanges = removeDuplicateFileChangeMessages(in: collapsedThinking)
+        let collapsedThinking = collapseThinkingMessages(in: reordered)
+        let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
+        let dedupedFileChanges = removeDuplicateFileChangeMessages(in: withoutCommandThinkingEchoes)
         let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
         let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
         return TurnTimelineProjection(messages: dedupedAssistant)
@@ -37,13 +38,13 @@ enum TurnTimelineReducer {
         return messages.last(where: { $0.role == .assistant && $0.isStreaming })?.id
     }
 
-    // Ensures correct visual order within each turn: user → thinking → assistant → file changes.
+    // Ensures correct visual order within each turn: user → activity → assistant → trailing file changes.
     // Works on non-consecutive messages: collects ALL indices per turnId across the entire
     // array, sorts each turn's messages by role priority, and places them back into their
     // original slot positions. Messages without a turnId are never moved.
     //
-    // Multi-item turns (thinking → response → thinking → response) are detected by checking
-    // whether a thinking row arrives after an assistant row in chronological order. When
+    // Multi-item turns (thinking/tool activity → response → more activity → response) are
+    // detected by checking whether activity arrives on BOTH sides of an assistant row. When
     // detected, only user messages are floated to the top; the interleaved flow is preserved.
     static func enforceIntraTurnOrder(in messages: [CodexMessage]) -> [CodexMessage] {
         // Collect indices belonging to each turnId (may be scattered across the array).
@@ -61,9 +62,9 @@ enum TurnTimelineReducer {
             let turnMessages = indices.map { result[$0] }
 
             let sorted: [CodexMessage]
-            if hasInterleavedAssistantThinkingFlow(turnMessages) {
+            if hasInterleavedAssistantActivityFlow(turnMessages) {
                 // Multi-item turn: only ensure user messages precede all others.
-                // Preserve the interleaved thinking → response → thinking → response order.
+                // Preserve the interleaved activity → response → activity → response order.
                 sorted = turnMessages.sorted { a, b in
                     let aIsUser = a.role == .user
                     let bIsUser = b.role == .user
@@ -89,10 +90,10 @@ enum TurnTimelineReducer {
         return result
     }
 
-    // Detects multi-item turns where thinking/reasoning appears on BOTH sides of an
-    // assistant message (thinking → response → thinking). This distinguishes true
+    // Detects multi-item turns where visible system activity appears on BOTH sides of an
+    // assistant message (thinking/tool → response → thinking/tool). This distinguishes true
     // interleaved flows from single-item turns where events arrived out of order.
-    private static func hasInterleavedAssistantThinkingFlow(_ turnMessages: [CodexMessage]) -> Bool {
+    private static func hasInterleavedAssistantActivityFlow(_ turnMessages: [CodexMessage]) -> Bool {
         // Multiple distinct assistant item IDs = definitive multi-item turn.
         let distinctAssistantItemIds = Set(
             turnMessages
@@ -103,22 +104,35 @@ enum TurnTimelineReducer {
             return true
         }
 
-        // Check pattern: thinking → assistant → thinking (reasoning on both sides).
+        // Check pattern: activity → assistant → activity (system activity on both sides).
         let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
-        var hasThinkingBeforeAssistant = false
+        var hasActivityBeforeAssistant = false
         var seenAssistant = false
         for message in ordered {
             if message.role == .assistant {
                 seenAssistant = true
-            } else if message.role == .system, message.kind == .thinking {
+            } else if isInterleavableSystemActivity(message) {
                 if !seenAssistant {
-                    hasThinkingBeforeAssistant = true
-                } else if hasThinkingBeforeAssistant {
+                    hasActivityBeforeAssistant = true
+                } else if hasActivityBeforeAssistant {
                     return true
                 }
             }
         }
         return false
+    }
+
+    private static func isInterleavableSystemActivity(_ message: CodexMessage) -> Bool {
+        guard message.role == .system else {
+            return false
+        }
+
+        switch message.kind {
+        case .thinking, .toolActivity, .commandExecution:
+            return true
+        case .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
+            return false
+        }
     }
 
     private static func intraTurnPriority(_ message: CodexMessage) -> Int {
@@ -129,6 +143,8 @@ enum TurnTimelineReducer {
             switch message.kind {
             case .thinking:
                 return 1
+            case .toolActivity:
+                return 2
             case .commandExecution:
                 return 2
             case .subagentAction:
@@ -155,8 +171,9 @@ enum TurnTimelineReducer {
         }
     }
 
-    // Collapses noisy back-to-back thinking rows into one visual row (render-only).
-    static func collapseConsecutiveThinkingMessages(in messages: [CodexMessage]) -> [CodexMessage] {
+    // Collapses repeated thinking placeholders/activity rows within one turn segment so
+    // tool cards can interleave without leaving stacked empty "Thinking..." rows behind.
+    static func collapseThinkingMessages(in messages: [CodexMessage]) -> [CodexMessage] {
         var result: [CodexMessage] = []
         result.reserveCapacity(messages.count)
 
@@ -166,18 +183,12 @@ enum TurnTimelineReducer {
                 continue
             }
 
-            guard var previous = result.last,
-                  previous.role == .system,
-                  previous.kind == .thinking else {
+            guard let previousIndex = latestReusableThinkingIndex(in: result, for: message) else {
                 result.append(message)
                 continue
             }
 
-            guard shouldMergeThinkingRows(previous: previous, incoming: message) else {
-                result.append(message)
-                continue
-            }
-
+            var previous = result[previousIndex]
             let incoming = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !incoming.isEmpty {
                 previous.text = mergeThinkingText(existing: previous.text, incoming: incoming)
@@ -187,29 +198,71 @@ enum TurnTimelineReducer {
             previous.isStreaming = message.isStreaming
             previous.turnId = message.turnId ?? previous.turnId
             previous.itemId = message.itemId ?? previous.itemId
-            result[result.count - 1] = previous
+            result[previousIndex] = previous
         }
 
         return result
     }
 
-    // Preserves separate reasoning blocks when they come from different item ids.
+    // Reuses the latest thinking row in the current system segment until user/assistant content resumes.
+    private static func latestReusableThinkingIndex(
+        in messages: [CodexMessage],
+        for incoming: CodexMessage
+    ) -> Int? {
+        for index in messages.indices.reversed() {
+            let candidate = messages[index]
+            if candidate.role == .assistant || candidate.role == .user {
+                break
+            }
+
+            guard candidate.role == .system, candidate.kind == .thinking else {
+                continue
+            }
+
+            if shouldMergeThinkingRows(previous: candidate, incoming: incoming) {
+                return index
+            }
+        }
+
+        return nil
+    }
+
+    // Coalesces thinking rows inside one system segment even when identifiers arrive late.
     private static func shouldMergeThinkingRows(previous: CodexMessage, incoming: CodexMessage) -> Bool {
         let previousItemId = normalizedIdentifier(previous.itemId)
         let incomingItemId = normalizedIdentifier(incoming.itemId)
-        if let previousItemId, let incomingItemId {
-            return previousItemId == incomingItemId
+        if let previousItemId, let incomingItemId,
+           previousItemId == incomingItemId {
+            return true
         }
-        if previousItemId != nil || incomingItemId != nil {
+
+        guard hasCompatibleThinkingTurnScope(previous: previous, incoming: incoming) else {
             return false
         }
 
-        let previousTurnId = normalizedIdentifier(previous.turnId)
-        let incomingTurnId = normalizedIdentifier(incoming.turnId)
-        guard previousTurnId == incomingTurnId else {
+        if isPlaceholderThinkingRow(previous) {
+            return true
+        }
+
+        let previousHasStableIdentity = hasStableThinkingIdentity(previous)
+        let incomingHasStableIdentity = hasStableThinkingIdentity(incoming)
+
+        if previousHasStableIdentity,
+           incomingHasStableIdentity,
+           previousItemId != nil,
+           incomingItemId != nil {
             return false
         }
-        return previousTurnId != nil
+
+        if isPlaceholderThinkingRow(incoming) {
+            return !previousHasStableIdentity
+        }
+
+        if !previousHasStableIdentity || !incomingHasStableIdentity {
+            return thinkingSnapshotsOverlap(previous: previous, incoming: incoming)
+        }
+
+        return false
     }
 
     private static func normalizedIdentifier(_ value: String?) -> String? {
@@ -218,6 +271,47 @@ enum TurnTimelineReducer {
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // Allows late turn ids to attach to the current system segment without crossing turn boundaries.
+    private static func hasCompatibleThinkingTurnScope(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        let previousTurnId = normalizedIdentifier(previous.turnId)
+        let incomingTurnId = normalizedIdentifier(incoming.turnId)
+        guard let previousTurnId, let incomingTurnId else {
+            return true
+        }
+        return previousTurnId == incomingTurnId
+    }
+
+    // Treats synthetic turn-scoped thinking ids as unstable so a later real item can reuse the row.
+    private static func hasStableThinkingIdentity(_ message: CodexMessage) -> Bool {
+        guard let itemId = normalizedIdentifier(message.itemId) else {
+            return false
+        }
+        return !(itemId.hasPrefix("turn:") && itemId.contains("|kind:\(CodexMessageKind.thinking.rawValue)"))
+    }
+
+    // Identifies placeholder-only rows that should be reused instead of stacked.
+    private static func isPlaceholderThinkingRow(_ message: CodexMessage) -> Bool {
+        ThinkingDisclosureParser.normalizedThinkingContent(from: message.text).isEmpty
+    }
+
+    // Merges streaming/history snapshots only when their visible reasoning content overlaps.
+    private static func thinkingSnapshotsOverlap(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        let previousText = ThinkingDisclosureParser.normalizedThinkingContent(from: previous.text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let incomingText = ThinkingDisclosureParser.normalizedThinkingContent(from: incoming.text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !previousText.isEmpty, !incomingText.isEmpty else {
+            return previousText.isEmpty || incomingText.isEmpty
+        }
+
+        let previousLower = previousText.lowercased()
+        let incomingLower = incomingText.lowercased()
+        return previousLower == incomingLower
+            || previousLower.contains(incomingLower)
+            || incomingLower.contains(previousLower)
     }
 
     // Preserves useful activity lines while still allowing newer thinking snapshots to win.
@@ -251,10 +345,85 @@ enum TurnTimelineReducer {
         return "\(existingTrimmed)\n\(incomingTrimmed)"
     }
 
+    // Hides command-status echoes that are already rendered as dedicated command cards.
+    private static func removeRedundantThinkingCommandActivityMessages(
+        in messages: [CodexMessage]
+    ) -> [CodexMessage] {
+        let commandKeysByTurn = messages.reduce(into: [String: Set<String>]()) { partialResult, message in
+            guard message.role == .system,
+                  message.kind == .commandExecution,
+                  let turnId = normalizedIdentifier(message.turnId),
+                  let commandKey = commandActivityKey(from: message.text) else {
+                return
+            }
+            partialResult[turnId, default: Set<String>()].insert(commandKey)
+        }
+
+        guard !commandKeysByTurn.isEmpty else {
+            return messages
+        }
+
+        return messages.filter { message in
+            guard message.role == .system,
+                  message.kind == .thinking,
+                  let turnId = normalizedIdentifier(message.turnId),
+                  let commandKeys = commandKeysByTurn[turnId] else {
+                return true
+            }
+
+            let normalizedThinking = ThinkingDisclosureParser.normalizedThinkingContent(from: message.text)
+            let lines = normalizedThinking
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            guard !lines.isEmpty else {
+                return true
+            }
+
+            return !lines.allSatisfy { line in
+                guard let commandKey = commandActivityKey(from: line) else {
+                    return false
+                }
+                return commandKeys.contains(commandKey)
+            }
+        }
+    }
+
+    private static func commandActivityKey(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let tokens = trimmed
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard tokens.count >= 2 else {
+            return nil
+        }
+
+        let status = tokens[0].lowercased()
+        guard status == "running"
+            || status == "completed"
+            || status == "failed"
+            || status == "stopped" else {
+            return nil
+        }
+
+        let command = tokens
+            .dropFirst()
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return command.isEmpty ? nil : command
+    }
+
     // Hides duplicated assistant rows caused by mixed completion/history payloads.
     static func removeDuplicateAssistantMessages(in messages: [CodexMessage]) -> [CodexMessage] {
         var seenKeys: Set<String> = []
         var seenNoTurnByText: [String: Date] = [:]
+        var seenTurnText: [String: AssistantTurnTextObservation] = [:]
         var result: [CodexMessage] = []
         result.reserveCapacity(messages.count)
 
@@ -271,12 +440,24 @@ enum TurnTimelineReducer {
             }
 
             if let turnId = message.turnId, !turnId.isEmpty {
-                let dedupeScope = message.itemId?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let dedupeScope = normalizedIdentifier(message.itemId)
                 let key = "\(turnId)|\(dedupeScope ?? "no-item")|\(normalizedText)"
                 if seenKeys.contains(key) {
                     continue
                 }
+
+                let hasStableIdentity = dedupeScope != nil
+                let turnTextKey = "\(turnId)|\(normalizedText)"
+                if let previous = seenTurnText[turnTextKey],
+                   abs(message.createdAt.timeIntervalSince(previous.createdAt)) <= 12,
+                   !previous.hasStableIdentity || !hasStableIdentity {
+                    continue
+                }
                 seenKeys.insert(key)
+                seenTurnText[turnTextKey] = AssistantTurnTextObservation(
+                    createdAt: message.createdAt,
+                    hasStableIdentity: hasStableIdentity
+                )
                 result.append(message)
                 continue
             }
@@ -291,6 +472,11 @@ enum TurnTimelineReducer {
         }
 
         return result
+    }
+
+    private struct AssistantTurnTextObservation {
+        let createdAt: Date
+        let hasStableIdentity: Bool
     }
 
     // Keeps only the newest matching file-change card when multiple event channels emit the same diff.
@@ -406,36 +592,43 @@ enum TurnTimelineReducer {
     }
 
     // Keys file-change cards by turn + rendered payload so repeated turn/diff snapshots collapse to one row.
+    // Falls back to full normalized text so even unparseable messages with identical content get deduped.
     private static func duplicateFileChangeKey(for message: CodexMessage) -> String? {
-        guard let turnId = normalizedIdentifier(message.turnId) else {
-            return nil
-        }
+        let turnLabel = normalizedIdentifier(message.turnId) ?? "turnless"
 
         if let summaryKey = TurnFileChangeSummaryParser.dedupeKey(from: message.text) {
-            return "\(turnId)|\(summaryKey)"
+            return "\(turnLabel)|\(summaryKey)"
         }
 
         let normalizedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedText.isEmpty else {
             return nil
         }
-        return "\(turnId)|\(normalizedText)"
+        return "\(turnLabel)|\(normalizedText)"
     }
 
     // Captures the parts of a file-change row that matter for timeline dedupe.
+    // Produces a signature even for turnless rows (local/streaming) so a later
+    // snapshot with a real turnId can supersede them via path overlap.
     private static func fileChangeDedupSignature(for message: CodexMessage) -> FileChangeDedupSignature? {
         guard message.role == .system,
-              message.kind == .fileChange,
-              let turnId = normalizedIdentifier(message.turnId),
-              let key = duplicateFileChangeKey(for: message) else {
+              message.kind == .fileChange else {
             return nil
         }
+
+        let turnId = normalizedIdentifier(message.turnId)
+        let key = duplicateFileChangeKey(for: message)
 
         let paths = Set(
             TurnFileChangeSummaryParser.parse(from: message.text)?
                 .entries
                 .map(\.path) ?? []
         )
+
+        // Need at least a key or paths to participate in dedup.
+        guard key != nil || !paths.isEmpty else {
+            return nil
+        }
 
         return FileChangeDedupSignature(
             turnId: turnId,
@@ -446,16 +639,24 @@ enum TurnTimelineReducer {
     }
 
     // Treats newer file-change snapshots as authoritative only when they describe the
-    // same turn and either the same dedupe key or a provisional-to-final snapshot upgrade.
+    // same turn (or a turnless→turnful upgrade) and either the same dedupe key or a
+    // provisional-to-final snapshot upgrade with matching paths.
     private static func fileChangeMessage(
         _ newer: FileChangeDedupSignature,
         supersedes older: FileChangeDedupSignature
     ) -> Bool {
-        guard newer.turnId == older.turnId else {
+        let sameTurn: Bool
+        if let newerTurn = newer.turnId, let olderTurn = older.turnId {
+            sameTurn = newerTurn == olderTurn
+        } else {
+            // One or both are turnless — allow matching if paths overlap.
+            sameTurn = older.turnId == nil || newer.turnId == nil
+        }
+        guard sameTurn else {
             return false
         }
 
-        if newer.key == older.key {
+        if let newerKey = newer.key, let olderKey = older.key, newerKey == olderKey {
             return true
         }
 
@@ -463,7 +664,17 @@ enum TurnTimelineReducer {
             return false
         }
 
-        if older.isStreaming && !newer.isStreaming && newer.paths == older.paths {
+        // Turnless local row superseded by a real snapshot that now covers the same or a wider file set.
+        if older.turnId == nil,
+           newer.turnId != nil,
+           older.paths.isSubset(of: newer.paths) {
+            return true
+        }
+
+        // A finalized aggregate snapshot should replace provisional per-file rows from the same turn.
+        if older.isStreaming,
+           !newer.isStreaming,
+           older.paths.isSubset(of: newer.paths) {
             return true
         }
 
@@ -471,9 +682,9 @@ enum TurnTimelineReducer {
     }
 }
 
-private struct FileChangeDedupSignature {
-    let turnId: String
-    let key: String
+private struct FileChangeDedupSignature: Equatable {
+    let turnId: String?
+    let key: String?
     let paths: Set<String>
     let isStreaming: Bool
 }

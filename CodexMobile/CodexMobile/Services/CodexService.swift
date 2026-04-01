@@ -174,6 +174,7 @@ enum CodexNotificationPayloadKeys {
     static let threadId = "threadId"
     static let turnId = "turnId"
     static let result = "result"
+    static let requestId = "requestId"
 }
 
 // Tracks the real terminal outcome of a run, including user interruption.
@@ -272,6 +273,8 @@ struct AssistantRevertStateCacheEntry {
 @MainActor
 @Observable
 final class CodexService {
+    static let minimumSupportedBridgePackageVersion = "1.3.5"
+
     // --- Public state ---------------------------------------------------------
 
     var threads: [CodexThread] = [] {
@@ -304,6 +307,7 @@ final class CodexService {
     var pendingApproval: CodexApprovalRequest?
     var lastRawMessage: String?
     var lastErrorMessage: String?
+    var runtimeDebugLogEntries: [String] = []
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     // Per-thread queued drafts for client-side turn queueing while a run is active.
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
@@ -320,6 +324,14 @@ final class CodexService {
     // Per-chat runtime overrides let the composer diverge from app-wide defaults.
     var threadRuntimeOverridesByThreadID: [String: CodexThreadRuntimeOverride] = [:]
     var selectedAccessMode: CodexAccessMode = .onRequest
+    // Bridge-owned ChatGPT auth snapshot used by Settings and voice gating.
+    var gptAccountSnapshot: CodexGPTAccountSnapshot = codexGPTAccountInitialSnapshot() {
+        didSet {
+            persistGPTAccountSnapshot(gptAccountSnapshot)
+        }
+    }
+    // Holds the most recent account-specific error without colliding with transport-level failures.
+    var gptAccountErrorMessage: String?
     var isLoadingModels = false
     var modelsErrorMessage: String?
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
@@ -329,6 +341,8 @@ final class CodexService {
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
+    // Runtime compatibility flag for the bridge-owned voice transcription flow.
+    var supportsBridgeVoiceAuth = true
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
     // Seeds brand-new chats with one-shot composer actions like code review.
@@ -343,6 +357,10 @@ final class CodexService {
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    // Mirrors the bridge package version currently running on the Mac, if the bridge reports it.
+    var bridgeInstalledVersion: String?
+    // Mirrors the latest published bridge package version, when the bridge can resolve it.
+    var latestBridgePackageVersion: String?
     // Fresh QR scans must use bootstrap once, even if this Mac was already trusted before.
     var shouldForceQRBootstrapOnNextHandshake = false
     // Stops infinite trusted-reconnect loops by escalating back to QR after repeated handshake failures.
@@ -353,6 +371,9 @@ final class CodexService {
     var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
     var hasPresentedServiceTierBridgeUpdatePrompt = false
     var hasPresentedThreadForkBridgeUpdatePrompt = false
+    var hasPresentedMinimumBridgePackageUpdatePrompt = false
+    // Remembers the latest optional npm update we already surfaced so foreground refreshes stay non-spammy.
+    var lastPresentedAvailableBridgePackageVersion: String?
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.
@@ -373,6 +394,9 @@ final class CodexService {
     @ObservationIgnored var requestTransportOverride: ((String, JSONValue?) async throws -> RPCMessage)?
     // Test hook: stubs trusted-session lookup without performing a real relay HTTP request.
     @ObservationIgnored var trustedSessionResolverOverride: (() async throws -> CodexTrustedSessionResolveResponse)?
+    // Keeps the trusted-session HTTP lookup cancellable so manual retry can preempt a stuck resolve.
+    @ObservationIgnored var trustedSessionResolveTask: Task<CodexTrustedSessionResolveResponse, Error>?
+    @ObservationIgnored var trustedSessionResolveTaskID: UUID?
     var streamingAssistantMessageByTurnID: [String: String] = [:]
     var streamingSystemMessageByItemID: [String: String] = [:]
     /// Rich metadata for command execution tool calls, keyed by itemId.
@@ -401,8 +425,18 @@ final class CodexService {
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
     var postConnectSyncTask: Task<Void, Never>?
+    // Keeps the phone-side account UI in sync while ChatGPT login is being completed on the Mac.
+    var gptAccountLoginSyncTask: Task<Void, Never>?
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
+    // Tracks whether the bridge is proxying a real Codex endpoint or a spawned local app-server.
+    var codexTransportMode: CodexRuntimeTransportMode = .unknown
+    // Remembers whether the current plan flow is staying native or has fallen back to inferred UI.
+    var planSessionSourceByThread: [String: CodexPlanSessionSource] = [:] {
+        didSet {
+            persistPlanSessionSources()
+        }
+    }
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
     var mirroredRunningCatchupThreadIDs: Set<String> = []
     var lastMirroredRunningCatchupAtByThread: [String: Date] = [:]
@@ -410,6 +444,7 @@ final class CodexService {
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]
+    var structuredUserInputNotificationDedupedAt: [String: Date] = [:]
     var notificationCenterDelegateProxy: CodexNotificationCenterDelegateProxy?
     var notificationObserverTokens: [NSObjectProtocol] = []
     var remoteNotificationDeviceToken: String?
@@ -463,6 +498,7 @@ final class CodexService {
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
+    static let planSessionSourcesDefaultsKey = "codex.planSessionSources"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
@@ -527,6 +563,16 @@ final class CodexService {
             self.threadRuntimeOverridesByThreadID = [:]
         }
 
+        if let savedPlanSessionSources = defaults.data(forKey: Self.planSessionSourcesDefaultsKey),
+           let decodedPlanSessionSources = try? decoder.decode(
+               [String: CodexPlanSessionSource].self,
+               from: savedPlanSessionSources
+           ) {
+            self.planSessionSourceByThread = decodedPlanSessionSources
+        } else {
+            self.planSessionSourceByThread = [:]
+        }
+
         if let savedForkOrigins = defaults.data(forKey: Self.forkedThreadOriginsDefaultsKey),
            let decodedForkOrigins = try? decoder.decode([String: String].self, from: savedForkOrigins) {
             self.forkedFromThreadIDByThreadID = decodedForkOrigins
@@ -559,6 +605,30 @@ final class CodexService {
             self.selectedAccessMode = .onRequest
         }
 
+        if let persistedGPTAccountSnapshot = loadPersistedGPTAccountSnapshot() {
+            self.gptAccountSnapshot = persistedGPTAccountSnapshot
+        } else {
+            self.gptAccountSnapshot = codexGPTAccountInitialSnapshot()
+        }
+
+        if let pendingLogin = gptPendingLoginState,
+           !self.gptAccountSnapshot.isAuthenticated,
+           self.gptAccountSnapshot.status != .loginPending {
+            self.gptAccountSnapshot = CodexGPTAccountSnapshot(
+                status: .loginPending,
+                authMethod: .chatgpt,
+                email: nil,
+                displayName: nil,
+                planType: nil,
+                loginInFlight: true,
+                needsReauth: false,
+                expiresAt: pendingLogin.expiresAt,
+                tokenReady: false,
+                tokenUnavailableSince: nil,
+                updatedAt: .now
+            )
+        }
+
         // Restore relay session from Keychain
         self.relaySessionId = SecureStore.readString(for: CodexSecureKeys.relaySessionId)
         self.relayUrl = SecureStore.readString(for: CodexSecureKeys.relayUrl)
@@ -584,6 +654,21 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
+    }
+
+    // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.
+    private func persistPlanSessionSources() {
+        guard !planSessionSourceByThread.isEmpty else {
+            defaults.removeObject(forKey: Self.planSessionSourcesDefaultsKey)
+            return
+        }
+
+        guard let data = try? encoder.encode(planSessionSourceByThread) else {
+            defaults.removeObject(forKey: Self.planSessionSourcesDefaultsKey)
+            return
+        }
+
+        defaults.set(data, forKey: Self.planSessionSourcesDefaultsKey)
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.

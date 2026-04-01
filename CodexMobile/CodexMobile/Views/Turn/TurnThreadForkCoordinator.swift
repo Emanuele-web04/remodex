@@ -25,7 +25,7 @@ enum TurnThreadForkCoordinator {
     static func localForkProjectPath(
         for thread: CodexThread,
         localCheckoutPath: String?,
-        pathValidator: (String?) -> String? = normalizedProjectPath
+        pathValidator: (String?) -> String? = normalizeThreadForkProjectPath
     ) -> String? {
         let currentProjectPath = pathValidator(thread.normalizedProjectPath)
         if !thread.isManagedWorktreeProject {
@@ -199,22 +199,23 @@ enum TurnThreadForkCoordinator {
         }
     }
 
-    // Normalizes runtime-provided project paths without assuming the current device can stat the remote filesystem.
-    private static func normalizedProjectPath(_ rawPath: String?) -> String? {
-        guard let rawPath else {
-            return nil
-        }
-
-        let trimmedPath = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPath.isEmpty else {
-            return nil
-        }
-
-        return trimmedPath
-    }
 }
 
 private enum TurnThreadForkCleanupDisposition {
     case cleanupSafe
     case preserveWorktree(String?)
+}
+
+// Normalizes runtime-provided project paths without assuming the current device can stat the remote filesystem.
+private func normalizeThreadForkProjectPath(_ rawPath: String?) -> String? {
+    guard let rawPath else {
+        return nil
+    }
+
+    let trimmedPath = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedPath.isEmpty else {
+        return nil
+    }
+
+    return trimmedPath
 }

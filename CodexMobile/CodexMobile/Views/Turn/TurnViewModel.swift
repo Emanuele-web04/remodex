@@ -124,7 +124,6 @@ final class TurnViewModel {
     private static let fileMentionSegmentRegex = try? NSRegularExpression(
         pattern: #"[A-Z]+(?=$|[A-Z][a-z]|\d)|[A-Z]?[a-z]+|\d+"#
     )
-
     var input = ""
     var isSending = false
     var isHandlingApproval = false
@@ -152,6 +151,7 @@ final class TurnViewModel {
     // MARK: - Git state
 
     var runningGitAction: TurnGitActionKind? = nil
+    var inlineCommitAndPushPhase: InlineCommitAndPushPhase? = nil
     var isRunningGitAction: Bool { runningGitAction != nil }
     var isShowingNothingToCommitAlert = false
     var gitSyncAlert: TurnGitSyncAlert? = nil
@@ -256,12 +256,24 @@ final class TurnViewModel {
 
     func cancelThreadActivation() { threadActivationTask?.cancel() }
 
+    // Cancels view-scoped async work before the chat view model disappears.
+    func cancelTransientTasks() {
+        threadActivationTask?.cancel()
+        threadActivationTask = nil
+        fileAutocompleteDebounceTask?.cancel()
+        fileAutocompleteDebounceTask = nil
+        skillAutocompleteDebounceTask?.cancel()
+        skillAutocompleteDebounceTask = nil
+        gitStatusRefreshTask?.cancel()
+        gitStatusRefreshTask = nil
+    }
+
     func activateThread(threadID: String, codex: CodexService, onComplete: @escaping () -> Void) {
         threadActivationTask?.cancel()
         threadActivationTask = Task { @MainActor [weak self] in
             guard !Task.isCancelled else { return }
-            await codex.prepareThreadForDisplay(threadId: threadID)
-            guard !Task.isCancelled else { return }
+            let didPrepare = await codex.prepareThreadForDisplay(threadId: threadID)
+            guard didPrepare, !Task.isCancelled, codex.activeThreadId == threadID else { return }
             self?.flushQueueIfPossible(codex: codex, threadID: threadID)
             onComplete()
         }
@@ -410,6 +422,25 @@ final class TurnViewModel {
         composerMentionedSkills.removeAll()
     }
 
+    // Appends spoken text into the composer without sending it automatically.
+    func appendVoiceTranscript(_ transcript: String) {
+        let normalizedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTranscript.isEmpty else {
+            return
+        }
+
+        if input.isEmpty {
+            input = normalizedTranscript
+            return
+        }
+
+        if input.last?.isWhitespace == true {
+            input += normalizedTranscript
+        } else {
+            input += " \(normalizedTranscript)"
+        }
+    }
+
     func setPlanModeArmed(_ isArmed: Bool) {
         isPlanModeArmed = isArmed
     }
@@ -465,6 +496,15 @@ final class TurnViewModel {
               codex.isConnected,
               let root = normalizedAutocompleteRoot(for: thread),
               let token = Self.trailingFileAutocompleteToken(in: text) else {
+            resetFileAutocompleteState()
+            return
+        }
+
+        // Keeps a confirmed `@file` mention closed once the user resumes normal prose after it.
+        guard !Self.hasClosedConfirmedFileMentionPrefix(
+            in: text,
+            confirmedMentions: composerMentionedFiles
+        ) else {
             resetFileAutocompleteState()
             return
         }
@@ -974,6 +1014,7 @@ final class TurnViewModel {
                     threadId: threadID,
                     attachments: nextDraft.attachments,
                     skillMentions: nextDraft.skillMentions,
+                    fileMentions: confirmedFileMentionPaths(from: nextDraft.rawFileMentions),
                     collaborationMode: nextDraft.collaborationMode
                 )
             } catch {
@@ -1021,6 +1062,7 @@ final class TurnViewModel {
                         threadId: threadID,
                         attachments: draft.attachments,
                         skillMentions: draft.skillMentions,
+                        fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
                         collaborationMode: draft.collaborationMode
                     )
                     removeQueuedDraft(id: id, codex: codex, threadID: threadID)
@@ -1037,6 +1079,7 @@ final class TurnViewModel {
                     expectedTurnId: expectedTurnID,
                     attachments: draft.attachments,
                     skillMentions: draft.skillMentions,
+                    fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
                     shouldAppendUserMessage: true,
                     collaborationMode: draft.collaborationMode
                 )
@@ -1254,6 +1297,58 @@ final class TurnViewModel {
         })
     }
 
+    // Detects when the last `@mention` already matches a confirmed chip and the user is now typing prose after it.
+    static func hasClosedConfirmedFileMentionPrefix(
+        in text: String,
+        confirmedMentions: [TurnComposerMentionedFile]
+    ) -> Bool {
+        guard !confirmedMentions.isEmpty,
+              let triggerIndex = text.lastIndex(of: "@") else {
+            return false
+        }
+
+        if triggerIndex > text.startIndex {
+            let previousCharacter = text[text.index(before: triggerIndex)]
+            guard previousCharacter.isWhitespace else {
+                return false
+            }
+        }
+
+        let tail = String(text[text.index(after: triggerIndex)...])
+        guard !tail.isEmpty else {
+            return false
+        }
+
+        let ambiguousKeys = ambiguousFileNameAliasKeys(in: confirmedMentions)
+        for mention in confirmedMentions {
+            let collisionKey = fileNameAliasCollisionKey(for: mention.fileName)
+            let allowFileNameAliases = collisionKey.map { !ambiguousKeys.contains($0) } ?? true
+            let aliases = fileMentionAliases(
+                fileName: mention.fileName,
+                path: mention.path,
+                allowFileNameAliases: allowFileNameAliases
+            )
+
+            for alias in aliases {
+                guard let range = tail.range(
+                    of: alias,
+                    options: [.anchored, .caseInsensitive]
+                ) else {
+                    continue
+                }
+
+                guard range.upperBound < tail.endIndex,
+                      tail[range.upperBound].isWhitespace else {
+                    continue
+                }
+
+                return true
+            }
+        }
+
+        return false
+    }
+
     static func replacingTrailingSkillAutocompleteToken(in text: String, with selectedSkill: String) -> String? {
         let trimmedSkill = selectedSkill.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedSkill.isEmpty,
@@ -1290,7 +1385,8 @@ final class TurnViewModel {
         let rawQuery = String(text[queryStart..<text.endIndex])
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty,
-              !query.contains(where: \.isNewline) else {
+              !query.contains(where: \.isNewline),
+              isAllowedFileAutocompleteQuery(query) else {
             return nil
         }
 
@@ -1304,6 +1400,11 @@ final class TurnViewModel {
         }
 
         return TurnTrailingToken(query: query, tokenRange: triggerIndex..<text.endIndex)
+    }
+
+    // Allows flexible file aliases while keeping common Swift attributes out of file search.
+    private static func isAllowedFileAutocompleteQuery(_ query: String) -> Bool {
+        TurnFileMentionHeuristics.isAllowedAutocompleteQuery(query)
     }
 
     // Shared parser for final-token autocomplete triggers (`@`, `$`).
@@ -1503,15 +1604,7 @@ final class TurnViewModel {
     }
 
     private func normalizedAutocompleteRoot(for thread: CodexThread) -> String? {
-        if let normalizedProjectPath = thread.normalizedProjectPath {
-            return normalizedProjectPath
-        }
-
-        guard let rawCwd = thread.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawCwd.isEmpty else {
-            return nil
-        }
-        return rawCwd
+        thread.gitWorkingDirectory
     }
 
     private func fileAutocompleteCancellationToken(for threadID: String) -> String {
@@ -1587,6 +1680,7 @@ final class TurnViewModel {
                     threadId: threadID,
                     attachments: pendingSend.attachments,
                     skillMentions: pendingSend.skillMentions,
+                    fileMentions: confirmedFileMentionPaths(from: pendingSend.rawFileMentions),
                     collaborationMode: pendingSend.collaborationMode
                 )
             }
@@ -1597,8 +1691,10 @@ final class TurnViewModel {
                shouldRearmPlanModeAfterSendFailure(error) {
                 isPlanModeArmed = true
             }
-            if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                codex.lastErrorMessage = error.localizedDescription
+            let fallbackMessage = codex.userFacingTurnErrorMessage(from: error)
+            if (codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+                && !fallbackMessage.isEmpty {
+                codex.lastErrorMessage = fallbackMessage
             }
         }
     }
@@ -1612,6 +1708,22 @@ final class TurnViewModel {
         composerReviewSelection = pendingSend.rawReviewSelection
         isSubagentsSelectionArmed = pendingSend.rawSubagentsSelectionArmed
         isPlanModeArmed = pendingSend.collaborationMode == .plan
+    }
+
+    // Carries only autocomplete-confirmed file selections into the timeline renderer.
+    private func confirmedFileMentionPaths(from mentions: [TurnComposerMentionedFile]) -> [String] {
+        var uniquePaths: [String] = []
+        var seenPaths: Set<String> = []
+
+        for mention in mentions {
+            let path = mention.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty, seenPaths.insert(path).inserted else {
+                continue
+            }
+            uniquePaths.append(path)
+        }
+
+        return uniquePaths
     }
 
     // Restores a queued row using the exact composer payload captured before it entered the queue.
@@ -1993,14 +2105,19 @@ final class TurnViewModel {
     func inlineCommitAndPush(codex: CodexService, workingDirectory: String?, threadID: String) {
         guard !isRunningGitAction else { return }
         runningGitAction = .commitAndPush
+        inlineCommitAndPushPhase = .committing
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.runningGitAction = nil }
+            defer {
+                self.runningGitAction = nil
+                self.inlineCommitAndPushPhase = nil
+            }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
             do {
                 _ = try await gitService.commit(message: nil)
+                inlineCommitAndPushPhase = .pushing
                 let pushResult = try await gitService.push()
                 handleSuccessfulPush(
                     pushResult,

@@ -30,6 +30,7 @@ struct TurnComposerView: View {
 
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
+    let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
 
     let selectedAccessMode: CodexAccessMode
     let contextWindowUsage: ContextWindowUsage?
@@ -59,6 +60,8 @@ struct TurnComposerView: View {
     let canHandOffToWorktree: Bool
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
+    let onTapVoice: () -> Void
+    let onCancelVoiceRecording: () -> Void
     let onTapCreateWorktree: () -> Void
     let onSetPlanModeArmed: (Bool) -> Void
     let onRemoveAttachment: (String) -> Void
@@ -111,7 +114,7 @@ struct TurnComposerView: View {
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
                         Text("Ask anything... @files, $skills, /commands")
-                            .font(AppFont.body())
+                            .font(AppFont.system(size: 15))
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
                     }
@@ -132,8 +135,8 @@ struct TurnComposerView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
-                .padding(.top, accessoryState.topInputPadding)
-                .padding(.bottom, 12)
+                .padding(.top, accessoryState.topInputPadding + 4)
+                .padding(.bottom, 14)
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)
@@ -155,8 +158,10 @@ struct TurnComposerView: View {
                     isQueuePaused: isQueuePaused,
                     activeTurnID: activeTurnID,
                     isThreadRunning: isThreadRunning,
+                    voiceButtonPresentation: voiceButtonPresentation,
                     onTapAddImage: onTapAddImage,
                     onTapTakePhoto: onTapTakePhoto,
+                    onTapVoice: onTapVoice,
                     onSetPlanModeArmed: onSetPlanModeArmed,
                     onResumeQueue: onResumeQueue,
                     onStopTurn: onStopTurn,
@@ -169,15 +174,29 @@ struct TurnComposerView: View {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
                     .overlay(alignment: .bottomLeading) {
-                        TurnComposerAutocompletePanels(
-                            state: autocompleteState,
-                            onSelectFileAutocomplete: onSelectFileAutocomplete,
-                            onSelectSkillAutocomplete: onSelectSkillAutocomplete,
-                            onSelectSlashCommand: onSelectSlashCommand,
-                            onSelectCodeReviewTarget: onSelectCodeReviewTarget,
-                            onSelectForkDestination: onSelectForkDestination,
-                            onCloseSlashCommandPanel: onCloseSlashCommandPanel
-                        )
+                        // Keep the floating overlay stretched to the composer width so the
+                        // recording capsule can expand all the way toward the trailing controls.
+                        VStack(alignment: .leading, spacing: 6) {
+                            if accessoryState.showsVoiceRecordingCapsule {
+                                VoiceRecordingCapsule(
+                                    audioLevels: accessoryState.voiceAudioLevels,
+                                    duration: accessoryState.voiceRecordingDuration,
+                                    onCancel: onCancelVoiceRecording
+                                )
+                                .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            }
+
+                            TurnComposerAutocompletePanels(
+                                state: autocompleteState,
+                                onSelectFileAutocomplete: onSelectFileAutocomplete,
+                                onSelectSkillAutocomplete: onSelectSkillAutocomplete,
+                                onSelectSlashCommand: onSelectSlashCommand,
+                                onSelectCodeReviewTarget: onSelectCodeReviewTarget,
+                                onSelectForkDestination: onSelectForkDestination,
+                                onCloseSlashCommandPanel: onCloseSlashCommandPanel
+                            )
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .offset(y: -8)
             }
@@ -216,8 +235,8 @@ struct TurnComposerView: View {
             )
         }
         .padding(.horizontal, 12)
-        .padding(.top, 6)
-        .padding(.bottom, 6)
+        .padding(.top, 4)
+        .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.easeInOut(duration: 0.18), value: isInputFocused.wrappedValue)
     }
@@ -369,7 +388,7 @@ private struct TurnComposerAccessorySection: View {
                     HStack(spacing: 6) {
                         ComposerActionChip(
                             title: "Subagents",
-                            symbolName: "person.crop.circle",
+                            symbolName: "point.3.connected.trianglepath.dotted",
                             tintColor: .teal,
                             removeAccessibilityLabel: "Remove subagents"
                         ) {
@@ -434,7 +453,10 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     composerMentionedFiles: [],
                     composerMentionedSkills: [],
                     composerReviewSelection: nil,
-                    isSubagentsSelectionArmed: true
+                    isSubagentsSelectionArmed: true,
+                    isVoiceRecording: false,
+                    voiceAudioLevels: [],
+                    voiceRecordingDuration: 0
                 ),
                 autocompleteState: TurnComposerAutocompleteState(
                     availableSlashCommands: TurnComposerSlashCommand.allCommands,
@@ -481,6 +503,15 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     selectReasoning: { _ in },
                     selectServiceTier: { _ in }
                 ),
+                voiceButtonPresentation: TurnComposerVoiceButtonPresentation(
+                    systemImageName: "mic",
+                    foregroundColor: Color(.secondaryLabel),
+                    backgroundColor: .clear,
+                    accessibilityLabel: "Start voice transcription",
+                    isDisabled: false,
+                    showsProgress: false,
+                    hasCircleBackground: false
+                ),
                 selectedAccessMode: .onRequest,
                 contextWindowUsage: nil,
                 rateLimitBuckets: [],
@@ -507,6 +538,8 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 canHandOffToWorktree: false,
                 onTapAddImage: {},
                 onTapTakePhoto: {},
+                onTapVoice: {},
+                onCancelVoiceRecording: {},
                 onTapCreateWorktree: {},
                 onSetPlanModeArmed: { _ in },
                 onRemoveAttachment: { _ in },

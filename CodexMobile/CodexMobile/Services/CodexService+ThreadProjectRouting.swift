@@ -63,7 +63,7 @@ extension CodexService {
             } else {
                 resumedThreadIDs.remove(normalizedThreadId)
             }
-            requestImmediateSync(threadId: normalizedThreadId)
+            requestImmediateActiveThreadSync(threadId: normalizedThreadId)
             throw error
         }
 
@@ -75,7 +75,7 @@ extension CodexService {
             upsertThread(resumedThread)
         }
 
-        requestImmediateSync(threadId: normalizedThreadId)
+        requestImmediateActiveThreadSync(threadId: normalizedThreadId)
         return thread(for: normalizedThreadId) ?? currentThread
     }
 
@@ -106,7 +106,7 @@ extension CodexService {
         upsertThread(currentThread)
         rememberRepoRoot(canonicalObservedPath, forWorkingDirectory: observedProjectPath)
         if activeThreadId == normalizedThreadId {
-            requestImmediateSync(threadId: normalizedThreadId)
+            requestImmediateActiveThreadSync(threadId: normalizedThreadId)
         }
         return true
     }

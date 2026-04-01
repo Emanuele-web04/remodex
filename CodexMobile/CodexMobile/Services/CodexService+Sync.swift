@@ -93,6 +93,10 @@ extension CodexService {
             if isConnected && isInitialized {
                 startSyncLoop()
                 requestImmediateSync(threadId: activeThreadId)
+                // Re-check bridge-managed state when the app becomes active again.
+                Task { @MainActor [weak self] in
+                    await self?.refreshBridgeManagedState(allowAvailableBridgeUpdatePrompt: true)
+                }
             } else {
                 stopSyncLoop()
             }
@@ -116,6 +120,20 @@ extension CodexService {
             guard let self else { return }
             await self.syncThreadsList()
             await self.refreshInactiveRunningBadgeThreads()
+            if let threadId = threadId ?? self.activeThreadId {
+                await self.syncActiveThreadState(threadId: threadId)
+            }
+        }
+    }
+
+    // Thread opening should refresh the visible chat, not refetch the full sidebar list.
+    func requestImmediateActiveThreadSync(threadId: String? = nil) {
+        guard canRunRealtimeSyncLoop else {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             if let threadId = threadId ?? self.activeThreadId {
                 await self.syncActiveThreadState(threadId: threadId)
             }
@@ -175,7 +193,6 @@ extension CodexService {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let persistedArchivedIDs = locallyArchivedThreadIDs
         let persistedDeletedIDs = locallyDeletedThreadIDs
-        let serverArchivedIDs = Set(serverArchivedThreads.map(\.id))
 
         var merged: [String: CodexThread] = [:]
 
@@ -255,7 +272,7 @@ extension CodexService {
         if let index = threadIndex(for: threadId) {
             threads[index].syncState = .archivedLocal
         } else {
-            threads.append(CodexThread(id: threadId, title: "Conversation", syncState: .archivedLocal))
+            threads.append(CodexThread(id: threadId, title: CodexThread.defaultDisplayTitle, syncState: .archivedLocal))
             threads = sortThreads(threads)
         }
 

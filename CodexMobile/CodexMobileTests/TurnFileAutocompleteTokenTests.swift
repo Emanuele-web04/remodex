@@ -26,8 +26,43 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "email@test.com"))
     }
 
+    func testTrailingTokenDoesNotParseSwiftAttribute() {
+        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "add @State"))
+    }
+
     func testTrailingTokenDoesNotParseWhenAtTokenIsNotFinal() {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "fix @turnv please"))
+    }
+
+    func testTrailingTokenDoesNotParseTerminalScopedTaskLabel() {
+        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "paste @t3tools/contracts:build"))
+    }
+
+    func testTrailingTokenDoesNotParseBareTerminalHandle() {
+        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "paste @remodex"))
+    }
+
+    func testTrailingTokenStillParsesLineReferencedFile() {
+        let token = TurnViewModel.trailingFileAutocompleteToken(in: "open @Views/Turn/TurnView.swift:42")
+
+        XCTAssertEqual(token?.query, "Views/Turn/TurnView.swift:42")
+    }
+
+    func testTrailingTokenKeepsCommonExtensionlessFilesWorking() {
+        let token = TurnViewModel.trailingFileAutocompleteToken(in: "check @Makefile")
+
+        XCTAssertEqual(token?.query, "Makefile")
+    }
+
+    func testRemovingTrailingLineColumnSuffixKeepsBasePath() {
+        XCTAssertEqual(
+            TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: "Views/Turn/TurnView.swift:42:7"),
+            "Views/Turn/TurnView.swift"
+        )
+        XCTAssertEqual(
+            TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: "Views/Turn/TurnView.swift"),
+            "Views/Turn/TurnView.swift"
+        )
     }
 
     func testReplacingTrailingTokenUpdatesOnlyFinalAtToken() {
@@ -84,5 +119,53 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
         ]
 
         XCTAssertEqual(TurnViewModel.ambiguousFileNameAliasKeys(in: mentions), ["notes.md"])
+    }
+
+    func testClosedConfirmedMentionStopsAutocompleteFromReopeningOnFollowingProse() {
+        let mentions = [
+            TurnComposerMentionedFile(fileName: "terminal.svg", path: "assets/terminal.svg"),
+        ]
+
+        XCTAssertTrue(
+            TurnViewModel.hasClosedConfirmedFileMentionPrefix(
+                in: "@terminal.svg try this one h",
+                confirmedMentions: mentions
+            )
+        )
+    }
+
+    func testClosedConfirmedMentionSupportsFileNamesWithSpaces() {
+        let mentions = [
+            TurnComposerMentionedFile(
+                fileName: "Codex iOS Recap TLDR.md",
+                path: "Docs/Codex iOS Recap TLDR.md"
+            ),
+        ]
+
+        XCTAssertTrue(
+            TurnViewModel.hasClosedConfirmedFileMentionPrefix(
+                in: "@Codex iOS Recap TLDR.md please revise this",
+                confirmedMentions: mentions
+            )
+        )
+    }
+
+    func testTrailingAutocompleteStillWorksForOpenPathWithSpaces() {
+        let mentions = [
+            TurnComposerMentionedFile(fileName: "terminal.svg", path: "assets/terminal.svg"),
+        ]
+
+        XCTAssertFalse(
+            TurnViewModel.hasClosedConfirmedFileMentionPrefix(
+                in: "compare @Codex Mobile App Plan/Codex iOS Recap TLDR.md",
+                confirmedMentions: mentions
+            )
+        )
+        XCTAssertEqual(
+            TurnViewModel.trailingFileAutocompleteToken(
+                in: "compare @Codex Mobile App Plan/Codex iOS Recap TLDR.md"
+            )?.query,
+            "Codex Mobile App Plan/Codex iOS Recap TLDR.md"
+        )
     }
 }

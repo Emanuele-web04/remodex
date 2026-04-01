@@ -6,16 +6,20 @@
 
 import SwiftUI
 import PhotosUI
+import UIKit
 
 struct TurnView: View {
     let thread: CodexThread
 
     @Environment(CodexService.self) private var codex
+    @Environment(\.openURL) private var openURL
+    @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
     @State private var isShowingStatusSheet = false
+    @State private var isShowingRuntimeLogSheet = false
     @State private var isLoadingRepositoryDiff = false
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
@@ -28,6 +32,13 @@ struct TurnView: View {
     @State private var isStartingSiblingChat = false
     @State private var isForkingThread = false
     @State private var checkedOutElsewhereAlert: CheckedOutElsewhereAlert?
+    @State private var isVoiceRecording = false
+    @State private var isVoicePreflighting = false
+    @State private var voicePreflightGeneration = 0
+    @State private var isVoiceTranscribing = false
+    @State private var voiceRecoveryReason: CodexVoiceFailureReason?
+    @State private var isShowingVoiceSetupSheet = false
+    @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -40,6 +51,9 @@ struct TurnView: View {
         let isEmptyThread = renderSnapshot.messages.isEmpty
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
         let isWorktreeProject = resolvedThread.isManagedWorktreeProject
+        let isComposerAutocompletePresented = viewModel.isFileAutocompleteVisible
+            || viewModel.isSkillAutocompleteVisible
+            || viewModel.slashCommandPanelState != .hidden
         let isWorktreeHandoffAvailable = isWorktreeHandoffAvailable(
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
@@ -60,8 +74,11 @@ struct TurnView: View {
                 stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
                 assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
                 errorMessage: codex.lastErrorMessage,
+                composerRecoveryAccessory: composerRecoveryAccessory,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
+                isComposerFocused: isInputFocused,
+                isComposerAutocompletePresented: isComposerAutocompletePresented,
                 emptyState: AnyView(emptyState),
                 composer: AnyView(composerWithSubagentAccessory(
                     currentThread: resolvedThread,
@@ -98,6 +115,7 @@ struct TurnView: View {
                 threadID: thread.id
             )
         } as (() -> Void)? : nil)
+        .environment(\.inlineCommitAndPushPhase, viewModel.inlineCommitAndPushPhase)
         .navigationTitle(resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -141,6 +159,15 @@ struct TurnView: View {
                 },
                 isShowingPathSheet: $isShowingThreadPathSheet
             )
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    isShowingRuntimeLogSheet = true
+                } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                }
+                .accessibilityLabel("Runtime logs")
+            }
         }
         .overlay {
             if isShowingWorktreeHandoff {
@@ -227,6 +254,14 @@ struct TurnView: View {
                 )
             },
             onConnectionChanged: { wasConnected, isConnected in
+                if !isConnected {
+                    cancelVoiceRecordingIfNeeded()
+                    invalidatePendingVoicePreflight()
+                    clearVoiceRecovery()
+                    return
+                }
+
+                clearVoiceRecovery()
                 guard !wasConnected, isConnected else { return }
                 viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
                 guard showsGitControls else { return }
@@ -236,11 +271,26 @@ struct TurnView: View {
                     threadID: thread.id
                 )
             },
-            onScenePhaseChanged: { _ in },
+            onScenePhaseChanged: { phase in
+                guard phase != .active else { return }
+                cancelVoiceRecordingIfNeeded()
+                invalidatePendingVoicePreflight()
+            },
             onApprovalRequestIDChanged: {
                 alertApprovalRequest = approvalForThread
             }
         )
+        .onDisappear {
+            cancelVoiceRecordingIfNeeded()
+            invalidatePendingVoicePreflight()
+            clearVoiceRecovery()
+            viewModel.cancelTransientTasks()
+            viewModel.clearComposerAutocomplete()
+        }
+        .onChange(of: isInputFocused) { _, isFocused in
+            guard !isFocused else { return }
+            viewModel.clearComposerAutocomplete()
+        }
         .onChange(of: renderSnapshot.repoRefreshSignal) { _, newValue in
             guard showsGitControls, newValue != nil else { return }
             viewModel.scheduleGitStatusRefresh(
@@ -267,6 +317,12 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
+        }
+        .sheet(isPresented: $isShowingRuntimeLogSheet) {
+            RuntimeDebugLogSheet()
+        }
+        .sheet(isPresented: $isShowingVoiceSetupSheet) {
+            GPTVoiceSetupSheet()
         }
         .sheet(item: $repositoryDiffPresentation) { presentation in
             TurnDiffSheet(
@@ -333,6 +389,75 @@ struct TurnView: View {
         } message: { alert in
             Text(alert.message)
         }
+    }
+
+    // Reuses the shared recovery-card slot for both transport reconnects and voice-specific guidance.
+    private var composerRecoveryAccessory: AnyView? {
+        if let voiceRecoveryPresentation {
+            return AnyView(
+                ConnectionRecoveryCard(snapshot: voiceRecoveryPresentation.snapshot) {
+                    handleVoiceRecoveryAction(voiceRecoveryPresentation.action)
+                }
+            )
+        }
+
+        guard let snapshot = connectionRecoverySnapshot else {
+            return nil
+        }
+
+        return AnyView(
+            ConnectionRecoveryCard(snapshot: snapshot) {
+                reconnectAction?()
+            }
+        )
+    }
+
+    private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {
+        guard let voiceRecoveryReason else {
+            return nil
+        }
+
+        guard let resolvedReason = codex.resolveVoiceRecoveryReason(voiceRecoveryReason) else {
+            return nil
+        }
+
+        return buildVoiceRecoveryPresentation(for: resolvedReason)
+    }
+
+    private var connectionRecoverySnapshot: ConnectionRecoverySnapshot? {
+        guard codex.hasReconnectCandidate,
+              !codex.isConnected,
+              codex.secureConnectionState != .rePairRequired else {
+            return nil
+        }
+
+        if codex.isConnecting || codex.shouldAutoReconnectOnForeground || isRetryingConnectionRecovery {
+            return ConnectionRecoverySnapshot(
+                summary: "Trying to reconnect to your Mac.",
+                status: .reconnecting,
+                trailingStyle: .progress
+            )
+        }
+
+        let trimmedError = codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let summary = {
+            guard let trimmedError, !trimmedError.isEmpty else {
+                return "Reconnect to your Mac to keep this chat in sync."
+            }
+            return trimmedError
+        }()
+        return ConnectionRecoverySnapshot(
+            summary: summary,
+            status: .interrupted,
+            trailingStyle: .action("Reconnect")
+        )
+    }
+
+    private var isRetryingConnectionRecovery: Bool {
+        if case .retrying = codex.connectionRecoveryState {
+            return true
+        }
+        return false
     }
 
     // MARK: - Bindings
@@ -636,9 +761,12 @@ struct TurnView: View {
     }
 
     private func prepareThreadIfReady(gitWorkingDirectory: String?) async {
-        await codex.prepareThreadForDisplay(threadId: thread.id)
+        let didPrepare = await codex.prepareThreadForDisplay(threadId: thread.id)
+        guard didPrepare, !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         await codex.refreshContextWindowUsage(threadId: thread.id)
+        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
+        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         guard gitWorkingDirectory != nil else { return }
         viewModel.refreshGitBranchTargets(
             codex: codex,
@@ -884,7 +1012,7 @@ struct TurnView: View {
     }
 
     private func threadNavigationContext(for thread: CodexThread) -> TurnThreadNavigationContext? {
-        guard let path = thread.normalizedProjectPath ?? thread.cwd,
+        guard let path = thread.gitWorkingDirectory,
               !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
@@ -1012,9 +1140,326 @@ struct TurnView: View {
                     isShowingWorktreeHandoff = true
                 },
                 onShowStatus: presentStatusSheet,
+                voiceButtonPresentation: voiceButtonPresentation,
+                isVoiceRecording: isVoiceRecording,
+                voiceAudioLevels: voiceTranscriptionManager.audioLevels,
+                voiceRecordingDuration: voiceTranscriptionManager.recordingDuration,
+                onTapVoice: handleVoiceButtonTap,
+                onCancelVoiceRecording: cancelVoiceRecordingIfNeeded,
                 onSend: handleSend
             )
         }
+    }
+
+    // Mirrors the mic CTA state so the composer can swap between ready, record, and stop.
+    private var voiceButtonPresentation: TurnComposerVoiceButtonPresentation {
+        if isVoiceTranscribing {
+            return TurnComposerVoiceButtonPresentation(
+                systemImageName: "waveform",
+                foregroundColor: Color(.secondaryLabel),
+                backgroundColor: Color(.systemGray5),
+                accessibilityLabel: "Transcribing voice note",
+                isDisabled: true,
+                showsProgress: true,
+                hasCircleBackground: true
+            )
+        }
+
+        if isVoicePreflighting {
+            return TurnComposerVoiceButtonPresentation(
+                systemImageName: "hourglass",
+                foregroundColor: Color(.secondaryLabel),
+                backgroundColor: Color(.systemGray5),
+                accessibilityLabel: "Preparing microphone",
+                isDisabled: true,
+                showsProgress: true,
+                hasCircleBackground: true
+            )
+        }
+
+        if isVoiceRecording {
+            return TurnComposerVoiceButtonPresentation(
+                systemImageName: "stop.fill",
+                foregroundColor: Color(.systemBackground),
+                backgroundColor: Color(.systemRed),
+                accessibilityLabel: "Stop voice recording",
+                isDisabled: false,
+                showsProgress: false,
+                hasCircleBackground: true
+            )
+        }
+
+        return TurnComposerVoiceButtonPresentation(
+            systemImageName: "mic",
+            foregroundColor: Color(.secondaryLabel),
+            backgroundColor: .clear,
+            accessibilityLabel: "Start voice transcription",
+            isDisabled: !codex.isConnected,
+            showsProgress: false,
+            hasCircleBackground: false
+        )
+    }
+
+    // Switches the mic button between login, recording, and transcription states.
+    private func handleVoiceButtonTap() {
+        if isVoiceTranscribing {
+            return
+        }
+
+        if isVoiceRecording {
+            Task { @MainActor in
+                await stopVoiceTranscription()
+            }
+            return
+        }
+
+        Task { @MainActor in
+            await startVoiceRecordingIfReady()
+        }
+    }
+
+    // Stops the recorder, transcribes through the bridge, and appends the final text into the draft.
+    private func stopVoiceTranscription() async {
+        isVoiceTranscribing = true
+        defer { isVoiceTranscribing = false }
+
+        do {
+            guard let clip = try voiceTranscriptionManager.stopRecording() else {
+                isVoiceRecording = false
+                voiceTranscriptionManager.resetMeteringState()
+                return
+            }
+
+            defer {
+                try? FileManager.default.removeItem(at: clip.url)
+            }
+
+            isVoiceRecording = false
+            voiceTranscriptionManager.resetMeteringState()
+            let transcript = try await codex.transcribeVoiceAudioFile(
+                at: clip.url,
+                durationSeconds: clip.durationSeconds
+            )
+            clearVoiceRecovery()
+            viewModel.appendVoiceTranscript(transcript)
+            // Keep voice flows keyboard-free; users can tap into the draft afterward if they want to edit.
+            isInputFocused = false
+        } catch {
+            isVoiceRecording = false
+            voiceTranscriptionManager.resetMeteringState()
+            presentVoiceRecovery(for: error)
+        }
+    }
+
+    // Starts microphone capture directly; auth is resolved when the user stops recording, matching Litter's flow.
+    @MainActor
+    private func startVoiceRecordingIfReady() async {
+        guard !isVoicePreflighting else {
+            return
+        }
+
+        guard codex.supportsBridgeVoiceAuth else {
+            presentVoiceRecovery(for: .bridgeSessionUnsupported)
+            return
+        }
+
+        guard codex.isConnected else {
+            presentVoiceRecovery(for: .reconnectRequired)
+            return
+        }
+
+        clearVoiceRecovery()
+        codex.lastErrorMessage = nil
+        // Dismiss any active text focus before recording so the keyboard does not
+        // compete with the waveform UI or waste vertical space during capture.
+        isInputFocused = false
+        let preflightGeneration = voicePreflightGeneration + 1
+        voicePreflightGeneration = preflightGeneration
+        isVoicePreflighting = true
+        defer {
+            if isVoicePreflightCurrent(preflightGeneration) {
+                isVoicePreflighting = false
+            }
+        }
+
+        do {
+            guard isVoicePreflightCurrent(preflightGeneration), codex.isConnected else {
+                return
+            }
+            try await voiceTranscriptionManager.startRecording()
+            guard isVoicePreflightCurrent(preflightGeneration), codex.isConnected else {
+                voiceTranscriptionManager.cancelRecording()
+                return
+            }
+            isVoiceRecording = true
+            isInputFocused = false
+        } catch {
+            presentVoiceRecovery(for: error)
+        }
+    }
+
+    // Clears any partial microphone capture when the screen leaves the active voice flow.
+    private func cancelVoiceRecordingIfNeeded() {
+        guard isVoiceRecording else {
+            return
+        }
+
+        voiceTranscriptionManager.cancelRecording()
+        isVoiceRecording = false
+    }
+
+    private func clearVoiceRecovery() {
+        voiceRecoveryReason = nil
+    }
+
+    // Keeps voice failures out of the transcript by routing them into a dedicated recovery accessory.
+    private func presentVoiceRecovery(for error: Error) {
+        presentVoiceRecovery(for: codex.classifyVoiceFailure(error))
+    }
+
+    private func presentVoiceRecovery(for reason: CodexVoiceFailureReason) {
+        voiceRecoveryReason = reason
+        codex.lastErrorMessage = nil
+    }
+
+    private func buildVoiceRecoveryPresentation(for reason: CodexVoiceFailureReason) -> VoiceRecoveryPresentation {
+        switch reason {
+        case .reconnectRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Reconnect to your Mac to use voice mode.",
+                    detail: "Keep the Remodex bridge running on your Mac, then try the microphone again.",
+                    status: .interrupted,
+                    trailingStyle: .action("Reconnect")
+                ),
+                action: .reconnect
+            )
+        case .bridgeSessionUnsupported:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "This bridge session does not support voice mode yet.",
+                    detail: "Restart Remodex on your Mac, then reconnect this iPhone. If it still happens, update Remodex on your Mac and pair again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("Reconnect")
+                ),
+                action: .reconnect
+            )
+        case .macLoginRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Sign in to ChatGPT on your Mac to use voice mode.",
+                    detail: "Open ChatGPT on the paired Mac, sign in there, then come back here and try again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("How To Fix")
+                ),
+                action: .showSetupHelp
+            )
+        case .macReauthenticationRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "ChatGPT voice needs a fresh sign-in on your Mac.",
+                    detail: "Open ChatGPT on the paired Mac, sign in again there, then retry voice mode here.",
+                    status: .actionRequired,
+                    trailingStyle: .action("How To Fix")
+                ),
+                action: .showSetupHelp
+            )
+        case .voiceSyncInProgress:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Voice mode is still syncing from your Mac.",
+                    detail: "Keep the bridge connected for a moment, then try again.",
+                    status: .syncing,
+                    trailingStyle: .progress
+                ),
+                action: .none
+            )
+        case .chatGPTRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Voice mode needs a ChatGPT session on your Mac.",
+                    detail: "API-key-only auth is not enough here. Sign in to ChatGPT on the paired Mac, then try again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("How To Fix")
+                ),
+                action: .showSetupHelp
+            )
+        case .microphonePermissionRequired:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Microphone access is off for Remodex.",
+                    detail: "Open iPhone Settings, allow Microphone for Remodex, then try recording again.",
+                    status: .actionRequired,
+                    trailingStyle: .action("Open Settings")
+                ),
+                action: .openSystemSettings
+            )
+        case .microphoneUnavailable:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "No microphone input is available right now.",
+                    detail: "Check that another app is not holding the microphone, then try again.",
+                    status: .actionRequired,
+                    trailingStyle: .none
+                ),
+                action: .none
+            )
+        case .recorderUnavailable:
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: "Remodex could not start the recorder.",
+                    detail: "Close other audio-heavy apps, then try voice mode again.",
+                    status: .actionRequired,
+                    trailingStyle: .none
+                ),
+                action: .none
+            )
+        case .generic(let message):
+            return VoiceRecoveryPresentation(
+                snapshot: ConnectionRecoverySnapshot(
+                    title: "Voice Mode",
+                    summary: message,
+                    status: .actionRequired,
+                    trailingStyle: .none
+                ),
+                action: .none
+            )
+        }
+    }
+
+    private func handleVoiceRecoveryAction(_ action: VoiceRecoveryAction) {
+        switch action {
+        case .reconnect:
+            reconnectAction?()
+        case .showSetupHelp:
+            isShowingVoiceSetupSheet = true
+        case .openSystemSettings:
+            guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else {
+                return
+            }
+            openURL(settingsURL)
+        case .none:
+            break
+        }
+    }
+
+    // Invalidates any in-flight async mic startup so it cannot reopen the recorder after leaving the screen.
+    private func invalidatePendingVoicePreflight() {
+        voicePreflightGeneration += 1
+        isVoicePreflighting = false
+    }
+
+    private func isVoicePreflightCurrent(_ generation: Int) -> Bool {
+        generation == voicePreflightGeneration
     }
 
     private var forkLoadingNotice: some View {
@@ -1064,6 +1509,70 @@ struct TurnView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
+}
+
+private struct RuntimeDebugLogSheet: View {
+    @Environment(CodexService.self) private var codex
+    @Environment(\.dismiss) private var dismiss
+
+    private var combinedLogText: String {
+        codex.runtimeDebugLogEntries.joined(separator: "\n")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if codex.runtimeDebugLogEntries.isEmpty {
+                    ContentUnavailableView(
+                        "No Runtime Logs Yet",
+                        systemImage: "list.bullet.rectangle",
+                        description: Text("Start a Plan Mode turn and the RPC events will appear here.")
+                    )
+                } else {
+                    ScrollView {
+                        Text(combinedLogText)
+                            .font(AppFont.mono(.footnote))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                    }
+                    .background(Color(.systemBackground))
+                }
+            }
+            .navigationTitle("Runtime Logs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Clear") {
+                        codex.clearRuntimeDebugLog()
+                    }
+
+                    Button("Copy") {
+                        UIPasteboard.general.string = combinedLogText
+                    }
+                    .disabled(combinedLogText.isEmpty)
+                }
+            }
+        }
+    }
+}
+
+private enum VoiceRecoveryAction: Equatable {
+    case reconnect
+    case showSetupHelp
+    case openSystemSettings
+    case none
+}
+
+private struct VoiceRecoveryPresentation: Equatable {
+    let snapshot: ConnectionRecoverySnapshot
+    let action: VoiceRecoveryAction
 }
 
 private struct SubagentParentAccessoryCard: View {

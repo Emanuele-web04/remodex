@@ -1,233 +1,166 @@
 // FILE: OnboardingView.swift
-// Purpose: One-time onboarding screen shown before the first QR scan.
+// Purpose: Split onboarding flow — swipeable pages with fixed bottom bar.
 // Layer: View
 // Exports: OnboardingView
-// Depends on: SwiftUI
+// Depends on: SwiftUI, OnboardingWelcomePage, OnboardingFeaturesPage, OnboardingStepPage
 
 import SwiftUI
 
 struct OnboardingView: View {
     let onContinue: () -> Void
+    @State private var currentPage = 0
+    @State private var isShowingCodexInstallReminder = false
+
+    private let pageCount = 5
+    private let codexInstallStepIndex = 2
+    private let codexInstallCommand = "npm install -g @openai/codex@latest"
 
     var body: some View {
         ZStack {
-            Color(.systemBackground).ignoresSafeArea()
+            Color.black.ignoresSafeArea()
 
-            GeometryReader { geo in
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 0) {
-                        // Hero image
-                        ZStack(alignment: .bottom) {
-                            Image("three")
-                                .resizable()
-                                .scaledToFill()
-                                .frame(width: geo.size.width, height: geo.size.height * 0.44)
-                                .clipped()
+            VStack(spacing: 0) {
+                TabView(selection: $currentPage) {
+                    OnboardingWelcomePage()
+                        .tag(0)
 
-                            LinearGradient(
-                                colors: [.clear, Color(.systemBackground).opacity(0.7), Color(.systemBackground)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                            .frame(height: 118)
-                        }
-                        
-                        .frame(height: geo.size.height * 0.32)
-                        .padding(.top, 20)
+                    OnboardingFeaturesPage()
+                        .tag(1)
 
-                        // Content
-                        VStack(spacing: 22) {
-                            // Logo + name
-                            VStack(spacing: 8) {
-                                Image("AppLogo")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 52, height: 52)
-                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    OnboardingStepPage(
+                        stepNumber: 1,
+                        icon: "terminal",
+                        title: "Install Codex CLI",
+                        description: "The AI coding agent that lives in your terminal. Remodex connects to it from your iPhone.",
+                        command: codexInstallCommand
+                    )
+                    .tag(2)
 
-                                Text("Remodex")
-                                    .font(AppFont.title2(weight: .bold))
+                    OnboardingStepPage(
+                        stepNumber: 2,
+                        icon: "link",
+                        title: "Install the Bridge",
+                        description: "A lightweight relay that securely connects your Mac to your iPhone.",
+                        command: "npm install -g remodex@latest"
+                    )
+                    .tag(3)
 
-                                Text("Control Codex from your iPhone.")
-                                    .font(AppFont.caption(weight: .regular))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.top, 4)
-
-                            VStack(spacing: 14) {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Before you scan")
-                                        .font(AppFont.caption(weight: .semibold))
-                                        .foregroundStyle(.secondary)
-                                        .textCase(.uppercase)
-
-                                    Text("Pair your phone in a few quick steps.")
-                                        .font(AppFont.title3(weight: .semibold))
-                                }
-
-                                VStack(spacing: 14) {
-                                    OnboardingStepRow(
-                                        number: "1",
-                                        title: "Install the Codex CLI",
-                                        command: "npm install -g @openai/codex@latest"
-                                    )
-
-                                    OnboardingStepRow(
-                                        number: "2",
-                                        title: "Install the latest Remodex bridge",
-                                        command: "npm install -g remodex@latest"
-                                    )
-
-                                    OnboardingStepRow(
-                                        number: "3",
-                                        title: "Start pairing",
-                                        command: "remodex up"
-                                    )
-                                }
-                            }
-
-                            // Primary CTA
-                            Button(action: onContinue) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "qrcode")
-                                        .font(.system(size: 16, weight: .semibold))
-                                    Text("Scan QR Code")
-                                        .font(AppFont.body(weight: .semibold))
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 15)
-                                .foregroundStyle(.white)
-                                .background(.black, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.top, 4)
-
-                            // Calls out the privacy posture without adding another action to onboarding.
-                            HStack(spacing: 6) {
-                                Image(systemName: "lock.shield")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text("End-to-end encrypted")
-                                    .font(AppFont.caption(weight: .medium))
-                            }
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 2)
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 40)
-                    }
+                    OnboardingStepPage(
+                        stepNumber: 3,
+                        icon: "qrcode.viewfinder",
+                        title: "Start Pairing",
+                        description: "Run this on your Mac. A QR code will appear in your terminal — scan it next.",
+                        command: "remodex up"
+                    )
+                    .tag(4)
                 }
-                .scrollBounceBehavior(.basedOnSize)
+                .tabViewStyle(.page(indexDisplayMode: .never))
+
+                bottomBar
             }
         }
-        .preferredColorScheme(.light)
-    }
-}
-
-// MARK: - Step row
-
-private struct OnboardingStepRow: View {
-    let number: String
-    let title: String
-    var command: String? = nil
-    var subtitle: String? = nil
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(number)
-                .font(AppFont.caption2(weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 20, height: 20)
-                .background(.black, in: Circle())
-                .padding(.top, 1)
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(AppFont.subheadline(weight: .medium))
-
-                if let command {
-                    OnboardingSetupCommandCard(command: command)
-                }
-
-                if let subtitle {
-                    Text(subtitle)
-                        .font(AppFont.caption(weight: .regular))
-                        .foregroundStyle(.secondary)
-                }
+        .preferredColorScheme(.dark)
+        .alert("Install Codex CLI First", isPresented: $isShowingCodexInstallReminder) {
+            Button("Stay Here", role: .cancel) {}
+            Button("Continue Anyway") {
+                advanceToNextPage()
             }
-
-            Spacer(minLength: 0)
+        } message: {
+            Text("Copy and paste \"\(codexInstallCommand)\" on your Mac before moving on. Remodex will not work until Codex CLI is installed and available in your PATH.")
         }
     }
-}
 
-// MARK: - Inline copy-able command
+    // MARK: - Bottom bar
 
-private struct OnboardingSetupCommandCard: View {
-    let command: String
-    @State private var copied = false
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            commandLabel
-
-            Button {
-                UIPasteboard.general.string = command
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                withAnimation(.easeInOut(duration: 0.2)) { copied = true }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    withAnimation(.easeInOut(duration: 0.2)) { copied = false }
+    private var bottomBar: some View {
+        VStack(spacing: 20) {
+            // Animated pill dots
+            HStack(spacing: 8) {
+                ForEach(0..<pageCount, id: \.self) { i in
+                    Capsule()
+                        .fill(i == currentPage ? Color.white : Color.white.opacity(0.18))
+                        .frame(width: i == currentPage ? 24 : 8, height: 8)
                 }
-            } label: {
-                Group {
-                    if copied {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.green)
-                    } else {
-                        Image("copy")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 15, height: 15)
-                            .foregroundStyle(.secondary)
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: currentPage)
+
+            // CTA button
+            Button(action: handleContinue) {
+                HStack(spacing: 10) {
+                    if currentPage == pageCount - 1 {
+                        Image(systemName: "qrcode")
+                            .font(.system(size: 15, weight: .semibold))
                     }
+
+                    Text(buttonTitle)
+                        .font(AppFont.body(weight: .semibold))
                 }
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
+                .foregroundStyle(.black)
+                .frame(maxWidth: .infinity)
+                .frame(height: 56)
+                .background(.white, in: Capsule())
             }
             .buttonStyle(.plain)
+
+            OpenSourceBadge(style: .light)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 4)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 12)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.regularMaterial)
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.6), .black],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 50)
+            .offset(y: -50),
+            alignment: .top
         )
     }
 
-    @ViewBuilder
-    private var commandLabel: some View {
-        ViewThatFits(in: .horizontal) {
-            Text(command)
-                .font(AppFont.mono(.caption2))
-                .foregroundStyle(.primary.opacity(0.9))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    // MARK: - State
 
-            Text(command)
-                .font(AppFont.mono(.caption2))
-                .foregroundStyle(.primary.opacity(0.9))
-                .lineSpacing(2)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private var buttonTitle: String {
+        switch currentPage {
+        case 0: return "Get Started"
+        case 1: return "Set Up"
+        case pageCount - 1: return "Scan QR Code"
+        default: return "Continue"
+        }
+    }
+
+    private func handleContinue() {
+        // The CLI install step is a hard requirement, so warn before advancing.
+        if currentPage == codexInstallStepIndex {
+            isShowingCodexInstallReminder = true
+            return
+        }
+
+        if currentPage < pageCount - 1 {
+            advanceToNextPage()
+        } else {
+            onContinue()
+        }
+    }
+
+    private func advanceToNextPage() {
+        withAnimation(.easeInOut(duration: 0.3)) {
+            currentPage += 1
         }
     }
 }
 
-// MARK: - Preview
+// MARK: - Previews
 
-#Preview {
+#Preview("Full Flow") {
     OnboardingView {
         print("Continue tapped")
     }
+}
+
+#Preview("Light Override") {
+    OnboardingView {
+        print("Continue tapped")
+    }
+    .preferredColorScheme(.light)
 }

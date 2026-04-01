@@ -47,73 +47,34 @@ private struct FileChangeInlineActionRow: View {
     }
 }
 
-// ─── File-Change Action Buttons ─────────────────────────────────────
+/// Resets the in-memory AttributedString cache that backs ``MarkdownTextView``.
+/// Kept for explicit memory recovery without forcing cold parses on every thread switch.
+@MainActor
+enum MarkdownParseCacheReset {
+    static func reset() { CachingMarkdownParser.reset() }
+}
 
-// MARK: - FileChangeActionButtons
-// Pill button below file rows: "Diff +N -M" (opens sheet).
-// Owns @State isShowingDiffSheet so MessageRow's Equatable short-circuit stays effective.
-private struct FileChangeActionButtons: View {
-    let entries: [TurnFileChangeSummaryEntry]
-    let bodyText: String
-    let messageID: String
-    var showInlineCommit: Bool = false
+// Wraps the default Textual markdown parser with a bounded AttributedString
+// cache so Foundation's markdown parser is not re-run when LazyVStack
+// recycles a cell on upward scroll.
+@MainActor
+private struct CachingMarkdownParser: MarkupParser {
+    static let shared = CachingMarkdownParser()
+    private static let cache = BoundedCache<String, AttributedString>(maxEntries: 128)
+    private let inner: AttributedStringMarkdownParser = .markdown()
 
-    @Environment(\.inlineCommitAndPushAction) private var commitAction
-    @State private var isShowingDiffSheet = false
-
-    var body: some View {
-        let totalAdditions = entries.reduce(0) { $0 + $1.additions }
-        let totalDeletions = entries.reduce(0) { $0 + $1.deletions }
-
-        HStack(spacing: 10) {
-            if !bodyText.isEmpty {
-                Button {
-                    isShowingDiffSheet = true
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(AppFont.system(size: 10, weight: .medium))
-                        Text("Diff")
-                        DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
-                    }
-                    .font(AppFont.mono(.body))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
-
-            if showInlineCommit, let action = commitAction {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    action()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image("cloud-upload")
-                            .renderingMode(.template)
-                            // Keep the inline commit CTA visually balanced with the Diff pill beside it.
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 18, height: 18)
-                        Text("Commit & Push")
-                    }
-                    .font(AppFont.mono(.body))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
-            }
+    func attributedString(for input: String) throws -> AttributedString {
+        let key = TurnTextCacheKey.key(namespace: "markdown-parser", text: input)
+        if let cached = Self.cache.get(key) {
+            return cached
         }
-        .sheet(isPresented: $isShowingDiffSheet) {
-            TurnDiffSheet(
-                title: "Changes",
-                entries: entries,
-                bodyText: bodyText,
-                messageID: messageID
-            )
-        }
+        let result = try inner.attributedString(for: input)
+        Self.cache.set(key, value: result)
+        return result
+    }
+
+    static func reset() {
+        cache.removeAll()
     }
 }
 
@@ -125,7 +86,7 @@ struct MarkdownTextView: View {
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
         // Keep prose on the app font, but let Textual own markdown/code layout to avoid block sizing regressions.
-        let baseView = StructuredText(markdown: transformed)
+        let baseView = StructuredText(transformed, parser: CachingMarkdownParser.shared)
             .font(AppFont.body())
             .textual.structuredTextStyle(.gitHub)
 
@@ -501,7 +462,7 @@ enum MarkdownTextFormatter {
         if CharacterSet.alphanumerics.contains(scalar) {
             return true
         }
-        return scalar == "."
+        return scalar == UnicodeScalar(".")
     }
 }
 
@@ -600,27 +561,26 @@ private enum AttachmentPreviewImageResolver {
 // ─── Message row ────────────────────────────────────────────────────
 
 struct MessageRow: View, Equatable {
+    @Environment(CodexService.self) private var codex
+
     let message: CodexMessage
     let isRetryAvailable: Bool
     let onRetryUserMessage: (String) -> Void
-    var assistantRevertPresentation: AssistantRevertPresentation? = nil
-    /// When non-nil, this message is the last in an assistant block and
-    /// a copy button should be shown. The string is the aggregated block text.
-    var copyBlockText: String? = nil
-    var showInlineCommit: Bool = false
+    // Keeps the end-of-block accessory aligned with the active assistant turn.
+    var assistantBlockAccessoryState: AssistantBlockAccessoryState? = nil
     // Disables timer-driven adornments while the user reads older content.
     var showsStreamingAnimations: Bool = true
-    @Environment(\.assistantRevertAction) private var assistantRevertAction
-    @Environment(\.subagentOpenAction) private var subagentOpenAction
+    // Passed as init params instead of @Environment so .equatable() can short-circuit
+    // without environment rebinding forcing a body re-evaluation on scroll-up cell reuse.
+    var assistantRevertAction: ((CodexMessage) -> Void)? = nil
+    var subagentOpenAction: ((CodexSubagentThreadPresentation) -> Void)? = nil
     @State private var previewImage: PreviewImagePayload?
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
         lhs.message == rhs.message
             && lhs.isRetryAvailable == rhs.isRetryAvailable
-            && lhs.assistantRevertPresentation == rhs.assistantRevertPresentation
-            && lhs.copyBlockText == rhs.copyBlockText
-            && lhs.showInlineCommit == rhs.showInlineCommit
+            && lhs.assistantBlockAccessoryState == rhs.assistantBlockAccessoryState
             && lhs.showsStreamingAnimations == rhs.showsStreamingAnimations
     }
 
@@ -656,8 +616,14 @@ struct MessageRow: View, Equatable {
             case .system:
                 VStack(alignment: .leading, spacing: 8) {
                     systemView(text: text, renderModel: renderModel)
-                    if let blockText = copyBlockText {
-                        CopyBlockButton(text: blockText)
+                    if hasTurnEndActions {
+                        turnEndActionButtons
+                    }
+                    if let assistantBlockAccessoryState {
+                        CopyBlockButton(
+                            text: assistantBlockAccessoryState.copyText,
+                            isRunning: assistantBlockAccessoryState.showsRunningIndicator
+                        )
                     }
                 }
             }
@@ -724,11 +690,18 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    // Renders inline @file and $skill mentions as highlighted tokens inside user bubbles.
+    // Renders inline @file and $skill mentions inside one AttributedString so large
+    // messages do not build an arbitrarily deep SwiftUI Text concatenation chain.
     private func userBubbleText(_ rawText: String) -> Text {
         let normalizedRawText = SkillReferenceFormatter.replacingSkillReferences(
             in: rawText,
             style: .mentionToken
+        )
+        let confirmedFileMentions = Set(
+            message.fileMentions
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .map(TurnMessageRegexCache.removingTrailingLineColumnSuffix)
+                .filter { !$0.isEmpty }
         )
 
         guard normalizedRawText.contains("@") || normalizedRawText.contains("$") else {
@@ -746,55 +719,14 @@ struct MessageRow: View, Equatable {
             return Text(normalizedRawText)
         }
 
-        var segments: [Text] = []
-        var cursor = 0
-
-        for match in matches {
-            let matchRange = match.range
-            let triggerRange = match.range(at: 1)
-            let tokenRange = match.range(at: 2)
-            guard triggerRange.location != NSNotFound,
-                  tokenRange.location != NSNotFound else {
-                continue
-            }
-
-            if matchRange.location > cursor {
-                let plain = nsText.substring(with: NSRange(location: cursor, length: matchRange.location - cursor))
-                if !plain.isEmpty {
-                    segments.append(Text(plain))
-                }
-            }
-
-            let trigger = nsText.substring(with: triggerRange)
-            let rawToken = nsText.substring(with: tokenRange)
-            let (normalizedToken, trailingPunctuation) = normalizedMentionToken(rawToken)
-            if !normalizedToken.isEmpty {
-                if trigger == "@" {
-                    let fileName = (normalizedToken as NSString).lastPathComponent
-                    let displayName = fileName.isEmpty ? normalizedToken : fileName
-                    segments.append(Text(displayName).foregroundColor(.blue))
-                } else {
-                    let displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
-                    segments.append(Text(displayName).foregroundColor(.indigo))
-                }
-            }
-
-            if !trailingPunctuation.isEmpty {
-                segments.append(Text(trailingPunctuation))
-            }
-
-            cursor = matchRange.location + matchRange.length
-        }
-
-        if cursor < nsText.length {
-            segments.append(Text(nsText.substring(from: cursor)))
-        }
-
-        guard let first = segments.first else {
-            return Text(normalizedRawText)
-        }
-
-        return segments.dropFirst().reduce(first) { $0 + $1 }
+        return Text(
+            userBubbleAttributedText(
+                from: normalizedRawText,
+                matches: matches,
+                nsText: nsText,
+                confirmedFileMentions: confirmedFileMentions
+            )
+        )
     }
 
     private func normalizedMentionToken(_ token: String) -> (token: String, trailingPunctuation: String) {
@@ -813,11 +745,127 @@ struct MessageRow: View, Equatable {
         return (path, trailing)
     }
 
+    // Keeps long mention-heavy prompts renderable without hitting SwiftUI's recursive
+    // ConcatenatedTextStorage resolution path.
+    private func userBubbleAttributedText(
+        from text: String,
+        matches: [NSTextCheckingResult],
+        nsText: NSString,
+        confirmedFileMentions: Set<String>
+    ) -> AttributedString {
+        var attributed = AttributedString()
+        var cursor = 0
+
+        for match in matches {
+            let matchRange = match.range
+            let triggerRange = match.range(at: 1)
+            let tokenRange = match.range(at: 2)
+            guard triggerRange.location != NSNotFound,
+                  tokenRange.location != NSNotFound else {
+                continue
+            }
+
+            if matchRange.location > cursor {
+                let plain = nsText.substring(with: NSRange(location: cursor, length: matchRange.location - cursor))
+                if !plain.isEmpty {
+                    attributed.append(AttributedString(plain))
+                }
+            }
+
+            let trigger = nsText.substring(with: triggerRange)
+            let rawToken = nsText.substring(with: tokenRange)
+            let (normalizedToken, trailingPunctuation) = normalizedMentionToken(rawToken)
+            let fullMatch = nsText.substring(with: matchRange)
+            let normalizedConfirmedToken = TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: normalizedToken)
+            if trigger == "@", !confirmedFileMentions.contains(normalizedConfirmedToken) {
+                attributed.append(AttributedString(fullMatch))
+                cursor = matchRange.location + matchRange.length
+                continue
+            }
+
+            if !normalizedToken.isEmpty {
+                let displayName: String
+                let color: Color
+
+                if trigger == "@" {
+                    let fileName = (normalizedToken as NSString).lastPathComponent
+                    displayName = fileName.isEmpty ? normalizedToken : fileName
+                    color = .blue
+                } else {
+                    displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
+                    color = .indigo
+                }
+
+                var highlightedSegment = AttributedString(displayName)
+                highlightedSegment.foregroundColor = color
+                attributed.append(highlightedSegment)
+            }
+
+            if !trailingPunctuation.isEmpty {
+                attributed.append(AttributedString(trailingPunctuation))
+            }
+
+            cursor = matchRange.location + matchRange.length
+        }
+
+        if cursor < nsText.length {
+            attributed.append(AttributedString(nsText.substring(from: cursor)))
+        }
+
+        if attributed.characters.isEmpty {
+            return AttributedString(text)
+        }
+
+        return attributed
+    }
+
     private func assistantView(text: String, renderModel: MessageRowRenderModel) -> some View {
         let commentContent = renderModel.codeCommentContent
         let bodyText = commentContent?.fallbackText ?? text
         let mermaidContent = renderModel.mermaidContent
-
+        let assistantProposedPlanCandidate = commentContent == nil && mermaidContent == nil
+            ? (message.proposedPlan ?? CodexProposedPlanParser.parse(from: bodyText))
+            : nil
+        let currentPlanSessionSource = codex.currentPlanSessionSource(for: message.threadId)
+        let isNativePlanSession = currentPlanSessionSource != nil && currentPlanSessionSource != .compatibilityFallback
+        let proposedPlan = !isNativePlanSession
+            ? (assistantProposedPlanCandidate
+                ?? (
+                    commentContent == nil
+                        && mermaidContent == nil
+                        && currentPlanSessionSource == .compatibilityFallback
+                        && InferredPlanQuestionnaireParser.parseAssistantMessage(bodyText) == nil
+                    ? CodexProposedPlanParser.parseAssistantFallback(from: bodyText)
+                    : nil
+                ))
+            : nil
+        let assistantTurnCompleted = codex.turnTerminalState(for: message.turnId) == .completed
+        let renderedPlanText = assistantProposedPlanCandidate == nil
+            ? bodyText
+            : (
+                CodexProposedPlanParser.containsEnvelope(in: bodyText)
+                    ? (CodexProposedPlanParser.removingEnvelope(from: bodyText) ?? "")
+                    : ""
+            )
+        let inferredQuestionnaire = commentContent == nil
+            ? resolvedInferredPlanQuestionnaire(
+                bodyText: bodyText,
+                message: message,
+                threadMessages: codex.messages(for: message.threadId),
+                shouldRecoverFallback: codex.allowsAssistantPlanFallbackRecovery(
+                    for: message.threadId,
+                    turnId: message.turnId
+                ),
+                parse: InferredPlanQuestionnaireParser.parseAssistantMessage
+            )
+            : nil
+        let visibleAssistantText = renderedPlanText
+        let suppressNativeProposedPlanShell = isNativePlanSession
+            && assistantProposedPlanCandidate != nil
+            && visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && inferredQuestionnaire == nil
+            && mermaidContent == nil
+        let hasRenderableAssistantContent = !visibleAssistantText.isEmpty || proposedPlan != nil
         return VStack(alignment: .leading, spacing: 8) {
             if let commentContent, commentContent.hasFindings {
                 VStack(alignment: .leading, spacing: 10) {
@@ -827,28 +875,67 @@ struct MessageRow: View, Equatable {
                 }
             }
 
-            if !bodyText.isEmpty {
+            if hasRenderableAssistantContent {
                 if let mermaidContent {
                     MermaidMarkdownContentView(content: mermaidContent)
+                } else if let inferredQuestionnaire {
+                    if let introText = inferredQuestionnaire.introText {
+                        MarkdownTextView(
+                            text: introText,
+                            profile: .assistantProse,
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                        )
+                    }
+
+                    InferredPlanQuestionnaireCard(
+                        message: message,
+                        questionnaire: inferredQuestionnaire
+                    )
+
+                    if let outroText = inferredQuestionnaire.outroText {
+                        Text(outroText)
+                            .font(AppFont.footnote())
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if let proposedPlan {
+                    // Compatibility-mode proposed plans still render inline from assistant text.
+                    if !renderedPlanText.isEmpty {
+                        MarkdownTextView(
+                            text: renderedPlanText,
+                            profile: .assistantProse,
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                        )
+                    }
+
+                    ProposedPlanResultCard(
+                        threadId: message.threadId,
+                        proposedPlan: proposedPlan,
+                        isStreaming: message.isStreaming,
+                        canImplement: assistantTurnCompleted
+                    )
                 } else {
                     MarkdownTextView(
-                        text: bodyText,
+                        text: visibleAssistantText,
                         profile: .assistantProse,
                         enablesSelection: enablesInlineMarkdownSelectionInTimeline
                     )
                 }
             }
 
-            if message.isStreaming && showsStreamingAnimations {
+            if !suppressNativeProposedPlanShell && message.isStreaming && showsStreamingAnimations {
                 TypingIndicator()
             }
 
-            if let assistantRevertPresentation {
-                assistantRevertButton(presentation: assistantRevertPresentation)
+            if !suppressNativeProposedPlanShell && hasTurnEndActions {
+                turnEndActionButtons
             }
 
-            if let blockText = copyBlockText {
-                CopyBlockButton(text: blockText)
+            if !suppressNativeProposedPlanShell, let assistantBlockAccessoryState {
+                CopyBlockButton(
+                    text: assistantBlockAccessoryState.copyText,
+                    isRunning: assistantBlockAccessoryState.showsRunningIndicator
+                )
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -862,6 +949,8 @@ struct MessageRow: View, Equatable {
         switch message.kind {
         case .thinking:
             thinkingSystemView(renderModel: renderModel)
+        case .toolActivity:
+            toolActivitySystemView(text: text)
         case .fileChange:
             fileChangeSystemView(text: text, renderModel: renderModel)
         case .commandExecution:
@@ -869,7 +958,17 @@ struct MessageRow: View, Equatable {
         case .subagentAction:
             subagentActionSystemView(text: text)
         case .plan:
-            PlanSystemCard(message: message)
+            if message.resolvedPlanPresentation?.isInlineResultVisible == true,
+               let proposedPlan = message.proposedPlan {
+                ProposedPlanResultCard(
+                    threadId: message.threadId,
+                    proposedPlan: proposedPlan,
+                    isStreaming: message.isStreaming,
+                    canImplement: message.resolvedPlanPresentation == .resultReady
+                )
+            } else {
+                PlanSystemCard(message: message)
+            }
         case .userInputPrompt:
             if let request = message.structuredUserInputRequest {
                 StructuredUserInputCard(request: request)
@@ -884,50 +983,38 @@ struct MessageRow: View, Equatable {
 
     @ViewBuilder
     private func thinkingSystemView(renderModel: MessageRowRenderModel) -> some View {
-        let thinkingText = renderModel.thinkingText ?? ""
-        let thinkingContent = renderModel.thinkingContent ?? ThinkingDisclosureContent(sections: [], fallbackText: "")
-        let activityPreview = ThinkingDisclosureParser.compactActivityPreview(fromNormalizedText: thinkingText)
-        Group {
-            // Keep completed reasoning visible too; older builds showed thinking blocks
-            // even after stream completion whenever content was present.
-            if message.isStreaming || !thinkingText.isEmpty {
-                if let activityPreview {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Thinking...")
-                            .font(AppFont.mono(.caption))
-                            .fontWeight(.regular)
-                            .italic()
-                            .foregroundStyle(.secondary.opacity(0.9))
+        ThinkingSystemBlock(
+            messageID: message.id,
+            isStreaming: message.isStreaming,
+            thinkingText: renderModel.thinkingText ?? "",
+            thinkingContent: renderModel.thinkingContent ?? ThinkingDisclosureContent(sections: [], fallbackText: ""),
+            activityPreview: renderModel.thinkingActivityPreview
+        )
+    }
 
-                        Text(activityPreview)
-                            .font(AppFont.mono(.caption))
-                            .fontWeight(.regular)
-                            .italic()
-                            .foregroundStyle(.secondary.opacity(0.9))
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                    .padding(.vertical, 2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Thinking...")
-                            .font(AppFont.mono(.caption))
-                            .fontWeight(.regular)
-                            .italic()
-                            .foregroundStyle(.secondary.opacity(0.9))
+    private func toolActivitySystemView(text: String) -> some View {
+        let joined = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
 
-                        if !thinkingText.isEmpty {
-                            ThinkingDisclosureView(
-                                messageID: message.id,
-                                content: thinkingContent
-                            )
-                        }
-                    }
-                    .padding(.vertical, 2)
+        return VStack(alignment: .leading, spacing: 4) {
+            if !joined.isEmpty {
+                Text(joined)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                }
             }
+
+            if message.isStreaming && showsStreamingAnimations {
+                TypingIndicator()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+        .contextMenu {
+            selectableTextActions(text: text, usesMarkdownSelection: false)
         }
     }
 
@@ -955,17 +1042,6 @@ struct MessageRow: View, Equatable {
                 }
             }
 
-            // Buttons + sheet live in a child view so environment reads
-            // don't invalidate the parent MessageRow's Equatable short-circuit.
-            if !message.isStreaming, !allEntries.isEmpty {
-                FileChangeActionButtons(
-                    entries: allEntries,
-                    bodyText: renderState.bodyText,
-                    messageID: message.id,
-                    showInlineCommit: showInlineCommit
-                )
-            }
-
             if message.isStreaming && showsStreamingAnimations {
                 TypingIndicator()
             }
@@ -981,7 +1057,7 @@ struct MessageRow: View, Equatable {
             .font(AppFont.footnote())
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
+            .padding(.vertical, 2)
             .contextMenu {
                 selectableTextActions(text: text, usesMarkdownSelection: false)
             }
@@ -1023,6 +1099,96 @@ struct MessageRow: View, Equatable {
             return "send failed"
         case .confirmed:
             return message.createdAt.formatted(date: .omitted, time: .shortened)
+        }
+    }
+
+    @Environment(\.inlineCommitAndPushAction) private var inlineCommitAction
+    @Environment(\.inlineCommitAndPushPhase) private var inlineCommitAndPushPhase
+    @State private var isShowingBlockDiffSheet = false
+
+    private var hasTurnEndActions: Bool {
+        guard let accessory = assistantBlockAccessoryState else { return false }
+        return accessory.blockRevertPresentation != nil
+            || accessory.blockDiffEntries != nil
+    }
+
+    private var isInlineCommitAndPushRunning: Bool {
+        inlineCommitAndPushPhase != nil
+    }
+
+    private var inlineCommitAndPushTitle: String {
+        inlineCommitAndPushPhase?.title ?? "Commit & Push"
+    }
+
+    @ViewBuilder
+    private var turnEndActionButtons: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let revert = assistantBlockAccessoryState?.blockRevertPresentation {
+                assistantRevertButton(presentation: revert)
+            }
+
+            if let accessory = assistantBlockAccessoryState {
+                HStack(spacing: 10) {
+                    if let entries = accessory.blockDiffEntries, !entries.isEmpty {
+                        let totalAdditions = entries.reduce(0) { $0 + $1.additions }
+                        let totalDeletions = entries.reduce(0) { $0 + $1.deletions }
+
+                        Button {
+                            isShowingBlockDiffSheet = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "doc.text.magnifyingglass")
+                                    .font(AppFont.system(size: 10, weight: .medium))
+                                Text("Diff")
+                                DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
+                            }
+                            .font(AppFont.mono(.body))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .sheet(isPresented: $isShowingBlockDiffSheet) {
+                            TurnDiffSheet(
+                                title: "Changes",
+                                entries: entries,
+                                bodyText: accessory.blockDiffText ?? "",
+                                messageID: message.id
+                            )
+                        }
+                    }
+
+                    if let action = inlineCommitAction {
+                        Button {
+                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                            action()
+                        } label: {
+                            HStack(spacing: 4) {
+                                // Mirror the top-bar git feedback so the inline CTA feels responsive too.
+                                Group {
+                                    if isInlineCommitAndPushRunning {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Image("cloud-upload")
+                                            .renderingMode(.template)
+                                            .resizable()
+                                            .scaledToFit()
+                                    }
+                                }
+                                    .frame(width: 18, height: 18)
+                                Text(inlineCommitAndPushTitle)
+                            }
+                            .font(AppFont.mono(.body))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isInlineCommitAndPushRunning)
+                    }
+                }
+            }
         }
     }
 
@@ -1150,6 +1316,141 @@ private struct SelectableMessageTextSheet: View {
     }
 }
 
+// ─── Thinking UI ────────────────────────────────────────────────────
+
+// Centralizes the inline reasoning row so thinking-specific spacing, fonts, and
+// disclosure behavior are easy to tweak without hunting through MessageRow.
+// Kept as one flat struct (no sub-view nesting) to minimise per-cell view-tree
+// depth inside the LazyVStack — extra struct layers cost allocation + diffing on
+// every scroll frame.
+private struct ThinkingSystemBlock: View {
+    let messageID: String
+    let isStreaming: Bool
+    let thinkingText: String
+    let thinkingContent: ThinkingDisclosureContent
+    let activityPreview: String?
+
+    init(
+        messageID: String,
+        isStreaming: Bool,
+        thinkingText: String,
+        thinkingContent: ThinkingDisclosureContent,
+        activityPreview: String? = nil
+    ) {
+        self.messageID = messageID
+        self.isStreaming = isStreaming
+        self.thinkingText = thinkingText
+        self.thinkingContent = thinkingContent
+        self.activityPreview = activityPreview
+    }
+
+    var body: some View {
+        Group {
+            // Keep completed reasoning visible too; older builds showed thinking blocks
+            // even after stream completion whenever content was present.
+            if isStreaming || !thinkingText.isEmpty {
+                if let activityPreview {
+                    VStack(alignment: .leading, spacing: 4) {
+                        thinkingTitle
+
+                        activityPreviewText(activityPreview)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else if thinkingText.isEmpty {
+                    thinkingTitle
+                        .padding(.vertical, 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        thinkingTitle
+
+                        ThinkingDisclosureView(
+                            messageID: messageID,
+                            content: thinkingContent
+                        )
+                    }
+                    .padding(.vertical, 2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    // MARK: - Inline helpers (no extra View structs)
+
+    private var thinkingTitle: some View {
+        Text("Thinking...")
+            .font(AppFont.caption(weight: .medium))
+            .foregroundStyle(.secondary.opacity(0.9))
+            .overlay {
+                if isStreaming {
+                    ShimmerMask()
+                }
+            }
+            .mask(Text("Thinking...")
+                .font(AppFont.caption(weight: .medium)))
+    }
+
+    private func activityPreviewText(_ preview: String) -> Text {
+        let trimmed = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return Text("") }
+
+        let splitIndex = trimmed.firstIndex(of: " ")
+        let leading: String
+        let remainder: String
+
+        if let splitIndex {
+            leading = String(trimmed[..<splitIndex])
+            remainder = String(trimmed[splitIndex...])
+        } else {
+            leading = trimmed
+            remainder = ""
+        }
+
+        let capitalised = leading.prefix(1).uppercased() + leading.dropFirst()
+
+        return Text(capitalised)
+            .font(AppFont.caption(weight: .medium))
+            .foregroundStyle(.secondary)
+        +
+        Text(remainder)
+            .font(AppFont.caption())
+            .foregroundStyle(.tertiary)
+    }
+}
+
+// A single-pass gradient sweep that slides across the text it overlays.
+private struct ShimmerMask: View {
+    @State private var phase: CGFloat = -1
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .white.opacity(0.45), location: 0.4),
+                    .init(color: .white.opacity(0.45), location: 0.6),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            .frame(width: w * 0.6)
+            .offset(x: phase * w)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: false)) {
+                    phase = 1.4
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 // Owns disclosure state for compact reasoning summaries without invalidating MessageRow.
 private struct ThinkingDisclosureView: View {
     let messageID: String
@@ -1196,8 +1497,7 @@ private struct ThinkingDisclosureView: View {
                         .frame(width: 10)
 
                     Text(section.title)
-                        .font(AppFont.mono(.caption))
-                        .fontWeight(.bold)
+                        .font(AppFont.caption(weight: .semibold))
                         .foregroundStyle(.secondary.opacity(0.95))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -1216,10 +1516,9 @@ private struct ThinkingDisclosureView: View {
 
     private func detailText(_ value: String) -> some View {
         Text(.init(value))
-            .font(AppFont.mono(.caption))
+            .font(AppFont.caption())
             .lineSpacing(2)
             .fontWeight(.regular)
-            .italic()
             .foregroundStyle(.secondary.opacity(0.85))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1359,4 +1658,130 @@ struct ApprovalBanner: View {
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
     }
+}
+
+// ─── Focused Previews ───────────────────────────────────────────────
+
+private struct TimelineSystemBlockPreviewSurface<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                content()
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+        }
+        .background(Color(.systemBackground))
+    }
+}
+
+@MainActor
+struct ThinkingSystemBlockCompactPreviewHost: View {
+    var body: some View {
+        TimelineSystemBlockPreviewSurface {
+            ThinkingSystemBlock(
+                messageID: "preview-thinking-compact",
+                isStreaming: true,
+                thinkingText: "running rg -n \"Thinking\" CodexMobile/CodexMobile/Views/Turn",
+                thinkingContent: ThinkingDisclosureContent(sections: [], fallbackText: "")
+            )
+        }
+    }
+}
+
+@MainActor
+struct ThinkingSystemBlockDisclosurePreviewHost: View {
+    var body: some View {
+        TimelineSystemBlockPreviewSurface {
+            ThinkingSystemBlock(
+                messageID: "preview-thinking-disclosure",
+                isStreaming: false,
+                thinkingText: """
+                **Tracing timeline rendering**
+                The thinking row now lives in its own dedicated view so typography and spacing changes stay local.
+
+                **Checking disclosure typography**
+                The selected prose font should be used for the thinking label and section titles instead of monospace.
+                """,
+                thinkingContent: ThinkingDisclosureContent(
+                    sections: [
+                        ThinkingDisclosureSection(
+                            id: "trace",
+                            title: "Tracing timeline rendering",
+                            detail: "The thinking row now lives in its own dedicated view so typography and spacing changes stay local."
+                        ),
+                        ThinkingDisclosureSection(
+                            id: "type",
+                            title: "Checking disclosure typography",
+                            detail: "The selected prose font should be used for the thinking label and section titles instead of monospace."
+                        ),
+                    ],
+                    fallbackText: ""
+                )
+            )
+        }
+    }
+}
+
+@MainActor
+struct ThinkingSystemBlockRealResponsePreviewHost: View {
+    private let rawThinkingText = """
+    Thinking...
+    **Explored 1 file**
+    Found the compact thinking block and isolated it into a dedicated view so the UI can be tuned in one place.
+
+    **Checking typography**
+    Removed italics and aligned the label with the selected prose font instead of monospace styling.
+
+    **Polishing compact activity state**
+    running rg -n "Thinking" CodexMobile/CodexMobile/Views/Turn
+    """
+
+    var body: some View {
+        let parsed = ThinkingDisclosureParser.parse(from: rawThinkingText)
+
+        return TimelineSystemBlockPreviewSurface {
+            ThinkingSystemBlock(
+                messageID: "preview-thinking-real-response",
+                isStreaming: false,
+                thinkingText: ThinkingDisclosureParser.normalizedThinkingContent(from: rawThinkingText),
+                thinkingContent: parsed
+            )
+        }
+    }
+}
+
+@MainActor
+struct ToolCallSystemBlockPreviewHost: View {
+    var body: some View {
+        TimelineSystemBlockPreviewSurface {
+            CommandExecutionStatusCard(
+                status: CommandExecutionStatusModel(
+                    command: "npm run lint -- --fix",
+                    statusLabel: "completed",
+                    accent: .completed
+                ),
+                itemId: "preview-tool-call"
+            )
+        }
+        .environment(CodexService())
+    }
+}
+
+#Preview("Thinking Block — Compact") {
+    ThinkingSystemBlockCompactPreviewHost()
+}
+
+#Preview("Thinking Block — Disclosure") {
+    ThinkingSystemBlockDisclosurePreviewHost()
+}
+
+#Preview("Thinking Block — Real Response") {
+    ThinkingSystemBlockRealResponsePreviewHost()
+}
+
+#Preview("Tool Call Block") {
+    ToolCallSystemBlockPreviewHost()
 }

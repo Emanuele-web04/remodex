@@ -83,7 +83,7 @@ extension CodexService {
         if merged.preview == nil { merged.preview = existing.preview }
         if merged.createdAt == nil { merged.createdAt = existing.createdAt }
         if merged.updatedAt == nil { merged.updatedAt = existing.updatedAt }
-        if merged.cwd == nil { merged.cwd = existing.cwd }
+        if merged.cwd == nil { merged.cwd = existing.normalizedProjectPath }
         merged.metadata = mergedThreadMetadata(
             serverMetadata: merged.metadata,
             localMetadata: existing.metadata

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="CodexMobile/CodexMobile/Assets.xcassets/remodex-og.imageset/remodex-og2%20(1).png" alt="Remodex" />
+  <img src="CodexMobile/CodexMobile/Assets.xcassets/remodex-og1.imageset/remodex-og2%20%281%29.png" alt="Remodex" />
 </p>
 
 # Remodex
@@ -39,6 +39,8 @@ If you want the public-repo distribution model explained clearly, read [SELF_HOS
 > I am not actively accepting contributions yet. If you still want to help, read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ## Get the App
+
+The app is live on the [App Store](https://apps.apple.com/us/app/remodex-remote-ai-coding/id6760243963).
 
 Build the iOS app from source in Xcode, install your own signed build on-device, then use the in-app onboarding flow to pair by scanning the QR from `remodex up`.
 
@@ -98,7 +100,7 @@ This repo contains the local bridge, the iOS app target, and their tests:
 
 ## Install the Bridge
 
-<sub>Install from npm with `@latest` so you get the newest bridge fixes, including the `1.2.5` pairing-state recovery updates.</sub>
+<sub>Install from npm with `@latest` so you get the newest bridge fixes.</sub>
 
 If you plan to use the macOS menu bar companion, `remodex` must be installed globally and available in your login-shell `PATH`.
 
@@ -190,6 +192,23 @@ Have the proxy strip `/remodex` before forwarding so the relay still receives `/
 
 If you point `REMODEX_RELAY` at your own self-hosted relay, managed push stays off unless you also set `REMODEX_PUSH_SERVICE_URL` on the bridge and explicitly enable push on the relay.
 
+## Publish to npm
+
+Published npm packages can embed default private relay settings at pack time via the `prepack` script.
+
+The current package version is `1.3.4`.
+
+To publish the bridge with `relay.example.invalid` as the default relay:
+
+```sh
+cd phodex-bridge
+npm login
+REMODEX_PACKAGE_DEFAULT_RELAY_URL="wss://relay.example.invalid/relay" \
+npm publish
+```
+
+After publish, users can still override the packaged default at runtime with `REMODEX_RELAY`.
+
 You can also run the bridge from source:
 
 ```sh
@@ -224,6 +243,11 @@ In both cases the bridge:
 ### `remodex start`
 
 macOS only. Starts the background bridge service without waiting for or printing a QR in the current terminal.
+If the service is already loaded, this path refreshes it in place.
+
+### `remodex restart`
+
+macOS only. Explicitly restarts the background bridge service without waiting for or printing a QR in the current terminal.
 
 ### `remodex stop`
 
@@ -243,7 +267,7 @@ Prints the installed Remodex CLI version.
 
 ```sh
 remodex --version
-# => 1.3.0
+# => 1.3.4
 ```
 
 ### `remodex reset-pairing`

@@ -294,6 +294,20 @@ enum TurnGitActionKind: CaseIterable, Sendable {
     }
 }
 
+enum InlineCommitAndPushPhase: Sendable {
+    case committing
+    case pushing
+
+    var title: String {
+        switch self {
+        case .committing:
+            return "Committing..."
+        case .pushing:
+            return "Pushing..."
+        }
+    }
+}
+
 // MARK: - Alert types
 
 struct TurnGitSyncAlert: Identifiable {

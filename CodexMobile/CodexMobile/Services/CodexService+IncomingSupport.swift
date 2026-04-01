@@ -21,7 +21,6 @@ struct CommandRunViewState {
     let cwd: String?
     let exitCode: Int?
     let durationMs: Int?
-    let activityLine: String?
 }
 
 func normalizedIncomingMethodName(_ method: String) -> String {
@@ -82,6 +81,65 @@ func firstIntValue(in object: IncomingParamsObject?, keys: [String]) -> Int? {
         }
     }
     return nil
+}
+
+// Keeps generic tool rows compact and human-readable across live and history paths.
+func normalizedToolActivityDescriptor(_ rawDescriptor: String?) -> String? {
+    guard let rawDescriptor = trimmedNonEmptyString(rawDescriptor) else {
+        return nil
+    }
+
+    let normalized = rawDescriptor
+        .replacingOccurrences(of: "_", with: " ")
+        .replacingOccurrences(of: "-", with: " ")
+        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalized.isEmpty else {
+        return nil
+    }
+
+    var uniqueTokens: [String] = []
+    for token in normalized.split(separator: " ", omittingEmptySubsequences: true).map(String.init) {
+        if uniqueTokens.last?.caseInsensitiveCompare(token) == .orderedSame {
+            continue
+        }
+        uniqueTokens.append(token)
+    }
+
+    let joined = uniqueTokens.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    return joined.isEmpty ? nil : joined
+}
+
+func normalizedToolActivityStatus(_ rawStatus: String?, isCompleted: Bool) -> String {
+    let normalized = rawStatus?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+        .replacingOccurrences(of: "_", with: "")
+        .replacingOccurrences(of: "-", with: "")
+
+    switch normalized {
+    case "failed", "error":
+        return "Failed"
+    case "stopped", "cancelled", "canceled", "interrupted":
+        return "Stopped"
+    case "completed", "complete", "done", "finished", "success", "succeeded":
+        return "Completed"
+    case "running", "inprogress", "working":
+        return "Running"
+    default:
+        return isCompleted ? "Completed" : "Running"
+    }
+}
+
+func toolActivitySummaryLine(
+    descriptor: String?,
+    rawStatus: String?,
+    isCompleted: Bool,
+    fallback: String = "tool"
+) -> String {
+    let statusLabel = normalizedToolActivityStatus(rawStatus, isCompleted: isCompleted)
+    let descriptorLabel = normalizedToolActivityDescriptor(descriptor) ?? fallback
+    return "\(statusLabel) \(descriptorLabel)"
 }
 
 func extractContextWindowUsage(from object: IncomingParamsObject?) -> ContextWindowUsage? {
@@ -328,7 +386,6 @@ func decodeCommandRunViewState(
         commandExecutionWorkingDirectoryCandidates(payloadObject: payloadObject, paramsObject: paramsObject)
     )
     let itemId = commandExecutionItemID(payloadObject: payloadObject, paramsObject: paramsObject)
-    let activityLine = (phase == .running) ? "Running \(shortCommand)" : nil
 
     let exitCode = commandExecutionExitCode(from: payloadObject)
     let durationMs = commandExecutionDurationMs(from: payloadObject)
@@ -340,8 +397,7 @@ func decodeCommandRunViewState(
         fullCommand: rawCommand,
         cwd: cwd,
         exitCode: exitCode,
-        durationMs: durationMs,
-        activityLine: activityLine
+        durationMs: durationMs
     )
 }
 

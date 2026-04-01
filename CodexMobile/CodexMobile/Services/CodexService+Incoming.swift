@@ -110,10 +110,14 @@ extension CodexService {
 
     // Handles server-initiated RPC requests like approval prompts.
     func handleServerRequest(method: String, requestID: JSONValue, params: JSONValue?) {
-        if method == "item/tool/requestUserInput" {
+        if method == "item/tool/requestUserInput" || method == "tool/requestUserInput" {
+            let paramsObject = params?.objectValue
+            debugRuntimeLog(
+                "rpc request \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+            )
             handleStructuredUserInputRequest(
                 requestID: requestID,
-                paramsObject: params?.objectValue
+                paramsObject: paramsObject
             )
             return
         }
@@ -140,7 +144,7 @@ extension CodexService {
                         debugRuntimeLog("auto-approve triggered method=\(method)")
                         try await sendResponse(
                             id: requestID,
-                            result: .string("accept")
+                            result: approvalDecisionResult("accept")
                         )
                     } catch {
                         debugRuntimeLog("auto-approve failed method=\(method): \(error.localizedDescription)")
@@ -169,6 +173,15 @@ extension CodexService {
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
+
+        switch method {
+        case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
+            debugRuntimeLog(
+                "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+            )
+        default:
+            break
+        }
 
         switch method {
         case "thread/started":
@@ -248,6 +261,12 @@ extension CodexService {
 
         case "thread/tokenUsage/updated":
             handleThreadTokenUsageUpdated(paramsObject)
+
+        case "account/updated":
+            handleGPTAccountUpdated(paramsObject)
+
+        case "account/login/completed":
+            handleGPTLoginCompletedNotification(paramsObject)
 
         case "account/rateLimits/updated":
             handleRateLimitsUpdated(paramsObject)
@@ -848,9 +867,33 @@ extension CodexService {
             guard !activityLines.isEmpty else {
                 return
             }
-            for line in activityLines {
-                appendEssentialActivityLine(threadId: threadId, turnId: resolvedTurnId, line: line)
+            let itemId = extractItemID(from: paramsObject, eventObject: eventObject, itemObject: itemObject)
+            let activityText = activityLines.joined(separator: "\n")
+            if let itemId, !itemId.isEmpty {
+                appendStreamingSystemItemDelta(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    itemId: itemId,
+                    kind: .toolActivity,
+                    delta: activityText
+                )
+                return
             }
+            if let resolvedTurnId, !resolvedTurnId.isEmpty {
+                appendStreamingSystemTurnDelta(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    kind: .toolActivity,
+                    delta: activityText
+                )
+                return
+            }
+            appendSystemMessage(
+                threadId: threadId,
+                text: activityText,
+                turnId: resolvedTurnId,
+                kind: .toolActivity
+            )
             return
         }
 
@@ -1491,10 +1534,6 @@ extension CodexService {
             )
         }
 
-        if let activityLine = state.activityLine {
-            appendEssentialActivityLine(threadId: threadId, turnId: turnId, line: activityLine)
-        }
-
         if isCompleted {
             maybeAppendPushResetMarker(from: state, threadId: threadId)
         }
@@ -1592,7 +1631,7 @@ extension CodexService {
             return
         }
         recentActivityLineByThread[dedupeKey] = CodexRecentActivityLine(line: trimmedLine, timestamp: now)
-        appendThinkingActivityLine(threadId: threadId, turnId: turnId, line: trimmedLine)
+        appendToolActivityLine(threadId: threadId, turnId: turnId, line: trimmedLine)
     }
 
     private func extractToolCallActivityLines(from delta: String) -> [String] {
@@ -1796,11 +1835,15 @@ extension CodexService {
             kind = .fileChange
             body = decodeFileChangeItemBody(itemObject)
         case "toolcall":
-            guard let resolvedBody = decodeToolCallFileChangeBody(itemObject, isCompleted: isCompleted) else {
+            if let resolvedBody = decodeToolCallFileChangeBody(itemObject, isCompleted: isCompleted) {
+                kind = .fileChange
+                body = resolvedBody
+            } else if let resolvedBody = decodeToolCallActivityBody(itemObject, isCompleted: isCompleted) {
+                kind = .toolActivity
+                body = resolvedBody
+            } else {
                 return false
             }
-            kind = .fileChange
-            body = resolvedBody
         case "commandexecution":
             kind = .commandExecution
             body = decodeCommandExecutionStatusText(itemObject, isCompleted: isCompleted)
@@ -1851,6 +1894,18 @@ extension CodexService {
            let turnId,
            let patch = extractChangeSetUnifiedPatch(from: itemObject, itemType: itemType) {
             recordFallbackFileChangePatch(threadId: threadId, turnId: turnId, patch: patch)
+        }
+
+        if kind == .plan {
+            upsertPlanMessage(
+                threadId: threadId,
+                turnId: turnId,
+                itemId: itemId,
+                text: body,
+                isStreaming: !isCompleted,
+                planPresentation: isCompleted ? .resultCompletedItem : .resultStreaming
+            )
+            return true
         }
 
         if let itemId, !itemId.isEmpty {
@@ -1931,6 +1986,31 @@ extension CodexService {
         }
 
         return nil
+    }
+
+    // Summarizes non-file-changing tool items into a stable system row instead of leaking them into thinking.
+    private func decodeToolCallActivityBody(
+        _ itemObject: IncomingParamsObject,
+        isCompleted: Bool
+    ) -> String? {
+        let output = extractToolCallOutputText(from: itemObject)
+        if let output {
+            let activityLines = extractToolCallActivityLines(from: output)
+            if !activityLines.isEmpty {
+                return activityLines.joined(separator: "\n")
+            }
+        }
+
+        let descriptor = toolCallDescriptor(from: itemObject)
+        let summary = toolActivitySummaryLine(
+            descriptor: descriptor,
+            rawStatus: firstNonEmptyString([
+                itemObject["status"]?.stringValue,
+                firstString(forKey: "status", in: .object(itemObject)),
+            ]),
+            isCompleted: isCompleted
+        )
+        return summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : summary
     }
 
     private func isLikelyIncomingItemPayload(_ object: IncomingParamsObject) -> Bool {

@@ -41,7 +41,7 @@ enum MermaidMarkdownContentCache {
 
     // Parses Mermaid fences once per message snapshot so the timeline does not redo regex work while scrolling.
     static func content(messageID: String, text: String) -> MermaidMarkdownContent? {
-        let cacheKey = "\(messageID)|\(text.hashValue)"
+        let cacheKey = TurnTextCacheKey.key(messageID: messageID, kind: "mermaid-markdown", text: text)
 
         lock.lock()
         if let cached = contentByKey[cacheKey] {
@@ -66,6 +66,10 @@ enum MermaidMarkdownContentCache {
         lock.lock()
         contentByKey.removeAll(keepingCapacity: false)
         lock.unlock()
+    }
+
+    static func resetRenderedSnapshots() {
+        MermaidRenderedSnapshotCache.reset()
     }
 }
 
@@ -550,6 +554,13 @@ private enum MermaidRenderedSnapshotCache {
         knownHeightsByKey[descriptor.cacheKey] = height
         lock.unlock()
     }
+
+    static func reset() {
+        snapshotCache.removeAllObjects()
+        lock.lock()
+        knownHeightsByKey.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
 }
 
 private enum MermaidBundledAsset {
@@ -683,6 +694,8 @@ private enum MermaidHTMLBuilder {
     static func html(source: String, isDarkMode: Bool) -> String {
         let sourceJSON = jsonStringLiteral(source)
         let configJSON = jsonObjectLiteral(configuration(isDarkMode: isDarkMode))
+        // Mirrors the in-app mono picker when Mermaid falls back to raw source text.
+        let monoFontFamily = AppFont.webMonospaceFontStack
 
         return """
         <!doctype html>
@@ -715,7 +728,7 @@ private enum MermaidHTMLBuilder {
               display: none;
               margin: 0;
               white-space: pre-wrap;
-              font: 13px/1.45 "JetBrains Mono", ui-monospace, monospace;
+              font: 13px/1.45 \(monoFontFamily);
               color: \(isDarkMode ? "#F5F5F5" : "#1A1A1A");
             }
           </style>
@@ -772,6 +785,8 @@ private enum MermaidHTMLBuilder {
 
     static func fallbackHTML(source: String) -> String {
         let sourceJSON = jsonStringLiteral(source)
+        // Keeps the standalone fallback page aligned with the selected mono family too.
+        let monoFontFamily = AppFont.webMonospaceFontStack
         return """
         <!doctype html>
         <html>
@@ -786,7 +801,7 @@ private enum MermaidHTMLBuilder {
             }
             body {
               white-space: pre-wrap;
-              font: 13px/1.45 "JetBrains Mono", ui-monospace, monospace;
+              font: 13px/1.45 \(monoFontFamily);
               color: #F5F5F5;
             }
           </style>

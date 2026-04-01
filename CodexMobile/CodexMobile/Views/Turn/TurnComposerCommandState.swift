@@ -51,7 +51,7 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         case .status:
             return "speedometer"
         case .subagents:
-            return "person.crop.circle"
+            return "point.3.connected.trianglepath.dotted"
         }
     }
 

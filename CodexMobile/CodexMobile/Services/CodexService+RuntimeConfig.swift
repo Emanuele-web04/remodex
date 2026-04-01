@@ -6,6 +6,13 @@
 
 import Foundation
 
+private let runtimeDebugTimestampFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "HH:mm:ss.SSS"
+    return formatter
+}()
+
 extension CodexService {
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
@@ -350,9 +357,18 @@ extension CodexService {
     }
 
     func debugRuntimeLog(_ message: String) {
+        let entry = "[\(runtimeDebugTimestampFormatter.string(from: Date()))] \(message)"
+        runtimeDebugLogEntries.append(entry)
+        if runtimeDebugLogEntries.count > 400 {
+            runtimeDebugLogEntries.removeFirst(runtimeDebugLogEntries.count - 400)
+        }
 #if DEBUG
-        print("[CodexRuntime] \(message)")
+        print("[CodexRuntime] \(entry)")
 #endif
+    }
+
+    func clearRuntimeDebugLog() {
+        runtimeDebugLogEntries.removeAll()
     }
 
     func shouldRetryWithApprovalPolicyFallback(_ error: Error) -> Bool {

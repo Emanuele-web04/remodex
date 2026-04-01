@@ -277,7 +277,7 @@ extension CodexService {
     }
 
     // Resets volatile secure state while preserving the trusted-device registry.
-    func resetSecureTransportState() {
+    func resetSecureTransportState(preservePendingQRBootstrapState: Bool = false) {
         secureSession = nil
         pendingHandshake = nil
         let continuations = pendingSecureControlContinuations
@@ -295,7 +295,13 @@ extension CodexService {
         }
 
         if shouldForceQRBootstrapOnNextHandshake, normalizedRelaySessionId != nil {
-            secureConnectionState = trustedMacRegistry.records[relayMacDeviceId ?? ""] == nil ? .handshaking : .trustedMac
+            // Fresh scans should stay visually "in progress" while the connect path is spinning up,
+            // but real disconnects still fall back to a stable saved-pair/not-paired presentation.
+            if preservePendingQRBootstrapState {
+                secureConnectionState = trustedMacRegistry.records[relayMacDeviceId ?? ""] == nil ? .handshaking : .trustedMac
+            } else {
+                secureConnectionState = trustedMacRegistry.records[relayMacDeviceId ?? ""] == nil ? .notPaired : .trustedMac
+            }
             secureMacFingerprint = normalizedRelayMacIdentityPublicKey.map { codexSecureFingerprint(for: $0) }
             return
         }
@@ -318,10 +324,38 @@ extension CodexService {
 
     // Used by: ContentViewModel trusted reconnect path.
     func resolveTrustedMacSession() async throws -> CodexTrustedSessionResolveResponse {
-        if let trustedSessionResolverOverride {
-            return try await trustedSessionResolverOverride()
+        let resolver = trustedSessionResolverOverride ?? { [weak self] in
+            guard let self else {
+                throw CancellationError()
+            }
+            return try await self.resolveTrustedMacSessionImpl()
         }
-        return try await resolveTrustedMacSessionImpl()
+        let resolveTaskID = UUID()
+        let task = Task {
+            try await resolver()
+        }
+
+        trustedSessionResolveTask = task
+        trustedSessionResolveTaskID = resolveTaskID
+        defer {
+            if trustedSessionResolveTaskID == resolveTaskID {
+                trustedSessionResolveTask = nil
+                trustedSessionResolveTaskID = nil
+            }
+        }
+
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    // Lets manual reconnect / fresh QR pairing preempt a stuck trusted-session HTTP lookup.
+    func cancelTrustedSessionResolve() {
+        trustedSessionResolveTask?.cancel()
+        trustedSessionResolveTask = nil
+        trustedSessionResolveTaskID = nil
     }
 
     // Persists the resolved live relay session and resets replay cursors when the live session changed.
@@ -556,11 +590,21 @@ private extension CodexService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(requestBody)
 
+        let session = trustedSessionResolveURLSession(for: resolveURL)
+        defer { session.invalidateAndCancel() }
+
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            let nsError = error as NSError
+            if Task.isCancelled
+                || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) {
+                throw CancellationError()
+            }
             throw CodexTrustedSessionResolveError.network("Could not reach the trusted Mac relay. Check your connection and try again.")
         }
 
@@ -651,6 +695,22 @@ private extension CodexService {
         }
 
         return components.url
+    }
+
+    // Uses a non-proxying URLSession for local/private-overlay relays so trusted reconnect
+    // avoids the same iOS proxy path that can break direct websocket pairing.
+    private func trustedSessionResolveURLSession(for url: URL) -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.waitsForConnectivity = false
+        configuration.allowsCellularAccess = true
+        configuration.allowsConstrainedNetworkAccess = true
+        configuration.allowsExpensiveNetworkAccess = true
+
+        if prefersDirectRelayTransport(for: url) {
+            configuration.connectionProxyDictionary = [:]
+        }
+
+        return URLSession(configuration: configuration)
     }
 
     /// Waits for a serverHello whose echoed clientNonce matches the one we sent.

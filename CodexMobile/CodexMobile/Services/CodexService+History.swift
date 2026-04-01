@@ -20,6 +20,7 @@ extension CodexService {
             guard let turnObject = turnValue.objectValue else { continue }
             let turnID = turnObject["id"]?.stringValue
             let turnTimestamp = decodeHistoryTimestamp(from: turnObject)
+            let turnCompleted = isCompletedHistoryTurn(turnObject)
             let items = turnObject["items"]?.arrayValue ?? []
 
             for itemValue in items {
@@ -101,10 +102,21 @@ extension CodexService {
                         createdAt: timestamp
                     )
 
-                case "toolcall", "diff":
-                    guard let decodedFileChangeText = decodeHistoryToolCallOrDiffItemText(from: itemObject) else {
-                        continue
-                    }
+                case "toolcall":
+                    guard let decodedToolCall = decodeHistoryToolCallItem(from: itemObject) else { continue }
+                    appendHistoryMessage(
+                        to: &result,
+                        role: .system,
+                        kind: decodedToolCall.kind,
+                        text: decodedToolCall.text,
+                        threadId: threadId,
+                        turnId: turnID,
+                        itemId: itemID,
+                        createdAt: timestamp
+                    )
+
+                case "diff":
+                    guard let decodedFileChangeText = decodeHistoryDiffItemText(from: itemObject) else { continue }
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
@@ -174,6 +186,7 @@ extension CodexService {
                     )
 
                 case "plan":
+                    let decodedPlanState = decodeHistoryPlanState(from: itemObject)
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
@@ -183,7 +196,10 @@ extension CodexService {
                         turnId: turnID,
                         itemId: itemID,
                         createdAt: timestamp,
-                        planState: decodeHistoryPlanState(from: itemObject)
+                        planState: finalizedHistoryPlanState(decodedPlanState, turnCompleted: turnCompleted),
+                        planPresentation: itemID == nil
+                            ? .progress
+                            : (turnCompleted ? .resultReady : .resultClosed)
                     )
 
                 case let collabType where collabType == "collabagenttoolcall"
@@ -368,6 +384,10 @@ extension CodexService {
         }
 
         var merged = existing
+        let assistantHistoryCountByTurn = Dictionary(
+            grouping: history.filter { $0.role == .assistant }
+        ) { $0.turnId ?? "" }
+        .mapValues(\.count)
 
         for message in history {
             if message.role == .assistant,
@@ -425,6 +445,40 @@ extension CodexService {
                 continue
             }
 
+            let threadIsStillActive = activeThreadIDs.contains(message.threadId)
+                || runningThreadIDs.contains(message.threadId)
+
+            // After a turn is fully closed, thread/read can return the same single assistant
+            // reply with canonical text or a different stable item id. Reconcile that row
+            // instead of appending a second final bubble.
+            if message.role == .assistant,
+               let turnId = message.turnId, !turnId.isEmpty,
+               !threadIsStillActive,
+               assistantHistoryCountByTurn[turnId] == 1 {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .assistant
+                        && candidate.turnId == turnId
+                        && !candidate.isStreaming
+                }
+
+                if candidateIndices.count == 1,
+                   let index = candidateIndices.last {
+                    if shouldReplaceClosedAssistantMessage(
+                        merged[index],
+                        with: message
+                    ) {
+                        merged[index] = reconcileExistingMessage(
+                            merged[index],
+                            with: message,
+                            activeThreadIDs: activeThreadIDs,
+                            runningThreadIDs: runningThreadIDs
+                        )
+                    }
+                    continue
+                }
+            }
+
             if message.role == .user,
                let turnId = message.turnId, !turnId.isEmpty,
                let index = merged.lastIndex(where: { candidate in
@@ -461,10 +515,59 @@ extension CodexService {
                let index = merged.lastIndex(where: { candidate in
                    candidate.role == .system
                        && candidate.kind == .fileChange
-                       && candidate.turnId == turnId
+                       && (candidate.turnId == nil || candidate.turnId == turnId)
                }) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
+            }
+
+            // Rebind generic tool rows when a live synthetic row gets a real history item id later.
+            if message.role == .system,
+               message.kind == .toolActivity,
+               let turnId = message.turnId, !turnId.isEmpty {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .system
+                        && candidate.kind == .toolActivity
+                        && candidate.turnId == turnId
+                }
+
+                if let itemIndex = candidateIndices.last(where: { index in
+                    let candidateItemId = normalizedHistoryIdentifier(merged[index].itemId)
+                    let incomingItemId = normalizedHistoryIdentifier(message.itemId)
+                    return candidateItemId != nil && candidateItemId == incomingItemId
+                }) {
+                    merged[itemIndex] = reconcileExistingMessage(merged[itemIndex], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                    continue
+                }
+
+                if candidateIndices.count == 1,
+                   let index = candidateIndices.last,
+                   isProvisionalToolActivityRow(merged[index]),
+                   shouldReconcileToolActivityRow(
+                    merged[index],
+                    with: message,
+                    requiresExactText: false
+                   ) {
+                    merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                    continue
+                }
+
+                if candidateIndices.count > 1 {
+                    let reconcilableIndices = candidateIndices.filter { index in
+                        shouldReconcileToolActivityRow(
+                            merged[index],
+                            with: message,
+                            requiresExactText: true
+                        )
+                    }
+
+                    if reconcilableIndices.count == 1,
+                       let index = reconcilableIndices.last {
+                        merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                        continue
+                    }
+                }
             }
 
             // Dedupes command rows when incoming/history command formatting differs only by shell quoting.
@@ -605,6 +708,13 @@ extension CodexService {
                     && localMessage.isStreaming
                     && serverItemId != nil
                     && localItemId != serverItemId
+            )
+            || (
+                value.role == .system
+                    && value.kind == .toolActivity
+                    && serverItemId != nil
+                    && !hasStableToolActivityIdentity(localItemId)
+                    && localItemId != serverItemId
             ) {
             value.itemId = serverItemId
         }
@@ -665,6 +775,64 @@ extension CodexService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    nonisolated static func shouldReconcileToolActivityRow(
+        _ localMessage: CodexMessage,
+        with serverMessage: CodexMessage,
+        requiresExactText: Bool
+    ) -> Bool {
+        let localItemId = normalizedHistoryIdentifier(localMessage.itemId)
+        let serverItemId = normalizedHistoryIdentifier(serverMessage.itemId)
+        if let localItemId, let serverItemId, localItemId == serverItemId {
+            return true
+        }
+
+        let localHasStableIdentity = hasStableToolActivityIdentity(localItemId)
+        let serverHasStableIdentity = hasStableToolActivityIdentity(serverItemId)
+        if localHasStableIdentity && serverHasStableIdentity {
+            return false
+        }
+
+        let localLines = normalizedToolActivityLines(from: localMessage.text)
+        let serverLines = normalizedToolActivityLines(from: serverMessage.text)
+        if localLines.isEmpty || serverLines.isEmpty {
+            return !localHasStableIdentity || !serverHasStableIdentity
+        }
+
+        if localLines == serverLines {
+            return true
+        }
+
+        guard !requiresExactText else {
+            return false
+        }
+
+        return localLines.starts(with: serverLines) || serverLines.starts(with: localLines)
+    }
+
+    nonisolated static func hasStableToolActivityIdentity(_ value: String?) -> Bool {
+        guard let value else {
+            return false
+        }
+        return !(value.hasPrefix("turn:") && value.contains("|kind:\(CodexMessageKind.toolActivity.rawValue)"))
+    }
+
+    // Treats only streaming/skeleton tool rows as safe to rebind by text alone.
+    nonisolated static func isProvisionalToolActivityRow(_ message: CodexMessage) -> Bool {
+        let itemId = normalizedHistoryIdentifier(message.itemId)
+        guard !hasStableToolActivityIdentity(itemId) else {
+            return false
+        }
+
+        return message.isStreaming || normalizedToolActivityLines(from: message.text).isEmpty
+    }
+
+    nonisolated static func normalizedToolActivityLines(from text: String) -> [String] {
+        normalizedMessageText(text)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+    }
+
     // Merges a resume/history snapshot into the local streaming buffer without
     // losing already-rendered tokens when the server snapshot is slightly stale.
     nonisolated static func mergeStreamingSnapshotText(existingText: String, incomingText: String) -> String {
@@ -698,6 +866,26 @@ extension CodexService {
         }
 
         return incomingText
+    }
+
+    // Closed-turn snapshots are only allowed to replace the visible assistant reply
+    // when they are clearly the same message and at least as complete.
+    nonisolated static func shouldReplaceClosedAssistantMessage(
+        _ localMessage: CodexMessage,
+        with serverMessage: CodexMessage
+    ) -> Bool {
+        let localText = normalizedMessageText(localMessage.text)
+        let serverText = normalizedMessageText(serverMessage.text)
+
+        guard !serverText.isEmpty else {
+            return false
+        }
+
+        if localText.isEmpty || localText == serverText {
+            return true
+        }
+
+        return serverText.count > localText.count && serverText.hasPrefix(localText)
     }
 
     nonisolated static func attachmentSignature(for attachments: [CodexImageAttachment]) -> String {
@@ -769,6 +957,7 @@ extension CodexService {
         createdAt: Date,
         attachments: [CodexImageAttachment] = [],
         planState: CodexPlanState? = nil,
+        planPresentation: CodexPlanPresentation? = nil,
         subagentAction: CodexSubagentAction? = nil
     ) {
         guard !text.isEmpty || !attachments.isEmpty || subagentAction != nil else {
@@ -788,6 +977,8 @@ extension CodexService {
                 deliveryState: .confirmed,
                 attachments: attachments,
                 planState: planState,
+                planPresentation: planPresentation,
+                proposedPlan: role == .assistant ? CodexProposedPlanParser.parse(from: text) : nil,
                 subagentAction: subagentAction
             )
         )
@@ -875,7 +1066,7 @@ extension CodexService {
             guard let stepObject = stepValue.objectValue,
                   let step = decodeHistoryNormalizedPlanText(stepObject["step"]),
                   let rawStatus = decodeHistoryNormalizedPlanText(stepObject["status"]),
-                  let status = CodexPlanStepStatus(rawValue: rawStatus) else {
+                  let status = CodexPlanStepStatus(wireValue: rawStatus) else {
                 return nil
             }
 
@@ -887,6 +1078,40 @@ extension CodexService {
         }
 
         return CodexPlanState(explanation: explanation, steps: steps)
+    }
+
+    // Closed turns should not restore a stale "active" plan accessory from history.
+    func finalizedHistoryPlanState(_ planState: CodexPlanState?, turnCompleted: Bool) -> CodexPlanState? {
+        guard turnCompleted,
+              let planState,
+              !planState.steps.isEmpty,
+              planState.steps.contains(where: { $0.status != .completed }) else {
+            return planState
+        }
+
+        return CodexPlanState(
+            explanation: planState.explanation,
+            steps: planState.steps.map { step in
+                CodexPlanStep(id: step.id, step: step.step, status: .completed)
+            }
+        )
+    }
+
+    func isCompletedHistoryTurn(_ turnObject: [String: JSONValue]) -> Bool {
+        let statusObject = turnObject["status"]?.objectValue
+        let rawStatus = firstNonEmptyString([
+            turnObject["status"]?.stringValue,
+            statusObject?["type"]?.stringValue,
+            statusObject?["statusType"]?.stringValue,
+            statusObject?["status_type"]?.stringValue,
+            turnObject["result"]?.stringValue,
+        ]) ?? ""
+
+        guard let terminalState = threadTerminalState(from: normalizeThreadStatusType(rawStatus)) else {
+            return false
+        }
+
+        return terminalState == .completed
     }
 
     // Parses collabAgentToolCall payloads into a stable summary row the timeline can render.
@@ -1431,7 +1656,22 @@ extension CodexService {
         return sections.joined(separator: "\n\n")
     }
 
-    func decodeHistoryToolCallOrDiffItemText(from itemObject: [String: JSONValue]) -> String? {
+    // Splits history tool items into dedicated file-change rows or compact generic activity rows.
+    func decodeHistoryToolCallItem(from itemObject: [String: JSONValue]) -> (kind: CodexMessageKind, text: String)? {
+        if let fileChangeText = decodeHistoryToolCallFileChangeText(from: itemObject) {
+            return (.fileChange, fileChangeText)
+        }
+        if let activityText = decodeHistoryToolActivityText(from: itemObject) {
+            return (.toolActivity, activityText)
+        }
+        return nil
+    }
+
+    func decodeHistoryDiffItemText(from itemObject: [String: JSONValue]) -> String? {
+        decodeHistoryToolCallFileChangeText(from: itemObject)
+    }
+
+    func decodeHistoryToolCallFileChangeText(from itemObject: [String: JSONValue]) -> String? {
         let status = decodeHistoryNestedStatus(from: itemObject) ?? "completed"
 
         var synthetic = itemObject
@@ -1471,6 +1711,10 @@ extension CodexService {
             }
         }
 
+        return nil
+    }
+
+    func decodeHistoryToolActivityText(from itemObject: [String: JSONValue]) -> String? {
         if let output = decodeHistoryFirstString(
             forAnyKey: [
                 "text",
@@ -1483,13 +1727,62 @@ extension CodexService {
             ],
             in: .object(itemObject)
         ) {
-            let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedOutput.isEmpty {
-                return "Status: \(status)\n\n\(trimmedOutput)"
+            let lines = output
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && $0.count <= 140 }
+            let acceptedPrefixes = [
+                "running ",
+                "read ",
+                "search ",
+                "searched ",
+                "exploring ",
+                "list ",
+                "listing ",
+                "open ",
+                "opened ",
+                "find ",
+                "finding ",
+                "edit ",
+                "edited ",
+                "write ",
+                "wrote ",
+                "apply ",
+                "applied ",
+            ]
+            let activityLines = lines.filter { line in
+                let lower = line.lowercased()
+                return acceptedPrefixes.contains { lower.hasPrefix($0) }
+            }
+            if !activityLines.isEmpty {
+                return activityLines.joined(separator: "\n")
             }
         }
 
-        return nil
+        let nestedTool = itemObject["tool"]?.objectValue
+        let nestedCall = itemObject["call"]?.objectValue
+        let descriptor = firstNonEmptyString([
+            itemObject["kind"]?.stringValue,
+            itemObject["name"]?.stringValue,
+            itemObject["tool"]?.stringValue,
+            itemObject["tool_name"]?.stringValue,
+            itemObject["toolName"]?.stringValue,
+            itemObject["title"]?.stringValue,
+            nestedTool?["kind"]?.stringValue,
+            nestedTool?["name"]?.stringValue,
+            nestedTool?["type"]?.stringValue,
+            nestedTool?["title"]?.stringValue,
+            nestedCall?["kind"]?.stringValue,
+            nestedCall?["name"]?.stringValue,
+            nestedCall?["type"]?.stringValue,
+            nestedCall?["title"]?.stringValue,
+        ])
+        let summary = toolActivitySummaryLine(
+            descriptor: descriptor,
+            rawStatus: decodeHistoryNestedStatus(from: itemObject),
+            isCompleted: true
+        )
+        return summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : summary
     }
 
     func decodeHistoryFileChangeEntries(
