@@ -965,7 +965,7 @@ function startBridge({
   }
 }
 
-// Registers the canonical Mac identity and the one trusted iPhone allowed for auto-resolve.
+// Registers the canonical Mac identity and the trusted iPhones allowed for auto-resolve.
 function buildMacRegistrationHeaders(deviceState) {
   const registration = buildMacRegistration(deviceState);
   const headers = {
@@ -973,6 +973,9 @@ function buildMacRegistrationHeaders(deviceState) {
     "x-mac-identity-public-key": registration.macIdentityPublicKey,
     "x-machine-name": registration.displayName,
   };
+  if (registration.trustedPhones.length > 0) {
+    headers["x-trusted-phones"] = JSON.stringify(registration.trustedPhones);
+  }
   if (registration.trustedPhoneDeviceId && registration.trustedPhonePublicKey) {
     headers["x-trusted-phone-device-id"] = registration.trustedPhoneDeviceId;
     headers["x-trusted-phone-public-key"] = registration.trustedPhonePublicKey;
@@ -981,13 +984,20 @@ function buildMacRegistrationHeaders(deviceState) {
 }
 
 function buildMacRegistration(deviceState) {
-  const trustedPhoneEntry = Object.entries(deviceState?.trustedPhones || {})[0] || null;
+  const trustedPhones = Object.entries(deviceState?.trustedPhones || {})
+    .map(([deviceId, publicKey]) => ({
+      deviceId: normalizeNonEmptyString(deviceId),
+      publicKey: normalizeNonEmptyString(publicKey),
+    }))
+    .filter(phone => phone.deviceId && phone.publicKey);
+  const primaryTrustedPhone = trustedPhones[0] || null;
   return {
     macDeviceId: normalizeNonEmptyString(deviceState?.macDeviceId),
     macIdentityPublicKey: normalizeNonEmptyString(deviceState?.macIdentityPublicKey),
     displayName: normalizeNonEmptyString(os.hostname()),
-    trustedPhoneDeviceId: normalizeNonEmptyString(trustedPhoneEntry?.[0]),
-    trustedPhonePublicKey: normalizeNonEmptyString(trustedPhoneEntry?.[1]),
+    trustedPhones,
+    trustedPhoneDeviceId: normalizeNonEmptyString(primaryTrustedPhone?.deviceId),
+    trustedPhonePublicKey: normalizeNonEmptyString(primaryTrustedPhone?.publicKey),
   };
 }
 
@@ -1252,6 +1262,8 @@ function buildHeartbeatBridgeStatus(
 
 module.exports = {
   buildHeartbeatBridgeStatus,
+  buildMacRegistration,
+  buildMacRegistrationHeaders,
   hasRelayConnectionGoneStale,
   sanitizeThreadHistoryImagesForRelay,
   startBridge,

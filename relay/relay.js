@@ -327,10 +327,11 @@ function resolveTrustedMacSession({
     throw createRelayError(404, "session_unavailable", "The trusted Mac is offline right now.");
   }
 
-  if (
-    liveSession.trustedPhoneDeviceId !== normalizedPhoneDeviceId
-    || liveSession.trustedPhonePublicKey !== normalizedPhoneIdentityPublicKey
-  ) {
+  if (!isTrustedPhoneRegistration(
+    liveSession,
+    normalizedPhoneDeviceId,
+    normalizedPhoneIdentityPublicKey
+  )) {
     throw createRelayError(403, "phone_not_trusted", "This iPhone is not trusted for the requested Mac.");
   }
 
@@ -433,20 +434,82 @@ function readMacRegistrationHeaders(headers, sessionId) {
     macDeviceId: readHeaderString(headers["x-mac-device-id"]),
     macIdentityPublicKey: readHeaderString(headers["x-mac-identity-public-key"]),
     displayName: readHeaderString(headers["x-machine-name"]),
+    trustedPhones: readTrustedPhonesHeader(headers["x-trusted-phones"]),
     trustedPhoneDeviceId: readHeaderString(headers["x-trusted-phone-device-id"]),
     trustedPhonePublicKey: readHeaderString(headers["x-trusted-phone-public-key"]),
   }, sessionId);
 }
 
 function normalizeMacRegistration(registration, sessionId) {
+  const trustedPhones = normalizeTrustedPhones(
+    registration?.trustedPhones,
+    registration?.trustedPhoneDeviceId,
+    registration?.trustedPhonePublicKey
+  );
+  const primaryTrustedPhone = trustedPhones[0] || null;
   return {
     sessionId,
     macDeviceId: normalizeNonEmptyString(registration?.macDeviceId),
     macIdentityPublicKey: normalizeNonEmptyString(registration?.macIdentityPublicKey),
     displayName: normalizeNonEmptyString(registration?.displayName),
-    trustedPhoneDeviceId: normalizeNonEmptyString(registration?.trustedPhoneDeviceId),
-    trustedPhonePublicKey: normalizeNonEmptyString(registration?.trustedPhonePublicKey),
+    trustedPhones,
+    trustedPhoneDeviceId: normalizeNonEmptyString(primaryTrustedPhone?.deviceId),
+    trustedPhonePublicKey: normalizeNonEmptyString(primaryTrustedPhone?.publicKey),
   };
+}
+
+function readTrustedPhonesHeader(rawValue) {
+  const serialized = readHeaderString(rawValue);
+  if (!serialized) {
+    return [];
+  }
+  try {
+    return JSON.parse(serialized);
+  } catch {
+    return [];
+  }
+}
+
+function normalizeTrustedPhones(trustedPhones, fallbackDeviceId = "", fallbackPublicKey = "") {
+  const nextTrustedPhones = [];
+  const seenDeviceIds = new Set();
+
+  if (Array.isArray(trustedPhones)) {
+    for (const phone of trustedPhones) {
+      const deviceId = normalizeNonEmptyString(phone?.deviceId);
+      const publicKey = normalizeNonEmptyString(phone?.publicKey);
+      if (!deviceId || !publicKey || seenDeviceIds.has(deviceId)) {
+        continue;
+      }
+      seenDeviceIds.add(deviceId);
+      nextTrustedPhones.push({ deviceId, publicKey });
+    }
+  }
+
+  const normalizedFallbackDeviceId = normalizeNonEmptyString(fallbackDeviceId);
+  const normalizedFallbackPublicKey = normalizeNonEmptyString(fallbackPublicKey);
+  if (
+    normalizedFallbackDeviceId
+    && normalizedFallbackPublicKey
+    && !seenDeviceIds.has(normalizedFallbackDeviceId)
+  ) {
+    nextTrustedPhones.unshift({
+      deviceId: normalizedFallbackDeviceId,
+      publicKey: normalizedFallbackPublicKey,
+    });
+  }
+
+  return nextTrustedPhones;
+}
+
+function isTrustedPhoneRegistration(liveSession, phoneDeviceId, phoneIdentityPublicKey) {
+  const trustedPhones = Array.isArray(liveSession?.trustedPhones)
+    ? liveSession.trustedPhones
+    : [];
+  return trustedPhones.some(phone => (
+    phone?.deviceId === phoneDeviceId
+    && phone?.publicKey === phoneIdentityPublicKey
+  ));
 }
 
 function buildTrustedSessionResolveBytes({
