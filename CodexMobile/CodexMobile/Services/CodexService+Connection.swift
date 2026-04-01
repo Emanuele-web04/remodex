@@ -265,7 +265,19 @@ extension CodexService {
 
         do {
             _ = try await sendRequest(method: "initialize", params: modernParams)
-            supportsTurnCollaborationMode = await runtimeSupportsPlanCollaborationMode()
+            // A successful modern initialize means the runtime accepted the experimental
+            // capability negotiation. Keep plan-mode sends enabled unless the runtime
+            // explicitly rejects `collaborationMode` on a turn request later.
+            supportsTurnCollaborationMode = true
+            debugRuntimeLog("initialize success experimentalApi=true")
+
+            let runtimeReportedPlanSupport = await runtimeSupportsPlanCollaborationMode()
+            debugRuntimeLog("collaborationMode/list plan=\(runtimeReportedPlanSupport)")
+            if !runtimeReportedPlanSupport {
+                debugRuntimeLog(
+                    "collaborationMode/list did not report plan; will still attempt collaborationMode until runtime rejects it"
+                )
+            }
         } catch {
             guard shouldRetryInitializeWithoutCapabilities(error) else {
                 throw error
@@ -276,6 +288,7 @@ extension CodexService {
             ])
             _ = try await sendRequest(method: "initialize", params: legacyParams)
             supportsTurnCollaborationMode = false
+            debugRuntimeLog("initialize fallback experimentalApi=false")
         }
 
         try await sendNotification(method: "initialized", params: nil)
@@ -590,9 +603,13 @@ extension CodexService {
     // Uses the documented experimental listing endpoint instead of assuming initialize implies plan support.
     func runtimeSupportsPlanCollaborationMode() async -> Bool {
         do {
-            let response = try await sendRequest(method: "collaborationMode/list", params: nil)
+            let response = try await sendRequest(
+                method: "collaborationMode/list",
+                params: .object([:])
+            )
             return responseContainsPlanCollaborationMode(response)
         } catch {
+            debugRuntimeLog("collaborationMode/list failed: \(error.localizedDescription)")
             return false
         }
     }
@@ -601,6 +618,7 @@ extension CodexService {
     func responseContainsPlanCollaborationMode(_ response: RPCMessage) -> Bool {
         let candidateArrays: [[JSONValue]?] = [
             response.result?.arrayValue,
+            response.result?.objectValue?["data"]?.arrayValue,
             response.result?.objectValue?["modes"]?.arrayValue,
             response.result?.objectValue?["collaborationModes"]?.arrayValue,
             response.result?.objectValue?["items"]?.arrayValue,

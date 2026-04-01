@@ -1,5 +1,5 @@
 // FILE: GPTVoiceTranscriptionManager.swift
-// Purpose: Captures microphone audio with AVAudioEngine and produces normalized 24 kHz mono WAV clips for bridge transcription.
+// Purpose: Captures microphone audio with AVAudioEngine and produces normalized 24 kHz mono WAV clips for voice transcription.
 // Layer: Service
 // Exports: GPTVoiceRecordingClip, GPTVoiceTranscriptionManager
 // Depends on: AVFoundation, Foundation

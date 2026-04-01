@@ -971,6 +971,125 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(commandRows[0].turnId, turnID)
     }
 
+    func testHistoryMergeReconcilesClosedSingleAssistantTurnWhenCanonicalSnapshotDiffers() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+
+        let existing = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Testo parziale",
+                createdAt: now,
+                turnId: turnID,
+                itemId: "local-message",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Testo finale",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "server-message",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.count, 1)
+        XCTAssertEqual(assistantRows[0].turnId, turnID)
+        XCTAssertEqual(assistantRows[0].itemId, "server-message")
+        XCTAssertEqual(assistantRows[0].text, "Testo finale")
+    }
+
+    func testHistoryMergeDoesNotCollapseSingleAssistantTurnWhileStillRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+
+        service.runningThreadIDs.insert(threadID)
+
+        let existing = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Testo parziale",
+                createdAt: now,
+                turnId: turnID,
+                itemId: "local-message",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Testo finale",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "server-message",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.count, 2)
+        XCTAssertEqual(assistantRows.map(\.itemId), ["local-message", "server-message"])
+    }
+
+    func testHistoryMergeDoesNotRegressClosedSingleAssistantTurnToShorterSnapshot() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+
+        let existing = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Testo finale completo",
+                createdAt: now,
+                turnId: turnID,
+                itemId: "local-message",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Testo finale",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "server-message",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.count, 1)
+        XCTAssertEqual(assistantRows[0].text, "Testo finale completo")
+        XCTAssertEqual(assistantRows[0].itemId, "local-message")
+    }
+
     func testThreadReadRestoresNestedReviewModeMessages() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

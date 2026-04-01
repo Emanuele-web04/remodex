@@ -307,6 +307,7 @@ final class CodexService {
     var pendingApproval: CodexApprovalRequest?
     var lastRawMessage: String?
     var lastErrorMessage: String?
+    var runtimeDebugLogEntries: [String] = []
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     // Per-thread queued drafts for client-side turn queueing while a run is active.
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
@@ -340,7 +341,7 @@ final class CodexService {
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
-    // Runtime compatibility flag for the bridge-owned `voice/resolveAuth` voice flow.
+    // Runtime compatibility flag for the bridge-owned voice transcription flow.
     var supportsBridgeVoiceAuth = true
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
@@ -428,6 +429,14 @@ final class CodexService {
     var gptAccountLoginSyncTask: Task<Void, Never>?
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
+    // Tracks whether the bridge is proxying a real Codex endpoint or a spawned local app-server.
+    var codexTransportMode: CodexRuntimeTransportMode = .unknown
+    // Remembers whether the current plan flow is staying native or has fallen back to inferred UI.
+    var planSessionSourceByThread: [String: CodexPlanSessionSource] = [:] {
+        didSet {
+            persistPlanSessionSources()
+        }
+    }
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
     var mirroredRunningCatchupThreadIDs: Set<String> = []
     var lastMirroredRunningCatchupAtByThread: [String: Date] = [:]
@@ -489,6 +498,7 @@ final class CodexService {
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
+    static let planSessionSourcesDefaultsKey = "codex.planSessionSources"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
@@ -551,6 +561,16 @@ final class CodexService {
             self.threadRuntimeOverridesByThreadID = decodedThreadRuntimeOverrides
         } else {
             self.threadRuntimeOverridesByThreadID = [:]
+        }
+
+        if let savedPlanSessionSources = defaults.data(forKey: Self.planSessionSourcesDefaultsKey),
+           let decodedPlanSessionSources = try? decoder.decode(
+               [String: CodexPlanSessionSource].self,
+               from: savedPlanSessionSources
+           ) {
+            self.planSessionSourceByThread = decodedPlanSessionSources
+        } else {
+            self.planSessionSourceByThread = [:]
         }
 
         if let savedForkOrigins = defaults.data(forKey: Self.forkedThreadOriginsDefaultsKey),
@@ -634,6 +654,21 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
+    }
+
+    // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.
+    private func persistPlanSessionSources() {
+        guard !planSessionSourceByThread.isEmpty else {
+            defaults.removeObject(forKey: Self.planSessionSourcesDefaultsKey)
+            return
+        }
+
+        guard let data = try? encoder.encode(planSessionSourceByThread) else {
+            defaults.removeObject(forKey: Self.planSessionSourcesDefaultsKey)
+            return
+        }
+
+        defaults.set(data, forKey: Self.planSessionSourcesDefaultsKey)
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.

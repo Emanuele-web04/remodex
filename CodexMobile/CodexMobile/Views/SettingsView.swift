@@ -592,6 +592,17 @@ private struct SettingsGPTAccountCard: View {
                 Text("Status")
                 Spacer()
                 SettingsStatusPill(label: snapshot.statusLabel)
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    isShowingMacLoginInfo = true
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(AppFont.subheadline(weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, height: 44)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("How ChatGPT voice works on your Mac")
             }
 
             if let detail = snapshot.detailText {
@@ -611,24 +622,6 @@ private struct SettingsGPTAccountCard: View {
                 Text(errorMessage)
                     .font(AppFont.caption())
                     .foregroundStyle(.red)
-            }
-
-            // Keeps the reauth state compact while preserving access to the Mac sign-in explainer.
-            if !snapshot.isAuthenticated {
-                HStack {
-                    Spacer()
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        isShowingMacLoginInfo = true
-                    } label: {
-                        Image(systemName: "info.circle")
-                            .font(AppFont.subheadline(weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("How ChatGPT voice sign-in works")
-                }
             }
 
             if snapshot.canLogout {
@@ -653,13 +646,25 @@ private struct SettingsGPTAccountCard: View {
     }
 
     private func hintText(for snapshot: CodexGPTAccountSnapshot) -> String? {
-        if snapshot.needsReauth { return "Voice on this bridge needs a fresh ChatGPT sign-in on your Mac." }
-        if snapshot.isAuthenticated && snapshot.isVoiceTokenReady { return nil }
-        if snapshot.isAuthenticated { return "Waiting for voice sync..." }
-        if snapshot.hasActiveLogin && codex.isConnected { return "Finish the ChatGPT sign-in flow in the browser on your Mac." }
-        if snapshot.hasActiveLogin { return "Reconnect to your bridge to finish sign-in on your Mac." }
-        if !codex.isConnected { return "Connect to your bridge first." }
-        return "ChatGPT voice uses the account already signed in on your Mac."
+        if snapshot.needsReauth {
+            return "The paired Mac bridge needs a fresh ChatGPT sign-in before voice transcription can run again."
+        }
+        if snapshot.isAuthenticated && snapshot.isVoiceTokenReady {
+            return "Voice transcription uses the ChatGPT session already active on your paired Mac."
+        }
+        if snapshot.isAuthenticated {
+            return "Finishing voice setup on your paired Mac bridge..."
+        }
+        if snapshot.hasActiveLogin && codex.isConnected {
+            return "Finish the ChatGPT sign-in flow in the browser on your Mac, then come back here."
+        }
+        if snapshot.hasActiveLogin {
+            return "Reconnect to your paired Mac bridge to finish ChatGPT sign-in."
+        }
+        if !codex.isConnected {
+            return "Connect to your paired Mac bridge first."
+        }
+        return "Voice transcription uses the ChatGPT account already signed in on your paired Mac."
     }
 
     private func statusIconName(for snapshot: CodexGPTAccountSnapshot) -> String {

@@ -560,6 +560,7 @@ function startBridge({
       bridgeVersionInfo: bridgeVersionInfoResult.status === "fulfilled"
         ? bridgeVersionInfoResult.value
         : null,
+      transportMode: codex.mode,
     });
   }
 

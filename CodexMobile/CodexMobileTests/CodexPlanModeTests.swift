@@ -42,6 +42,13 @@ final class CodexPlanModeTests: XCTestCase {
             capturedTurnStartParams[0].objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
             "plan"
         )
+        XCTAssertNil(
+            capturedTurnStartParams[0]
+                .objectValue?["collaborationMode"]?
+                .objectValue?["settings"]?
+                .objectValue?["developer_instructions"]?
+                .stringValue
+        )
         XCTAssertEqual(
             capturedTurnStartParams[0].objectValue?["model"]?.stringValue,
             "gpt-5-codex"
@@ -57,6 +64,198 @@ final class CodexPlanModeTests: XCTestCase {
 
         XCTAssertEqual(capturedTurnStartParams.count, 2)
         XCTAssertNil(capturedTurnStartParams[1].objectValue?["collaborationMode"])
+    }
+
+    func testBuildCollaborationModePayloadUsesBuiltInPlanInstructionsByDefault() throws {
+        let service = makeService()
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+
+        let payload = try service.buildCollaborationModePayload(
+            for: .plan,
+            threadId: "thread-plan"
+        )
+
+        let instructions = payload?
+            .objectValue?["settings"]?
+            .objectValue?["developer_instructions"]?
+            .stringValue
+        XCTAssertEqual(payload?.objectValue?["mode"]?.stringValue, "plan")
+        XCTAssertNil(instructions)
+    }
+
+    func testBuildCollaborationModePayloadUsesCompatibilityInstructionsAfterFallback() throws {
+        let service = makeService()
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+        service.markCompatibilityPlanFallback(for: "thread-plan")
+
+        let payload = try service.buildCollaborationModePayload(
+            for: .plan,
+            threadId: "thread-plan"
+        )
+
+        let instructions = payload?
+            .objectValue?["settings"]?
+            .objectValue?["developer_instructions"]?
+            .stringValue
+        XCTAssertEqual(payload?.objectValue?["mode"]?.stringValue, "plan")
+        XCTAssertTrue(instructions?.contains("request_user_input") == true)
+        XCTAssertTrue(instructions?.contains("<proposed_plan>") == true)
+    }
+
+    func testRequestedPlanSessionStaysNativeFirstWithoutCompatibilityInstructions() throws {
+        let service = makeService()
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+        service.markRequestedPlanSession(for: "thread-plan")
+
+        let payload = try service.buildCollaborationModePayload(
+            for: .plan,
+            threadId: "thread-plan"
+        )
+
+        let instructions = payload?
+            .objectValue?["settings"]?
+            .objectValue?["developer_instructions"]?
+            .stringValue
+        XCTAssertNil(instructions)
+        XCTAssertTrue(service.allowsInferredPlanQuestionnaireFallback(for: "thread-plan"))
+        XCTAssertTrue(service.allowsAssistantPlanFallbackRecovery(for: "thread-plan"))
+    }
+
+    func testCompatibilityFallbackCanOverrideNativePlanThread() {
+        let service = makeService()
+
+        service.markNativePlanSession(for: "thread-plan")
+        XCTAssertTrue(service.currentPlanSessionSource(for: "thread-plan")?.isNative == true)
+
+        service.markCompatibilityPlanFallback(for: "thread-plan")
+
+        XCTAssertEqual(service.currentPlanSessionSource(for: "thread-plan"), .compatibilityFallback)
+    }
+
+    func testAssistantFallbackRecoveryRemainsAvailableForNativePlanThread() {
+        let service = makeService()
+
+        service.markNativePlanSession(for: "thread-plan")
+
+        XCTAssertFalse(service.allowsInferredPlanQuestionnaireFallback(for: "thread-plan"))
+        XCTAssertTrue(service.allowsAssistantPlanFallbackRecovery(for: "thread-plan"))
+    }
+
+    func testPlanSessionSourcePersistsAcrossRelaunch() {
+        let suiteName = "CodexPlanModeTests.Persistence.PlanSource.\(UUID().uuidString)"
+        let firstService = makeService(suiteName: suiteName, reset: true)
+        firstService.markCompatibilityPlanFallback(for: "thread-plan")
+
+        let relaunchedService = makeService(suiteName: suiteName, reset: false)
+
+        XCTAssertEqual(
+            relaunchedService.currentPlanSessionSource(for: "thread-plan"),
+            .compatibilityFallback
+        )
+    }
+
+    func testCompatibilityFallbackStaysStickyAcrossNewPlanTurnStarts() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.supportsTurnCollaborationMode = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+        service.markCompatibilityPlanFallback(for: "thread-plan")
+
+        var capturedTurnStartParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            if method == "turn/start" {
+                capturedTurnStartParams = params
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "turn": .object([
+                            "id": .string("turn-live"),
+                            "status": .string("inProgress"),
+                            "items": .array([]),
+                            "error": .null,
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            }
+
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([:]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.startTurn(
+            userInput: "Keep planning",
+            threadId: "thread-plan",
+            shouldAppendUserMessage: false,
+            collaborationMode: .plan
+        )
+
+        let instructions = capturedTurnStartParams?
+            .objectValue?["collaborationMode"]?
+            .objectValue?["settings"]?
+            .objectValue?["developer_instructions"]?
+            .stringValue
+
+        XCTAssertEqual(service.currentPlanSessionSource(for: "thread-plan"), .compatibilityFallback)
+        XCTAssertTrue(instructions?.contains("request_user_input") == true)
+    }
+
+    func testSubmittingInferredQuestionnaireDoesNotDowngradeConfirmedNativePlanThread() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.supportsTurnCollaborationMode = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+        service.markNativePlanSession(for: "thread-plan")
+
+        var capturedTurnSteerParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            if method == "turn/steer" {
+                capturedTurnSteerParams = params
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["turnId": .string("turn-live")]),
+                    includeJSONRPC: false
+                )
+            }
+
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([:]),
+                includeJSONRPC: false
+            )
+        }
+
+        service.setActiveTurnID("turn-live", for: "thread-plan")
+
+        try await service.submitInferredPlanQuestionnaireResponse(
+            threadId: "thread-plan",
+            questions: [
+                CodexStructuredUserInputQuestion(
+                    id: "scope",
+                    header: "Scope",
+                    question: "What scope should we use?",
+                    options: [
+                        CodexStructuredUserInputOption(label: "Ship now", description: nil),
+                        CodexStructuredUserInputOption(label: "Stage behind a flag", description: nil),
+                    ],
+                    allowsMultiple: false
+                ),
+            ],
+            answersByQuestionID: [
+                "scope": ["Ship now"],
+            ]
+        )
+
+        XCTAssertTrue(capturedTurnSteerParams != nil)
+        XCTAssertTrue(service.currentPlanSessionSource(for: "thread-plan")?.isNative == true)
     }
 
     func testUnsupportedPlanModeFallsBackToNormalTurnAndStopsRetryingPlanField() async throws {
@@ -99,6 +298,7 @@ final class CodexPlanModeTests: XCTestCase {
         )
         XCTAssertNil(capturedTurnStartParams[1].objectValue?["collaborationMode"])
         XCTAssertFalse(service.supportsTurnCollaborationMode)
+        XCTAssertNil(service.currentPlanSessionSource(for: threadID))
         XCTAssertEqual(
             service.messages(for: threadID).last(where: { $0.role == .system })?.text,
             "Plan mode is not supported by this runtime. Sent as a normal turn instead."
@@ -109,9 +309,145 @@ final class CodexPlanModeTests: XCTestCase {
 
         XCTAssertEqual(capturedTurnStartParams.count, 1)
         XCTAssertNil(capturedTurnStartParams[0].objectValue?["collaborationMode"])
+        XCTAssertNil(service.currentPlanSessionSource(for: threadID))
     }
 
-    func testRuntimeSupportsPlanCollaborationModeUsesCollaborationModeList() async {
+    func testPlanSessionStateMigratesToContinuationThread() async throws {
+        let service = makeService()
+        service.supportsTurnCollaborationMode = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+
+        let archivedThreadID = "thread-archived"
+        let continuationThreadID = "thread-continuation"
+
+        service.requestTransportOverride = { method, params in
+            switch method {
+            case "thread/resume":
+                let threadId = params?.objectValue?["threadId"]?.stringValue
+                if threadId == archivedThreadID {
+                    throw CodexServiceError.rpcError(
+                        RPCError(code: -32000, message: "thread not found")
+                    )
+                }
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(threadId ?? continuationThreadID),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+
+            case "thread/start":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(continuationThreadID),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+
+            case "turn/start":
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, continuationThreadID)
+                XCTAssertEqual(
+                    params?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
+                    "plan"
+                )
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["turnId": .string("turn-live")]),
+                    includeJSONRPC: false
+                )
+
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), includeJSONRPC: false)
+            }
+        }
+
+        try await service.startTurn(
+            userInput: "Plan this continuation",
+            threadId: archivedThreadID,
+            collaborationMode: .plan
+        )
+
+        XCTAssertNil(service.currentPlanSessionSource(for: archivedThreadID))
+        XCTAssertEqual(service.currentPlanSessionSource(for: continuationThreadID), .requested)
+    }
+
+    func testNonPlanSteerClearsStalePlanSessionState() async throws {
+        let service = makeService()
+        let threadID = "thread-plan"
+        let turnID = "turn-live"
+
+        service.markCompatibilityPlanFallback(for: threadID)
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "turn/steer")
+            XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, threadID)
+            XCTAssertNil(params?.objectValue?["collaborationMode"])
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string(turnID)]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.steerTurn(
+            userInput: "Normal follow-up",
+            threadId: threadID,
+            expectedTurnId: turnID,
+            collaborationMode: nil
+        )
+
+        XCTAssertNil(service.currentPlanSessionSource(for: threadID))
+    }
+
+    func testRuntimeSupportsPlanCollaborationModeUsesOfficialCollaborationModeListShape() async {
+        let service = makeService()
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "collaborationMode/list")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "data": .array([
+                        .object(["mode": .string("default")]),
+                        .object(["mode": .string("plan")]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let isSupported = await service.runtimeSupportsPlanCollaborationMode()
+        XCTAssertTrue(isSupported)
+    }
+
+    func testRuntimeSupportsPlanCollaborationModeReturnsFalseWhenPlanMissingFromOfficialShape() async {
+        let service = makeService()
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "collaborationMode/list")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "data": .array([
+                        .object(["mode": .string("default")]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let isSupported = await service.runtimeSupportsPlanCollaborationMode()
+        XCTAssertFalse(isSupported)
+    }
+
+    func testRuntimeSupportsPlanCollaborationModeStillAcceptsLegacyModesShape() async {
         let service = makeService()
 
         service.requestTransportOverride = { method, _ in
@@ -130,26 +466,6 @@ final class CodexPlanModeTests: XCTestCase {
 
         let isSupported = await service.runtimeSupportsPlanCollaborationMode()
         XCTAssertTrue(isSupported)
-    }
-
-    func testRuntimeSupportsPlanCollaborationModeReturnsFalseWhenPlanMissing() async {
-        let service = makeService()
-
-        service.requestTransportOverride = { method, _ in
-            XCTAssertEqual(method, "collaborationMode/list")
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "modes": .array([
-                        .object(["mode": .string("default")]),
-                    ]),
-                ]),
-                includeJSONRPC: false
-            )
-        }
-
-        let isSupported = await service.runtimeSupportsPlanCollaborationMode()
-        XCTAssertFalse(isSupported)
     }
 
     func testPlanModeSendFailureRearmsToggleAndSkipsFallbackRequest() async {
@@ -200,7 +516,7 @@ final class CodexPlanModeTests: XCTestCase {
                     ]),
                     .object([
                         "step": .string("Implement the UI toggle"),
-                        "status": .string("in_progress"),
+                        "status": .string("inProgress"),
                     ]),
                 ]),
             ])
@@ -240,6 +556,39 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(planMessages[0].planState?.explanation, "We should break the work into safe slices.")
         XCTAssertEqual(planMessages[0].planState?.steps.count, 2)
         XCTAssertEqual(planMessages[0].planState?.steps[0].status, .completed)
+        XCTAssertEqual(planMessages[0].planState?.steps[1].status, .inProgress)
+    }
+
+    func testTurnPlanUpdatedWithoutThreadIDUsesTurnMapping() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "turnId": .string(turnID),
+                "explanation": .string("Use the stored turn mapping when threadId is omitted."),
+                "plan": .array([
+                    .object([
+                        "step": .string("Keep the clarification UI native"),
+                        "status": .string("inProgress"),
+                    ]),
+                ]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.status, .inProgress)
     }
 
     func testStructuredUserInputRequestCreatesAndResolvedRemovesPromptCard() {
@@ -290,6 +639,85 @@ final class CodexPlanModeTests: XCTestCase {
         )
 
         XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .userInputPrompt }.isEmpty)
+    }
+
+    func testToolRequestUserInputMethodCreatesPromptCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let requestID: JSONValue = .string("request-\(UUID().uuidString)")
+
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "tool/requestUserInput",
+                params: .object([
+                    "threadId": .string(threadID),
+                    "questions": .array([
+                        .object([
+                            "id": .string("path"),
+                            "header": .string("Direction"),
+                            "question": .string("Which path should we take?"),
+                            "isOther": .bool(true),
+                            "options": .array([
+                                .object([
+                                    "label": .string("Ship it"),
+                                    "description": .string("Build the fastest version"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        let promptMessages = service.messages(for: threadID).filter { $0.kind == .userInputPrompt }
+        XCTAssertEqual(promptMessages.count, 1)
+        XCTAssertEqual(promptMessages[0].structuredUserInputRequest?.questions.first?.id, "path")
+        XCTAssertEqual(promptMessages[0].structuredUserInputRequest?.questions.first?.isOther, true)
+    }
+
+    func testToolRequestUserInputWithoutThreadIDUsesTurnMapping() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let requestID: JSONValue = .string("request-\(UUID().uuidString)")
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "tool/requestUserInput",
+                params: .object([
+                    "turnId": .string(turnID),
+                    "questions": .array([
+                        .object([
+                            "id": .string("path"),
+                            "header": .string("Direction"),
+                            "question": .string("Which path should we take?"),
+                            "options": .array([
+                                .object([
+                                    "label": .string("Ship it"),
+                                    "description": .string("Build the fastest version"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        let promptMessages = service.messages(for: threadID).filter { $0.kind == .userInputPrompt }
+        XCTAssertEqual(promptMessages.count, 1)
+        XCTAssertEqual(promptMessages[0].turnId, turnID)
     }
 
     func testStructuredUserInputPromptPersistsAcrossRelaunchUntilResolved() {
@@ -493,6 +921,279 @@ final class CodexPlanModeTests: XCTestCase {
         )
     }
 
+    func testResolvedInferredPlanQuestionnairePrefersMatchingNativePrompt() {
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let assistantMessage = CodexMessage(
+            threadId: threadID,
+            role: .assistant,
+            text: """
+            I have one question for you before I finalize the plan:
+
+            1. Which path should we take?
+            - Ship it
+            - Stage it
+            """,
+            turnId: turnID
+        )
+        let nativePrompt = CodexMessage(
+            threadId: threadID,
+            role: .system,
+            kind: .userInputPrompt,
+            text: "Direction\nWhich path should we take?",
+            turnId: turnID,
+            structuredUserInputRequest: CodexStructuredUserInputRequest(
+                requestID: .string("request-\(UUID().uuidString)"),
+                questions: [
+                    CodexStructuredUserInputQuestion(
+                        id: "direction",
+                        header: "Direction",
+                        question: "Which path should we take?",
+                        isOther: false,
+                        isSecret: false,
+                        options: [
+                            CodexStructuredUserInputOption(label: "Ship it", description: "Build the fastest version"),
+                            CodexStructuredUserInputOption(label: "Stage it", description: "Ship in smaller slices"),
+                        ]
+                    ),
+                ]
+            )
+        )
+
+        let questionnaire = resolvedInferredPlanQuestionnaire(
+            bodyText: assistantMessage.text,
+            message: assistantMessage,
+            threadMessages: [assistantMessage, nativePrompt],
+            parse: InferredPlanQuestionnaireParser.parseAssistantMessage
+        )
+
+        XCTAssertNil(questionnaire)
+    }
+
+    func testAssistantFallbackQuestionnaireWithoutCueStillParses() {
+        let text = """
+        1. Which rollout path should we take?
+        - Ship it now
+        - Stage it behind a flag
+
+        2. Which validation level do you want?
+        - Smoke test only
+        - Add focused regression coverage
+        """
+
+        let questionnaire = InferredPlanQuestionnaireParser.parseAssistantMessage(text)
+
+        XCTAssertEqual(questionnaire?.questions.count, 2)
+        XCTAssertEqual(
+            questionnaire?.questions.first?.options.map(\.label),
+            ["Ship it now", "Stage it behind a flag"]
+        )
+    }
+
+    func testAssistantFallbackQuestionnaireWithMarkdownNumberingParses() {
+        let text = """
+        A few quick questions before I finalize the plan:
+
+        **1. Which rollout path should we take?**
+        - Ship it now
+        - Stage it behind a flag
+        """
+
+        let questionnaire = InferredPlanQuestionnaireParser.parseAssistantMessage(text)
+
+        XCTAssertEqual(questionnaire?.questions.count, 1)
+        XCTAssertEqual(questionnaire?.questions.first?.question, "Which rollout path should we take?")
+        XCTAssertEqual(
+            questionnaire?.questions.first?.options.map(\.label),
+            ["Ship it now", "Stage it behind a flag"]
+        )
+    }
+
+    func testAssistantFallbackChoiceListParsesIntoSingleQuestion() {
+        let text = """
+        My strongest recommendation is to focus on trust first.
+
+        If you want, next I can turn this into one of these:
+
+        1. a prioritized roadmap for the next 2-4 weeks
+        2. a feature matrix with quick wins vs bigger bets
+        3. a concrete implementation plan mapped to the current codebase
+        """
+
+        let questionnaire = InferredPlanQuestionnaireParser.parseAssistantMessage(text)
+
+        XCTAssertEqual(questionnaire?.questions.count, 1)
+        XCTAssertEqual(questionnaire?.questions.first?.header, "Next step")
+        XCTAssertEqual(questionnaire?.questions.first?.question, "What should Codex produce next?")
+        XCTAssertEqual(
+            questionnaire?.questions.first?.options.map(\.label),
+            [
+                "a prioritized roadmap for the next 2-4 weeks",
+                "a feature matrix with quick wins vs bigger bets",
+                "a concrete implementation plan mapped to the current codebase",
+            ]
+        )
+    }
+
+    func testResolvedFallbackChoiceListStillAppearsAfterNativeThreadDegradesToPlainText() {
+        let assistantMessage = CodexMessage(
+            role: .assistant,
+            text: """
+            Suggested Roadmap If we wanted a practical sequence, I'd do:
+
+            1. Polish onboarding and first-run UX
+            2. Improve status clarity and calibration experience
+            3. Expand actions beyond open app
+
+            If you want, next I can turn this into one of these:
+
+            1. a concrete 2-week roadmap
+            2. a feature-priority matrix
+            3. a "v1 vs v2" product strategy doc
+            """,
+            threadId: "thread-plan",
+            turnId: "turn-plan",
+            orderIndex: 3
+        )
+
+        let questionnaire = resolvedInferredPlanQuestionnaire(
+            bodyText: assistantMessage.text,
+            message: assistantMessage,
+            threadMessages: [assistantMessage],
+            parse: InferredPlanQuestionnaireParser.parseAssistantMessage
+        )
+
+        XCTAssertEqual(questionnaire?.questions.count, 1)
+        XCTAssertEqual(questionnaire?.questions.first?.header, "Next step")
+        XCTAssertEqual(
+            questionnaire?.questions.first?.options.map(\.label),
+            [
+                "a concrete 2-week roadmap",
+                "a feature-priority matrix",
+                "a \"v1 vs v2\" product strategy doc",
+            ]
+        )
+    }
+
+    func testResolvedFallbackChoiceListDoesNotAppearOutsidePlanModeSession() {
+        let assistantMessage = CodexMessage(
+            role: .assistant,
+            text: """
+            If you want, next I can turn this into one of these:
+
+            1. a concrete 2-week roadmap
+            2. a feature-priority matrix
+            3. a "v1 vs v2" product strategy doc
+            """,
+            threadId: "thread-default",
+            turnId: "turn-default",
+            orderIndex: 3
+        )
+
+        let questionnaire = resolvedInferredPlanQuestionnaire(
+            bodyText: assistantMessage.text,
+            message: assistantMessage,
+            threadMessages: [assistantMessage],
+            shouldRecoverFallback: false,
+            parse: InferredPlanQuestionnaireParser.parseAssistantMessage
+        )
+
+        XCTAssertNil(questionnaire)
+    }
+
+    func testResolvedFallbackChoiceListDoesNotAppearAfterNativePlanSessionIsConfirmed() {
+        let service = makeService()
+        service.markNativePlanSession(for: "thread-native")
+
+        let assistantMessage = CodexMessage(
+            role: .assistant,
+            text: """
+            If you want, next I can turn this into one of these:
+
+            1. a concrete 2-week roadmap
+            2. a feature-priority matrix
+            3. a "v1 vs v2" product strategy doc
+            """,
+            threadId: "thread-native",
+            turnId: "turn-native",
+            orderIndex: 3
+        )
+
+        let questionnaire = resolvedInferredPlanQuestionnaire(
+            bodyText: assistantMessage.text,
+            message: assistantMessage,
+            threadMessages: [assistantMessage],
+            shouldRecoverFallback: service.allowsAssistantPlanFallbackRecovery(for: "thread-native"),
+            parse: InferredPlanQuestionnaireParser.parseAssistantMessage
+        )
+
+        XCTAssertNil(questionnaire)
+    }
+
+    func testProposedPlanParserExtractsBodyAndRemovesEnvelope() {
+        let rawText = """
+        I explored the current flow and here is the final plan.
+
+        <proposed_plan>
+        ## Summary
+        - Make native structured questions the primary path.
+        - Render final plan blocks with an implementation action.
+        </proposed_plan>
+        """
+
+        let proposedPlan = CodexProposedPlanParser.parse(from: rawText)
+
+        XCTAssertEqual(
+            proposedPlan?.body,
+            """
+            ## Summary
+            - Make native structured questions the primary path.
+            - Render final plan blocks with an implementation action.
+            """
+        )
+        XCTAssertEqual(
+            CodexProposedPlanParser.removingEnvelope(from: rawText),
+            "I explored the current flow and here is the final plan."
+        )
+        XCTAssertEqual(
+            proposedPlan?.summary,
+            "Summary"
+        )
+    }
+
+    func testImplementProposedPlanUsesMinimalThreadReferencePrompt() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+
+        var capturedParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "turn/start")
+            capturedParams = params
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-live")]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.implementProposedPlan(
+            threadId: "thread-plan",
+            proposedPlan: CodexProposedPlan(
+                body: """
+                ## Summary
+                - Make Plan Mode native-first.
+                """
+            )
+        )
+
+        XCTAssertEqual(
+            textInput(from: capturedParams),
+            "Implement the latest approved plan from the most recent <proposed_plan> in this thread."
+        )
+    }
+
     func testHistoryPlanItemsRestoreStructuredState() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -524,7 +1225,7 @@ final class CodexPlanModeTests: XCTestCase {
                                     ]),
                                     .object([
                                         "step": .string("Implement"),
-                                        "status": .string("in_progress"),
+                                        "status": .string("inProgress"),
                                     ]),
                                 ]),
                             ]),
@@ -540,6 +1241,57 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(messages[0].planState?.explanation, "Break the work into safe slices.")
         XCTAssertEqual(messages[0].planState?.steps.count, 2)
         XCTAssertEqual(messages[0].planState?.steps.last?.status, .inProgress)
+    }
+
+    func testCompletedHistoryTurnFinalizesPlanSteps() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .double(1_700_000_000),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "status": .string("completed"),
+                        "items": .array([
+                            .object([
+                                "id": .string(itemID),
+                                "type": .string("plan"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("text"),
+                                        "text": .string("1. Audit\n2. Implement\n3. Verify"),
+                                    ]),
+                                ]),
+                                "explanation": .string("Break the work into safe slices."),
+                                "plan": .array([
+                                    .object([
+                                        "step": .string("Audit"),
+                                        "status": .string("completed"),
+                                    ]),
+                                    .object([
+                                        "step": .string("Implement"),
+                                        "status": .string("in_progress"),
+                                    ]),
+                                    .object([
+                                        "step": .string("Verify"),
+                                        "status": .string("pending"),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0].planState?.steps.map(\.status), [.completed, .completed, .completed])
+        XCTAssertFalse(messages[0].shouldDisplayPinnedPlanAccessory)
     }
 
     func testCompletedPlanDoesNotStayPinnedInConversationAccessory() {
@@ -561,6 +1313,7 @@ final class CodexPlanModeTests: XCTestCase {
 
         XCTAssertTrue(completedPlan.isPlanSystemMessage)
         XCTAssertFalse(completedPlan.shouldDisplayPinnedPlanAccessory)
+        XCTAssertFalse(completedPlan.shouldDisplayInlinePlanResult)
     }
 
     func testIncompletePlanRemainsPinnedInConversationAccessory() {
@@ -581,6 +1334,47 @@ final class CodexPlanModeTests: XCTestCase {
         )
 
         XCTAssertTrue(activePlan.shouldDisplayPinnedPlanAccessory)
+    }
+
+    func testCompletedSystemPlanWithEmbeddedProposedPlanDoesNotMasqueradeAsFinalPlan() {
+        let completedPlan = CodexMessage(
+            threadId: "thread-\(UUID().uuidString)",
+            role: .system,
+            kind: .plan,
+            text: """
+            <proposed_plan>
+            ## Ship
+            - Tighten native Plan Mode first.
+            </proposed_plan>
+            """,
+            isStreaming: false,
+            planState: CodexPlanState(
+                explanation: "The plan is finalized.",
+                steps: [
+                    CodexPlanStep(step: "Inspect the current behavior", status: .completed),
+                    CodexPlanStep(step: "Implement the fix", status: .completed),
+                ]
+            )
+        )
+
+        XCTAssertFalse(completedPlan.shouldDisplayInlinePlanResult)
+        XCTAssertNil(completedPlan.proposedPlan)
+    }
+
+    func testAssistantProposedPlanStaysSeparateFromSystemStepPlan() {
+        let finalAssistantPlan = CodexMessage(
+            threadId: "thread-\(UUID().uuidString)",
+            role: .assistant,
+            text: """
+            <proposed_plan>
+            ## Ship
+            - Tighten native Plan Mode first.
+            </proposed_plan>
+            """,
+            isStreaming: false
+        )
+
+        XCTAssertEqual(finalAssistantPlan.proposedPlan?.summary, "Ship")
     }
 
     private func makeService(
@@ -627,5 +1421,14 @@ final class CodexPlanModeTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTFail("Expected send to complete")
+    }
+
+    private func textInput(from params: JSONValue?) -> String? {
+        params?
+            .objectValue?["input"]?
+            .arrayValue?
+            .compactMap(\.objectValue)
+            .first(where: { $0["type"]?.stringValue == "text" })?["text"]?
+            .stringValue
     }
 }

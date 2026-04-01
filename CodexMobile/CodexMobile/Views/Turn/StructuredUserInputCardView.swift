@@ -13,26 +13,51 @@ struct StructuredUserInputCardView: View {
     let onSelectOption: (_ questionID: String, _ optionLabel: String) -> Void
     let onSubmit: (_ answersByQuestionID: [String: [String]]) -> Void
 
-    @State private var selectedOptionsByQuestionID: [String: String] = [:]
+    @State private var selectedOptionsByQuestionID: [String: [String]] = [:]
     @State private var typedAnswersByQuestionID: [String: String] = [:]
+    @State private var currentQuestionIndex = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(Array(questions.enumerated()), id: \.element.id) { index, question in
-                if index > 0 {
-                    Divider().opacity(0.2)
-                }
-                questionSection(question)
+            headerRow
+
+            if let currentQuestion {
+                questionSection(currentQuestion)
+                    .id(currentQuestion.id)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .leading).combined(with: .opacity)
+                    ))
             }
 
-            submitButton
+            actionRow
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 16)
-        .background {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color(.tertiarySystemFill).opacity(0.8))
-                .stroke(Color.secondary.opacity(0.08))
+        .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: currentQuestionIndex)
+        // If the server refreshes the prompt in place, treat it like a fresh form.
+        .onChange(of: questionSignature) { _, _ in
+            resetStoredAnswers()
+            currentQuestionIndex = 0
+        }
+    }
+
+    private var headerRow: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text("Questions")
+                .font(AppFont.mono(.caption))
+                .foregroundStyle(.secondary)
+
+            if questions.count > 1 {
+                Circle()
+                    .fill(Color(.separator).opacity(0.6))
+                    .frame(width: 3, height: 3)
+
+                progressHeader
+            }
+
+            Spacer(minLength: 0)
         }
     }
 
@@ -52,8 +77,14 @@ struct StructuredUserInputCardView: View {
                 .font(AppFont.body())
                 .foregroundStyle(.primary)
 
+            if let selectionLimit = question.selectionLimitDescription {
+                Text(selectionLimit)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
             if !question.options.isEmpty {
-                VStack(alignment: .leading, spacing: 0) {
+                VStack(spacing: 6) {
                     ForEach(question.options) { option in
                         optionRow(option, questionID: question.id)
                     }
@@ -69,36 +100,47 @@ struct StructuredUserInputCardView: View {
     // MARK: - Option row
 
     private func optionRow(_ option: CodexStructuredUserInputOption, questionID: String) -> some View {
-        let isSelected = selectedOptionsByQuestionID[questionID] == option.label
+        let isSelected = selectedOptionsByQuestionID[questionID]?.contains(option.label) == true
 
         return Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            selectedOptionsByQuestionID[questionID] = option.label
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                toggleOptionSelection(option.label, for: questionID, question: question(for: questionID))
+            }
             onSelectOption(questionID, option.label)
         } label: {
             HStack(spacing: 10) {
-                Circle()
-                    .fill(isSelected ? Color(.plan) : Color.clear)
-                    .frame(width: 8, height: 8)
-                    .overlay(
-                        Circle().stroke(isSelected ? Color(.plan) : Color(.separator), lineWidth: 1)
-                    )
-
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(option.label)
-                        .font(AppFont.subheadline(weight: isSelected ? .medium : .regular))
+                        .font(AppFont.subheadline(weight: .medium))
                         .foregroundStyle(isSelected ? Color(.plan) : .primary)
 
                     if let desc = option.trimmedDescription {
                         Text(desc)
                             .font(AppFont.caption())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(isSelected ? Color(.plan).opacity(0.6) : .secondary)
                     }
                 }
 
                 Spacer(minLength: 0)
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(AppFont.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color(.plan))
+                        .transition(.scale.combined(with: .opacity))
+                }
             }
-            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isSelected ? Color(.plan).opacity(0.08) : Color(.systemBackground).opacity(0.6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(isSelected ? Color(.plan).opacity(0.3) : Color(.separator).opacity(0.15), lineWidth: 1)
+                    )
+            )
         }
         .buttonStyle(.plain)
         .disabled(isSubmitting)
@@ -130,20 +172,137 @@ struct StructuredUserInputCardView: View {
         .disabled(isSubmitting)
     }
 
-    // MARK: - Submit
+    // MARK: - Flow controls
+
+    private var currentQuestion: CodexStructuredUserInputQuestion? {
+        guard questions.indices.contains(currentQuestionIndex) else {
+            return nil
+        }
+
+        return questions[currentQuestionIndex]
+    }
+
+    private func question(for questionID: String) -> CodexStructuredUserInputQuestion? {
+        questions.first(where: { $0.id == questionID })
+    }
+
+    private var questionSignature: [QuestionSignature] {
+        questions.map(QuestionSignature.init)
+    }
+
+    private var progressHeader: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text("\(currentQuestionIndex + 1) of \(questions.count)")
+                .font(AppFont.mono(.caption2))
+                .foregroundStyle(.secondary)
+
+            stepRail
+        }
+    }
+
+    private var stepRail: some View {
+        HStack(spacing: 3) {
+            ForEach(0..<questions.count, id: \.self) { index in
+                Capsule()
+                    .fill(stepRailTint(at: index))
+                    .frame(width: 10, height: 3)
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: currentQuestionIndex)
+    }
+
+    private func stepRailTint(at index: Int) -> Color {
+        if index < currentQuestionIndex {
+            // Answered — solid
+            return Color.primary.opacity(0.72)
+        } else if index == currentQuestionIndex {
+            // Active
+            return Color(.plan).opacity(0.72)
+        } else {
+            // Upcoming
+            return Color(.separator).opacity(0.22)
+        }
+    }
+
+    private var canMoveForward: Bool {
+        guard let currentQuestion else { return false }
+        return resolvedAnswers(for: currentQuestion) != nil
+    }
 
     private var isSubmitDisabled: Bool {
         isSubmitting || hasSubmittedResponse || !questions.allSatisfy { question in
-            resolvedAnswer(for: question) != nil
+            resolvedAnswers(for: question) != nil
         }
+    }
+
+    private var actionRow: some View {
+        HStack(spacing: 10) {
+            if currentQuestionIndex > 0 {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        currentQuestionIndex = max(currentQuestionIndex - 1, 0)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                            .font(AppFont.system(size: 11, weight: .semibold))
+                        Text("Back")
+                            .font(AppFont.subheadline(weight: .medium))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(isSubmitting ? Color(.tertiaryLabel) : Color(.secondaryLabel))
+                .background(Color(.quaternarySystemFill), in: Capsule())
+                .disabled(isSubmitting)
+                .transition(.opacity.combined(with: .move(edge: .leading)))
+            }
+
+            Spacer(minLength: 0)
+
+            if currentQuestionIndex < max(questions.count - 1, 0) {
+                nextButton
+            } else {
+                submitButton
+            }
+        }
+    }
+
+    private var nextButton: some View {
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                currentQuestionIndex = min(currentQuestionIndex + 1, max(questions.count - 1, 0))
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text("Next")
+                    .font(AppFont.subheadline(weight: .medium))
+                Image(systemName: "chevron.right")
+                    .font(AppFont.system(size: 11, weight: .semibold))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 9)
+        }
+        .buttonStyle(.plain)
+        .foregroundColor(canMoveForward ? Color.white : Color(.tertiaryLabel))
+        .background(
+            canMoveForward
+                ? AnyShapeStyle(Color(.plan))
+                : AnyShapeStyle(Color(.quaternarySystemFill)),
+            in: Capsule()
+        )
+        .disabled(!canMoveForward || isSubmitting)
     }
 
     private var submitButton: some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback()
             let answers = questions.reduce(into: [String: [String]]()) { result, question in
-                if let answer = resolvedAnswer(for: question) {
-                    result[question.id] = [answer]
+                if let answer = resolvedAnswers(for: question) {
+                    result[question.id] = answer
                 }
             }
             onSubmit(answers)
@@ -172,14 +331,67 @@ struct StructuredUserInputCardView: View {
         .frame(maxWidth: .infinity, alignment: .trailing)
     }
 
-    private func resolvedAnswer(for question: CodexStructuredUserInputQuestion) -> String? {
+    private func resolvedAnswers(for question: CodexStructuredUserInputQuestion) -> [String]? {
         let typed = typedAnswersByQuestionID[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let typed, !typed.isEmpty { return typed }
+        if let typed, !typed.isEmpty { return [typed] }
 
-        let selected = selectedOptionsByQuestionID[question.id]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let selected, !selected.isEmpty { return selected }
+        let selected = (selectedOptionsByQuestionID[question.id] ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !selected.isEmpty { return selected }
 
         return nil
+    }
+
+    private func toggleOptionSelection(
+        _ optionLabel: String,
+        for questionID: String,
+        question: CodexStructuredUserInputQuestion?
+    ) {
+        let limit = max(question?.selectionLimit ?? 1, 1)
+        var selected = selectedOptionsByQuestionID[questionID] ?? []
+
+        if let existingIndex = selected.firstIndex(of: optionLabel) {
+            selected.remove(at: existingIndex)
+        } else if limit == 1 {
+            selected = [optionLabel]
+        } else if selected.count < limit {
+            selected.append(optionLabel)
+        }
+
+        selectedOptionsByQuestionID[questionID] = selected
+    }
+
+    private func resetStoredAnswers() {
+        selectedOptionsByQuestionID = [:]
+        typedAnswersByQuestionID = [:]
+    }
+}
+
+private struct QuestionSignature: Hashable {
+    struct OptionSignature: Hashable {
+        let label: String
+        let description: String
+    }
+
+    let id: String
+    let header: String
+    let question: String
+    let isOther: Bool
+    let isSecret: Bool
+    let selectionLimit: Int?
+    let options: [OptionSignature]
+
+    init(_ question: CodexStructuredUserInputQuestion) {
+        self.id = question.id
+        self.header = question.header
+        self.question = question.question
+        self.isOther = question.isOther
+        self.isSecret = question.isSecret
+        self.selectionLimit = question.selectionLimit
+        self.options = question.options.map {
+            OptionSignature(label: $0.label, description: $0.description)
+        }
     }
 }
 
@@ -218,11 +430,7 @@ struct PlanModeCardContainer<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 14)
         .padding(.horizontal, 16)
-        .background {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(Color(.tertiarySystemFill).opacity(0.8))
-                .stroke(Color.secondary.opacity(0.08))
-        }
+        .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 
@@ -244,6 +452,13 @@ extension CodexStructuredUserInputQuestion {
 
     var answerFieldPlaceholder: String {
         isOther ? "Other answer" : "Your answer"
+    }
+
+    var selectionLimitDescription: String? {
+        guard let selectionLimit, selectionLimit > 1 else {
+            return nil
+        }
+        return "Select up to \(selectionLimit)"
     }
 }
 
@@ -378,6 +593,17 @@ extension CodexStructuredUserInputOption {
                     isOther: false,
                     isSecret: false,
                     options: []
+                ),
+                CodexStructuredUserInputQuestion(
+                    id: "q3",
+                    header: "Timeline",
+                    question: "When should the migration be completed?",
+                    isOther: true,
+                    isSecret: false,
+                    options: [
+                        CodexStructuredUserInputOption(label: "This sprint", description: "2-week delivery window"),
+                        CodexStructuredUserInputOption(label: "Next quarter", description: "Phased rollout with buffer"),
+                    ]
                 ),
             ],
             isSubmitting: false,

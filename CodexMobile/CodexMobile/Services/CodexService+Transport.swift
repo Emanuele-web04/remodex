@@ -75,6 +75,13 @@ extension CodexService {
             includeJSONRPC: false
         )
 
+        if method == "turn/start",
+           let collaborationMode = params?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue {
+            debugRuntimeLog(
+                "rpc send turn/start collaborationMode=\(collaborationMode) thread=\(params?.objectValue?["threadId"]?.stringValue ?? "")"
+            )
+        }
+
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[requestKey] = continuation
 

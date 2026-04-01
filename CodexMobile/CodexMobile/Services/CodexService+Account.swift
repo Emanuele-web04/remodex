@@ -637,6 +637,17 @@ extension CodexService {
         allowMissingVersionPrompt: Bool,
         allowAvailableBridgeUpdatePrompt: Bool
     ) {
+        let previousTransportMode = codexTransportMode
+        codexTransportMode = decodeCodexTransportMode(
+            from: firstStringValue(
+                in: payloadObject,
+                keys: ["codexTransportMode", "codex_transport_mode", "transportMode", "transport_mode"]
+            )
+        )
+        reconcileNativePlanSessionSources(
+            previousTransportMode: previousTransportMode,
+            nextTransportMode: codexTransportMode
+        )
         bridgeInstalledVersion = firstStringValue(
             in: payloadObject,
             keys: ["bridgeVersion", "bridge_version", "bridgePackageVersion", "bridge_package_version"]
@@ -652,6 +663,15 @@ extension CodexService {
         if allowAvailableBridgeUpdatePrompt {
             evaluateAvailableBridgePackageVersionPromptIfNeeded()
         }
+    }
+
+    private func decodeCodexTransportMode(from rawValue: String?) -> CodexRuntimeTransportMode {
+        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !rawValue.isEmpty else {
+            return .unknown
+        }
+
+        return CodexRuntimeTransportMode(rawValue: rawValue) ?? .unknown
     }
 
     private func handleBridgeManagedAccountRefreshFailure() {

@@ -23,9 +23,9 @@ struct GPTVoiceSetupSheet: View {
                         )
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("ChatGPT voice is checked on your Mac")
+                        Text("Voice uses ChatGPT from your Mac")
                             .font(AppFont.subheadline(weight: .semibold))
-                        Text("Remodex reads the ChatGPT session from your paired Mac bridge.")
+                        Text("Remodex reads the ChatGPT session from your paired Mac bridge so your iPhone can transcribe with that account.")
                             .font(AppFont.caption())
                             .foregroundStyle(.secondary)
                     }
@@ -39,8 +39,8 @@ struct GPTVoiceSetupSheet: View {
                     )
                     setupStep(
                         number: "2",
-                        title: "Sign in there",
-                        detail: "Make sure the ChatGPT account you want for voice is active on the Mac."
+                        title: "Sign in or refresh ChatGPT there",
+                        detail: "Make sure the ChatGPT account you want for voice is active on that Mac."
                     )
                     setupStep(
                         number: "3",
@@ -49,7 +49,7 @@ struct GPTVoiceSetupSheet: View {
                     )
                 }
 
-                Text("You do not need to start ChatGPT login from this iPhone.")
+                Text("You do not need a separate ChatGPT login flow on this iPhone.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 

@@ -20,7 +20,7 @@ enum CodexVoiceFailureReason: Equatable {
 }
 
 extension CodexService {
-    // Learns that this bridge predates `voice/resolveAuth` so future mic taps can short-circuit immediately.
+    // Learns that this bridge predates the bridge-owned voice RPCs so future mic taps can short-circuit immediately.
     func consumeUnsupportedVoiceBridgeAuth(_ error: Error) -> Bool {
         guard shouldTreatAsUnsupportedVoiceBridgeAuth(error) else {
             return false
@@ -77,15 +77,18 @@ extension CodexService {
             || message.contains("does not support")
             || message.contains("unknown variant")
             || message.contains("expected one of")
-        let mentionsVoiceResolveAuth = message.contains("voice/resolveauth")
+        let mentionsBridgeVoiceMethod = message.contains("voice/resolveauth")
             || message.contains("voice resolveauth")
             || message.contains("voice/resolveauth`")
+            || message.contains("voice/transcribe")
+            || message.contains("voice transcribe")
+            || message.contains("voice/transcribe`")
 
         guard rpcError.code == -32600 || rpcError.code == -32602 || rpcError.code == -32000 else {
-            return mentionsUnsupportedRequest && mentionsVoiceResolveAuth
+            return mentionsUnsupportedRequest && mentionsBridgeVoiceMethod
         }
 
-        return mentionsUnsupportedRequest && mentionsVoiceResolveAuth
+        return mentionsUnsupportedRequest && mentionsBridgeVoiceMethod
     }
 
     private func classifyVoiceFailure(_ error: GPTVoiceTranscriptionError) -> CodexVoiceFailureReason {
@@ -167,7 +170,8 @@ extension CodexService {
         }
 
         let normalized = trimmed.lowercased()
-        if normalized.contains("voice/resolveauth") && normalized.contains("unknown variant") {
+        if (normalized.contains("voice/resolveauth") || normalized.contains("voice/transcribe"))
+            && normalized.contains("unknown variant") {
             return .bridgeSessionUnsupported
         }
         if normalized.contains("connect to your mac before using voice transcription")

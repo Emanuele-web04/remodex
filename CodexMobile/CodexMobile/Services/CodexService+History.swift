@@ -20,6 +20,7 @@ extension CodexService {
             guard let turnObject = turnValue.objectValue else { continue }
             let turnID = turnObject["id"]?.stringValue
             let turnTimestamp = decodeHistoryTimestamp(from: turnObject)
+            let turnCompleted = isCompletedHistoryTurn(turnObject)
             let items = turnObject["items"]?.arrayValue ?? []
 
             for itemValue in items {
@@ -185,6 +186,7 @@ extension CodexService {
                     )
 
                 case "plan":
+                    let decodedPlanState = decodeHistoryPlanState(from: itemObject)
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
@@ -194,7 +196,10 @@ extension CodexService {
                         turnId: turnID,
                         itemId: itemID,
                         createdAt: timestamp,
-                        planState: decodeHistoryPlanState(from: itemObject)
+                        planState: finalizedHistoryPlanState(decodedPlanState, turnCompleted: turnCompleted),
+                        planPresentation: itemID == nil
+                            ? .progress
+                            : (turnCompleted ? .resultReady : .resultClosed)
                     )
 
                 case let collabType where collabType == "collabagenttoolcall"
@@ -379,6 +384,10 @@ extension CodexService {
         }
 
         var merged = existing
+        let assistantHistoryCountByTurn = Dictionary(
+            grouping: history.filter { $0.role == .assistant }
+        ) { $0.turnId ?? "" }
+        .mapValues(\.count)
 
         for message in history {
             if message.role == .assistant,
@@ -434,6 +443,40 @@ extension CodexService {
                }) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
+            }
+
+            let threadIsStillActive = activeThreadIDs.contains(message.threadId)
+                || runningThreadIDs.contains(message.threadId)
+
+            // After a turn is fully closed, thread/read can return the same single assistant
+            // reply with canonical text or a different stable item id. Reconcile that row
+            // instead of appending a second final bubble.
+            if message.role == .assistant,
+               let turnId = message.turnId, !turnId.isEmpty,
+               !threadIsStillActive,
+               assistantHistoryCountByTurn[turnId] == 1 {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .assistant
+                        && candidate.turnId == turnId
+                        && !candidate.isStreaming
+                }
+
+                if candidateIndices.count == 1,
+                   let index = candidateIndices.last {
+                    if shouldReplaceClosedAssistantMessage(
+                        merged[index],
+                        with: message
+                    ) {
+                        merged[index] = reconcileExistingMessage(
+                            merged[index],
+                            with: message,
+                            activeThreadIDs: activeThreadIDs,
+                            runningThreadIDs: runningThreadIDs
+                        )
+                    }
+                    continue
+                }
             }
 
             if message.role == .user,
@@ -825,6 +868,26 @@ extension CodexService {
         return incomingText
     }
 
+    // Closed-turn snapshots are only allowed to replace the visible assistant reply
+    // when they are clearly the same message and at least as complete.
+    nonisolated static func shouldReplaceClosedAssistantMessage(
+        _ localMessage: CodexMessage,
+        with serverMessage: CodexMessage
+    ) -> Bool {
+        let localText = normalizedMessageText(localMessage.text)
+        let serverText = normalizedMessageText(serverMessage.text)
+
+        guard !serverText.isEmpty else {
+            return false
+        }
+
+        if localText.isEmpty || localText == serverText {
+            return true
+        }
+
+        return serverText.count > localText.count && serverText.hasPrefix(localText)
+    }
+
     nonisolated static func attachmentSignature(for attachments: [CodexImageAttachment]) -> String {
         attachments
             .map { attachment in
@@ -894,6 +957,7 @@ extension CodexService {
         createdAt: Date,
         attachments: [CodexImageAttachment] = [],
         planState: CodexPlanState? = nil,
+        planPresentation: CodexPlanPresentation? = nil,
         subagentAction: CodexSubagentAction? = nil
     ) {
         guard !text.isEmpty || !attachments.isEmpty || subagentAction != nil else {
@@ -913,6 +977,8 @@ extension CodexService {
                 deliveryState: .confirmed,
                 attachments: attachments,
                 planState: planState,
+                planPresentation: planPresentation,
+                proposedPlan: role == .assistant ? CodexProposedPlanParser.parse(from: text) : nil,
                 subagentAction: subagentAction
             )
         )
@@ -1000,7 +1066,7 @@ extension CodexService {
             guard let stepObject = stepValue.objectValue,
                   let step = decodeHistoryNormalizedPlanText(stepObject["step"]),
                   let rawStatus = decodeHistoryNormalizedPlanText(stepObject["status"]),
-                  let status = CodexPlanStepStatus(rawValue: rawStatus) else {
+                  let status = CodexPlanStepStatus(wireValue: rawStatus) else {
                 return nil
             }
 
@@ -1012,6 +1078,40 @@ extension CodexService {
         }
 
         return CodexPlanState(explanation: explanation, steps: steps)
+    }
+
+    // Closed turns should not restore a stale "active" plan accessory from history.
+    func finalizedHistoryPlanState(_ planState: CodexPlanState?, turnCompleted: Bool) -> CodexPlanState? {
+        guard turnCompleted,
+              let planState,
+              !planState.steps.isEmpty,
+              planState.steps.contains(where: { $0.status != .completed }) else {
+            return planState
+        }
+
+        return CodexPlanState(
+            explanation: planState.explanation,
+            steps: planState.steps.map { step in
+                CodexPlanStep(id: step.id, step: step.step, status: .completed)
+            }
+        )
+    }
+
+    func isCompletedHistoryTurn(_ turnObject: [String: JSONValue]) -> Bool {
+        let statusObject = turnObject["status"]?.objectValue
+        let rawStatus = firstNonEmptyString([
+            turnObject["status"]?.stringValue,
+            statusObject?["type"]?.stringValue,
+            statusObject?["statusType"]?.stringValue,
+            statusObject?["status_type"]?.stringValue,
+            turnObject["result"]?.stringValue,
+        ]) ?? ""
+
+        guard let terminalState = threadTerminalState(from: normalizeThreadStatusType(rawStatus)) else {
+            return false
+        }
+
+        return terminalState == .completed
     }
 
     // Parses collabAgentToolCall payloads into a stable summary row the timeline can render.

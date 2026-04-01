@@ -110,10 +110,14 @@ extension CodexService {
 
     // Handles server-initiated RPC requests like approval prompts.
     func handleServerRequest(method: String, requestID: JSONValue, params: JSONValue?) {
-        if method == "item/tool/requestUserInput" {
+        if method == "item/tool/requestUserInput" || method == "tool/requestUserInput" {
+            let paramsObject = params?.objectValue
+            debugRuntimeLog(
+                "rpc request \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+            )
             handleStructuredUserInputRequest(
                 requestID: requestID,
-                paramsObject: params?.objectValue
+                paramsObject: paramsObject
             )
             return
         }
@@ -169,6 +173,15 @@ extension CodexService {
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
+
+        switch method {
+        case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
+            debugRuntimeLog(
+                "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+            )
+        default:
+            break
+        }
 
         switch method {
         case "thread/started":
@@ -1881,6 +1894,18 @@ extension CodexService {
            let turnId,
            let patch = extractChangeSetUnifiedPatch(from: itemObject, itemType: itemType) {
             recordFallbackFileChangePatch(threadId: threadId, turnId: turnId, patch: patch)
+        }
+
+        if kind == .plan {
+            upsertPlanMessage(
+                threadId: threadId,
+                turnId: turnId,
+                itemId: itemId,
+                text: body,
+                isStreaming: !isCompleted,
+                planPresentation: isCompleted ? .resultCompletedItem : .resultStreaming
+            )
+            return true
         }
 
         if let itemId, !itemId.isEmpty {

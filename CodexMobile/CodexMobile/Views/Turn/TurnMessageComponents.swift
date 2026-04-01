@@ -561,6 +561,8 @@ private enum AttachmentPreviewImageResolver {
 // ─── Message row ────────────────────────────────────────────────────
 
 struct MessageRow: View, Equatable {
+    @Environment(CodexService.self) private var codex
+
     let message: CodexMessage
     let isRetryAvailable: Bool
     let onRetryUserMessage: (String) -> Void
@@ -821,7 +823,49 @@ struct MessageRow: View, Equatable {
         let commentContent = renderModel.codeCommentContent
         let bodyText = commentContent?.fallbackText ?? text
         let mermaidContent = renderModel.mermaidContent
-
+        let assistantProposedPlanCandidate = commentContent == nil && mermaidContent == nil
+            ? (message.proposedPlan ?? CodexProposedPlanParser.parse(from: bodyText))
+            : nil
+        let currentPlanSessionSource = codex.currentPlanSessionSource(for: message.threadId)
+        let isNativePlanSession = currentPlanSessionSource != nil && currentPlanSessionSource != .compatibilityFallback
+        let proposedPlan = !isNativePlanSession
+            ? (assistantProposedPlanCandidate
+                ?? (
+                    commentContent == nil
+                        && mermaidContent == nil
+                        && currentPlanSessionSource == .compatibilityFallback
+                        && InferredPlanQuestionnaireParser.parseAssistantMessage(bodyText) == nil
+                    ? CodexProposedPlanParser.parseAssistantFallback(from: bodyText)
+                    : nil
+                ))
+            : nil
+        let assistantTurnCompleted = codex.turnTerminalState(for: message.turnId) == .completed
+        let renderedPlanText = assistantProposedPlanCandidate == nil
+            ? bodyText
+            : (
+                CodexProposedPlanParser.containsEnvelope(in: bodyText)
+                    ? (CodexProposedPlanParser.removingEnvelope(from: bodyText) ?? "")
+                    : ""
+            )
+        let inferredQuestionnaire = commentContent == nil
+            ? resolvedInferredPlanQuestionnaire(
+                bodyText: bodyText,
+                message: message,
+                threadMessages: codex.messages(for: message.threadId),
+                shouldRecoverFallback: codex.allowsAssistantPlanFallbackRecovery(
+                    for: message.threadId,
+                    turnId: message.turnId
+                ),
+                parse: InferredPlanQuestionnaireParser.parseAssistantMessage
+            )
+            : nil
+        let visibleAssistantText = renderedPlanText
+        let suppressNativeProposedPlanShell = isNativePlanSession
+            && assistantProposedPlanCandidate != nil
+            && visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && inferredQuestionnaire == nil
+            && mermaidContent == nil
+        let hasRenderableAssistantContent = !visibleAssistantText.isEmpty || proposedPlan != nil
         return VStack(alignment: .leading, spacing: 8) {
             if let commentContent, commentContent.hasFindings {
                 VStack(alignment: .leading, spacing: 10) {
@@ -831,27 +875,63 @@ struct MessageRow: View, Equatable {
                 }
             }
 
-            if !bodyText.isEmpty {
+            if hasRenderableAssistantContent {
                 if let mermaidContent {
                     MermaidMarkdownContentView(content: mermaidContent)
+                } else if let inferredQuestionnaire {
+                    if let introText = inferredQuestionnaire.introText {
+                        MarkdownTextView(
+                            text: introText,
+                            profile: .assistantProse,
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                        )
+                    }
+
+                    InferredPlanQuestionnaireCard(
+                        message: message,
+                        questionnaire: inferredQuestionnaire
+                    )
+
+                    if let outroText = inferredQuestionnaire.outroText {
+                        Text(outroText)
+                            .font(AppFont.footnote())
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if let proposedPlan {
+                    // Compatibility-mode proposed plans still render inline from assistant text.
+                    if !renderedPlanText.isEmpty {
+                        MarkdownTextView(
+                            text: renderedPlanText,
+                            profile: .assistantProse,
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                        )
+                    }
+
+                    ProposedPlanResultCard(
+                        threadId: message.threadId,
+                        proposedPlan: proposedPlan,
+                        isStreaming: message.isStreaming,
+                        canImplement: assistantTurnCompleted
+                    )
                 } else {
                     MarkdownTextView(
-                        text: bodyText,
+                        text: visibleAssistantText,
                         profile: .assistantProse,
                         enablesSelection: enablesInlineMarkdownSelectionInTimeline
                     )
                 }
             }
 
-            if message.isStreaming && showsStreamingAnimations {
+            if !suppressNativeProposedPlanShell && message.isStreaming && showsStreamingAnimations {
                 TypingIndicator()
             }
 
-            if hasTurnEndActions {
+            if !suppressNativeProposedPlanShell && hasTurnEndActions {
                 turnEndActionButtons
             }
 
-            if let assistantBlockAccessoryState {
+            if !suppressNativeProposedPlanShell, let assistantBlockAccessoryState {
                 CopyBlockButton(
                     text: assistantBlockAccessoryState.copyText,
                     isRunning: assistantBlockAccessoryState.showsRunningIndicator
@@ -878,7 +958,17 @@ struct MessageRow: View, Equatable {
         case .subagentAction:
             subagentActionSystemView(text: text)
         case .plan:
-            PlanSystemCard(message: message)
+            if message.resolvedPlanPresentation?.isInlineResultVisible == true,
+               let proposedPlan = message.proposedPlan {
+                ProposedPlanResultCard(
+                    threadId: message.threadId,
+                    proposedPlan: proposedPlan,
+                    isStreaming: message.isStreaming,
+                    canImplement: message.resolvedPlanPresentation == .resultReady
+                )
+            } else {
+                PlanSystemCard(message: message)
+            }
         case .userInputPrompt:
             if let request = message.structuredUserInputRequest {
                 StructuredUserInputCard(request: request)

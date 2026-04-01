@@ -588,6 +588,41 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
+    func testVoiceTranscriptionUsesBridgeResolvedTokenForDirectUpload() async throws {
+        let service = makeService()
+        service.isConnected = true
+        let clipURL = try makeTemporaryVoiceClipURL()
+        defer { try? FileManager.default.removeItem(at: clipURL) }
+        let expectedAudio = makeTestWavData()
+        let expectedToken = "chatgpt-token-123"
+
+        var observedMethod: String?
+        var observedParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            observedMethod = method
+            observedParams = params
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "token": .string(expectedToken),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+        GPTVoiceTranscriptionManager.transcribeOverride = { wavData, token in
+            XCTAssertEqual(wavData, expectedAudio)
+            XCTAssertEqual(token, expectedToken)
+            return "transcribed on phone"
+        }
+        defer { GPTVoiceTranscriptionManager.transcribeOverride = nil }
+
+        let transcript = try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1.25)
+
+        XCTAssertEqual(transcript, "transcribed on phone")
+        XCTAssertEqual(observedMethod, "voice/resolveAuth")
+        XCTAssertNil(observedParams)
+    }
+
     func testUnsupportedVoiceBridgeAuthMarksBridgeSessionAsUnsupported() {
         let service = makeService()
         let error = CodexServiceError.rpcError(
@@ -751,6 +786,38 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
+    private func makeTemporaryVoiceClipURL() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("wav")
+        try makeTestWavData().write(to: url)
+        return url
+    }
+
+    private func makeTestWavData() -> Data {
+        let sampleRate = 24_000
+        let sampleCount = sampleRate / 4
+        let pcmData = Data(repeating: 0, count: sampleCount * 2)
+        let dataSize = UInt32(pcmData.count)
+
+        var wav = Data()
+        wav.append(contentsOf: "RIFF".utf8)
+        wav.appendLE(UInt32(36 + dataSize))
+        wav.append(contentsOf: "WAVE".utf8)
+        wav.append(contentsOf: "fmt ".utf8)
+        wav.appendLE(UInt32(16))
+        wav.appendLE(UInt16(1))
+        wav.appendLE(UInt16(1))
+        wav.appendLE(UInt32(sampleRate))
+        wav.appendLE(UInt32(sampleRate * 2))
+        wav.appendLE(UInt16(2))
+        wav.appendLE(UInt16(16))
+        wav.append(contentsOf: "data".utf8)
+        wav.appendLE(dataSize)
+        wav.append(pcmData)
+        return wav
+    }
+
     private func XCTAssertThrowsErrorAsync<T>(
         _ expression: () async throws -> T,
         _ errorHandler: (Error) -> Void
@@ -760,6 +827,15 @@ final class CodexGPTAccountTests: XCTestCase {
             XCTFail("Expected expression to throw")
         } catch {
             errorHandler(error)
+        }
+    }
+}
+
+private extension Data {
+    mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { rawBuffer in
+            append(contentsOf: rawBuffer.bindMemory(to: UInt8.self))
         }
     }
 }

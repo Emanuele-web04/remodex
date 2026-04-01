@@ -51,7 +51,6 @@ extension CodexService {
         do {
             token = try await resolveVoiceAuthToken()
         } catch {
-            // Refresh auth state so the Settings UI reflects the real token situation.
             Task { await refreshGPTAccountState() }
             throw error
         }

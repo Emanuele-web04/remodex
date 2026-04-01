@@ -19,6 +19,7 @@ struct TurnView: View {
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
     @State private var isShowingStatusSheet = false
+    @State private var isShowingRuntimeLogSheet = false
     @State private var isLoadingRepositoryDiff = false
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
@@ -158,6 +159,15 @@ struct TurnView: View {
                 },
                 isShowingPathSheet: $isShowingThreadPathSheet
             )
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    isShowingRuntimeLogSheet = true
+                } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                }
+                .accessibilityLabel("Runtime logs")
+            }
         }
         .overlay {
             if isShowingWorktreeHandoff {
@@ -307,6 +317,9 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
+        }
+        .sheet(isPresented: $isShowingRuntimeLogSheet) {
+            RuntimeDebugLogSheet()
         }
         .sheet(isPresented: $isShowingVoiceSetupSheet) {
             GPTVoiceSetupSheet()
@@ -1495,6 +1508,58 @@ struct TurnView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+private struct RuntimeDebugLogSheet: View {
+    @Environment(CodexService.self) private var codex
+    @Environment(\.dismiss) private var dismiss
+
+    private var combinedLogText: String {
+        codex.runtimeDebugLogEntries.joined(separator: "\n")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if codex.runtimeDebugLogEntries.isEmpty {
+                    ContentUnavailableView(
+                        "No Runtime Logs Yet",
+                        systemImage: "list.bullet.rectangle",
+                        description: Text("Start a Plan Mode turn and the RPC events will appear here.")
+                    )
+                } else {
+                    ScrollView {
+                        Text(combinedLogText)
+                            .font(AppFont.mono(.footnote))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                    }
+                    .background(Color(.systemBackground))
+                }
+            }
+            .navigationTitle("Runtime Logs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Clear") {
+                        codex.clearRuntimeDebugLog()
+                    }
+
+                    Button("Copy") {
+                        UIPasteboard.general.string = combinedLogText
+                    }
+                    .disabled(combinedLogText.isEmpty)
+                }
+            }
+        }
     }
 }
 
