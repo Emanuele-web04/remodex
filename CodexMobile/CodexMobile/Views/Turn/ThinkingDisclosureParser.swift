@@ -94,9 +94,11 @@ enum ThinkingDisclosureParser {
             let preamble = joinedThinkingBlock(from: preambleLines)
             if !preamble.isEmpty {
                 var firstSection = sections.removeFirst()
-                let mergedDetail = [preamble, firstSection.detail]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: "\n\n")
+                let mergedDetail = dedupeAdjacentParagraphs(
+                    [preamble, firstSection.detail]
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n\n")
+                )
                 firstSection = ThinkingDisclosureSection(
                     id: firstSection.id,
                     title: firstSection.title,
@@ -194,18 +196,19 @@ enum ThinkingDisclosureParser {
                 continue
             }
 
-            let mergedDetail: String
+            let mergedRaw: String
             if previous.detail == section.detail || section.detail.isEmpty {
-                mergedDetail = previous.detail
+                mergedRaw = previous.detail
             } else if previous.detail.isEmpty || section.detail.contains(previous.detail) {
-                mergedDetail = section.detail
+                mergedRaw = section.detail
             } else if previous.detail.contains(section.detail) {
-                mergedDetail = previous.detail
+                mergedRaw = previous.detail
             } else {
-                mergedDetail = [previous.detail, section.detail]
+                mergedRaw = [previous.detail, section.detail]
                     .filter { !$0.isEmpty }
                     .joined(separator: "\n\n")
             }
+            let mergedDetail = dedupeAdjacentParagraphs(mergedRaw)
 
             previous = ThinkingDisclosureSection(
                 id: previous.id,
@@ -216,5 +219,18 @@ enum ThinkingDisclosureParser {
         }
 
         return collapsed
+    }
+
+    /// Streaming snapshots sometimes repeat the same paragraph across duplicate summary anchors; keep one copy.
+    private static func dedupeAdjacentParagraphs(_ text: String) -> String {
+        let paragraphs = text
+            .components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var deduped: [String] = []
+        for paragraph in paragraphs where deduped.last != paragraph {
+            deduped.append(paragraph)
+        }
+        return deduped.joined(separator: "\n\n")
     }
 }

@@ -16,7 +16,7 @@ func remodexNormalizedCreatedBranchName(_ rawName: String) -> String {
     return "remodex/\(trimmedName)"
 }
 
-// Leaves "open elsewhere" branches selectable so the caller can surface the right alert or git error.
+// Disables rows for branches checked out in another worktree when we cannot open that worktree from here.
 func remodexCurrentBranchSelectionIsDisabled(
     branch: String,
     currentBranch: String,
@@ -28,7 +28,10 @@ func remodexCurrentBranchSelectionIsDisabled(
         return branch == currentBranch
     }
 
-    return false
+    guard gitBranchesCheckedOutElsewhere.contains(branch) else {
+        return false
+    }
+    return gitWorktreePathsByBranch[branch] == nil
 }
 
 private enum TurnGitBranchPickerMode: String, Identifiable {

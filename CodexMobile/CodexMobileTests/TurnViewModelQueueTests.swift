@@ -207,7 +207,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["turn/start"])
-        XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
+        XCTAssertTrue(service.runningThreadIDs.contains("thread-queue"))
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
         XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
     }
@@ -643,7 +643,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["turn/start"])
-        XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
+        XCTAssertTrue(service.runningThreadIDs.contains("thread-queue"))
         XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? true)
         XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-new")
     }

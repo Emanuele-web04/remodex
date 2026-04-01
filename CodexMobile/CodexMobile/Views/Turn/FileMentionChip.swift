@@ -270,7 +270,7 @@ struct FlowLayout: Layout {
 enum UserMessageParser {
     // Supports both legacy `@token` mentions and file paths with spaces ending in a file extension.
     private static let leadingFileMentionRegex = try? NSRegularExpression(
-        pattern: #"^@((?:[^@\n]+?\.[A-Za-z0-9]+)|(?:[^\s@]+))(?=[\s,.;:!?)\]}>]|$)"#
+        pattern: #"^@((?:[^@\n]+?\.[A-Za-z0-9]+(?::\d+(?::\d+)?)?)|(?:[^\s@]+))(?=[\s,.;:!?)\]}>]|$)"#
     )
 
     /// Splits a user message into leading `@path` mention tokens and the rest of the body.

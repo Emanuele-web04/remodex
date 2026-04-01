@@ -302,7 +302,7 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .userInputPrompt }.isEmpty)
     }
 
-    func testStructuredUserInputPromptPersistsAcrossRelaunchUntilResolved() {
+    func testStructuredUserInputPromptPersistsAcrossRelaunchUntilResolved() async throws {
         let suiteName = "CodexPlanModeTests.Persistence.\(UUID().uuidString)"
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
@@ -337,6 +337,9 @@ final class CodexPlanModeTests: XCTestCase {
                 includeJSONRPC: false
             )
         )
+
+        // persistMessages debounces ~250ms then saves off the main actor; relaunch must read after flush.
+        try await Task.sleep(nanoseconds: 400_000_000)
 
         let relaunchedService = makeService(suiteName: suiteName, reset: false)
         let promptMessages = relaunchedService.messages(for: threadID).filter { $0.kind == .userInputPrompt }

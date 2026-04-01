@@ -10,11 +10,12 @@ enum TurnMessageRegexCache {
     static let inlineAction = try? NSRegularExpression(
         pattern: #"(?i)^(edited|updated|added|created|deleted|removed|renamed|moved)\s+(.+?)$"#
     )
+    // Use non-raw strings so Swift interprets `\u{...}`; raw `#"..."#` leaves `\u` as regex literals and breaks compilation.
     static let inlineTotals = try? NSRegularExpression(
-        pattern: #"[+\u{FF0B}]\s*(\d+)\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\s*(\d+)"#
+        pattern: "[+\u{FF0B}]\\s*(\\d+)\\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\\s*(\\d+)"
     )
     static let trailingInlineTotals = try? NSRegularExpression(
-        pattern: #"\s*[+\u{FF0B}]\s*\d+\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\s*\d+\s*$"#
+        pattern: "\\s*[+\u{FF0B}]\\s*\\d+\\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\\s*\\d+\\s*$"
     )
     static let trailingLineColumn = try? NSRegularExpression(pattern: #":\d+(?::\d+)?$"#)
     static let fileLikeToken = try? NSRegularExpression(pattern: #"[A-Za-z0-9_+.-]+\.[A-Za-z0-9]+$"#)
@@ -32,7 +33,7 @@ enum TurnMessageRegexCache {
     )
     static let filenameWithLine = try? NSRegularExpression(pattern: #"^(.*\.[A-Za-z0-9]+):(\d+)(?::\d+)?$"#)
     static let inlineEditingRow = try? NSRegularExpression(
-        pattern: #"(?i)^(edited|updated|added|created|deleted|removed|renamed|moved)\s+.+\s+[+\u{FF0B}]\s*\d+\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\s*\d+\s*$"#
+        pattern: "(?i)^(edited|updated|added|created|deleted|removed|renamed|moved)\\s+.+\\s+[+\u{FF0B}]\\s*\\d+\\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\\s*\\d+\\s*$"
     )
     static let collapsibleNewlines = try? NSRegularExpression(pattern: #"\n{3,}"#)
     static let thinkingSummaryLine = try? NSRegularExpression(pattern: #"^\s*\*\*(.+?)\*\*\s*$"#)

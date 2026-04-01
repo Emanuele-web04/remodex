@@ -515,6 +515,8 @@ final class CodexThreadForkTests: XCTestCase {
             resolvedDefaults = isolatedDefaults
         }
         let service = CodexService(defaults: resolvedDefaults)
+        // Fork tests stub transport narrowly; immediate post-fork sync would call thread/list + thread/read.
+        service.syncRealtimeEnabled = false
         Self.retainedServices.append(service)
         return service
     }
