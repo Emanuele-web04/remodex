@@ -594,7 +594,7 @@ final class CodexService {
 
     let encoder: JSONEncoder
     let decoder: JSONDecoder
-    let messagePersistence = CodexMessagePersistence()
+    let messagePersistence: CodexMessagePersistence
     let aiChangeSetPersistence: AIChangeSetPersistence
     let threadListPersistence: CodexThreadListPersistence
     let skillsPersistence: CodexSkillsPersistence
@@ -640,17 +640,29 @@ final class CodexService {
         decoder: JSONDecoder = JSONDecoder(),
         defaults injectedDefaults: UserDefaults = .standard,
         userNotificationCenter: CodexUserNotificationCentering = UNUserNotificationCenter.current(),
-        remoteNotificationRegistrar: CodexRemoteNotificationRegistering = CodexApplicationRemoteNotificationRegistrar.shared
+        remoteNotificationRegistrar: CodexRemoteNotificationRegistering = CodexApplicationRemoteNotificationRegistrar.shared,
+        persistenceNamespaceOverride: String? = nil,
+        /// Unit tests that construct many short-lived services should disable this to avoid NWPathMonitor churn.
+        startsLocalRelayPathMonitor: Bool = true
     ) {
         let uiTestFixture = ProcessInfo.processInfo.arguments.contains("-CodexUITestsFixture")
         let defaults = uiTestFixture
             ? (UserDefaults(suiteName: "com.codexmobile.uitest.timelineFixture") ?? injectedDefaults)
             : injectedDefaults
 
-        let persistenceNamespace = Self.persistenceNamespace(for: defaults)
+        let persistenceNamespace: String
+        if let trimmed = persistenceNamespaceOverride?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty {
+            // Tests can pin the on-disk namespace when UserDefaults cannot persist `codex.persistenceNamespace`
+            // (simulator “Path not accessible” for arbitrary suite names).
+            persistenceNamespace = trimmed
+        } else {
+            persistenceNamespace = Self.persistenceNamespace(for: defaults)
+        }
         self.encoder = encoder
         self.decoder = decoder
         self.defaults = defaults
+        self.messagePersistence = CodexMessagePersistence(namespace: persistenceNamespace)
         self.threadListPersistence = CodexThreadListPersistence(namespace: persistenceNamespace)
         self.skillsPersistence = CodexSkillsPersistence(namespace: persistenceNamespace)
         self.aiChangeSetPersistence = AIChangeSetPersistence(namespace: persistenceNamespace)
@@ -829,7 +841,7 @@ final class CodexService {
         restorePersistedConnectionContextIfNeeded()
         restorePersistedThreadListSnapshotIfNeeded()
         rebuildThreadLookupCaches()
-        if !uiTestFixture {
+        if !uiTestFixture, startsLocalRelayPathMonitor {
             startLocalRelayPathMonitor()
         }
     }

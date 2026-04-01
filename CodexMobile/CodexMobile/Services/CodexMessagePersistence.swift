@@ -8,7 +8,12 @@ import CryptoKit
 import Foundation
 
 nonisolated struct CodexMessagePersistence {
+    // Serializes load/save and key material access. Detached `persistMessages` tasks can otherwise
+    // race with the next `CodexService` init on the main actor and corrupt CryptoKit / malloc state.
+    nonisolated(unsafe) private static let gate = NSLock()
+
     // v6 encrypts the on-device message cache while keeping backward-compatible legacy fallbacks.
+    private let namespace: String
     private let fileName = "codex-message-history-v6.bin"
     private let legacyFileNames = [
         "codex-message-history-v5.json",
@@ -18,11 +23,42 @@ nonisolated struct CodexMessagePersistence {
         "codex-message-history.json",
     ]
 
+    nonisolated init(namespace: String) {
+        self.namespace = namespace
+    }
+
+    private nonisolated var bundleSupportDirectory: URL {
+        let fm = FileManager.default
+        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? fm.temporaryDirectory
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.codexmobile.app"
+        return base.appendingPathComponent(bundleID, isDirectory: true)
+    }
+
+    private nonisolated var namespacedDirectory: URL {
+        bundleSupportDirectory.appendingPathComponent(namespace, isDirectory: true)
+    }
+
+    /// Reads namespaced files first, then pre-namespace flat files under the bundle directory (one-time migration).
+    private nonisolated var loadCandidateURLs: [URL] {
+        let names = [fileName] + legacyFileNames
+        let namespaced = names.map { namespacedDirectory.appendingPathComponent($0, isDirectory: false) }
+        let legacyFlat = names.map { bundleSupportDirectory.appendingPathComponent($0, isDirectory: false) }
+        return namespaced + legacyFlat
+    }
+
+    private nonisolated var primaryStoreURL: URL {
+        namespacedDirectory.appendingPathComponent(fileName, isDirectory: false)
+    }
+
     // Loads the saved message map from disk. Returns an empty store on failure.
     nonisolated func load() -> [String: [CodexMessage]] {
+        Self.gate.lock()
+        defer { Self.gate.unlock() }
+
         let decoder = JSONDecoder()
 
-        for fileURL in storeURLs {
+        for fileURL in loadCandidateURLs {
             guard let data = try? Data(contentsOf: fileURL) else {
                 continue
             }
@@ -43,29 +79,18 @@ nonisolated struct CodexMessagePersistence {
 
     // Persists all thread timelines atomically to avoid corrupt partial writes.
     nonisolated func save(_ value: [String: [CodexMessage]]) {
+        Self.gate.lock()
+        defer { Self.gate.unlock() }
+
         let encoder = JSONEncoder()
         guard let plaintext = try? encoder.encode(sanitizedForPersistence(value)),
               let data = encryptPersistedPayload(plaintext) else {
             return
         }
 
-        let fileURL = storeURL
+        let fileURL = primaryStoreURL
         ensureParentDirectoryExists(for: fileURL)
         try? data.write(to: fileURL, options: [.atomic])
-    }
-
-    private nonisolated var storeURL: URL {
-        storeURLs[0]
-    }
-
-    private nonisolated var storeURLs: [URL] {
-        let fm = FileManager.default
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? fm.temporaryDirectory
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.codexmobile.app"
-        let directory = base.appendingPathComponent(bundleID, isDirectory: true)
-        let names = [fileName] + legacyFileNames
-        return names.map { directory.appendingPathComponent($0, isDirectory: false) }
     }
 
     private nonisolated func ensureParentDirectoryExists(for fileURL: URL) {
@@ -90,12 +115,15 @@ nonisolated struct CodexMessagePersistence {
     }
 
     private nonisolated func messageHistoryKey() -> SymmetricKey {
+        // Caller must hold `gate` (load/save already do).
         if let storedKey = SecureStore.readData(for: CodexSecureKeys.messageHistoryKey) {
             return SymmetricKey(data: storedKey)
         }
 
         let newKey = SymmetricKey(size: .bits256)
-        let keyData = newKey.withUnsafeBytes { Data($0) }
+        let keyData = newKey.withUnsafeBytes { rawBuffer in
+            Data(rawBuffer)
+        }
         SecureStore.writeData(keyData, for: CodexSecureKeys.messageHistoryKey)
         return newKey
     }
