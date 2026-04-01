@@ -401,5 +401,4 @@ extension CodexMessage {
 
         return steps.contains { $0.status != .completed }
     }
-
 }

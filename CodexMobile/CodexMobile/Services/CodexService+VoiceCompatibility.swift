@@ -122,19 +122,20 @@ extension CodexService {
     }
 
     private func classifyMissingVoiceTokenState() -> CodexVoiceFailureReason {
-        if gptAccountSnapshot.hasActiveLogin || gptVoiceTemporarilyUnavailable {
-            return .voiceSyncInProgress
-        }
-
         if gptAccountSnapshot.needsReauth || gptAccountSnapshot.status == .expired {
             return .macReauthenticationRequired
+        }
+
+        if gptVoiceTemporarilyUnavailable {
+            return .voiceSyncInProgress
         }
 
         if gptAccountSnapshot.isAuthenticated && !gptAccountSnapshot.isVoiceTokenReady {
             return .voiceSyncInProgress
         }
 
-        if gptAccountSnapshot.status == .notLoggedIn
+        if gptAccountSnapshot.hasActiveLogin
+            || gptAccountSnapshot.status == .notLoggedIn
             || gptAccountSnapshot.status == .unknown {
             return .macLoginRequired
         }
