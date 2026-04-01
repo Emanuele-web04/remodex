@@ -367,6 +367,20 @@ final class CodexService {
     var lastRawMessage: String?
     var lastErrorMessage: String?
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
+
+    var hasAttemptedInitialAutoConnect = false
+    let autoReconnectBackoffNanoseconds: [UInt64] = [1_000_000_000, 3_000_000_000]
+    let reconnectSleepChunkNanoseconds: UInt64 = 100_000_000
+    var isRunningAutoReconnect = false
+    var isRunningManualReconnect = false
+    var shouldCancelManualReconnect = false
+    
+    // Test hooks keep reconnect verification fast without changing production retry behavior.
+    @ObservationIgnored var reconnectAttemptLimitOverride: Int?
+    @ObservationIgnored var connectOverride: ((CodexService, String) async throws -> Void)?
+    @ObservationIgnored var reconnectSleepOverride: ((UInt64) async -> Void)?
+    @ObservationIgnored var reconnectSleepChunkNanosecondsOverride: UInt64?
+
     // Per-thread queued drafts for client-side turn queueing while a run is active.
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
     // Per-thread queue pause state (active by default when absent).
@@ -384,6 +398,13 @@ final class CodexService {
     var selectedModelId: String?
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
+    var hasExplicitModelSelection = false
+    var hasExplicitReasoningEffortSelection = false
+    var availableConfigProfiles: [CodexConfigProfileOption] = []
+    var isLoadingConfigProfiles = false
+    var configProfilesErrorMessage: String?
+    var selectedConfigProfileName: String?
+    static let selectedConfigProfileDefaultsKey = "codex.selectedConfigProfile"
     // Per-chat runtime overrides let the composer diverge from app-wide defaults.
     var threadRuntimeOverridesByThreadID: [String: CodexThreadRuntimeOverride] = [:]
     var selectedAccessMode: CodexAccessMode = .onRequest

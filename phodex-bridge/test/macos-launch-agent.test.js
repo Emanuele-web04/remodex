@@ -373,6 +373,26 @@ test("resolveMacOSBridgeStartConfig falls back to the saved daemon relay config"
   });
 });
 
+test("resolveMacOSBridgeStartConfig infers a local relay URL when nothing is configured", () => {
+  withTempDaemonEnv(({ rootDir }) => {
+    const config = resolveMacOSBridgeStartConfig({
+      env: {
+        HOME: rootDir,
+        REMODEX_DEVICE_STATE_DIR: rootDir,
+      },
+      osImpl: {
+        hostname: () => "Zacks-Mac-Studio",
+      },
+      execFileSyncImpl() {
+        return "Zacks-Mac-Studio\n";
+      },
+    });
+
+    assert.equal(config.relayUrl, "ws://zacks-mac-studio.local:9100/relay");
+    assert.equal(config.convexSiteUrl, "https://determined-ladybug-18.convex.site");
+  });
+});
+
 test("getMacOSBridgeServiceStatus reports launchd + runtime metadata together", () => {
   withTempDaemonEnv(({ rootDir }) => {
     writePairingSession({ sessionId: "session-2" });

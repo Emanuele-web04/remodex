@@ -17,20 +17,14 @@ const { createCodexTransport } = require("./codex-transport");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
-const { handleDesktopRequest } = require("./desktop-handler");
-const { handleGitRequest } = require("./git-handler");
-const { handleThreadContextRequest } = require("./thread-context-handler");
-const { handleWorkspaceRequest } = require("./workspace-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
-const { createVoiceHandler, resolveVoiceAuth } = require("./voice-handler");
-const {
-  composeSanitizedAuthStatusFromSettledResults,
-} = require("./account-status");
+const { createVoiceHandler } = require("./voice-handler");
 const { createBridgePackageVersionStatusReader } = require("./package-version-status");
 const { createPushNotificationServiceClient } = require("./push-notification-service-client");
 const { createPushNotificationTracker } = require("./push-notification-tracker");
-const { createConvexHelperClient } = require("./convex-helper-client");
-const { createICloudHelperClient } = require("./icloud-helper-client");
+const { createAsyncHelperClient } = require("./async-helper-factory");
+const { createApplicationRouter } = require("./application-router");
+const { handleBridgeManagedHandshakeMessage, createBridgeManagedAccountHandler } = require("./bridge-managed-handlers");
 const {
   loadOrCreateBridgeDeviceState,
   resolveBridgeRelaySession,
@@ -472,47 +466,33 @@ function startBridge({
     asyncHelperClient.stop();
   }));
 
-  // Routes decrypted app payloads through the same bridge handlers as before.
-  function handleApplicationMessage(rawMessage, responseSender = sendApplicationResponse) {
-    if (handleBridgeManagedHandshakeMessage(rawMessage)) {
-      return;
-    }
-    if (handleBridgeManagedAccountRequest(rawMessage, responseSender)) {
-      return;
-    }
-    if (voiceHandler.handleVoiceRequest(rawMessage, responseSender)) {
-      return;
-    }
-    if (handleThreadContextRequest(rawMessage, responseSender)) {
-      return;
-    }
-    if (handleWorkspaceRequest(rawMessage, responseSender)) {
-      return;
-    }
-    if (notificationsHandler.handleNotificationsRequest(rawMessage, responseSender)) {
-      return;
-    }
-    if (handleDesktopRequest(rawMessage, responseSender, {
-      bundleId: config.codexBundleId,
-      appPath: config.codexAppPath,
-    })) {
-      return;
-    }
-    if (handleGitRequest(rawMessage, responseSender)) {
-      return;
-    }
-    desktopRefresher.handleInbound(rawMessage);
-    rolloutLiveMirror?.observeInbound(rawMessage);
-    rememberForwardedRequestMethod(rawMessage);
-    rememberThreadFromMessage("phone", rawMessage);
-    rememberAsyncResponseSender(rawMessage, responseSender);
-    codex.send(rawMessage);
-  }
-
-  // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
+    console.log("[remodex] OUTBOUND APPLICATION MESSAGE:", rawMessage);
     secureTransport.queueOutboundApplicationMessage(rawMessage, sendRelayWireMessage);
   }
+
+  const { handleBridgeManagedAccountRequest } = createBridgeManagedAccountHandler({
+    sendCodexRequest,
+    readBridgePackageVersionStatus,
+    getPendingAuthLogin: () => pendingAuthLogin,
+  });
+
+  const handleApplicationMessage = createApplicationRouter({
+    config,
+    codex,
+    voiceHandler,
+    notificationsHandler,
+    desktopRefresher,
+    rolloutLiveMirror,
+    handleBridgeManagedHandshakeMessage,
+    handleBridgeManagedAccountRequest,
+    rememberForwardedRequestMethod,
+    rememberThreadFromMessage,
+    rememberAsyncResponseSender,
+    getHandshakeState: () => codexHandshakeState,
+    forwardedInitializeRequestIds,
+    defaultResponseSender: sendApplicationResponse,
+  });
 
   function handleAsyncHelperRequest(message) {
     const rawMessage = readString(message?.payloadText);
@@ -543,136 +523,6 @@ function startBridge({
         message: (error && error.message) || "Bridge request failed.",
       });
     }
-  }
-
-  // ─── Bridge-owned auth snapshot ─────────────────────────────
-
-  // Handles the bridge-owned auth status wrappers without exposing tokens to the phone.
-  // This dispatcher stays synchronous so non-account messages can continue down the normal routing chain.
-  function handleBridgeManagedAccountRequest(rawMessage, sendResponse) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
-      return false;
-    }
-
-    const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
-    if (method !== "account/status/read"
-      && method !== "getAuthStatus"
-      && method !== "account/login/openOnMac"
-      && method !== "voice/resolveAuth") {
-      return false;
-    }
-
-    const requestId = parsed.id;
-    const shouldRespond = requestId != null;
-    readBridgeManagedAccountResult(method, parsed.params || {})
-      .then((result) => {
-        if (shouldRespond) {
-          sendResponse(JSON.stringify({ id: requestId, result }));
-        }
-      })
-      .catch((error) => {
-        if (shouldRespond) {
-          sendResponse(createJsonRpcErrorResponse(requestId, error, "auth_status_failed"));
-        }
-      });
-
-    return true;
-  }
-
-  // Resolves bridge-owned account helpers like status reads and Mac-side browser opening.
-  async function readBridgeManagedAccountResult(method, params) {
-    switch (method) {
-      case "account/status/read":
-      case "getAuthStatus":
-        return readSanitizedAuthStatus();
-      case "account/login/openOnMac":
-        return openPendingAuthLoginOnMac(params);
-      case "voice/resolveAuth":
-        return resolveVoiceAuth(sendCodexRequest);
-      default:
-        throw new Error(`Unsupported bridge-managed account method: ${method}`);
-    }
-  }
-
-  // Combines account/read + getAuthStatus into one safe snapshot for the phone UI.
-  // The two RPCs are settled independently so one transient failure does not hide the other.
-  async function readSanitizedAuthStatus() {
-    const [accountReadResult, authStatusResult, bridgeVersionInfoResult] = await Promise.allSettled([
-      sendCodexRequest("account/read", {
-        refreshToken: false,
-      }),
-      sendCodexRequest("getAuthStatus", {
-        includeToken: true,
-        refreshToken: true,
-      }),
-      readBridgePackageVersionStatus(),
-    ]);
-
-    return composeSanitizedAuthStatusFromSettledResults({
-      accountReadResult: accountReadResult.status === "fulfilled"
-        ? {
-          status: "fulfilled",
-          value: normalizeAccountRead(accountReadResult.value),
-        }
-        : accountReadResult,
-      authStatusResult,
-      loginInFlight: Boolean(pendingAuthLogin.loginId),
-      bridgeVersionInfo: bridgeVersionInfoResult.status === "fulfilled"
-        ? bridgeVersionInfoResult.value
-        : null,
-    });
-  }
-
-  // Opens the ChatGPT sign-in URL in the default browser on the bridge Mac.
-  async function openPendingAuthLoginOnMac(params) {
-    if (process.platform !== "darwin") {
-      const error = new Error("Opening ChatGPT sign-in on the bridge is only supported on macOS.");
-      error.errorCode = "unsupported_platform";
-      throw error;
-    }
-
-    const authUrl = readString(params?.authUrl) || pendingAuthLogin.authUrl;
-    if (!authUrl) {
-      const error = new Error("No pending ChatGPT sign-in URL is available on this bridge.");
-      error.errorCode = "missing_auth_url";
-      throw error;
-    }
-
-    await execFileAsync("open", [authUrl], { timeout: 15_000 });
-    return {
-      success: true,
-      openedOnMac: true,
-    };
-  }
-
-  function normalizeAccountRead(payload) {
-    if (!payload || typeof payload !== "object") {
-      return {
-        account: null,
-        requiresOpenaiAuth: true,
-      };
-    }
-
-    return {
-      account: payload.account && typeof payload.account === "object" ? payload.account : null,
-      requiresOpenaiAuth: Boolean(payload.requiresOpenaiAuth),
-    };
-  }
-
-  function createJsonRpcErrorResponse(requestId, error, defaultErrorCode) {
-    return JSON.stringify({
-      id: requestId,
-      error: {
-        code: -32000,
-        message: error?.userMessage || error?.message || "Bridge request failed.",
-        data: {
-          errorCode: error?.errorCode || defaultErrorCode,
-        },
-      },
-    });
   }
 
   function rememberForwardedRequestMethod(rawMessage) {
@@ -861,44 +711,6 @@ function startBridge({
     }));
   }
 
-  // The spawned/shared Codex app-server stays warm across phone reconnects.
-  // When iPhone reconnects it sends initialize again, but forwarding that to the
-  // already-initialized Codex transport only produces "Already initialized".
-  function handleBridgeManagedHandshakeMessage(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
-      return false;
-    }
-
-    const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
-    if (!method) {
-      return false;
-    }
-
-    if (method === "initialize" && parsed.id != null) {
-      if (codexHandshakeState !== "warm") {
-        forwardedInitializeRequestIds.add(String(parsed.id));
-        return false;
-      }
-
-      sendApplicationResponse(JSON.stringify({
-        id: parsed.id,
-        result: {
-          bridgeManaged: true,
-        },
-      }));
-      return true;
-    }
-
-    if (method === "initialized") {
-      return codexHandshakeState === "warm";
-    }
-
-    return false;
-  }
-
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
   function trackCodexHandshakeState(rawMessage) {
     let parsed = null;
@@ -1058,39 +870,6 @@ function startBridge({
       registration: buildMacRegistration(nextDeviceState),
     }));
   }
-}
-
-function createAsyncHelperClient({
-  config,
-  helperPath,
-  containerId,
-  convexSiteUrl,
-  getDeviceState,
-  deviceStateDir,
-  logPrefix,
-  onAsyncRequest,
-  onStatusChange,
-}) {
-  if (readString(convexSiteUrl)) {
-    return createConvexHelperClient({
-      enabled: true,
-      siteUrl: convexSiteUrl,
-      getDeviceState,
-      logPrefix,
-      onAsyncRequest,
-      onStatusChange,
-    });
-  }
-
-  return createICloudHelperClient({
-    enabled: Boolean(config.cloudAsyncEnabled),
-    helperPath,
-    containerId,
-    deviceStateDir,
-    logPrefix,
-    onAsyncRequest,
-    onStatusChange,
-  });
 }
 
 // Registers the canonical Mac identity and the one trusted iPhone allowed for auto-resolve.

@@ -13,7 +13,7 @@
 		09EDF3042523535331455D63 /* TurnSessionDiffSummaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCBD0C4093FA44C8EA2262D /* TurnSessionDiffSummaryTests.swift */; };
 		0C8A3C4AB865FAC563BFDBE4 /* UserMessageParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1F4B171BD25F45C03F9D85D /* UserMessageParserTests.swift */; };
 		22B3C4D5E6F708192A3B4C5D /* CodexFuzzyFileSearchDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B3C4D5E6F708192A3B4C5E /* CodexFuzzyFileSearchDecodeTests.swift */; };
-		177B77ED82379565C8ADE345 /* ContentViewModelReconnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0427832E46DA5F975CF40AAD /* ContentViewModelReconnectTests.swift */; };
+		177B77ED82379565C8ADE345 /* CodexServiceReconnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0427832E46DA5F975CF40AAD /* CodexServiceReconnectTests.swift */; };
 		208FA1AF404FD76928AF36EF /* CodexServiceTierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C693CC76681F41AC57DF429 /* CodexServiceTierTests.swift */; };
 		2A6D4B8C1E3F507192A4B6C8 /* CodexStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A6D4B8C1E3F507192A4B6C9 /* CodexStatusTests.swift */; };
 		26DADC3DBD589D17711176F0 /* TurnGitBranchSelectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69B8CC0F310E1345437A064D /* TurnGitBranchSelectorTests.swift */; };
@@ -86,7 +86,7 @@
 
 /* Begin PBXFileReference section */
 		01C35F4525902AA6B8DD6FBA /* TurnViewModelGitBranchWorktreeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnViewModelGitBranchWorktreeTests.swift; sourceTree = "<group>"; };
-		0427832E46DA5F975CF40AAD /* ContentViewModelReconnectTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentViewModelReconnectTests.swift; sourceTree = "<group>"; };
+		0427832E46DA5F975CF40AAD /* CodexServiceReconnectTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceReconnectTests.swift; sourceTree = "<group>"; };
 		0C693CC76681F41AC57DF429 /* CodexServiceTierTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceTierTests.swift; sourceTree = "<group>"; };
 		0D0DB1D9C8DC54FBF4C35312 /* CodexThreadRenamePersistenceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadRenamePersistenceTests.swift; sourceTree = "<group>"; };
 		11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnFileAutocompleteTokenTests.swift; sourceTree = "<group>"; };
@@ -206,7 +206,7 @@
 				6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */,
 				F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */,
 				7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */,
-				0427832E46DA5F975CF40AAD /* ContentViewModelReconnectTests.swift */,
+				0427832E46DA5F975CF40AAD /* CodexServiceReconnectTests.swift */,
 				B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */,
 				C1A2B3C4D5E6F708192A3B4F /* CodexCloudAsyncRuntimeSupportTests.swift */,
 				C3A4B5C6D7E8F90123456781 /* CodexCloudAsyncFallbackTests.swift */,
@@ -462,7 +462,7 @@
 				6F8E129A7BC34A12D45E6F70 /* CodexThreadStartProjectBindingTests.swift in Sources */,
 				F1B2C3D4E5F60718293A4B10 /* CodexGPTAccountTests.swift in Sources */,
 				7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */,
-				177B77ED82379565C8ADE345 /* ContentViewModelReconnectTests.swift in Sources */,
+				177B77ED82379565C8ADE345 /* CodexServiceReconnectTests.swift in Sources */,
 				B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */,
 				8CE11223A4B5C6D7E8F90123 /* SidebarRunBadgePerformanceTests.swift in Sources */,
 				4B3358CA7F0DD9ADB1B9E496 /* SidebarThreadsLoadingPresentationTests.swift in Sources */,

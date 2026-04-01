@@ -252,6 +252,87 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(planMessages[0].planState?.steps[0].status, .completed)
     }
 
+    func testFailedAndStoppedTurnCompletionNeutralizesPendingPlanAccessory() throws {
+        for terminalState in [CodexTurnTerminalState.failed, .stopped] {
+            let service = makeService()
+            let threadID = "thread-\(UUID().uuidString)"
+            let turnID = "turn-\(UUID().uuidString)"
+            let planText = "1. Inspect the current behavior\n2. Implement the fix\n3. Verify the result"
+            let planState = CodexPlanState(
+                explanation: "Break the work into safe slices.",
+                steps: [
+                    CodexPlanStep(step: "Inspect the current behavior", status: .completed),
+                    CodexPlanStep(step: "Implement the fix", status: .inProgress),
+                    CodexPlanStep(step: "Verify the result", status: .pending),
+                ]
+            )
+
+            service.messagesByThread[threadID] = [
+                CodexMessage(
+                    threadId: threadID,
+                    role: .system,
+                    kind: .plan,
+                    text: planText,
+                    turnId: turnID,
+                    isStreaming: true,
+                    planState: planState
+                )
+            ]
+
+            service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: terminalState)
+            service.markTurnCompleted(threadId: threadID, turnId: turnID)
+
+            let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+            XCTAssertEqual(planMessages.count, 1)
+
+            let planMessage = try XCTUnwrap(planMessages.first)
+            let cleanedPlanState = try XCTUnwrap(planMessage.planState)
+            XCTAssertFalse(planMessage.isStreaming)
+            XCTAssertEqual(planMessage.text, planText)
+            XCTAssertEqual(cleanedPlanState.explanation, planState.explanation)
+            XCTAssertEqual(cleanedPlanState.steps.map(\.status), [.completed])
+            XCTAssertFalse(planMessage.shouldDisplayPinnedPlanAccessory)
+        }
+    }
+
+    func testCompletedTurnCompletionLeavesCompletedPlanUnchanged() throws {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let planText = "1. Inspect the current behavior\n2. Implement the fix"
+        let planState = CodexPlanState(
+            explanation: "The plan finished successfully.",
+            steps: [
+                CodexPlanStep(step: "Inspect the current behavior", status: .completed),
+                CodexPlanStep(step: "Implement the fix", status: .completed),
+            ]
+        )
+
+        service.messagesByThread[threadID] = [
+            CodexMessage(
+                threadId: threadID,
+                role: .system,
+                kind: .plan,
+                text: planText,
+                turnId: turnID,
+                isStreaming: true,
+                planState: planState
+            )
+        ]
+
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.markTurnCompleted(threadId: threadID, turnId: turnID)
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+
+        let planMessage = try XCTUnwrap(planMessages.first)
+        let completedPlanState = try XCTUnwrap(planMessage.planState)
+        XCTAssertFalse(planMessage.shouldDisplayPinnedPlanAccessory)
+        XCTAssertEqual(planMessage.text, planText)
+        XCTAssertEqual(completedPlanState, planState)
+    }
+
     func testStructuredUserInputRequestCreatesAndResolvedRemovesPromptCard() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

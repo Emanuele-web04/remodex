@@ -118,7 +118,7 @@ function createConvexHelperClient({
 
   async function validateHealth(controller, runId, site) {
     const responseBody = await fetchJson({
-      endpointPath: "/remodex/health",
+      endpointPath: "/async/health",
       method: "GET",
       signal: controller.signal,
       label: "Convex health check",
@@ -154,7 +154,7 @@ function createConvexHelperClient({
 
   async function claimNextMessage(controller, runId, macDeviceId) {
     const responseBody = await fetchJson({
-      endpointPath: "/remodex/messages/outbound/claim",
+      endpointPath: "/async/outbound/claim",
       method: "GET",
       signal: controller.signal,
       label: "Convex claim request",
@@ -375,7 +375,7 @@ function createConvexHelperClient({
         return false;
       }
       return await postReply(
-        "/remodex/messages/outbound/respond",
+        "/async/outbound/respond",
         body,
         "Convex response request failed."
       );
@@ -395,7 +395,7 @@ function createConvexHelperClient({
         return false;
       }
       return await postReply(
-        "/remodex/messages/outbound/error",
+        "/async/outbound/error",
         body,
         "Convex error request failed."
       );
@@ -547,6 +547,8 @@ function verifyPhonePayloadSignature(ciphertextBuffer, signatureBase64, phonePub
   }
 
   try {
+    // crypto.verify() returns a boolean directly and is already timing-safe internally.
+    // No user-space comparison is performed here, so crypto.timingSafeEqual() is not needed.
     return verify(null, ciphertextBuffer, publicKey, signature);
   } catch {
     return false;

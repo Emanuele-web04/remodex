@@ -11,6 +11,9 @@ const {
   hasRelayConnectionGoneStale,
   sanitizeThreadHistoryImagesForRelay,
 } = require("../src/bridge");
+const {
+  handleBridgeManagedHandshakeMessage,
+} = require("../src/bridge-managed-handlers");
 
 test("hasRelayConnectionGoneStale returns true once the relay silence crosses the timeout", () => {
   assert.equal(
@@ -140,4 +143,49 @@ test("sanitizeThreadHistoryImagesForRelay leaves unrelated RPC payloads unchange
     sanitizeThreadHistoryImagesForRelay(rawMessage, "turn/start"),
     rawMessage
   );
+});
+
+test("handleBridgeManagedHandshakeMessage sends warm initialize responses to the provided sender", () => {
+  const responses = [];
+  const forwardedInitializeRequestIds = new Set();
+
+  const handled = handleBridgeManagedHandshakeMessage(JSON.stringify({
+    id: "req-1",
+    method: "initialize",
+    params: {},
+  }), {
+    codexHandshakeState: "warm",
+    forwardedInitializeRequestIds,
+    sendResponse(message) {
+      responses.push(JSON.parse(message));
+    },
+  });
+
+  assert.equal(handled, true);
+  assert.equal(forwardedInitializeRequestIds.size, 0);
+  assert.deepEqual(responses, [{
+    id: "req-1",
+    result: {
+      bridgeManaged: true,
+    },
+  }]);
+});
+
+test("handleBridgeManagedHandshakeMessage forwards cold initialize requests to Codex", () => {
+  const forwardedInitializeRequestIds = new Set();
+
+  const handled = handleBridgeManagedHandshakeMessage(JSON.stringify({
+    id: "req-2",
+    method: "initialize",
+    params: {},
+  }), {
+    codexHandshakeState: "cold",
+    forwardedInitializeRequestIds,
+    sendResponse() {
+      throw new Error("cold initialize should not be answered by the bridge");
+    },
+  });
+
+  assert.equal(handled, false);
+  assert.deepEqual([...forwardedInitializeRequestIds], ["req-2"]);
 });

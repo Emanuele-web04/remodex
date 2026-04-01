@@ -195,7 +195,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
                     id: .string(UUID().uuidString),
                     result: .object([
                         "data": .array(isArchived ? [] : [
-                            makeThreadJSON(id: "thread-live", title: "Live thread"),
+                            self.makeThreadJSON(id: "thread-live", title: "Live thread"),
                         ]),
                         "nextCursor": .null,
                     ]),
@@ -318,7 +318,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
                 return RPCMessage(
                     id: .string(UUID().uuidString),
                     result: .object([
-                        "thread": makeThreadJSON(id: "thread-stale", title: "Recovered thread"),
+                        "thread": self.makeThreadJSON(id: "thread-stale", title: "Recovered thread"),
                     ]),
                     includeJSONRPC: false
                 )
@@ -328,8 +328,8 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
                     id: .string(UUID().uuidString),
                     result: .object([
                         "data": .array(isArchived ? [] : [
-                            makeThreadJSON(id: "thread-stale", title: "Recovered thread"),
-                            makeThreadJSON(id: "thread-other", title: "Other thread"),
+                            self.makeThreadJSON(id: "thread-stale", title: "Recovered thread"),
+                            self.makeThreadJSON(id: "thread-other", title: "Other thread"),
                         ]),
                         "nextCursor": .null,
                     ]),
@@ -370,7 +370,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
                 return RPCMessage(
                     id: .string(UUID().uuidString),
                     result: .object([
-                        "thread": makeThreadJSON(id: "thread-retry", title: "Retry thread"),
+                        "thread": self.makeThreadJSON(id: "thread-retry", title: "Retry thread"),
                     ]),
                     includeJSONRPC: false
                 )

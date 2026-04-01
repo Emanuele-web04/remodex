@@ -92,12 +92,59 @@ extension CodexService {
     func setSelectedModelId(_ modelId: String?) {
         let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
         selectedModelId = (normalized?.isEmpty == false) ? normalized : nil
+        hasExplicitModelSelection = selectedModelId != nil
         normalizeRuntimeSelectionsAfterModelsUpdate()
+    }
+
+    func refreshConfigProfiles(cwd: String? = nil) async {
+        isLoadingConfigProfiles = true
+        defer { isLoadingConfigProfiles = false }
+
+        do {
+            var params: RPCObject = [
+                "includeLayers": .bool(false),
+            ]
+            if let normalizedCWD = cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !normalizedCWD.isEmpty {
+                params["cwd"] = .string(normalizedCWD)
+            }
+
+            let response = try await sendRequest(
+                method: "config/read",
+                params: .object(params)
+            )
+
+            guard let result = response.result,
+                  let decodedConfig = decodeModel(CodexConfigReadPayload.self, from: result) else {
+                throw CodexServiceError.invalidResponse("config/read response missing config")
+            }
+
+            availableConfigProfiles = decodedConfig.availableProfiles
+            configProfilesErrorMessage = nil
+
+            if let selectedConfigProfileName,
+               !availableConfigProfiles.contains(where: { $0.id == selectedConfigProfileName }) {
+                self.selectedConfigProfileName = nil
+                persistRuntimeSelections()
+            }
+        } catch {
+            availableConfigProfiles = []
+            let normalized = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            configProfilesErrorMessage = normalized.isEmpty ? "Unable to load profiles" : normalized
+        }
+    }
+
+    func setSelectedConfigProfileName(_ profileName: String?) {
+        let normalized = profileName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        selectedConfigProfileName = (normalized?.isEmpty == false) ? normalized : nil
+        persistRuntimeSelections()
+        scheduleDeferredModelListRefresh()
     }
 
     func setSelectedReasoningEffort(_ effort: String?) {
         let normalized = effort?.trimmingCharacters(in: .whitespacesAndNewlines)
         selectedReasoningEffort = (normalized?.isEmpty == false) ? normalized : nil
+        hasExplicitReasoningEffortSelection = selectedReasoningEffort != nil
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
@@ -218,6 +265,12 @@ extension CodexService {
             return selected
         }
 
+        if selectedConfigProfileName != nil,
+           !hasExplicitModelSelection,
+           !hasExplicitReasoningEffortSelection {
+            return nil
+        }
+
         if let selected = selectedReasoningEffort,
            supported.contains(selected) {
             return selected
@@ -235,8 +288,71 @@ extension CodexService {
         return model.supportedReasoningEfforts.first?.reasoningEffort
     }
 
+    // Maps Codex model IDs to GLM equivalents when using a GLM profile.
+    // This allows the UI to display familiar OpenAI model names while sending
+    // the appropriate GLM model ID to the backend.
+    private static let glmModelMapping: [String: String] = [
+        "gpt-5.4": "glm-5",
+        "gpt-5.4-mini": "glm-4-plus",
+        "gpt-5.3": "glm-5",
+        "gpt-5.3-mini": "glm-4-plus",
+        "gpt-5.2": "glm-5",
+        "gpt-5.2-mini": "glm-4-plus",
+        "gpt-5.1": "glm-5.1",
+        "gpt-5.1-mini": "glm-4.7",
+        "gpt-5": "glm-5",
+        "gpt-5-mini": "glm-4-plus",
+        "gpt-4.1": "glm-4.1",
+        "gpt-4.1-mini": "glm-4.7",
+        "gpt-4o": "glm-4",
+        "gpt-4o-mini": "glm-4.7",
+        "o4-mini": "glm-4.7",
+        "o3-mini": "glm-4.7",
+    ]
+
+    // Returns true if the current profile is a GLM-based provider.
+    private var isUsingGLMProfile: Bool {
+        guard let profile = selectedConfigProfileName else { return false }
+        return profile.lowercased().hasPrefix("glm") || profile.lowercased().hasPrefix("zai-glm")
+    }
+
+    // Translates a model ID to the GLM equivalent when using a GLM profile.
+    private func mappedModelIdForGLM(_ modelId: String) -> String {
+        guard isUsingGLMProfile else { return modelId }
+        // Check for exact match first
+        if let mapped = Self.glmModelMapping[modelId] {
+            return mapped
+        }
+        // Try matching without version suffix (e.g., "gpt-5.4" matches "gpt-5.4-mini")
+        let baseModelId = modelId.components(separatedBy: "-").first ?? modelId
+        if let mapped = Self.glmModelMapping[baseModelId] {
+            return mapped
+        }
+        // Default fallback to glm-5 for unknown GPT models
+        if modelId.lowercased().hasPrefix("gpt") || modelId.lowercased().hasPrefix("o") {
+            return "glm-5"
+        }
+        return modelId
+    }
+
     func runtimeModelIdentifierForTurn() -> String? {
-        selectedModelOption()?.model
+        if selectedConfigProfileName != nil, !hasExplicitModelSelection {
+            return nil
+        }
+        let rawModelId = selectedModelOption()?.model
+        guard let modelId = rawModelId else { return nil }
+        return mappedModelIdForGLM(modelId)
+    }
+
+    func runtimeConfigOverrideForThreadStart() -> JSONValue? {
+        guard let selectedConfigProfileName,
+              !selectedConfigProfileName.isEmpty else {
+            return nil
+        }
+
+        return .object([
+            "profile": .string(selectedConfigProfileName),
+        ])
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
@@ -495,13 +611,21 @@ private extension CodexService {
     }
 
     func persistRuntimeSelections() {
-        if let selectedModelId, !selectedModelId.isEmpty {
+        if hasExplicitModelSelection,
+           let selectedModelId, !selectedModelId.isEmpty {
             defaults.set(selectedModelId, forKey: Self.selectedModelIdDefaultsKey)
         } else {
             defaults.removeObject(forKey: Self.selectedModelIdDefaultsKey)
         }
 
-        if let selectedReasoningEffort, !selectedReasoningEffort.isEmpty {
+        if let selectedConfigProfileName, !selectedConfigProfileName.isEmpty {
+            defaults.set(selectedConfigProfileName, forKey: Self.selectedConfigProfileDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.selectedConfigProfileDefaultsKey)
+        }
+
+        if hasExplicitReasoningEffortSelection,
+           let selectedReasoningEffort, !selectedReasoningEffort.isEmpty {
             defaults.set(selectedReasoningEffort, forKey: Self.selectedReasoningEffortDefaultsKey)
         } else {
             defaults.removeObject(forKey: Self.selectedReasoningEffortDefaultsKey)
@@ -525,5 +649,59 @@ private extension CodexService {
         }
 
         defaults.set(encodedOverrides, forKey: Self.threadRuntimeOverridesDefaultsKey)
+    }
+}
+
+private struct CodexConfigReadPayload: Decodable {
+    let config: CodexConfigReadConfig
+
+    var availableProfiles: [CodexConfigProfileOption] {
+        (config.profiles ?? [:])
+            .map { key, value in
+                CodexConfigProfileOption(
+                    id: key,
+                    model: value.model,
+                    modelProvider: value.modelProvider
+                )
+            }
+            .sorted { lhs, rhs in
+                lhs.id.localizedCaseInsensitiveCompare(rhs.id) == .orderedAscending
+            }
+    }
+}
+
+struct CodexConfigProfileOption: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let model: String?
+    let modelProvider: String?
+
+    var detailText: String? {
+        if let model {
+            if let provider = modelProvider {
+                return "Uses \(model) (\(provider)) for new chats."
+            }
+            return "Uses \(model) for new chats."
+        }
+        return nil
+    }
+
+    init(id: String, model: String?, modelProvider: String?) {
+        self.id = id
+        self.model = model
+        self.modelProvider = modelProvider
+    }
+}
+
+private struct CodexConfigReadConfig: Decodable {
+    let profiles: [String: CodexConfigReadProfile]?
+}
+
+private struct CodexConfigReadProfile: Decodable {
+    let model: String?
+    let modelProvider: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case model
+        case modelProvider = "model_provider"
     }
 }

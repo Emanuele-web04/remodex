@@ -246,14 +246,14 @@ final class CodexCloudAsyncTransport: CodexAsyncRequestTransporting {
             params: params,
             includeJSONRPC: false
         )
-        let requestId = cloudAsyncRequestIDString(from: requestID)
+        let requestId = CodexOffLANAsyncMechanics.requestIDString(from: requestID)
         let payloadData = try encoder.encode(requestMessage)
-        let encryptedPayload = try encryptPayload(payloadData, secret: context.sharedSecret)
-        let signature = try signPayload(encryptedPayload, privateKeyBase64: service.phoneIdentityState.phoneIdentityPrivateKey)
+        let encryptedPayload = try CodexOffLANAsyncMechanics.encryptPayload(payloadData, secret: context.sharedSecret)
+        let signature = try CodexOffLANAsyncMechanics.signPayload(encryptedPayload, privateKeyBase64: service.phoneIdentityState.phoneIdentityPrivateKey)
         let outboundRecord = CKRecord(recordType: CodexCloudAsyncRecordType.outbound)
         outboundRecord[CodexCloudAsyncRecordField.requestId] = requestId as CKRecordValue
         outboundRecord[CodexCloudAsyncRecordField.messageId] = UUID().uuidString as CKRecordValue
-        if let threadId = threadId(for: method, params: params) {
+        if let threadId = CodexOffLANAsyncMechanics.threadId(for: method, params: params) {
             outboundRecord[CodexCloudAsyncRecordField.threadId] = threadId as CKRecordValue
         }
         outboundRecord[CodexCloudAsyncRecordField.fromDeviceId] = context.phoneDeviceId as CKRecordValue
@@ -266,7 +266,7 @@ final class CodexCloudAsyncTransport: CodexAsyncRequestTransporting {
         outboundRecord[CodexCloudAsyncRecordField.expiresAt] = Date().addingTimeInterval(60 * 60) as CKRecordValue
         outboundRecord[CodexCloudAsyncRecordField.idempotencyKey] = "\(requestId)|\(context.phoneDeviceId)" as CKRecordValue
         _ = try await save(record: outboundRecord)
-        if let threadId = threadId(for: method, params: params) {
+        if let threadId = CodexOffLANAsyncMechanics.threadId(for: method, params: params) {
             try await upsertConversationRecord(threadId: threadId, macDeviceId: context.macDeviceId)
         }
 
@@ -300,11 +300,11 @@ final class CodexCloudAsyncTransport: CodexAsyncRequestTransporting {
             error: nil
         )
         let payloadData = try encoder.encode(notificationMessage)
-        let encryptedPayload = try encryptPayload(payloadData, secret: context.sharedSecret)
-        let signature = try signPayload(encryptedPayload, privateKeyBase64: service.phoneIdentityState.phoneIdentityPrivateKey)
+        let encryptedPayload = try CodexOffLANAsyncMechanics.encryptPayload(payloadData, secret: context.sharedSecret)
+        let signature = try CodexOffLANAsyncMechanics.signPayload(encryptedPayload, privateKeyBase64: service.phoneIdentityState.phoneIdentityPrivateKey)
         let outboundRecord = CKRecord(recordType: CodexCloudAsyncRecordType.outbound)
         outboundRecord[CodexCloudAsyncRecordField.messageId] = UUID().uuidString as CKRecordValue
-        if let threadId = threadId(for: method, params: params) {
+        if let threadId = CodexOffLANAsyncMechanics.threadId(for: method, params: params) {
             outboundRecord[CodexCloudAsyncRecordField.threadId] = threadId as CKRecordValue
         }
         outboundRecord[CodexCloudAsyncRecordField.fromDeviceId] = context.phoneDeviceId as CKRecordValue
@@ -317,7 +317,7 @@ final class CodexCloudAsyncTransport: CodexAsyncRequestTransporting {
         outboundRecord[CodexCloudAsyncRecordField.expiresAt] = Date().addingTimeInterval(30 * 60) as CKRecordValue
         outboundRecord[CodexCloudAsyncRecordField.idempotencyKey] = "notification|\(UUID().uuidString)" as CKRecordValue
         _ = try await save(record: outboundRecord)
-        if let threadId = threadId(for: method, params: params) {
+        if let threadId = CodexOffLANAsyncMechanics.threadId(for: method, params: params) {
             try await upsertConversationRecord(threadId: threadId, macDeviceId: context.macDeviceId)
         }
     }
@@ -404,16 +404,13 @@ private extension CodexCloudAsyncTransport {
     }
 
     func pollForResponse(requestId: String, phoneDeviceId: String) async throws -> CKRecord? {
-        let startedAt = Date()
-        var nextDelay = initialPollDelayNanoseconds
-        while Date().timeIntervalSince(startedAt) < TimeInterval(responseTimeoutNanoseconds) / 1_000_000_000 {
-            if let responseRecord = try await fetchResponseRecord(requestId: requestId, phoneDeviceId: phoneDeviceId) {
-                return responseRecord
-            }
-            try await Task.sleep(nanoseconds: nextDelay)
-            nextDelay = min(maxPollDelayNanoseconds, nextDelay + 500_000_000)
+        try await CodexOffLANAsyncMechanics.pollForResponse(
+            responseTimeoutNanoseconds: responseTimeoutNanoseconds,
+            initialPollDelayNanoseconds: initialPollDelayNanoseconds,
+            maxPollDelayNanoseconds: maxPollDelayNanoseconds
+        ) {
+            try await self.fetchResponseRecord(requestId: requestId, phoneDeviceId: phoneDeviceId)
         }
-        return nil
     }
 
     func fetchResponseRecord(requestId: String, phoneDeviceId: String) async throws -> CKRecord? {
@@ -475,7 +472,7 @@ private extension CodexCloudAsyncTransport {
             throw CodexCloudAsyncTransportError.invalidRecord("Cloud async response record is incomplete.")
         }
         let encryptedPayload = Data(base64EncodedOrEmpty: ciphertext)
-        let verified = try verifyPayload(
+        let verified = try CodexOffLANAsyncMechanics.verifyPayload(
             encryptedPayload,
             signatureBase64: signature,
             publicKeyBase64: macIdentityPublicKey
@@ -483,11 +480,39 @@ private extension CodexCloudAsyncTransport {
         guard verified else {
             throw CodexCloudAsyncTransportError.invalidSignature
         }
-        let plaintext = try decryptPayload(encryptedPayload, secret: sharedSecret)
+        let plaintext = try CodexOffLANAsyncMechanics.decryptPayload(encryptedPayload, secret: sharedSecret)
         return try decoder.decode(RPCMessage.self, from: plaintext)
     }
 
-    func encryptPayload(_ payload: Data, secret: SymmetricKey) throws -> Data {
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+enum CodexOffLANAsyncMechanics {
+    static func pollForResponse<T>(
+        responseTimeoutNanoseconds: UInt64,
+        initialPollDelayNanoseconds: UInt64,
+        maxPollDelayNanoseconds: UInt64,
+        fetchRecord: () async throws -> T?
+    ) async throws -> T? {
+        let startedAt = Date()
+        var nextDelay = initialPollDelayNanoseconds
+        while Date().timeIntervalSince(startedAt) < TimeInterval(responseTimeoutNanoseconds) / 1_000_000_000 {
+            if let responseRecord = try await fetchRecord() {
+                return responseRecord
+            }
+            try await Task.sleep(nanoseconds: nextDelay)
+            nextDelay = min(maxPollDelayNanoseconds, nextDelay + 500_000_000)
+        }
+        return nil
+    }
+
+    static func encryptPayload(_ payload: Data, secret: SymmetricKey) throws -> Data {
         let sealedBox = try AES.GCM.seal(payload, using: secret)
         guard let combined = sealedBox.combined else {
             throw CodexCloudAsyncTransportError.decryptFailed
@@ -495,7 +520,7 @@ private extension CodexCloudAsyncTransport {
         return combined
     }
 
-    func decryptPayload(_ payload: Data, secret: SymmetricKey) throws -> Data {
+    static func decryptPayload(_ payload: Data, secret: SymmetricKey) throws -> Data {
         guard let sealedBox = try? AES.GCM.SealedBox(combined: payload) else {
             throw CodexCloudAsyncTransportError.decryptFailed
         }
@@ -505,7 +530,7 @@ private extension CodexCloudAsyncTransport {
         return plaintext
     }
 
-    func signPayload(_ payload: Data, privateKeyBase64: String) throws -> String {
+    static func signPayload(_ payload: Data, privateKeyBase64: String) throws -> String {
         let privateKey = try Curve25519.Signing.PrivateKey(
             rawRepresentation: Data(base64EncodedOrEmpty: privateKeyBase64)
         )
@@ -513,20 +538,20 @@ private extension CodexCloudAsyncTransport {
         return signature.base64EncodedString()
     }
 
-    func verifyPayload(_ payload: Data, signatureBase64: String, publicKeyBase64: String) throws -> Bool {
+    static func verifyPayload(_ payload: Data, signatureBase64: String, publicKeyBase64: String) throws -> Bool {
         let publicKey = try Curve25519.Signing.PublicKey(
             rawRepresentation: Data(base64EncodedOrEmpty: publicKeyBase64)
         )
         return publicKey.isValidSignature(Data(base64EncodedOrEmpty: signatureBase64), for: payload)
     }
 
-    func threadId(for method: String, params: JSONValue?) -> String? {
+    static func threadId(for _: String, params: JSONValue?) -> String? {
         let object = params?.objectValue
         return object?["threadId"]?.stringValue
             ?? object?["thread_id"]?.stringValue
     }
 
-    func cloudAsyncRequestIDString(from id: JSONValue) -> String {
+    static func requestIDString(from id: JSONValue) -> String {
         switch id {
         case .string(let value):
             return value
@@ -542,10 +567,11 @@ private extension CodexCloudAsyncTransport {
             return UUID().uuidString
         }
     }
-}
 
-private extension String {
-    var nilIfEmpty: String? {
-        trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : trimmingCharacters(in: .whitespacesAndNewlines)
+    static func idempotencyKey(requestId: String?, messageId: String, fromDeviceId: String) -> String {
+        if let requestId {
+            return "\(requestId)|\(fromDeviceId)"
+        }
+        return "notification|\(messageId)|\(fromDeviceId)"
     }
 }

@@ -12,10 +12,14 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         let params = CodexThreadStartProjectBinding.makeThreadStartParams(
             modelIdentifier: "gpt-5",
             preferredProjectPath: "/Users/me/work/project",
-            serviceTier: "fast"
+            serviceTier: "fast",
+            config: .object([
+                "profile": .string("zai-glm5"),
+            ])
         )
 
         XCTAssertEqual(params["model"]?.stringValue, "gpt-5")
+        XCTAssertEqual(params["config"]?.objectValue?["profile"]?.stringValue, "zai-glm5")
         XCTAssertEqual(params["cwd"]?.stringValue, "/Users/me/work/project")
         XCTAssertEqual(params["serviceTier"]?.stringValue, "fast")
     }
@@ -25,7 +29,8 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         let params = CodexThreadStartProjectBinding.makeThreadStartParams(
             modelIdentifier: nil,
             preferredProjectPath: normalized,
-            serviceTier: nil
+            serviceTier: nil,
+            config: nil
         )
 
         XCTAssertNil(params["cwd"])
@@ -37,7 +42,8 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         let params = CodexThreadStartProjectBinding.makeThreadStartParams(
             modelIdentifier: nil,
             preferredProjectPath: normalized,
-            serviceTier: nil
+            serviceTier: nil,
+            config: nil
         )
 
         XCTAssertNil(params["cwd"])

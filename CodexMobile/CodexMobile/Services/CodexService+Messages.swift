@@ -2358,6 +2358,17 @@ extension CodexService {
                 didMutate = true
             }
 
+            let terminalState = resolvedTurnId.flatMap { terminalStateByTurnID[$0] }
+            if let resolvedTurnId,
+               let terminalState,
+               (terminalState == .failed || terminalState == .stopped),
+               reconcilePlanMessagesAfterTurnCompletion(
+                   in: &threadMessages,
+                   turnId: resolvedTurnId
+               ) {
+                didMutate = true
+            }
+
             if didMutate {
                 messagesByThread[threadId] = threadMessages
             }
@@ -2384,6 +2395,39 @@ extension CodexService {
         // notifications (e.g. turn/diff/updated emitted right after turn/completed).
         persistMessages()
         updateCurrentOutput(for: threadId)
+    }
+
+    // Clears transient plan state after failed or stopped turns so the card stays visible
+    // without still presenting as an active pending plan.
+    private func reconcilePlanMessagesAfterTurnCompletion(
+        in threadMessages: inout [CodexMessage],
+        turnId: String
+    ) -> Bool {
+        var didMutate = false
+
+        for index in threadMessages.indices where threadMessages[index].role == .system
+            && threadMessages[index].kind == .plan
+            && threadMessages[index].turnId == turnId {
+            if threadMessages[index].isStreaming {
+                threadMessages[index].isStreaming = false
+                didMutate = true
+            }
+
+            guard var planState = threadMessages[index].planState else {
+                continue
+            }
+
+            let completedSteps = planState.steps.filter { $0.status == .completed }
+            guard completedSteps.count != planState.steps.count else {
+                continue
+            }
+
+            planState.steps = completedSteps
+            threadMessages[index].planState = planState
+            didMutate = true
+        }
+
+        return didMutate
     }
 
     // Converts all pending streaming bubbles to completed state after transport failures.
@@ -2422,22 +2466,6 @@ extension CodexService {
     }
 }
 
-extension CodexService {
-    func persistMessages() {
-        messagePersistenceDebounceTask?.cancel()
-        messagePersistenceDebounceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            guard !Task.isCancelled, let self else { return }
-
-            let snapshot = self.messagesByThread
-            self.messagePersistenceDebounceTask = nil
-
-            Task.detached { [messagePersistence] in
-                messagePersistence.save(snapshot)
-            }
-        }
-    }
-}
 
 // ─── Private helpers ──────────────────────────────────────────
 
@@ -2985,4 +3013,21 @@ extension CodexService {
         return existingText + incomingDelta
     }
 
+}
+
+extension CodexService {
+    func persistMessages() {
+        messagePersistenceDebounceTask?.cancel()
+        messagePersistenceDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled, let self else { return }
+
+            let snapshot = self.messagesByThread
+            self.messagePersistenceDebounceTask = nil
+
+            Task.detached { [messagePersistence] in
+                messagePersistence.save(snapshot)
+            }
+        }
+    }
 }

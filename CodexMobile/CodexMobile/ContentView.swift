@@ -41,8 +41,7 @@ struct ContentView: View {
                 guard hasSeenOnboarding, !isShowingManualScanner else {
                     return
                 }
-                await viewModel.performLaunchConnectSequence(
-                    codex: codex,
+                await codex.performLaunchConnectSequence(
                     e2ePairing: e2ePairingLaunchConfiguration
                 )
             }
@@ -99,7 +98,7 @@ struct ContentView: View {
                             return
                         }
 
-                        await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
+                        await codex.attemptAutoReconnectOnForegroundIfNeeded()
                         await subscriptionRefresh
                     }
                 }
@@ -109,7 +108,7 @@ struct ContentView: View {
                     return
                 }
                 Task {
-                    await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
+                    await codex.attemptAutoReconnectOnForegroundIfNeeded()
                 }
             }
             .onChange(of: codex.isConnected) { wasConnected, isNowConnected in
@@ -226,9 +225,8 @@ struct ContentView: View {
                     isShowingManualScanner = false
                     hasDismissedAutomaticScanner = false
                     scannerCanReturnToOnboarding = false
-                    await viewModel.connectToRelay(
-                        pairingPayload: pairingPayload,
-                        codex: codex
+                    await codex.connectToRelay(
+                        pairingPayload: pairingPayload
                     )
                 }
             }
@@ -290,7 +288,7 @@ struct ContentView: View {
                 .id(thread.id)
                 .environment(\.reconnectAction, {
                     Task {
-                        await viewModel.toggleConnection(codex: codex)
+                        await codex.toggleConnection()
                     }
                 })
                 .toolbar {
@@ -312,7 +310,7 @@ struct ContentView: View {
                     }
 
                     Task {
-                        await viewModel.toggleConnection(codex: codex)
+                        await codex.toggleConnection()
                     }
                 }
             ) {
@@ -457,10 +455,10 @@ struct ContentView: View {
         }
 
         if codex.secureConnectionState == .rePairRequired {
-            return !viewModel.isAttemptingManualReconnect && !isPreparingManualScanner
+            return !codex.isAttemptingManualReconnect && !isPreparingManualScanner
         }
 
-        if viewModel.isAttemptingAutoReconnect || shouldShowReconnectShell || isPreparingManualScanner {
+        if codex.isAttemptingAutoReconnect || shouldShowReconnectShell || isPreparingManualScanner {
             return false
         }
 
@@ -472,8 +470,8 @@ struct ContentView: View {
         codex.hasReconnectCandidate
             && !isShowingManualScanner
             && (codex.isConnecting
-                || viewModel.isAttemptingManualReconnect
-                || viewModel.isAttemptingAutoReconnect
+                || codex.isAttemptingManualReconnect
+                || codex.isAttemptingAutoReconnect
                 || codex.shouldAutoReconnectOnForeground
                 || isRetryingSavedPairing
                 || hasIdleSavedPairingRecovery)
@@ -483,7 +481,7 @@ struct ContentView: View {
     private var homeConnectionPhase: CodexConnectionPhase {
         // Only manual reconnect should force a busy shell here; background auto-retry can sit in backoff
         // while the Mac is asleep, and that should still read as offline until a real connect starts.
-        if viewModel.isAttemptingManualReconnect && !codex.isConnected {
+        if codex.isAttemptingManualReconnect && !codex.isConnected {
             return .connecting
         }
         return codex.connectionPhase
@@ -505,7 +503,7 @@ struct ContentView: View {
         }
 
         return !codex.isConnecting
-            && !viewModel.isAttemptingAutoReconnect
+            && !codex.isAttemptingAutoReconnect
             && !codex.shouldAutoReconnectOnForeground
             && !isRetryingSavedPairing
     }
@@ -558,7 +556,7 @@ struct ContentView: View {
         isRetryingBridgeUpdate = true
 
         Task {
-            await viewModel.toggleConnection(codex: codex)
+            await codex.toggleConnection()
             await MainActor.run {
                 isRetryingBridgeUpdate = false
             }
@@ -583,7 +581,7 @@ struct ContentView: View {
         isShowingManualScanner = true
 
         Task {
-            await viewModel.stopAutoReconnectForManualScan(codex: codex)
+            await codex.stopAutoReconnectForManualScan()
         }
     }
 

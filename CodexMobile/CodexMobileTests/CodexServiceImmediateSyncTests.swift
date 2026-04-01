@@ -61,9 +61,7 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
         service.requestImmediateSync(threadId: "thread-b")
         service.requestImmediateSync(threadId: "thread-c")
 
-        while service.pendingImmediateSyncTask != nil {
-            await Task.yield()
-        }
+        await waitUntil { service.pendingImmediateSyncTask == nil }
 
         XCTAssertEqual(threadListRequestCount, 1)
         XCTAssertEqual(readThreadIDs, ["thread-c"])
@@ -124,9 +122,7 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
         await Task.yield()
         service.requestImmediateSync(threadId: "thread-c")
 
-        while service.pendingImmediateSyncTask != nil {
-            await Task.yield()
-        }
+        await waitUntil { service.pendingImmediateSyncTask == nil }
 
         XCTAssertEqual(activeListRequestCount, 1)
         XCTAssertEqual(readThreadIDs, ["thread-c"])
@@ -176,9 +172,7 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
 
         service.requestImmediateSync(threadId: "thread-a", includeThreadList: false)
 
-        while service.pendingImmediateSyncTask != nil {
-            await Task.yield()
-        }
+        await waitUntil { service.pendingImmediateSyncTask == nil }
 
         XCTAssertEqual(threadListRequestCount, 0)
         XCTAssertEqual(readThreadIDs, ["thread-a"])
@@ -240,9 +234,7 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
         service.requestImmediateActiveThreadSync(threadId: "thread-b")
         service.requestImmediateActiveThreadSync(threadId: "thread-c")
 
-        while service.pendingImmediateSyncTask != nil {
-            await Task.yield()
-        }
+        await waitUntil { service.pendingImmediateSyncTask == nil }
 
         XCTAssertEqual(threadListRequestCount, 0)
         XCTAssertEqual(readThreadIDs, ["thread-c"])
@@ -1054,12 +1046,5 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
         let service = CodexService(defaults: defaults)
         Self.retainedServices.append(service)
         return service
-    }
-
-    private func makeThreadJSON(id: String, title: String) -> JSONValue {
-        .object([
-            "id": .string(id),
-            "title": .string(title),
-        ])
     }
 }

@@ -8,12 +8,25 @@ import Foundation
 import XCTest
 @testable import CodexMobile
 
-private final class FakeCloudAsyncTransport: CodexAsyncRequestTransporting {
-    var requestedMethods: [String] = []
-    var notifiedMethods: [String] = []
+
+final class FakeAsyncTransport: CodexAsyncRequestTransporting {
+    private let lock = NSLock()
+    private var requestedMethodsStorage: [String] = []
+    private var notifiedMethodsStorage: [String] = []
+    var requestHandler: ((String, JSONValue?, JSONValue, CodexService) throws -> RPCMessage)?
+    var availabilityHandler: (() async -> CodexCloudAsyncAvailability)?
+
+    func methodSnapshots() -> (requested: [String], notified: [String]) {
+        lock.withLock {
+            (requestedMethodsStorage, notifiedMethodsStorage)
+        }
+    }
 
     func availability(for service: CodexService) async -> CodexCloudAsyncAvailability {
-        .available
+        if let availabilityHandler {
+            return await availabilityHandler()
+        }
+        return .available
     }
 
     func performRequest(
@@ -22,7 +35,15 @@ private final class FakeCloudAsyncTransport: CodexAsyncRequestTransporting {
         requestID: JSONValue,
         service: CodexService
     ) async throws -> RPCMessage {
-        requestedMethods.append(method)
+        let handler = lock.withLock {
+            requestedMethodsStorage.append(method)
+            return self.requestHandler
+        }
+
+        if let handler {
+            return try handler(method, params, requestID, service)
+        }
+
         return RPCMessage(id: requestID, result: .object([:]), includeJSONRPC: false)
     }
 
@@ -31,7 +52,62 @@ private final class FakeCloudAsyncTransport: CodexAsyncRequestTransporting {
         params: JSONValue?,
         service: CodexService
     ) async throws {
-        notifiedMethods.append(method)
+        lock.withLock {
+            notifiedMethodsStorage.append(method)
+        }
+    }
+}
+
+extension XCTestCase {
+    @MainActor
+    func makeTestService(
+        defaults: UserDefaults? = nil,
+        persistenceNamespace: String? = nil,
+        retain: inout [CodexService]
+    ) -> CodexService {
+        let suiteName = persistenceNamespace ?? "TestService.\(UUID().uuidString)"
+        let resolvedDefaults = defaults ?? UserDefaults(suiteName: suiteName)!
+        resolvedDefaults.removePersistentDomain(forName: suiteName)
+        let service = CodexService(defaults: resolvedDefaults)
+        retain.append(service)
+        return service
+    }
+
+    func makeSuccessResponse(
+        id: JSONValue = .string(UUID().uuidString),
+        result: [String: JSONValue]
+    ) -> RPCMessage {
+        RPCMessage(
+            id: id,
+            result: .object(result),
+            includeJSONRPC: false
+        )
+    }
+
+    func makeThreadJSON(id: String, title: String) -> JSONValue {
+        .object([
+            "id": .string(id),
+            "title": .string(title),
+            "turns": .array([]),
+        ])
+    }
+
+    @MainActor
+    func waitUntil(
+        _ condition: @escaping () -> Bool,
+        timeoutSeconds: TimeInterval = 2.0,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTFail("Timed out waiting for condition.", file: file, line: line)
     }
 }
 
@@ -51,7 +127,7 @@ final class CodexCloudAsyncFallbackTests: XCTestCase {
 
     func testActivateCloudAsyncFallbackInitializesWithoutWebSocket() async throws {
         let service = makeService()
-        let transport = FakeCloudAsyncTransport()
+        let transport = FakeAsyncTransport()
         let macDeviceID = "mac-\(UUID().uuidString)"
         let relayURL = "wss://relay.local/relay"
         let sharedSecret = Data(repeating: 7, count: 32).base64EncodedString()
@@ -75,8 +151,59 @@ final class CodexCloudAsyncFallbackTests: XCTestCase {
         XCTAssertTrue(service.isInitialized)
         XCTAssertEqual(service.trustedReconnectFailureCount, 0)
         XCTAssertNil(service.bridgeUpdatePrompt)
-        XCTAssertEqual(transport.requestedMethods.first, "initialize")
-        XCTAssertEqual(transport.notifiedMethods.first, "initialized")
+        let snapshots = transport.methodSnapshots()
+        XCTAssertTrue(snapshots.requested.contains("initialize"))
+        XCTAssertTrue(snapshots.requested.contains("collaborationMode/list"))
+        XCTAssertTrue(snapshots.notified.contains("initialized"))
+    }
+
+    @MainActor
+    func testSetTransportPreferenceConvexOnlyUsesRealConvexActivationPath() async throws {
+        let transport = makeConvexOnlyTransitionTransport()
+        let service = makeConvexOnlyTransitionService(transport: transport)
+
+        service.setTransportPreference(.convexOnly)
+
+        await waitUntil {
+            service.transportMode == .convexRemote
+                && service.isConnected
+                && service.isInitialized
+        }
+
+        XCTAssertEqual(service.transportPreference, .convexOnly)
+        let snapshots = transport.methodSnapshots()
+        XCTAssertTrue(snapshots.requested.contains("initialize"))
+        XCTAssertTrue(snapshots.requested.contains("collaborationMode/list"))
+        XCTAssertTrue(snapshots.notified.contains("initialized"))
+    }
+
+    @MainActor
+    func testConvexOnlyPreferencePathCanSendRequestAfterSwitching() async throws {
+        let transport = makeConvexOnlyTransitionTransport()
+        let service = makeConvexOnlyTransitionService(transport: transport)
+
+        service.setTransportPreference(.convexOnly)
+
+        await waitUntil {
+            service.transportMode == .convexRemote
+                && service.isConnected
+                && service.isInitialized
+        }
+
+        let requestedMethodsBeforeSend = transport.methodSnapshots().requested
+        let response = try await service.sendRequest(
+            method: "test/convex-only",
+            params: .object(["message": .string("hello")])
+        )
+
+        let snapshots = transport.methodSnapshots()
+        XCTAssertTrue(snapshots.notified.contains("initialized"))
+        let appendedMethods = Array(snapshots.requested.dropFirst(requestedMethodsBeforeSend.count))
+        XCTAssertTrue(appendedMethods.contains("test/convex-only"))
+        XCTAssertEqual(
+            response.result,
+            .object(["echoMethod": .string("test/convex-only")])
+        )
     }
 
     func testCloudAsyncFallbackCredentialsStayBoundToRelayMacWhenPreferredTrustDiffers() {
@@ -137,6 +264,55 @@ final class CodexCloudAsyncFallbackTests: XCTestCase {
         Self.retainedServices.append(service)
         return service
     }
+
+    @MainActor
+    private func makeConvexOnlyTransitionService(
+        transport: FakeAsyncTransport
+    ) -> CodexService {
+        let service = makeService()
+        service.convexTransport = transport
+        service.isConnected = true
+        service.transportMode = .lanRelay
+        service.relayUrl = "ws://192.168.1.31:9000/relay"
+        service.relaySessionId = "session-1"
+        service.relayMacDeviceId = "mac-device-1"
+        service.relayMacIdentityPublicKey = Data(repeating: 8, count: 32).base64EncodedString()
+        service.relayCloudAsyncSharedSecret = Data(repeating: 7, count: 32).base64EncodedString()
+        return service
+    }
+
+    @MainActor
+    private func makeConvexOnlyTransitionTransport() -> FakeAsyncTransport {
+        let transport = FakeAsyncTransport()
+        transport.requestHandler = { method, _, requestID, _ in
+            switch method {
+            case "initialize":
+                return RPCMessage(id: requestID, result: .object([:]), includeJSONRPC: false)
+            case "collaborationMode/list":
+                return RPCMessage(
+                    id: requestID,
+                    result: .object([
+                        "modes": .array([
+                            .object([
+                                "mode": .string("plan"),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(
+                    id: requestID,
+                    result: .object([
+                        "echoMethod": .string(method),
+                    ]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+        return transport
+    }
+
 
     private func clearStoredSecureRelayState() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)

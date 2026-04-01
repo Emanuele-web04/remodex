@@ -7,33 +7,6 @@ import Foundation
 import RevenueCat
 import SwiftUI
 
-private struct CodexUITestLaunchConfiguration {
-    let isEnabled: Bool
-    let messageCount: Int
-    let autoStream: Bool
-
-    static let current = Self(arguments: ProcessInfo.processInfo.arguments)
-
-    init(arguments: [String]) {
-        isEnabled = arguments.contains("-CodexUITestsFixture")
-        messageCount = max(Self.intValue(after: "-CodexUITestsMessageCount", in: arguments) ?? 400, 1)
-        autoStream = arguments.contains("-CodexUITestsAutoStream")
-    }
-
-    private static func intValue(after flag: String, in arguments: [String]) -> Int? {
-        guard let flagIndex = arguments.firstIndex(of: flag) else {
-            return nil
-        }
-
-        let valueIndex = arguments.index(after: flagIndex)
-        guard valueIndex < arguments.endIndex else {
-            return nil
-        }
-
-        return Int(arguments[valueIndex])
-    }
-}
-
 private struct CodexDebugLaunchConfiguration {
     private static let forceProAccessDefaultsKey = "codex.subscription.debugForceProAccess"
     private static let hasSeenOnboardingKey = "codex.hasSeenOnboarding"
@@ -75,6 +48,166 @@ private struct CodexProcessLaunchConfiguration {
 
     init(environment: [String: String]) {
         isRunningUnitTests = environment["XCTestConfigurationFilePath"] != nil
+    }
+}
+
+enum AppLaunchMode {
+    case production(codexService: CodexService, subscriptionService: SubscriptionService)
+    case uiTestFixture(configuration: CodexUITestLaunchConfiguration)
+}
+
+@MainActor
+@main
+struct CodexMobileApp: App {
+    @Environment(\.scenePhase) private var scenePhase
+    @UIApplicationDelegateAdaptor(CodexMobileAppDelegate.self) private var appDelegate
+    
+    @State private var launchMode: AppLaunchMode
+    private let shouldSkipRevenueCatBootstrap: Bool
+
+    init() {
+        let uiTestLaunchConfiguration = CodexUITestLaunchConfiguration.current
+        let processLaunchConfiguration = CodexProcessLaunchConfiguration.current
+        CodexDebugLaunchConfiguration.current.apply()
+#if DEBUG
+#if targetEnvironment(simulator)
+        let launchArgs = ProcessInfo.processInfo.arguments
+        if launchArgs.contains("-CodexSkipOnboarding")
+            || CodexE2EPairingLaunchConfiguration.simulatorSkipsOnboardingForCodeInjection {
+            UserDefaults.standard.set(true, forKey: "codex.hasSeenOnboarding")
+        }
+#endif
+#endif
+        let shouldSkipRevenueCatBootstrap =
+            uiTestLaunchConfiguration.isEnabled
+            || processLaunchConfiguration.isRunningUnitTests
+            || SubscriptionService.shouldBypassSubscriptionGatesForCurrentBuild
+        self.shouldSkipRevenueCatBootstrap = shouldSkipRevenueCatBootstrap
+
+        if !uiTestLaunchConfiguration.isEnabled,
+           !processLaunchConfiguration.isRunningUnitTests,
+           !shouldSkipRevenueCatBootstrap {
+            Self.configureRevenueCatIfAvailable()
+        }
+
+        if uiTestLaunchConfiguration.isEnabled {
+            _launchMode = State(initialValue: .uiTestFixture(configuration: uiTestLaunchConfiguration))
+        } else {
+            let service = CodexService()
+            if !processLaunchConfiguration.isRunningUnitTests {
+                service.configureNotifications()
+            }
+            _launchMode = State(initialValue: .production(codexService: service, subscriptionService: SubscriptionService()))
+        }
+    }
+
+    var body: some Scene {
+        WindowGroup {
+            switch launchMode {
+            case .uiTestFixture(let configuration):
+                CodexUITestAppRootView(configuration: configuration)
+            case .production(let codexService, let subscriptionService):
+                ContentView()
+                    .environment(codexService)
+                    .environment(subscriptionService)
+                    .environment(\.codexE2EPairingLaunchConfiguration, CodexE2EPairingLaunchConfiguration.current)
+                    .task {
+                        guard !shouldSkipRevenueCatBootstrap else {
+                            return
+                        }
+                        await subscriptionService.bootstrap()
+                    }
+                    .onOpenURL { url in
+                        Task { @MainActor in
+                            guard CodexService.legacyGPTLoginCallbackEnabled else {
+                                return
+                            }
+                            await codexService.handleGPTLoginCallbackURL(url)
+                        }
+                    }
+                    .onReceive(
+                        NotificationCenter.default.publisher(
+                            for: UIApplication.didReceiveMemoryWarningNotification
+                        )
+                    ) { _ in
+                        TurnCacheManager.resetAll()
+                    }
+                    .onChange(of: scenePhase) { _, newPhase in
+                        guard newPhase == .background else { return }
+                        TurnCacheManager.resetAll()
+                    }
+            }
+        }
+    }
+
+    // Configures RevenueCat once at launch using the client-safe public SDK key.
+    private static func configureRevenueCatIfAvailable() {
+        guard let apiKey = AppEnvironment.revenueCatPublicAPIKey else {
+            assertionFailure("Missing RevenueCat public API key in Info.plist")
+            return
+        }
+
+        #if DEBUG
+        Purchases.logLevel = .debug
+        #endif
+
+        Purchases.configure(withAPIKey: apiKey)
+    }
+}
+import Foundation
+import SwiftUI
+
+struct CodexUITestLaunchConfiguration {
+    let isEnabled: Bool
+    let messageCount: Int
+    let autoStream: Bool
+
+    static let current = Self(arguments: ProcessInfo.processInfo.arguments)
+
+    init(arguments: [String]) {
+        isEnabled = arguments.contains("-CodexUITestsFixture")
+        messageCount = max(Self.intValue(after: "-CodexUITestsMessageCount", in: arguments) ?? 400, 1)
+        autoStream = arguments.contains("-CodexUITestsAutoStream")
+    }
+
+    private static func intValue(after flag: String, in arguments: [String]) -> Int? {
+        guard let flagIndex = arguments.firstIndex(of: flag) else {
+            return nil
+        }
+
+        let valueIndex = arguments.index(after: flagIndex)
+        guard valueIndex < arguments.endIndex else {
+            return nil
+        }
+
+        return Int(arguments[valueIndex])
+    }
+}
+
+/// Hosts the heavy timeline fixture only after a minimal first frame so XCTest can receive AX-ready quickly.
+struct CodexUITestAppRootView: View {
+    let configuration: CodexUITestLaunchConfiguration
+    @State private var showHeavyFixture = false
+
+    var body: some View {
+        Group {
+            if showHeavyFixture {
+                CodexUITestTimelineFixtureView(configuration: configuration)
+            } else {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("Preparing UI test fixture…")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityIdentifier("ui.test.bootstrap")
+                .task {
+                    await Task.yield()
+                    showHeavyFixture = true
+                }
+            }
+        }
     }
 }
 
@@ -133,6 +266,8 @@ private struct CodexUITestTimelineFixtureView: View {
                     )
                 }.value
                 messages = built
+                // Match production: container caches layout by token; without a bump, stale empty layout hides the timeline.
+                timelineChangeToken += 1
             }
             if configuration.autoStream {
                 await runStreamingFixture()
@@ -291,104 +426,5 @@ private struct CodexUITestTimelineFixtureView: View {
     private static func streamingChunkText(for tick: Int) -> String {
         let suffix = (tick % 3) + 1
         return "\n\nStreaming chunk \(tick): appended delta segment \(suffix)."
-    }
-}
-
-@MainActor
-@main
-struct CodexMobileApp: App {
-    @Environment(\.scenePhase) private var scenePhase
-    @UIApplicationDelegateAdaptor(CodexMobileAppDelegate.self) private var appDelegate
-    @State private var codexService: CodexService
-    @State private var subscriptionService: SubscriptionService
-    private let uiTestLaunchConfiguration: CodexUITestLaunchConfiguration
-    private let processLaunchConfiguration: CodexProcessLaunchConfiguration
-    private let shouldSkipRevenueCatBootstrap: Bool
-
-    init() {
-        let uiTestLaunchConfiguration = CodexUITestLaunchConfiguration.current
-        let processLaunchConfiguration = CodexProcessLaunchConfiguration.current
-        self.uiTestLaunchConfiguration = uiTestLaunchConfiguration
-        self.processLaunchConfiguration = processLaunchConfiguration
-        CodexDebugLaunchConfiguration.current.apply()
-#if DEBUG
-#if targetEnvironment(simulator)
-        let launchArgs = ProcessInfo.processInfo.arguments
-        if launchArgs.contains("-CodexSkipOnboarding")
-            || CodexE2EPairingLaunchConfiguration.simulatorSkipsOnboardingForCodeInjection {
-            UserDefaults.standard.set(true, forKey: "codex.hasSeenOnboarding")
-        }
-#endif
-#endif
-        let shouldSkipRevenueCatBootstrap =
-            uiTestLaunchConfiguration.isEnabled
-            || processLaunchConfiguration.isRunningUnitTests
-            || SubscriptionService.shouldBypassSubscriptionGatesForCurrentBuild
-        self.shouldSkipRevenueCatBootstrap = shouldSkipRevenueCatBootstrap
-
-        if !uiTestLaunchConfiguration.isEnabled,
-           !processLaunchConfiguration.isRunningUnitTests,
-           !shouldSkipRevenueCatBootstrap {
-            Self.configureRevenueCatIfAvailable()
-        }
-
-        let service = CodexService()
-        if !uiTestLaunchConfiguration.isEnabled, !processLaunchConfiguration.isRunningUnitTests {
-            service.configureNotifications()
-        }
-        _codexService = State(initialValue: service)
-        _subscriptionService = State(initialValue: SubscriptionService())
-    }
-
-    var body: some Scene {
-        WindowGroup {
-            if uiTestLaunchConfiguration.isEnabled {
-                CodexUITestTimelineFixtureView(configuration: uiTestLaunchConfiguration)
-            } else {
-                ContentView()
-                    .environment(codexService)
-                    .environment(subscriptionService)
-                    .environment(\.codexE2EPairingLaunchConfiguration, CodexE2EPairingLaunchConfiguration.current)
-                    .task {
-                        guard !shouldSkipRevenueCatBootstrap else {
-                            return
-                        }
-                        await subscriptionService.bootstrap()
-                    }
-                    .onOpenURL { url in
-                        Task { @MainActor in
-                            guard CodexService.legacyGPTLoginCallbackEnabled else {
-                                return
-                            }
-                            await codexService.handleGPTLoginCallbackURL(url)
-                        }
-                    }
-                    .onReceive(
-                        NotificationCenter.default.publisher(
-                            for: UIApplication.didReceiveMemoryWarningNotification
-                        )
-                    ) { _ in
-                        TurnCacheManager.resetAll()
-                    }
-                    .onChange(of: scenePhase) { _, newPhase in
-                        guard newPhase == .background else { return }
-                        TurnCacheManager.resetAll()
-                    }
-            }
-        }
-    }
-
-    // Configures RevenueCat once at launch using the client-safe public SDK key.
-    private static func configureRevenueCatIfAvailable() {
-        guard let apiKey = AppEnvironment.revenueCatPublicAPIKey else {
-            assertionFailure("Missing RevenueCat public API key in Info.plist")
-            return
-        }
-
-        #if DEBUG
-        Purchases.logLevel = .debug
-        #endif
-
-        Purchases.configure(withAPIKey: apiKey)
     }
 }

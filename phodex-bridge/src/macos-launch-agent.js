@@ -310,7 +310,12 @@ async function startMacOSBridgeService({
 
 // In a source checkout, preserve the saved relay config when the shell lacks one,
 // but always refresh code-owned defaults like the Convex deployment URL.
-function resolveMacOSBridgeStartConfig({ env = process.env, fsImpl = fs } = {}) {
+function resolveMacOSBridgeStartConfig({
+  env = process.env,
+  fsImpl = fs,
+  osImpl = os,
+  execFileSyncImpl = execFileSync,
+} = {}) {
   const currentConfig = readBridgeConfig({ env, fsImpl });
   if (typeof currentConfig?.relayUrl === "string" && currentConfig.relayUrl.trim()) {
     return currentConfig;
@@ -325,7 +330,35 @@ function resolveMacOSBridgeStartConfig({ env = process.env, fsImpl = fs } = {}) 
     };
   }
 
-  return currentConfig;
+  const inferredRelayUrl = inferDefaultLocalRelayUrl({
+    osImpl,
+    execFileSyncImpl,
+  });
+  if (!inferredRelayUrl) {
+    return currentConfig;
+  }
+
+  return {
+    ...currentConfig,
+    relayUrl: inferredRelayUrl,
+  };
+}
+
+function inferDefaultLocalRelayUrl({
+  osImpl = os,
+  execFileSyncImpl = execFileSync,
+} = {}) {
+  const localHostName = readMacLocalHostName(execFileSyncImpl);
+  if (localHostName) {
+    return `ws://${localHostName}.local:9100/relay`;
+  }
+
+  const osHostname = normalizeHostname(osImpl.hostname?.() || "");
+  if (osHostname) {
+    return `ws://${osHostname}.local:9100/relay`;
+  }
+
+  return "";
 }
 
 function stopMacOSBridgeService({

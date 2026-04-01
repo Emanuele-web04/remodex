@@ -584,6 +584,7 @@ private extension CodexConvexAsyncTransport {
 
 private extension String {
     var nilIfEmpty: String? {
-        trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

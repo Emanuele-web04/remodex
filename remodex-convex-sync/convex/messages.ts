@@ -185,6 +185,7 @@ export const findInboundResponse = query({
   args: {
     requestId: v.string(),
     toDeviceId: v.string(),
+    nowMs: v.number(),
   },
   handler: async (ctx, args) => {
     const matches = await ctx.db
@@ -198,7 +199,7 @@ export const findInboundResponse = query({
       .order("asc")
       .take(10);
 
-    const active = matches.find((entry) => entry.expiresAt > Date.now());
+    const active = matches.find((entry) => entry.expiresAt > args.nowMs);
     return serializeMessage(active ?? null);
   },
 });

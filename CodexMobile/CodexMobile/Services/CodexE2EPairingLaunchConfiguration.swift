@@ -32,13 +32,9 @@ struct CodexE2EPairingLaunchConfiguration: Sendable {
     }
 
     static func resolve(arguments: [String], environment: [String: String]) -> CodexE2EPairingLaunchConfiguration {
-        // QR-less injection is Simulator-only; device builds ignore flags and env (see unit tests).
-#if !targetEnvironment(simulator)
-        return .disabled
-#endif
 
 #if DEBUG
-        let codeInjection = CodexSimulatorPairingCodeInjection.isEnabled
+        let codeInjection = false
 #else
         let codeInjection = false
 #endif
@@ -66,19 +62,6 @@ struct CodexE2EPairingLaunchConfiguration: Sendable {
                 resolvedPairingJSON: contents
             )
         }
-
-#if DEBUG
-#if targetEnvironment(simulator)
-        if codeInjection,
-           let contents = try? String(contentsOf: CodexSimulatorPairingCodeInjection.pairingSessionFileURL, encoding: .utf8),
-           !contents.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return CodexE2EPairingLaunchConfiguration(
-                isPairingBypassActive: true,
-                resolvedPairingJSON: contents
-            )
-        }
-#endif
-#endif
 
         return CodexE2EPairingLaunchConfiguration(
             isPairingBypassActive: true,

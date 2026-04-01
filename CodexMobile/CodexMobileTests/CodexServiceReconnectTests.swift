@@ -1,4 +1,4 @@
-// FILE: ContentViewModelReconnectTests.swift
+// FILE: CodexServiceReconnectTests.swift
 // Purpose: Verifies reconnect URL selection across trusted-session lookup failures and saved-session fallback.
 // Layer: Unit Test
 // Exports: ContentViewModelReconnectTests
@@ -24,8 +24,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testPreferredReconnectURLFallsBackToSavedSessionWhenTrustedResolveReportsOffline() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         let macDeviceID = "mac-\(UUID().uuidString)"
         let relayURL = "wss://relay.local/relay"
 
@@ -44,15 +43,14 @@ final class ContentViewModelReconnectTests: XCTestCase {
             throw CodexTrustedSessionResolveError.macOffline("Your trusted Mac is offline right now.")
         }
 
-        let reconnectURL = await viewModel.preferredReconnectURL(codex: service)
+        let reconnectURL = await service.preferredReconnectURL()
 
         XCTAssertEqual(reconnectURL, "\(relayURL)/saved-session")
         XCTAssertNil(service.lastErrorMessage)
     }
 
     func testPreferredReconnectURLUsesSavedSessionWhenTrustedMacRelayDisagrees() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         let macDeviceID = "mac-\(UUID().uuidString)"
 
         service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
@@ -76,14 +74,13 @@ final class ContentViewModelReconnectTests: XCTestCase {
             )
         }
 
-        let reconnectURL = await viewModel.preferredReconnectURL(codex: service)
+        let reconnectURL = await service.preferredReconnectURL()
 
         XCTAssertEqual(reconnectURL, "ws://zacks-mac-studio.local:9100/relay/saved-session")
     }
 
     func testPreferredReconnectURLStopsWhenTrustedResolveReportsOfflineAndNoSavedSessionExists() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         let macDeviceID = "mac-\(UUID().uuidString)"
         let relayURL = "wss://relay.local/relay"
 
@@ -98,28 +95,27 @@ final class ContentViewModelReconnectTests: XCTestCase {
             throw CodexTrustedSessionResolveError.macOffline("Your trusted Mac is offline right now.")
         }
 
-        let reconnectURL = await viewModel.preferredReconnectURL(codex: service)
+        let reconnectURL = await service.preferredReconnectURL()
 
         XCTAssertNil(reconnectURL)
         XCTAssertEqual(service.lastErrorMessage, "Your trusted Mac is offline right now.")
     }
 
     func testForegroundReconnectKeepsRetryIntentArmedAfterRetryableFailures() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var attempts = 0
 
         service.relaySessionId = "saved-session"
         service.relayUrl = "wss://relay.local/relay"
         service.shouldAutoReconnectOnForeground = true
-        viewModel.reconnectAttemptLimitOverride = 2
-        viewModel.reconnectSleepOverride = { _ in }
-        viewModel.connectOverride = { _, _ in
+        service.reconnectAttemptLimitOverride = 2
+        service.reconnectSleepOverride = { (_: UInt64) in }
+        service.connectOverride = { (_: CodexService, _: String) in
             attempts += 1
             throw NWError.posix(.ECONNABORTED)
         }
 
-        await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: service)
+        await service.attemptAutoReconnectOnForegroundIfNeeded()
 
         XCTAssertEqual(attempts, 2)
         XCTAssertTrue(service.shouldAutoReconnectOnForeground)
@@ -128,8 +124,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testManualReconnectCancelsStuckTrustedSessionResolve() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         let macDeviceID = "mac-\(UUID().uuidString)"
         let relayURL = "wss://relay.local/relay"
         var resolveAttempts = 0
@@ -146,7 +141,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.relayUrl = relayURL
         service.relayMacDeviceId = macDeviceID
         service.shouldAutoReconnectOnForeground = true
-        viewModel.reconnectSleepOverride = { _ in await Task.yield() }
+        service.reconnectSleepOverride = { (_: UInt64) in await Task.yield() }
         service.trustedSessionResolverOverride = {
             resolveAttempts += 1
             if resolveAttempts == 1 {
@@ -163,30 +158,30 @@ final class ContentViewModelReconnectTests: XCTestCase {
                 sessionId: "live-session"
             )
         }
-        viewModel.connectOverride = { _, serverURL in
+        service.connectOverride = { (_: CodexService, serverURL: String) in
             connectAttempts += 1
             XCTAssertEqual(serverURL, "\(relayURL)/live-session")
         }
 
         let autoReconnectTask = Task {
-            await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: service)
+            await service.attemptAutoReconnectOnForegroundIfNeeded()
         }
 
-        while !viewModel.isAttemptingAutoReconnect || resolveAttempts == 0 {
+        while !service.isAttemptingAutoReconnect || resolveAttempts == 0 {
             await Task.yield()
         }
 
-        await viewModel.toggleConnection(codex: service)
+        await service.toggleConnection()
         await autoReconnectTask.value
 
         XCTAssertEqual(resolveAttempts, 2)
         XCTAssertEqual(connectAttempts, 1)
-        XCTAssertFalse(viewModel.isAttemptingAutoReconnect)
+        XCTAssertFalse(service.isAttemptingAutoReconnect)
         XCTAssertFalse(service.shouldAutoReconnectOnForeground)
     }
 
     func testTrustedResolveCancelsWhenCallerTaskIsCancelled() async {
-        let service = makeService()
+        let service = makeTestService(retain: &Self.retainedServices)
         var resolverSawCancellation = false
 
         service.trustedSessionResolverOverride = {
@@ -226,15 +221,14 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testManualReconnectDoesNotWaitForOldAutoReconnectBackoff() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectAttempts = 0
 
         service.relaySessionId = "saved-session"
         service.relayUrl = "wss://relay.local/relay"
         service.shouldAutoReconnectOnForeground = true
-        viewModel.reconnectSleepChunkNanosecondsOverride = 10_000_000
-        viewModel.connectOverride = { codex, _ in
+        service.reconnectSleepChunkNanosecondsOverride = 10_000_000
+        service.connectOverride = { (codex: CodexService, _: String) in
             connectAttempts += 1
             if connectAttempts == 1 {
                 throw CodexServiceError.disconnected
@@ -242,7 +236,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         }
 
         let autoReconnectTask = Task {
-            await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: service)
+            await service.attemptAutoReconnectOnForegroundIfNeeded()
         }
 
         while true {
@@ -254,7 +248,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         }
 
         let reconnectStartedAt = Date()
-        await viewModel.toggleConnection(codex: service)
+        await service.toggleConnection()
         let reconnectElapsed = Date().timeIntervalSince(reconnectStartedAt)
         await autoReconnectTask.value
 
@@ -264,8 +258,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testToggleConnectionDisconnectPreservesSavedRelaySession() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
 
         service.relaySessionId = "saved-session"
         service.relayUrl = "wss://relay.local/relay"
@@ -276,7 +269,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.isInitialized = true
         service.transportMode = .lanRelay
 
-        await viewModel.toggleConnection(codex: service)
+        await service.toggleConnection()
 
         XCTAssertFalse(service.isConnected)
         XCTAssertFalse(service.isInitialized)
@@ -289,14 +282,13 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testManualReconnectIgnoresRapidSecondTapWhileFirstAttemptIsInFlight() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectAttempts = 0
         var allowFirstAttemptToFinish = false
 
         service.relaySessionId = "saved-session"
         service.relayUrl = "wss://relay.local/relay"
-        viewModel.connectOverride = { _, _ in
+        service.connectOverride = { (_: CodexService, _: String) in
             connectAttempts += 1
             while !allowFirstAttemptToFinish {
                 await Task.yield()
@@ -304,15 +296,15 @@ final class ContentViewModelReconnectTests: XCTestCase {
         }
 
         let firstTapTask = Task {
-            await viewModel.toggleConnection(codex: service)
+            await service.toggleConnection()
         }
 
-        while !viewModel.isAttemptingManualReconnect {
+        while !service.isAttemptingManualReconnect {
             await Task.yield()
         }
 
         let secondTapTask = Task {
-            await viewModel.toggleConnection(codex: service)
+            await service.toggleConnection()
         }
 
         await Task.yield()
@@ -322,24 +314,23 @@ final class ContentViewModelReconnectTests: XCTestCase {
         await secondTapTask.value
 
         XCTAssertEqual(connectAttempts, 1)
-        XCTAssertFalse(viewModel.isAttemptingManualReconnect)
+        XCTAssertFalse(service.isAttemptingManualReconnect)
     }
 
     func testManualScannerCancelsManualReconnectBackoff() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectAttempts = 0
 
         service.relaySessionId = "saved-session"
         service.relayUrl = "wss://relay.local/relay"
-        viewModel.reconnectSleepChunkNanosecondsOverride = 10_000_000
-        viewModel.connectOverride = { _, _ in
+        service.reconnectSleepChunkNanosecondsOverride = 10_000_000
+        service.connectOverride = { (_: CodexService, _: String) in
             connectAttempts += 1
             throw CodexServiceError.disconnected
         }
 
         let reconnectTask = Task {
-            await viewModel.toggleConnection(codex: service)
+            await service.toggleConnection()
         }
 
         while true {
@@ -351,18 +342,17 @@ final class ContentViewModelReconnectTests: XCTestCase {
         }
 
         let scannerTakeoverStartedAt = Date()
-        await viewModel.stopAutoReconnectForManualScan(codex: service)
+        await service.stopAutoReconnectForManualScan()
         let scannerTakeoverElapsed = Date().timeIntervalSince(scannerTakeoverStartedAt)
         await reconnectTask.value
 
         XCTAssertEqual(connectAttempts, 1)
-        XCTAssertFalse(viewModel.isAttemptingManualReconnect)
+        XCTAssertFalse(service.isAttemptingManualReconnect)
         XCTAssertLessThan(scannerTakeoverElapsed, 0.75)
     }
 
     func testManualScannerCancellationDoesNotLeaveTrustedResolveError() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         let macDeviceID = "mac-\(UUID().uuidString)"
         let relayURL = "wss://relay.local/relay"
         var resolveAttempts = 0
@@ -386,24 +376,23 @@ final class ContentViewModelReconnectTests: XCTestCase {
         }
 
         let reconnectTask = Task {
-            await viewModel.toggleConnection(codex: service)
+            await service.toggleConnection()
         }
 
-        while !viewModel.isAttemptingManualReconnect || resolveAttempts == 0 {
+        while !service.isAttemptingManualReconnect || resolveAttempts == 0 {
             await Task.yield()
         }
 
-        await viewModel.stopAutoReconnectForManualScan(codex: service)
+        await service.stopAutoReconnectForManualScan()
         await reconnectTask.value
 
         XCTAssertEqual(resolveAttempts, 1)
         XCTAssertNil(service.lastErrorMessage)
-        XCTAssertFalse(viewModel.isAttemptingManualReconnect)
+        XCTAssertFalse(service.isAttemptingManualReconnect)
     }
 
     func testConnectSurfacesCloudFallbackFailureInsteadOfOriginalRelayTimeout() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         let expectedError = CodexCloudAsyncTransportError.unavailable(
             "Could not reach Convex for off-LAN async messaging."
         )
@@ -412,12 +401,12 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.relayMacIdentityPublicKey = Data(repeating: 1, count: 32).base64EncodedString()
         service.relayCloudAsyncSharedSecret = Data(repeating: 2, count: 32).base64EncodedString()
         service.transportPreference = .convexOnly
-        service.convexLaneActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { (_: String, _: Bool) in
             throw expectedError
         }
 
         do {
-            try await viewModel.connect(codex: service, serverURL: "ws://192.168.1.31:9000/relay/session")
+            try await service.connectToPreferredTransport(serverURL: "ws://192.168.1.31:9000/relay/session")
             XCTFail("Expected fallback failure to be surfaced.")
         } catch {
             XCTAssertEqual(error.localizedDescription, expectedError.localizedDescription)
@@ -425,39 +414,37 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testConnectUsesConvexOnlyPreferenceWithoutLiveRelayAttempt() async throws {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectAttempts = 0
         var fallbackAttempts = 0
 
         service.transportPreference = .convexOnly
-        service.connectAttemptOverride = { _, _, _, _ in
+        service.connectAttemptOverride = { (_: String, _: String, _: String?, _: Bool) in
             connectAttempts += 1
         }
-        service.convexLaneActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { (_: String, _: Bool) in
             fallbackAttempts += 1
         }
 
-        try await viewModel.connect(codex: service, serverURL: "ws://192.168.1.31:9000/relay/session")
+        try await service.connectToPreferredTransport(serverURL: "ws://192.168.1.31:9000/relay/session")
         XCTAssertEqual(connectAttempts, 0)
         XCTAssertEqual(fallbackAttempts, 1)
     }
 
     func testConnectUsesLanOnlyPreferenceWithoutCloudFallbackAttempt() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var fallbackAttempts = 0
 
         service.transportPreference = .lanOnly
-        service.connectAttemptOverride = { _, _, _, _ in
+        service.connectAttemptOverride = { (_: String, _: String, _: String?, _: Bool) in
             throw NWError.posix(.ETIMEDOUT)
         }
-        service.convexLaneActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { (_: String, _: Bool) in
             fallbackAttempts += 1
         }
 
         do {
-            try await viewModel.connect(codex: service, serverURL: "ws://192.168.1.31:9000/relay/session")
+            try await service.connectToPreferredTransport(serverURL: "ws://192.168.1.31:9000/relay/session")
             XCTFail("Expected LAN-only mode to surface the relay error.")
         } catch {
             XCTAssertEqual(fallbackAttempts, 0)
@@ -465,7 +452,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testSetTransportPreferenceSwitchesLiveRelayConnectionToConvexFallback() async {
-        let service = makeService()
+        let service = makeTestService(retain: &Self.retainedServices)
         var fallbackAttempts = 0
         var receivedURL: String?
         var receivedPerformInitialSync: Bool?
@@ -491,7 +478,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testSetTransportPreferenceReconnectsFromConvexFallbackToLan() async {
-        let service = makeService()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectAttempts = 0
         var receivedServerURL: String?
         var receivedPerformInitialSync: Bool?
@@ -517,7 +504,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testSetTransportPreferenceDefersSwitchUntilConnectionFinishes() async {
-        let service = makeService()
+        let service = makeTestService(retain: &Self.retainedServices)
         var fallbackAttempts = 0
 
         service.isConnected = true
@@ -525,7 +512,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         service.transportMode = .lanRelay
         service.relayUrl = "ws://192.168.1.31:9000/relay"
         service.relaySessionId = "session-1"
-        service.convexLaneActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { (_: String, _: Bool) in
             fallbackAttempts += 1
         }
 
@@ -539,14 +526,14 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testSetTransportPreferenceRapidToggleAppliesLatestSelectionOnly() async {
-        let service = makeService()
+        let service = makeTestService(retain: &Self.retainedServices)
         var fallbackAttempts = 0
 
         service.isConnected = true
         service.transportMode = .lanRelay
         service.relayUrl = "ws://192.168.1.31:9000/relay"
         service.relaySessionId = "session-1"
-        service.convexLaneActivationOverride = { _, _ in
+        service.convexLaneActivationOverride = { (_: String, _: Bool) in
             fallbackAttempts += 1
         }
 
@@ -559,10 +546,9 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testPerformLaunchConnectSequenceConnectsValidE2EPairingJSON() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectedURLs: [String] = []
-        viewModel.connectOverride = { _, serverURL in
+        service.connectOverride = { (_: CodexService, serverURL: String) in
             connectedURLs.append(serverURL)
         }
 
@@ -572,7 +558,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         """
         let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: json)
 
-        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+        await service.performLaunchConnectSequence(e2ePairing: e2e)
 
         XCTAssertEqual(connectedURLs, ["wss://relay.example/session-abc"])
         XCTAssertEqual(service.relaySessionId, "session-abc")
@@ -580,10 +566,9 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testPerformLaunchConnectSequenceSetsBridgeUpdatePromptWithoutConnecting() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectAttempts = 0
-        viewModel.connectOverride = { _, _ in
+        service.connectOverride = { (_: CodexService, _: String) in
             connectAttempts += 1
         }
 
@@ -592,17 +577,16 @@ final class ContentViewModelReconnectTests: XCTestCase {
         """
         let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: json)
 
-        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+        await service.performLaunchConnectSequence(e2ePairing: e2e)
 
         XCTAssertEqual(connectAttempts, 0)
         XCTAssertNotNil(service.bridgeUpdatePrompt)
     }
 
     func testPerformLaunchConnectSequenceFallsBackToSavedSessionWhenE2EInvalid() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectedURLs: [String] = []
-        viewModel.connectOverride = { _, serverURL in
+        service.connectOverride = { (_: CodexService, serverURL: String) in
             connectedURLs.append(serverURL)
         }
 
@@ -611,17 +595,16 @@ final class ContentViewModelReconnectTests: XCTestCase {
 
         let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: "not valid pairing json")
 
-        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+        await service.performLaunchConnectSequence(e2ePairing: e2e)
 
         XCTAssertEqual(connectedURLs, ["wss://relay.local/relay/saved-session"])
         XCTAssertNil(service.bridgeUpdatePrompt)
     }
 
     func testPerformLaunchConnectSequenceSkipsE2EWhenBypassInactive() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectedURLs: [String] = []
-        viewModel.connectOverride = { _, serverURL in
+        service.connectOverride = { (_: CodexService, serverURL: String) in
             connectedURLs.append(serverURL)
         }
 
@@ -633,7 +616,7 @@ final class ContentViewModelReconnectTests: XCTestCase {
         """
         let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: false, pairingJSON: json)
 
-        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+        await service.performLaunchConnectSequence(e2ePairing: e2e)
 
         XCTAssertEqual(connectedURLs, ["wss://relay.local/relay/saved-session"])
         XCTAssertEqual(service.relayUrl, "wss://relay.local/relay")
@@ -641,10 +624,9 @@ final class ContentViewModelReconnectTests: XCTestCase {
     }
 
     func testPerformLaunchConnectSequenceSecondCallIsNoOp() async {
-        let service = makeService()
-        let viewModel = ContentViewModel()
+        let service = makeTestService(retain: &Self.retainedServices)
         var connectAttempts = 0
-        viewModel.connectOverride = { _, _ in
+        service.connectOverride = { (_: CodexService, _: String) in
             connectAttempts += 1
         }
 
@@ -653,8 +635,8 @@ final class ContentViewModelReconnectTests: XCTestCase {
         """
         let e2e = CodexE2EPairingLaunchConfiguration.testing(pairingBypassActive: true, pairingJSON: json)
 
-        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
-        await viewModel.performLaunchConnectSequence(codex: service, e2ePairing: e2e)
+        await service.performLaunchConnectSequence(e2ePairing: e2e)
+        await service.performLaunchConnectSequence(e2ePairing: e2e)
 
         XCTAssertEqual(connectAttempts, 1)
     }

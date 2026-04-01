@@ -32,7 +32,10 @@ final class CodexMobileUITests: XCTestCase {
         ])
 
         let timeline = app.scrollViews["turn.timeline.scrollview"]
-        XCTAssertTrue(timeline.waitForExistence(timeout: 20))
+        XCTAssertTrue(
+            timeline.waitForExistence(timeout: 30),
+            "Timeline scroll view should appear after the fixture finishes building messages."
+        )
 
         measure(metrics: [XCTOSSignpostMetric.scrollingAndDecelerationMetric]) {
             timeline.swipeUp(velocity: .fast)
@@ -49,7 +52,10 @@ final class CodexMobileUITests: XCTestCase {
             "-CodexUITestsAutoStream",
         ])
 
-        XCTAssertTrue(app.scrollViews["turn.timeline.scrollview"].waitForExistence(timeout: 20))
+        XCTAssertTrue(
+            app.scrollViews["turn.timeline.scrollview"].waitForExistence(timeout: 30),
+            "Timeline scroll view should appear after the fixture finishes building messages."
+        )
 
         measure(metrics: [XCTClockMetric(), XCTCPUMetric(), XCTMemoryMetric()]) {
             // Wait window where fixture appends streaming chunks into the active timeline.

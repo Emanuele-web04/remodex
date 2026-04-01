@@ -601,6 +601,8 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             service.isInitialized = true
             service.lastErrorMessage = nil
             service.setForegroundState(true)
+            // XCTest host is often not UIApplication.State.active; foreground error copy requires both flags.
+            service.applicationStateProvider = { .active }
 
             service.handleReceiveError(
                 CodexServiceError.disconnected,

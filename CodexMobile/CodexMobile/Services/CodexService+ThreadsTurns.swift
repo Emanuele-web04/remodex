@@ -111,7 +111,8 @@ extension CodexService {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
                 modelIdentifier: runtimeModelIdentifierForTurn(),
                 preferredProjectPath: normalizedPreferredProjectPath,
-                serviceTier: includesServiceTier ? explicitServiceTier : nil
+                serviceTier: includesServiceTier ? explicitServiceTier : nil,
+                config: runtimeConfigOverrideForThreadStart()
             )
 
             do {
@@ -726,12 +727,17 @@ enum CodexThreadStartProjectBinding {
     static func makeThreadStartParams(
         modelIdentifier: String?,
         preferredProjectPath: String?,
-        serviceTier: String?
+        serviceTier: String?,
+        config: JSONValue?
     ) -> RPCObject {
         var params: RPCObject = [:]
 
         if let modelIdentifier {
             params["model"] = .string(modelIdentifier)
+        }
+
+        if let config {
+            params["config"] = config
         }
 
         if let preferredProjectPath {

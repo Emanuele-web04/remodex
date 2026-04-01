@@ -22,6 +22,8 @@ const {
   createConvexHelperClient,
 } = require("../src/convex-helper-client");
 
+const { waitFor } = require("./test-utils");
+
 const EXPECTED_CONVEX_SITE_URL = "https://determined-ladybug-18.convex.site";
 
 test("createConvexHelperClient covers the Convex helper lifecycle", async (t) => {
@@ -62,9 +64,9 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
       const requests = [];
       const statuses = [];
       const fetchImpl = createFetchRecorder({
-        "/remodex/health": () =>
+        "/async/health": () =>
           jsonResponse({ status: "ok", provider: "convex" }),
-        "/remodex/messages/outbound/claim": ({ query }) => {
+        "/async/outbound/claim": ({ query }) => {
           assert.equal(query.toDeviceId, deviceState.macDeviceId);
           assert.equal(query.leaseMs, "25");
           return emptyResponse(204);
@@ -92,7 +94,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
 
       client.start();
       await waitFor(
-        () => requests.some((request) => request.path === "/remodex/messages/outbound/claim"),
+        () => requests.some((request) => request.path === "/async/outbound/claim"),
         5_000
       );
       assert.ok(
@@ -100,7 +102,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
       );
       assert.deepEqual(
         requests.map((request) => request.path),
-        ["/remodex/health", "/remodex/messages/outbound/claim"]
+        ["/async/health", "/async/outbound/claim"]
       );
       assert.equal(requests[0].method, "GET");
       assert.equal(requests[1].method, "GET");
@@ -119,7 +121,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
     await withDeviceState(deviceState, async () => {
       const requests = [];
       const fetchImpl = createFetchRecorder({
-        "/remodex/health": () =>
+        "/async/health": () =>
           jsonResponse({ status: "degraded", provider: "convex" }),
       }, requests);
 
@@ -140,7 +142,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
         client.start();
         await waitFor(() => !client.currentStatus().running && client.currentStatus().lastError.length > 0);
 
-        assert.deepEqual(requests.map((request) => request.path), ["/remodex/health"]);
+        assert.deepEqual(requests.map((request) => request.path), ["/async/health"]);
         assert.equal(client.currentStatus().running, false);
         assert.equal(client.currentStatus().available, false);
         assert.equal(client.currentStatus().lastError, "Convex health check reported status \"degraded\".");
@@ -159,7 +161,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
     await withDeviceState(deviceState, async () => {
       const requests = [];
       const fetchImpl = createFetchRecorder({
-        "/remodex/health": () =>
+        "/async/health": () =>
           jsonResponse({ status: "ok", provider: "cloudkit" }),
       }, requests);
 
@@ -180,7 +182,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
         client.start();
         await waitFor(() => !client.currentStatus().running && client.currentStatus().lastError.length > 0);
 
-        assert.deepEqual(requests.map((request) => request.path), ["/remodex/health"]);
+        assert.deepEqual(requests.map((request) => request.path), ["/async/health"]);
         assert.equal(client.currentStatus().running, false);
         assert.equal(client.currentStatus().available, false);
         assert.equal(client.currentStatus().lastError, "Convex health check reported provider \"cloudkit\".");
@@ -199,9 +201,9 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
     await withDeviceState(deviceState, async () => {
       const requests = [];
       const fetchImpl = createFetchRecorder({
-        "/remodex/health": () =>
+        "/async/health": () =>
           jsonResponse({ status: "ok", provider: "convex" }),
-        "/remodex/messages/outbound/claim": ({ query }) => {
+        "/async/outbound/claim": ({ query }) => {
           assert.equal(query.toDeviceId, deviceState.macDeviceId);
           assert.equal(query.leaseMs, "25");
           return jsonResponse({ ok: false, error: "Convex claim denied." });
@@ -229,7 +231,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
 
         assert.deepEqual(
           requests.map((request) => request.path),
-          ["/remodex/health", "/remodex/messages/outbound/claim"]
+          ["/async/health", "/async/outbound/claim"]
         );
         assert.equal(client.currentStatus().running, false);
         assert.equal(client.currentStatus().available, false);
@@ -253,9 +255,9 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
       const requests = [];
       const asyncRequests = [];
       const fetchImpl = createFetchRecorder({
-        "/remodex/health": () =>
+        "/async/health": () =>
           jsonResponse({ status: "ok", provider: "convex" }),
-        "/remodex/messages/outbound/claim": () =>
+        "/async/outbound/claim": () =>
           jsonResponse({
             message: {
               recordName: "record-1",
@@ -290,7 +292,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
 
         assert.deepEqual(
           requests.map((request) => request.path),
-          ["/remodex/health", "/remodex/messages/outbound/claim"]
+          ["/async/health", "/async/outbound/claim"]
         );
         assert.deepEqual(asyncRequests, [
           {
@@ -318,11 +320,11 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
     await withDeviceState(deviceState, async () => {
       const requests = [];
       const fetchImpl = createFetchRecorder({
-        "/remodex/health": () =>
+        "/async/health": () =>
           jsonResponse({ status: "ok", provider: "convex" }),
-        "/remodex/messages/outbound/claim": () => emptyResponse(204),
-        "/remodex/messages/outbound/respond": () => emptyResponse(204),
-        "/remodex/messages/outbound/error": () => emptyResponse(204),
+        "/async/outbound/claim": () => emptyResponse(204),
+        "/async/outbound/respond": () => emptyResponse(204),
+        "/async/outbound/error": () => emptyResponse(204),
       }, requests);
 
       const originalFetch = global.fetch;
@@ -343,7 +345,7 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
                 !triggered &&
                 status.running &&
                 status.available &&
-                requests.some((request) => request.path === "/remodex/messages/outbound/claim")
+                requests.some((request) => request.path === "/async/outbound/claim")
               ) {
                 triggered = true;
                 void (async () => {
@@ -374,8 +376,8 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
         assert.equal(responseResult, true);
         assert.equal(errorResult, true);
 
-        const responseRequest = requests.find((request) => request.path === "/remodex/messages/outbound/respond");
-        const errorRequest = requests.find((request) => request.path === "/remodex/messages/outbound/error");
+        const responseRequest = requests.find((request) => request.path === "/async/outbound/respond");
+        const errorRequest = requests.find((request) => request.path === "/async/outbound/error");
 
         assert.ok(responseRequest);
         assert.ok(errorRequest);
@@ -448,9 +450,9 @@ test("createConvexHelperClient covers the Convex helper lifecycle", async (t) =>
       const asyncRequests = [];
       let claimReturnedMessage = false;
       const fetchImpl = createFetchRecorder({
-        "/remodex/health": () =>
+        "/async/health": () =>
           jsonResponse({ status: "ok", provider: "convex" }),
-        "/remodex/messages/outbound/claim": () => {
+        "/async/outbound/claim": () => {
           if (claimReturnedMessage) {
             return emptyResponse(204);
           }
@@ -587,17 +589,6 @@ async function withDeviceState(deviceState, fn) {
   }
 }
 
-async function waitFor(predicate, timeoutMs = 1000) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    if (predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-
-  throw new Error("Timed out waiting for the Convex helper to reach the expected state.");
-}
 
 function base64UrlToBase64(value) {
   const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");

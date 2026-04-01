@@ -110,6 +110,10 @@ extension CodexService {
             }
 
             startSyncLoop()
+            // Load models as soon as the session is initialized. Post-connect sync can be
+            // cancelled during transport churn or skipped when `performInitialSync` is false;
+            // without this, `availableModels` stays empty and the composer shows "No models".
+            scheduleDeferredModelListRefresh()
             // Push registration is best-effort and talks to the bridge, so it must not
             // hold the main connect path hostage when the managed backend is slow.
             Task { @MainActor [weak self] in
@@ -275,6 +279,7 @@ extension CodexService {
                 .map { codexSecureFingerprint(for: $0.macIdentityPublicKey) }
             bridgeUpdatePrompt = nil
             startSyncLoop()
+            scheduleDeferredModelListRefresh()
             Task { @MainActor [weak self] in
                 await self?.syncManagedPushRegistrationIfNeeded(force: true)
             }
@@ -571,7 +576,7 @@ extension CodexService {
         scheduleDeferredModelListRefresh()
     }
 
-    private func scheduleDeferredModelListRefresh() {
+    func scheduleDeferredModelListRefresh() {
         guard deferredModelListTask == nil else {
             return
         }

@@ -14,6 +14,7 @@ struct SettingsView: View {
     @State private var isShowingMacNameSheet = false
 
     private let runtimeAutoValue = "__AUTO__"
+    private let runtimeDefaultProfileValue = "__DEFAULT_PROFILE__"
     private let runtimeNormalValue = "__NORMAL__"
     private let settingsAccentColor = Color(.plan)
 
@@ -50,6 +51,12 @@ struct SettingsView: View {
             }
             await subscriptions.bootstrap()
         }
+        .task(id: codex.isConnected) {
+            guard codex.isConnected else {
+                return
+            }
+            await codex.refreshConfigProfiles()
+        }
     }
 
     private var appFontStyleBinding: Binding<AppFont.Style> {
@@ -64,6 +71,30 @@ struct SettingsView: View {
     @ViewBuilder private var runtimeDefaultsSection: some View {
         SettingsCard(title: "Runtime defaults") {
             HStack {
+                Text("Profile")
+                Spacer()
+                Picker("Profile", selection: runtimeProfileSelection) {
+                    Text("Default").tag(runtimeDefaultProfileValue)
+                    ForEach(runtimeConfigProfileOptions, id: \.id) { profile in
+                        Text(profile.id).tag(profile.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(settingsAccentColor)
+            }
+
+            if let selectedProfile = selectedRuntimeProfileDetailText {
+                Text(selectedProfile)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Uses your paired Mac's default Codex config. Pick a named profile like `zai-glm5` to override new chats.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
                 Text("Model")
                 Spacer()
                 Picker("Model", selection: runtimeModelSelection) {
@@ -77,6 +108,10 @@ struct SettingsView: View {
                 .labelsHidden()
                 .tint(settingsAccentColor)
             }
+
+            Text("Profile sets the base provider/model from `~/.codex/config.toml`. Model and reasoning choices below still override it when set.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
 
             HStack {
                 Text("Reasoning")
@@ -245,15 +280,56 @@ struct SettingsView: View {
         TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
     }
 
+    private var runtimeConfigProfileOptions: [CodexConfigProfileOption] {
+        let loadedOptions = codex.availableConfigProfiles
+        guard let selectedConfigProfileName = codex.selectedConfigProfileName,
+              !selectedConfigProfileName.isEmpty,
+              !loadedOptions.contains(where: { $0.id == selectedConfigProfileName }) else {
+            return loadedOptions
+        }
+
+        return loadedOptions + [
+            CodexConfigProfileOption(
+                id: selectedConfigProfileName,
+                model: nil,
+                modelProvider: nil
+            ),
+        ]
+    }
+
     private var runtimeReasoningOptions: [TurnComposerReasoningDisplayOption] {
         TurnComposerMetaMapper.reasoningDisplayOptions(
             from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
         )
     }
 
+    private var selectedRuntimeProfileDetailText: String? {
+        guard let selectedConfigProfileName = codex.selectedConfigProfileName,
+              let selectedProfile = runtimeConfigProfileOptions.first(where: { $0.id == selectedConfigProfileName }) else {
+            return nil
+        }
+
+        return selectedProfile.detailText ?? "Uses the `\(selectedProfile.id)` profile for new chats."
+    }
+
+    private var runtimeProfileSelection: Binding<String> {
+        Binding(
+            get: { codex.selectedConfigProfileName ?? runtimeDefaultProfileValue },
+            set: { selection in
+                codex.setSelectedConfigProfileName(
+                    selection == runtimeDefaultProfileValue ? nil : selection
+                )
+            }
+        )
+    }
+
     private var runtimeModelSelection: Binding<String> {
         Binding(
-            get: { codex.selectedModelOption()?.id ?? runtimeAutoValue },
+            get: {
+                codex.hasExplicitModelSelection
+                    ? (codex.selectedModelOption()?.id ?? runtimeAutoValue)
+                    : runtimeAutoValue
+            },
             set: { selection in
                 codex.setSelectedModelId(selection == runtimeAutoValue ? nil : selection)
             }
@@ -262,7 +338,7 @@ struct SettingsView: View {
 
     private var runtimeReasoningSelection: Binding<String> {
         Binding(
-            get: { codex.selectedReasoningEffort ?? runtimeAutoValue },
+            get: { codex.hasExplicitReasoningEffortSelection ? (codex.selectedReasoningEffort ?? runtimeAutoValue) : runtimeAutoValue },
             set: { selection in
                 codex.setSelectedReasoningEffort(selection == runtimeAutoValue ? nil : selection)
             }
