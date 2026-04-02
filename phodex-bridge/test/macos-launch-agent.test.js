@@ -55,7 +55,7 @@ test("resolveLaunchAgentPlistPath writes into the user's LaunchAgents folder", (
   );
 });
 
-test("resolveMacOSBridgeStartConfig preserves saved relay settings while refreshing stale Convex defaults", () => {
+test("resolveMacOSBridgeStartConfig preserves saved daemon config fields", () => {
   withTempDaemonEnv(() => {
     writeDaemonConfig({
       relayUrl: "ws://127.0.0.1:9100/relay",
@@ -80,11 +80,11 @@ test("resolveMacOSBridgeStartConfig preserves saved relay settings while refresh
     assert.equal(config.refreshDebounceMs, 999);
     assert.equal(config.codexEndpoint, "ws://codex.example");
     assert.equal(config.refreshCommand, "echo refresh");
-    assert.equal(config.convexSiteUrl, "https://determined-ladybug-18.convex.site");
+    assert.ok(!("convexSiteUrl" in config));
   });
 });
 
-test("startMacOSBridgeService rewrites stale Convex defaults into daemon config before launchd restart", { concurrency: false }, async () => {
+test("startMacOSBridgeService preserves saved daemon config before launchd restart", { concurrency: false }, async () => {
   const previousDir = process.env.REMODEX_DEVICE_STATE_DIR;
   const previousHome = process.env.HOME;
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-launch-agent-"));
@@ -98,7 +98,6 @@ test("startMacOSBridgeService rewrites stale Convex defaults into daemon config 
   try {
     writeDaemonConfig({
       relayUrl: "ws://zacks-mac-studio.local:9100/relay",
-      convexSiteUrl: "https://stale.convex.site",
       refreshEnabled: true,
     }, { env: daemonEnv });
 
@@ -142,8 +141,8 @@ test("startMacOSBridgeService rewrites stale Convex defaults into daemon config 
 
     const savedConfig = readDaemonConfig({ env: daemonEnv });
     assert.equal(savedConfig?.relayUrl, "ws://zacks-mac-studio.local:9100/relay");
-    assert.equal(savedConfig?.convexSiteUrl, "https://determined-ladybug-18.convex.site");
     assert.equal(savedConfig?.refreshEnabled, true);
+    assert.ok(!("convexSiteUrl" in savedConfig));
     assert.ok(launchCalls.length > 0);
   } finally {
     if (previousDir === undefined) {
@@ -274,7 +273,6 @@ test("runMacOSBridgeService starts an embedded relay when the saved relay URL po
     };
     writeDaemonConfig({
       relayUrl: "ws://zacks-mac-studio.local:9100/relay",
-      convexSiteUrl: "https://stale.convex.site",
     }, { env: daemonEnv });
 
     const relayListenCalls = [];
@@ -315,7 +313,7 @@ test("runMacOSBridgeService starts an embedded relay when the saved relay URL po
 
     assert.deepEqual(relayListenCalls, [{ port: 9100, host: "0.0.0.0" }]);
     assert.equal(bridgeConfig?.relayUrl, "ws://zacks-mac-studio.local:9100/relay");
-    assert.equal(bridgeConfig?.convexSiteUrl, "https://determined-ladybug-18.convex.site");
+    assert.ok(!("convexSiteUrl" in bridgeConfig));
   });
 });
 
@@ -389,7 +387,7 @@ test("resolveMacOSBridgeStartConfig infers a local relay URL when nothing is con
     });
 
     assert.equal(config.relayUrl, "ws://zacks-mac-studio.local:9100/relay");
-    assert.equal(config.convexSiteUrl, "https://determined-ladybug-18.convex.site");
+    assert.ok(!("convexSiteUrl" in config));
   });
 });
 

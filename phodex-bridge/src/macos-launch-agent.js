@@ -269,7 +269,7 @@ async function startMacOSBridgeService({
   assertRelayConfigured(config);
   const startedAt = Date.now();
 
-  writeDaemonConfig(config, { env, fsImpl });
+  writeDaemonConfig(stripLegacyConvexConfig(config), { env, fsImpl });
   clearPairingSession({ env, fsImpl });
   clearBridgeStatus({ env, fsImpl });
   ensureRemodexStateDir({ env, fsImpl, osImpl });
@@ -308,8 +308,7 @@ async function startMacOSBridgeService({
   };
 }
 
-// In a source checkout, preserve the saved relay config when the shell lacks one,
-// but always refresh code-owned defaults like the Convex deployment URL.
+// In a source checkout, preserve saved local bridge config when the shell lacks one.
 function resolveMacOSBridgeStartConfig({
   env = process.env,
   fsImpl = fs,
@@ -321,12 +320,11 @@ function resolveMacOSBridgeStartConfig({
     return currentConfig;
   }
 
-  const savedConfig = readDaemonConfig({ env, fsImpl });
+  const savedConfig = stripLegacyConvexConfig(readDaemonConfig({ env, fsImpl }));
   if (typeof savedConfig?.relayUrl === "string" && savedConfig.relayUrl.trim()) {
     return {
       ...currentConfig,
       ...savedConfig,
-      convexSiteUrl: currentConfig.convexSiteUrl,
     };
   }
 
@@ -342,6 +340,15 @@ function resolveMacOSBridgeStartConfig({
     ...currentConfig,
     relayUrl: inferredRelayUrl,
   };
+}
+
+function stripLegacyConvexConfig(config) {
+  if (!config || typeof config !== "object") {
+    return config;
+  }
+
+  const { convexSiteUrl: _legacyConvexSiteUrl, ...nextConfig } = config;
+  return nextConfig;
 }
 
 function inferDefaultLocalRelayUrl({
