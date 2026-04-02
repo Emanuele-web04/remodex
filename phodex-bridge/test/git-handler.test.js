@@ -379,6 +379,37 @@ test("gitCreateWorktree creates a managed worktree under CODEX_HOME/worktrees", 
   }
 });
 
+test("gitCreateManagedWorktree creates a detached managed worktree under CODEX_HOME/worktrees", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const result = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+    });
+    const managedWorktreesRoot = canonicalPath(path.join(codexHome, "worktrees"));
+
+    assert.equal(result.alreadyExisted, false);
+    assert.equal(result.baseBranch, "main");
+    assert.equal(result.headMode, "detached");
+    assert.ok(result.worktreePath.startsWith(managedWorktreesRoot));
+    assert.equal(path.basename(result.worktreePath), "phodex-bridge");
+    assert.equal(git(result.worktreePath, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD");
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test("gitCreateWorktree reuses an existing worktree for the same remodex branch", async () => {
   const repoDir = makeTempRepo();
   const projectDir = path.join(repoDir, "phodex-bridge");
@@ -619,6 +650,202 @@ test("gitCreateWorktree leaves ignored files only in Local when copying changes 
     assert.match(git(repoDir, "status", "--short"), /README\.md/);
 
     git(repoDir, "worktree", "remove", "--force", path.dirname(result.worktreePath));
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateManagedWorktree moves tracked changes into the detached worktree and cleans Local", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\nmoved\n");
+    fs.writeFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "carry me\n");
+
+    const result = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+      changeTransfer: "move",
+    });
+
+    assert.equal(
+      fs.readFileSync(path.join(result.worktreePath, "..", "README.md"), "utf8"),
+      "# Test\nmoved\n"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(result.worktreePath, "scratch.txt"), "utf8"),
+      "carry me\n"
+    );
+    assert.equal(git(repoDir, "status", "--short"), "");
+    assert.equal(fs.existsSync(path.join(repoDir, "phodex-bridge", "scratch.txt")), false);
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateManagedWorktree copies tracked changes into the detached worktree and keeps Local dirty", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\ncopied\n");
+    fs.writeFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "keep me too\n");
+
+    const result = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+      changeTransfer: "copy",
+    });
+
+    assert.equal(
+      fs.readFileSync(path.join(result.worktreePath, "..", "README.md"), "utf8"),
+      "# Test\ncopied\n"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(result.worktreePath, "scratch.txt"), "utf8"),
+      "keep me too\n"
+    );
+    assert.match(git(repoDir, "status", "--short"), /README\.md/);
+    assert.equal(
+      fs.readFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "utf8"),
+      "keep me too\n"
+    );
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateManagedWorktree leaves ignored files only in Local", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), "ignored.log\n");
+    git(repoDir, "add", ".gitignore");
+    git(repoDir, "commit", "-m", "Add ignore rule");
+    fs.writeFileSync(path.join(repoDir, "ignored.log"), "stay local\n");
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\ncopied\n");
+
+    const result = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+      changeTransfer: "copy",
+    });
+
+    assert.equal(fs.existsSync(path.join(repoDir, "ignored.log")), true);
+    assert.equal(fs.existsSync(path.join(path.dirname(result.worktreePath), "ignored.log")), false);
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitTransferManagedHandoff moves tracked changes from Local into an existing managed worktree", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const managed = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+    });
+
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\nhandoff local\n");
+    fs.writeFileSync(path.join(projectDir, "scratch.txt"), "from local\n");
+
+    const result = await __test.gitTransferManagedHandoff(projectDir, {
+      targetPath: managed.worktreePath,
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(git(repoDir, "status", "--short"), "");
+    assert.equal(
+      fs.readFileSync(path.join(managed.worktreePath, "..", "README.md"), "utf8"),
+      "# Test\nhandoff local\n"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(managed.worktreePath, "scratch.txt"), "utf8"),
+      "from local\n"
+    );
+    assert.equal(fs.existsSync(path.join(projectDir, "scratch.txt")), false);
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitTransferManagedHandoff moves tracked changes from a managed worktree back to Local", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const managed = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+    });
+
+    fs.writeFileSync(path.join(managed.worktreePath, "..", "README.md"), "# Test\nhandoff back\n");
+    fs.writeFileSync(path.join(managed.worktreePath, "scratch.txt"), "from worktree\n");
+
+    const result = await __test.gitTransferManagedHandoff(managed.worktreePath, {
+      targetPath: projectDir,
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(git(path.join(managed.worktreePath, ".."), "status", "--short"), "");
+    assert.equal(
+      fs.readFileSync(path.join(repoDir, "README.md"), "utf8"),
+      "# Test\nhandoff back\n"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(projectDir, "scratch.txt"), "utf8"),
+      "from worktree\n"
+    );
+    assert.equal(fs.existsSync(path.join(managed.worktreePath, "scratch.txt")), false);
   } finally {
     if (previousCodexHome === undefined) {
       delete process.env.CODEX_HOME;

@@ -40,7 +40,7 @@ This repo is local-first now. Do not reintroduce hosted-service assumptions, rem
 
 ## Build guardrails
 
-- Do not run Xcode builds/tests unless the user explicitly asks.
+- Do not run Xcode tests unless the user explicitly asks. Do not decide to run them on your own.
 - Markdown files inside Xcode-synced groups can still produce harmless warnings.
 - For small iOS/mobile fixes, prefer inspection and targeted edits over simulator runs by default.
 

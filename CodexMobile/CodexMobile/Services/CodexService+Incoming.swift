@@ -411,7 +411,7 @@ extension CodexService {
             return
         }
 
-        upsertThread(thread)
+        upsertThread(thread, treatAsServerState: true)
         if activeThreadId == nil {
             activeThreadId = thread.id
         }

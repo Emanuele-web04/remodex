@@ -139,6 +139,9 @@ struct SidebarView: View {
                 onSelectProject: { projectPath in
                     handleNewChatTap(preferredProjectPath: projectPath)
                 },
+                onSelectWorktreeProject: { projectPath in
+                    handleNewWorktreeChatTap(preferredProjectPath: projectPath)
+                },
                 onSelectWithoutProject: {
                     handleNewChatTap(preferredProjectPath: nil)
                 }
@@ -226,13 +229,37 @@ struct SidebarView: View {
             defer { isCreatingThread = false }
 
             do {
-                let thread = try await codex.startThreadIfReady(preferredProjectPath: preferredProjectPath)
+                let thread = try await WorktreeFlowCoordinator.startNewLocalChat(
+                    preferredProjectPath: preferredProjectPath,
+                    codex: codex
+                )
                 selectedThread = thread
                 onClose()
             } catch {
                 let message = error.localizedDescription
                 codex.lastErrorMessage = message
                 createThreadErrorMessage = message.isEmpty ? "Unable to create a chat right now." : message
+            }
+        }
+    }
+
+    private func handleNewWorktreeChatTap(preferredProjectPath: String) {
+        Task { @MainActor in
+            createThreadErrorMessage = nil
+            isCreatingThread = true
+            defer { isCreatingThread = false }
+
+            do {
+                let thread = try await WorktreeFlowCoordinator.startNewWorktreeChat(
+                    preferredProjectPath: preferredProjectPath,
+                    codex: codex
+                )
+                selectedThread = thread
+                onClose()
+            } catch {
+                let message = error.localizedDescription
+                codex.lastErrorMessage = message
+                createThreadErrorMessage = message.isEmpty ? "Unable to create a worktree chat right now." : message
             }
         }
     }
@@ -365,6 +392,7 @@ enum SidebarThreadsLoadingPresentation {
 private struct SidebarNewChatProjectPickerSheet: View {
     let choices: [SidebarProjectChoice]
     let onSelectProject: (String) -> Void
+    let onSelectWorktreeProject: (String) -> Void
     let onSelectWithoutProject: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -405,6 +433,35 @@ private struct SidebarNewChatProjectPickerSheet: View {
                     }
                 }
 
+                if !choices.isEmpty {
+                    Section("Worktree") {
+                        ForEach(choices) { choice in
+                            Button {
+                                dismiss()
+                                onSelectWorktreeProject(choice.projectPath)
+                            } label: {
+                                HStack(alignment: .top, spacing: 12) {
+                                    CodexWorktreeIcon(pointSize: 16, weight: .medium)
+                                        .foregroundStyle(.secondary)
+
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(choice.label)
+                                            .font(AppFont.body(weight: .semibold))
+                                            .foregroundStyle(.primary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                                        Text("Start a new chat in a managed detached worktree from the repo default branch.")
+                                            .font(AppFont.body())
+                                            .foregroundStyle(.secondary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
+                    }
+                }
+
                 Section {
                     Button {
                         dismiss()
@@ -433,7 +490,7 @@ private struct SidebarNewChatProjectPickerSheet: View {
 
                 Section {
                     // Explains the existing scoping rule at the exact moment the user chooses it.
-                    Text("Chats started in a project stay scoped to that working directory. If you pick Cloud, the chat is global.")
+                    Text("Chats started in a project stay scoped to that working directory. Worktree chats start in a managed detached worktree. If you pick Cloud, the chat is global.")
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

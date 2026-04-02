@@ -79,7 +79,7 @@ struct ComposerBottomBar: View {
                         .font(AppFont.system(size: 12, weight: .bold))
                         .foregroundStyle(Color(.systemBackground))
                         .frame(width: 28, height: 28)
-                        .background(Color.orange, in: Circle())
+                        .background(Color(.systemGray2), in: Circle())
                 }
                 .accessibilityLabel("Resume queued messages")
             }
@@ -291,7 +291,7 @@ struct ComposerBottomBar: View {
         }
         .padding(.vertical, metaVerticalPadding)
         .padding(.horizontal, 4)
-        .foregroundStyle(Color(.plan))
+        .foregroundStyle(.secondary)
     }
 
 
@@ -308,7 +308,7 @@ struct ComposerBottomBar: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(
-            Capsule().fill(isQueuePaused ? Color.orange : Color.cyan)
+            Capsule().fill(isQueuePaused ? Color(.systemGray3) : Color(.systemGray4))
         )
     }
 

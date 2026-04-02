@@ -444,7 +444,7 @@ extension CodexService {
         // so subagent identity resolves without navigating into the child thread.
         if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
            let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
-            upsertThread(decoded)
+            upsertThread(decoded, treatAsServerState: true)
         }
 
         // A turn may have started while thread/read was in flight. Normal background

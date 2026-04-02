@@ -83,6 +83,10 @@ async function handleGitMethod(method, params) {
       return gitCreateBranch(cwd, params);
     case "git/createWorktree":
       return gitCreateWorktree(cwd, params);
+    case "git/createManagedWorktree":
+      return gitCreateManagedWorktree(cwd, params);
+    case "git/transferManagedHandoff":
+      return gitTransferManagedHandoff(cwd, params);
     case "git/removeWorktree":
       return gitRemoveWorktree(cwd, params);
     case "git/stash":
@@ -412,7 +416,7 @@ async function gitCreateWorktree(cwd, params) {
 
   const currentBranch = typeof status.branch === "string" ? status.branch.trim() : "";
   const canCarryLocalChanges = status.dirty && !!currentBranch && currentBranch === baseBranch;
-  if (status.dirty && !canCarryLocalChanges) {
+  if (status.dirty && changeTransfer !== "none" && !canCarryLocalChanges) {
     const currentBranchLabel = currentBranch || "the current branch";
     const transferVerb = changeTransfer === "copy" ? "copy" : "move";
     throw gitError(
@@ -454,7 +458,7 @@ async function gitCreateWorktree(cwd, params) {
     if (canCarryLocalChanges) {
       if (changeTransfer === "copy") {
         copiedLocalChangesPatch = await captureLocalChangesPatch(repoRoot);
-      } else {
+      } else if (changeTransfer === "move") {
         handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot);
       }
     }
@@ -499,6 +503,173 @@ async function gitCreateWorktree(cwd, params) {
     branch,
     worktreePath,
     alreadyExisted: false,
+  };
+}
+
+async function gitCreateManagedWorktree(cwd, params) {
+  const branchResult = await gitBranches(cwd);
+  const repoRoot = await resolveRepoRoot(cwd);
+  const status = await gitStatus(cwd);
+  const projectRelativePath = resolveProjectRelativePath(cwd, repoRoot);
+  const baseBranch = resolveBaseBranchName(params.baseBranch, branchResult.defaultBranch);
+  const changeTransfer = resolveWorktreeChangeTransfer(params.changeTransfer);
+  if (!baseBranch) {
+    throw gitError("missing_base_branch", "Base branch is required.");
+  }
+  if (!(await localBranchExists(cwd, baseBranch))) {
+    throw gitError(
+      "missing_base_branch",
+      `Base branch '${baseBranch}' is not available locally. Create or check out that branch first.`
+    );
+  }
+
+  const currentBranch = typeof status.branch === "string" ? status.branch.trim() : "";
+  const canCarryLocalChanges = status.dirty && !!currentBranch && currentBranch === baseBranch;
+  if (status.dirty && changeTransfer !== "none" && !canCarryLocalChanges) {
+    const currentBranchLabel = currentBranch || "the current branch";
+    const transferVerb = changeTransfer === "copy" ? "copy" : "move";
+    throw gitError(
+      "dirty_worktree_base_mismatch",
+      `Uncommitted changes can ${transferVerb} into a managed worktree only from ${currentBranchLabel}. Switch the base branch to match or clean up local changes first.`
+    );
+  }
+
+  const worktreeRootPath = allocateManagedWorktreePath(repoRoot);
+  let handoffStashRef = null;
+  let copiedLocalChangesPatch = "";
+  let didCreateWorktree = false;
+
+  try {
+    if (canCarryLocalChanges) {
+      if (changeTransfer === "copy") {
+        copiedLocalChangesPatch = await captureLocalChangesPatch(repoRoot);
+      } else if (changeTransfer === "move") {
+        handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot);
+      }
+    }
+
+    await git(repoRoot, "worktree", "add", "--detach", worktreeRootPath, baseBranch);
+    didCreateWorktree = true;
+
+    if (handoffStashRef) {
+      await applyWorktreeHandoffStash(worktreeRootPath, handoffStashRef);
+    }
+    if (copiedLocalChangesPatch) {
+      await applyCopiedLocalChangesToWorktree(worktreeRootPath, copiedLocalChangesPatch);
+    }
+  } catch (err) {
+    if (didCreateWorktree) {
+      await cleanupManagedWorktree(repoRoot, worktreeRootPath);
+    } else {
+      fs.rmSync(path.dirname(worktreeRootPath), { recursive: true, force: true });
+    }
+
+    if (handoffStashRef) {
+      await restoreWorktreeHandoffStash(repoRoot, handoffStashRef);
+    }
+
+    if (err.message?.includes("invalid reference")) {
+      throw gitError("missing_base_branch", `Base branch '${baseBranch}' does not exist.`);
+    }
+    throw gitError("create_worktree_failed", err.message || "Failed to create managed worktree.");
+  }
+
+  const worktreePath = scopedWorktreePath(worktreeRootPath, projectRelativePath);
+  return {
+    worktreePath,
+    alreadyExisted: false,
+    baseBranch,
+    headMode: "detached",
+    transferredChanges: Boolean(handoffStashRef || copiedLocalChangesPatch),
+  };
+}
+
+async function gitTransferManagedHandoff(cwd, params) {
+  const targetPath = firstNonEmptyString([params.targetPath, params.targetProjectPath]);
+  if (!targetPath) {
+    throw gitError("missing_handoff_target", "A handoff target path is required.");
+  }
+  if (!isExistingDirectory(cwd)) {
+    throw gitError(
+      "missing_handoff_source",
+      "The current handoff source is not available on this Mac."
+    );
+  }
+  if (!isExistingDirectory(targetPath)) {
+    throw gitError(
+      "missing_handoff_target",
+      "The destination for this handoff is not available on this Mac."
+    );
+  }
+
+  const [sourceRepoRoot, sourceLocalCheckoutRoot, targetRepoRoot, targetLocalCheckoutRoot] = await Promise.all([
+    resolveRepoRoot(cwd),
+    resolveLocalCheckoutRoot(cwd),
+    resolveRepoRoot(targetPath),
+    resolveLocalCheckoutRoot(targetPath),
+  ]);
+
+  const sourceCheckoutRoot = sourceLocalCheckoutRoot || sourceRepoRoot;
+  const targetCheckoutRoot = targetLocalCheckoutRoot || targetRepoRoot;
+  if (!sameFilePath(sourceCheckoutRoot, targetCheckoutRoot)) {
+    throw gitError(
+      "handoff_target_mismatch",
+      "The selected handoff destination belongs to a different checkout."
+    );
+  }
+
+  if (sameFilePath(cwd, targetPath)) {
+    return {
+      success: true,
+      targetPath: normalizeExistingPath(targetPath) ?? targetPath,
+      transferredChanges: false,
+    };
+  }
+
+  const [sourceStatus, targetStatus] = await Promise.all([
+    gitStatus(cwd),
+    gitStatus(targetPath),
+  ]);
+
+  if (!sourceStatus.dirty) {
+    return {
+      success: true,
+      targetPath: normalizeExistingPath(targetPath) ?? targetPath,
+      transferredChanges: false,
+    };
+  }
+
+  if (targetStatus.dirty) {
+    throw gitError(
+      "handoff_target_dirty",
+      "The handoff destination already has uncommitted changes. Clean it up before moving this thread there."
+    );
+  }
+
+  const stashRef = await stashChangesForWorktreeHandoff(sourceRepoRoot);
+  if (!stashRef) {
+    return {
+      success: true,
+      targetPath: normalizeExistingPath(targetPath) ?? targetPath,
+      transferredChanges: false,
+    };
+  }
+
+  try {
+    await applyWorktreeHandoffStash(targetRepoRoot, stashRef, { dropAfterApply: true });
+  } catch (err) {
+    await rollbackFailedHandoffTransfer(targetRepoRoot);
+    await restoreWorktreeHandoffStash(sourceRepoRoot, stashRef);
+    throw gitError(
+      "handoff_transfer_failed",
+      err.userMessage || err.message || "Could not move local changes into the handoff destination."
+    );
+  }
+
+  return {
+    success: true,
+    targetPath: normalizeExistingPath(targetPath) ?? targetPath,
+    transferredChanges: true,
   };
 }
 
@@ -652,9 +823,15 @@ async function findStashRefByLabel(cwd, stashLabel) {
   return null;
 }
 
-async function applyWorktreeHandoffStash(cwd, stashRef) {
+async function applyWorktreeHandoffStash(cwd, stashRef, options = {}) {
+  const dropAfterApply = options.dropAfterApply === true;
   try {
-    await git(cwd, "stash", "pop", stashRef);
+    if (dropAfterApply) {
+      await git(cwd, "stash", "apply", stashRef);
+      await git(cwd, "stash", "drop", stashRef);
+    } else {
+      await git(cwd, "stash", "pop", stashRef);
+    }
   } catch (err) {
     throw gitError(
       "create_worktree_failed",
@@ -688,6 +865,20 @@ async function restoreWorktreeHandoffStash(cwd, stashRef) {
     await git(cwd, "stash", "pop", stashRef);
   } catch {
     // Best effort: if restore fails we prefer surfacing the original worktree error without masking it.
+  }
+}
+
+async function rollbackFailedHandoffTransfer(cwd) {
+  try {
+    await git(cwd, "reset", "--hard", "HEAD");
+  } catch {
+    // Best effort: leave the original transfer error as the primary failure.
+  }
+
+  try {
+    await git(cwd, "clean", "-fd");
+  } catch {
+    // Best effort: leave the original transfer error as the primary failure.
   }
 }
 
@@ -1048,7 +1239,13 @@ function parseNumstatTotals(output) {
 
 function resolveWorktreeChangeTransfer(rawValue) {
   const normalizedValue = typeof rawValue === "string" ? rawValue.trim().toLowerCase() : "";
-  return normalizedValue === "copy" ? "copy" : "move";
+  if (normalizedValue === "copy") {
+    return "copy";
+  }
+  if (normalizedValue === "none") {
+    return "none";
+  }
+  return "move";
 }
 
 function ensureTrailingNewline(value) {
@@ -1251,6 +1448,8 @@ module.exports = {
     gitBranches,
     gitCreateBranch,
     gitCreateWorktree,
+    gitCreateManagedWorktree,
+    gitTransferManagedHandoff,
     gitCheckout,
     gitRemoveWorktree,
     isManagedWorktreePath,

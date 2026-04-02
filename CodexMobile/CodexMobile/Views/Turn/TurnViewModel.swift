@@ -104,6 +104,10 @@ final class TurnViewModel {
             baseBranch: String,
             changeTransfer: GitWorktreeChangeTransferMode
         )
+        case createManagedWorktree(
+            baseBranch: String,
+            changeTransfer: GitWorktreeChangeTransferMode
+        )
     }
 
     // Preserves the exact composer payload + raw chips so stale-busy recovery can retry cleanly.
@@ -228,6 +232,7 @@ final class TurnViewModel {
     @ObservationIgnored var gitStatusRefreshTask: Task<Void, Never>?
     @ObservationIgnored var pendingGitBranchOperation: GitBranchUserOperation?
     @ObservationIgnored var pendingGitWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?
+    @ObservationIgnored var pendingManagedGitWorktreeOpenHandler: ((GitCreateManagedWorktreeResult) -> Void)?
     @ObservationIgnored private var cachedSkillSearchIndexByRoot: [String: [TurnSkillSearchIndexEntry]] = [:]
     @ObservationIgnored var unsupportedSkillsAutocompleteRoots: Set<String> = []
 

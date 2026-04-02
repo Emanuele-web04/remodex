@@ -47,8 +47,12 @@ extension CodexService {
         return newThread.id
     }
 
-    func upsertThread(_ incomingThread: CodexThread) {
-        var resolvedThread = mergedThread(incomingThread, with: self.thread(for: incomingThread.id))
+    func upsertThread(_ incomingThread: CodexThread, treatAsServerState: Bool = false) {
+        var resolvedThread = mergedThread(
+            incomingThread,
+            with: self.thread(for: incomingThread.id),
+            treatAsServerState: treatAsServerState
+        )
         if resolvedThread.forkedFromThreadId == nil {
             resolvedThread.forkedFromThreadId = persistedForkOrigin(for: resolvedThread.id)
         }
@@ -72,9 +76,16 @@ extension CodexService {
     }
 
     // Preserves locally discovered child-thread identity while newer server payloads trickle in.
-    func mergedThread(_ incoming: CodexThread, with existing: CodexThread?) -> CodexThread {
+    func mergedThread(
+        _ incoming: CodexThread,
+        with existing: CodexThread?,
+        treatAsServerState: Bool = false
+    ) -> CodexThread {
         guard let existing else {
-            return incoming
+            return applyingAuthoritativeProjectPath(
+                to: incoming,
+                treatAsServerState: treatAsServerState
+            )
         }
 
         var merged = incoming
@@ -95,7 +106,10 @@ extension CodexService {
         if merged.agentRole == nil { merged.agentRole = existing.agentRole }
         if merged.model == nil { merged.model = existing.model }
         if merged.modelProvider == nil { merged.modelProvider = existing.modelProvider }
-        return merged
+        return applyingAuthoritativeProjectPath(
+            to: merged,
+            treatAsServerState: treatAsServerState
+        )
     }
 
     // Persists fork ancestry outside transient thread payloads so sidebar badges survive reconnects.

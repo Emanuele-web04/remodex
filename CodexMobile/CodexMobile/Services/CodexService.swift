@@ -476,6 +476,8 @@ final class CodexService {
     @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
     @ObservationIgnored var forkedFromThreadIDByThreadID: [String: String] = [:]
     @ObservationIgnored var renamedThreadNameByThreadID: [String: String] = [:]
+    @ObservationIgnored var associatedManagedWorktreePathByThreadID: [String: String] = [:]
+    @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
     // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
     @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]
@@ -503,6 +505,7 @@ final class CodexService {
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
+    static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
 
     init(
@@ -585,6 +588,16 @@ final class CodexService {
             self.renamedThreadNameByThreadID = decodedRenamedThreadNames
         } else {
             self.renamedThreadNameByThreadID = [:]
+        }
+
+        if let savedAssociatedManagedWorktreePaths = defaults.data(forKey: Self.associatedManagedWorktreePathsDefaultsKey),
+           let decodedAssociatedManagedWorktreePaths = try? decoder.decode(
+               [String: String].self,
+               from: savedAssociatedManagedWorktreePaths
+           ) {
+            self.associatedManagedWorktreePathByThreadID = decodedAssociatedManagedWorktreePaths
+        } else {
+            self.associatedManagedWorktreePathByThreadID = [:]
         }
 
         let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?

@@ -37,65 +37,43 @@ extension CodexService {
             throw CodexServiceError.invalidInput("Thread not found.")
         }
 
-        let sourceRuntimeOverride = threadRuntimeOverride(for: normalizedSourceThreadId)
         let resolvedProjectPath = resolvedForkProjectPath(for: target, sourceThread: sourceThread)
-        let preferredModelIdentifier = sourceThread.model ?? runtimeModelIdentifierForTurn()
-        let serviceTier = sourceRuntimeOverride?.overridesServiceTier == true
-            ? sourceRuntimeOverride?.serviceTierRawValue
-            : runtimeServiceTierForTurn(threadId: normalizedSourceThreadId)
-        var includesServiceTier = serviceTier != nil
-        var includesSandbox = true
-        var usesMinimalForkParams = false
+        let sourceModelIdentifier = sourceThread.model?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        while true {
-            let params = makeThreadForkParams(
-                sourceThreadId: normalizedSourceThreadId,
-                sourceThread: sourceThread,
-                targetProjectPath: resolvedProjectPath,
-                serviceTier: includesServiceTier ? serviceTier : nil,
-                includeSandbox: includesSandbox,
-                usesMinimalForkParams: usesMinimalForkParams
+        do {
+            let response = try await sendRequestWithApprovalPolicyFallback(
+                method: "thread/fork",
+                baseParams: ["threadId": .string(normalizedSourceThreadId)],
+                context: "minimal"
             )
-
-            do {
-                let response = try await sendRequestWithApprovalPolicyFallback(
-                    method: "thread/fork",
-                    baseParams: params,
-                    context: includesSandbox ? "sandbox" : "minimal"
+            let forkedThread = try await handleThreadForkResponse(
+                response,
+                sourceThreadId: normalizedSourceThreadId,
+                targetProjectPath: resolvedProjectPath,
+                sourceModelIdentifier: (sourceModelIdentifier?.isEmpty == false) ? sourceModelIdentifier : nil
+            )
+            activeThreadId = forkedThread.id
+            markThreadAsViewed(forkedThread.id)
+            requestImmediateSync(threadId: forkedThread.id)
+            return forkedThread
+        } catch {
+            if consumeUnsupportedThreadFork(error) {
+                throw CodexServiceError.invalidInput(
+                    "This Mac bridge does not support native thread forks yet. Update Remodex on your Mac and retry."
                 )
-                let forkedThread = try await handleThreadForkResponse(
-                    response,
-                    sourceThreadId: normalizedSourceThreadId,
-                    fallbackProjectPath: resolvedProjectPath,
-                    preferredModelIdentifier: preferredModelIdentifier,
-                    usesPostForkResumeOverrides: usesMinimalForkParams
-                )
-                return forkedThread
-            } catch {
-                if consumeUnsupportedThreadFork(error) {
-                    throw CodexServiceError.invalidInput(
-                        "This Mac bridge does not support native thread forks yet. Update Remodex on your Mac and retry."
-                    )
-                }
-                if consumeUnsupportedThreadForkOverrides(error, usesMinimalForkParams: &usesMinimalForkParams) {
-                    includesServiceTier = false
-                    includesSandbox = false
-                    continue
-                }
-                if consumeUnsupportedServiceTier(error, includesServiceTier: &includesServiceTier) {
-                    continue
-                }
-                if includesSandbox, shouldFallbackFromSandboxPolicy(error) {
-                    includesSandbox = false
-                    continue
-                }
-                throw error
             }
+            throw error
         }
     }
 }
 
 private extension CodexService {
+    static let forkHydrationRetryDelays: [UInt64] = [
+        0,
+        250_000_000,
+        800_000_000,
+    ]
+
     // Resolves only service-level fork targets; product-level "Fork into local" is resolved in the UI first.
     func resolvedForkProjectPath(
         for target: CodexThreadForkTarget,
@@ -109,49 +87,12 @@ private extension CodexService {
         }
     }
 
-    // Builds the fork payload without mixing in handoff-specific state transitions.
-    func makeThreadForkParams(
-        sourceThreadId: String,
-        sourceThread: CodexThread,
-        targetProjectPath: String?,
-        serviceTier: String?,
-        includeSandbox: Bool,
-        usesMinimalForkParams: Bool
-    ) -> RPCObject {
-        var params: RPCObject = [
-            "threadId": .string(sourceThreadId),
-        ]
-
-        if usesMinimalForkParams {
-            return params
-        }
-
-        if let targetProjectPath {
-            params["cwd"] = .string(targetProjectPath)
-        }
-        if let modelIdentifier = sourceThread.model ?? runtimeModelIdentifierForTurn() {
-            params["model"] = .string(modelIdentifier)
-        }
-        if let modelProvider = sourceThread.modelProvider {
-            params["modelProvider"] = .string(modelProvider)
-        }
-        if let serviceTier {
-            params["serviceTier"] = .string(serviceTier)
-        }
-        if includeSandbox {
-            params["sandbox"] = .string(selectedAccessMode.sandboxLegacyValue)
-        }
-
-        return params
-    }
-
-    // Normalizes the fork response, records the new thread immediately, then hydrates it best-effort.
+    // Normalizes the fork response, records the new thread immediately, then hydrates it before the UI opens it.
     func handleThreadForkResponse(
         _ response: RPCMessage,
         sourceThreadId: String,
-        fallbackProjectPath: String?,
-        preferredModelIdentifier: String?,
-        usesPostForkResumeOverrides: Bool
+        targetProjectPath: String?,
+        sourceModelIdentifier: String?
     ) async throws -> CodexThread {
         guard let resultObject = response.result?.objectValue,
               let threadValue = resultObject["thread"],
@@ -170,37 +111,144 @@ private extension CodexService {
         if decodedThread.updatedAt == nil {
             decodedThread.updatedAt = forkCreationDate
         }
-        if usesPostForkResumeOverrides, let fallbackProjectPath {
-            decodedThread.cwd = fallbackProjectPath
+        if let targetProjectPath {
+            decodedThread.cwd = targetProjectPath
         } else if decodedThread.normalizedProjectPath == nil {
             let responseProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(
                 resultObject["cwd"]?.stringValue
             )
-            decodedThread.cwd = responseProjectPath ?? fallbackProjectPath
+            decodedThread.cwd = responseProjectPath
         }
 
-        upsertThread(decodedThread)
+        let sourceThread = thread(for: sourceThreadId)
+        if let sourceThread {
+            if decodedThread.model == nil {
+                decodedThread.model = sourceThread.model
+            }
+            if decodedThread.modelProvider == nil {
+                decodedThread.modelProvider = sourceThread.modelProvider
+            }
+        }
+
+        upsertThread(decodedThread, treatAsServerState: true)
+        if let targetProjectPath {
+            beginAuthoritativeProjectPathTransition(
+                threadId: decodedThread.id,
+                projectPath: targetProjectPath
+            )
+        }
+        if let normalizedProjectPath = decodedThread.normalizedProjectPath,
+           CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+            rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: decodedThread.id)
+        }
         inheritThreadRuntimeOverrides(from: sourceThreadId, to: decodedThread.id)
         if let projectPath = decodedThread.gitWorkingDirectory {
             rememberRepoRoot(projectPath, forWorkingDirectory: projectPath)
         }
 
-        activeThreadId = decodedThread.id
-        markThreadAsViewed(decodedThread.id)
-        requestImmediateSync(threadId: decodedThread.id)
-
-        do {
-            let resumedThread = try await ensureThreadResumed(
-                threadId: decodedThread.id,
-                force: true,
-                preferredProjectPath: usesPostForkResumeOverrides ? fallbackProjectPath : nil,
-                modelIdentifierOverride: usesPostForkResumeOverrides ? preferredModelIdentifier : nil
-            )
-            return resumedThread ?? thread(for: decodedThread.id) ?? decodedThread
-        } catch {
-            // If hydration fails after `thread/fork` succeeded, keep the created thread instead of
-            // treating the whole fork as failed. Sync/resume can recover the richer payload later.
-            return thread(for: decodedThread.id) ?? decodedThread
+        let hydratedThread = try await hydrateForkedThread(
+            threadId: decodedThread.id,
+            targetProjectPath: targetProjectPath,
+            sourceModelIdentifier: sourceModelIdentifier,
+            sourceModelProvider: sourceThread?.modelProvider
+        )
+        if let hydratedThread {
+            return hydratedThread
         }
+
+        let fallbackThread = thread(for: decodedThread.id) ?? decodedThread
+        return patchedForkThread(
+            fallbackThread,
+            targetProjectPath: targetProjectPath,
+            sourceModelIdentifier: sourceModelIdentifier,
+            sourceModelProvider: sourceThread?.modelProvider
+        ) ?? fallbackThread
+    }
+
+    func hydrateForkedThread(
+        threadId: String,
+        targetProjectPath: String?,
+        sourceModelIdentifier: String?,
+        sourceModelProvider: String?
+    ) async throws -> CodexThread? {
+        for delay in Self.forkHydrationRetryDelays {
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: delay)
+            }
+
+            let resumedThread: CodexThread?
+            do {
+                resumedThread = try await ensureThreadResumed(
+                    threadId: threadId,
+                    force: true,
+                    preferredProjectPath: targetProjectPath,
+                    modelIdentifierOverride: sourceModelIdentifier
+                )
+            } catch {
+                if shouldAllowProjectRebindWithoutResume(error) {
+                    continue
+                }
+                throw error
+            }
+
+            try await loadThreadHistoryIfNeeded(
+                threadId: threadId,
+                forceRefresh: true,
+                markHydratedWhenNotMaterialized: false
+            )
+
+            if hydratedThreadIDs.contains(threadId) || !(messagesByThread[threadId] ?? []).isEmpty {
+                return patchedForkThread(
+                    resumedThread ?? thread(for: threadId),
+                    targetProjectPath: targetProjectPath,
+                    sourceModelIdentifier: sourceModelIdentifier,
+                    sourceModelProvider: sourceModelProvider
+                )
+            }
+        }
+
+        return patchedForkThread(
+            thread(for: threadId),
+            targetProjectPath: targetProjectPath,
+            sourceModelIdentifier: sourceModelIdentifier,
+            sourceModelProvider: sourceModelProvider
+        )
+    }
+
+    // Keeps fork semantics authoritative on the client even when the runtime resumes with stale cwd/model metadata.
+    func patchedForkThread(
+        _ thread: CodexThread?,
+        targetProjectPath: String?,
+        sourceModelIdentifier: String?,
+        sourceModelProvider: String?
+    ) -> CodexThread? {
+        guard var thread else {
+            return nil
+        }
+
+        var didPatch = false
+        if let targetProjectPath,
+           thread.normalizedProjectPath != targetProjectPath {
+            thread.cwd = targetProjectPath
+            didPatch = true
+        }
+        if thread.model == nil, let sourceModelIdentifier {
+            thread.model = sourceModelIdentifier
+            didPatch = true
+        }
+        if thread.modelProvider == nil, let sourceModelProvider {
+            thread.modelProvider = sourceModelProvider
+            didPatch = true
+        }
+
+        if didPatch {
+            upsertThread(thread)
+            if let normalizedProjectPath = thread.normalizedProjectPath,
+               CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+                rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
+            }
+        }
+
+        return thread
     }
 }

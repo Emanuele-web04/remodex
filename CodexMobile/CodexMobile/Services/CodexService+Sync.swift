@@ -205,7 +205,7 @@ extension CodexService {
             var liveThread = serverThread
 
             if let localThread = localByID[liveThread.id] {
-                liveThread = mergedThread(liveThread, with: localThread)
+                liveThread = mergedThread(liveThread, with: localThread, treatAsServerState: true)
                 liveThread.syncState = localThread.syncState
             } else if persistedArchivedIDs.contains(liveThread.id) {
                 liveThread.syncState = .archivedLocal
@@ -227,7 +227,7 @@ extension CodexService {
 
             var archivedThread = serverThread
             if let localThread = localByID[archivedThread.id] {
-                archivedThread = mergedThread(archivedThread, with: localThread)
+                archivedThread = mergedThread(archivedThread, with: localThread, treatAsServerState: true)
             }
             archivedThread.syncState = .archivedLocal
 

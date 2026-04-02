@@ -54,6 +54,16 @@ enum GitActionsError: LocalizedError {
             return fallback ?? "Only managed worktrees can be cleaned up automatically."
         case "worktree_cleanup_failed":
             return fallback ?? "We could not clean up the temporary worktree automatically."
+        case "handoff_target_dirty":
+            return fallback ?? "The handoff destination already has uncommitted changes."
+        case "handoff_target_mismatch":
+            return fallback ?? "The selected handoff destination belongs to a different checkout."
+        case "handoff_transfer_failed":
+            return fallback ?? "Could not move local changes into the handoff destination."
+        case "missing_handoff_source":
+            return fallback ?? "The current handoff source is no longer available on this Mac."
+        case "missing_handoff_target":
+            return fallback ?? "The handoff destination is no longer available on this Mac."
         default: return fallback ?? "Git operation failed."
         }
     }
@@ -132,6 +142,29 @@ final class GitActionsService {
             ]
         )
         return GitCreateWorktreeResult(from: json)
+    }
+
+    // Creates a Codex-managed detached worktree rooted under CODEX_HOME/worktrees.
+    func createManagedWorktree(
+        baseBranch: String,
+        changeTransfer: GitWorktreeChangeTransferMode = .move
+    ) async throws -> GitCreateManagedWorktreeResult {
+        let json = try await request(
+            method: "git/createManagedWorktree",
+            params: [
+                "baseBranch": .string(baseBranch),
+                "changeTransfer": .string(changeTransfer.rawValue),
+            ]
+        )
+        return GitCreateManagedWorktreeResult(from: json)
+    }
+
+    func transferManagedHandoff(targetProjectPath: String) async throws -> GitManagedHandoffTransferResult {
+        let json = try await request(
+            method: "git/transferManagedHandoff",
+            params: ["targetPath": .string(targetProjectPath)]
+        )
+        return GitManagedHandoffTransferResult(from: json)
     }
 
     func removeManagedWorktree(branch: String?) async throws {

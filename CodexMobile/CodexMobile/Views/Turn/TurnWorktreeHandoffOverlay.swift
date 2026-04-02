@@ -1,5 +1,5 @@
 // FILE: TurnWorktreeHandoffOverlay.swift
-// Purpose: Presents the shared worktree-creation dialog used by handoff and fork flows.
+// Purpose: Presents the shared managed-worktree dialog used by handoff and fork flows.
 // Layer: View Component
 // Exports: TurnWorktreeHandoffOverlay
 // Depends on: SwiftUI, CodexWorktreeIcon
@@ -15,16 +15,16 @@ enum TurnWorktreeOverlayMode {
         case .handoff:
             return "Hand off thread to worktree"
         case .fork:
-            return "Fork thread into new worktree"
+            return "Fork thread into worktree"
         }
     }
 
     var message: String {
         switch self {
         case .handoff:
-            return "Create and check out a branch in a new worktree to continue working in parallel. Tracked local changes move there too, while ignored files stay in Local."
+            return "Create a managed detached worktree from a base branch, then move this same chat there. If this base branch matches your current branch, local changes move with it; ignored files stay in Local. You can create a branch later inside the worktree."
         case .fork:
-            return "Create and check out a branch in a new worktree, then fork this conversation into the new checkout. Tracked local changes are copied there too, while the current thread and Local checkout stay exactly where they are."
+            return "Create a managed detached worktree from a base branch, then clone this conversation into it as a new chat. No local files move during a fork, so the new worktree starts clean. You can create a branch later inside the worktree."
         }
     }
 
@@ -44,17 +44,13 @@ struct TurnWorktreeHandoffOverlay: View {
     let isHandoffAvailable: Bool
     let isSubmitting: Bool
     let onClose: () -> Void
-    let onSubmit: (String, String) -> Void
+    let onSubmit: (String) -> Void
 
-    @State private var branchName = ""
-    @FocusState private var isBranchNameFocused: Bool
-
-    private var normalizedBranchName: String {
-        remodexNormalizedCreatedBranchName(branchName)
-    }
+    @State private var baseBranch = ""
+    @FocusState private var isBaseBranchFocused: Bool
 
     private var trimmedBaseBranch: String {
-        preferredBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        baseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -75,8 +71,16 @@ struct TurnWorktreeHandoffOverlay: View {
             .padding(.horizontal, 20)
         }
         .task {
+            if baseBranch.isEmpty {
+                baseBranch = preferredBaseBranch
+            }
             guard !isSubmitting else { return }
-            isBranchNameFocused = true
+            isBaseBranchFocused = true
+        }
+        .onChange(of: preferredBaseBranch) { _, newValue in
+            if trimmedBaseBranch.isEmpty {
+                baseBranch = newValue
+            }
         }
         .onChange(of: isHandoffAvailable) { _, newValue in
             // If a run starts while the dialog is open, close it instead of leaving a dead-end submit affordance onscreen.
@@ -122,14 +126,14 @@ struct TurnWorktreeHandoffOverlay: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Branch name")
+                Text("Base branch")
                     .font(AppFont.body(weight: .semibold))
                     .foregroundStyle(.primary)
 
-                TextField("feature-name", text: $branchName)
+                TextField("main", text: $baseBranch)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .focused($isBranchNameFocused)
+                    .focused($isBaseBranchFocused)
                     .font(AppFont.body(weight: .medium))
                     .padding(.horizontal, 18)
                     .padding(.vertical, 18)
@@ -142,19 +146,18 @@ struct TurnWorktreeHandoffOverlay: View {
                             .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                     )
 
-                if !normalizedBranchName.isEmpty {
-                    Text(normalizedBranchName)
-                        .font(AppFont.mono(.caption))
-                        .foregroundStyle(.secondary)
-                }
+                Text("Managed worktrees start detached from this branch; create a feature branch later if you want one.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
     private var submitButton: some View {
         Button {
-            guard !normalizedBranchName.isEmpty, !trimmedBaseBranch.isEmpty else { return }
-            onSubmit(normalizedBranchName, trimmedBaseBranch)
+            guard !trimmedBaseBranch.isEmpty else { return }
+            onSubmit(trimmedBaseBranch)
         } label: {
             ZStack {
                 if isSubmitting {
@@ -171,7 +174,7 @@ struct TurnWorktreeHandoffOverlay: View {
             .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(.plain)
-        .disabled(!isHandoffAvailable || isSubmitting || normalizedBranchName.isEmpty || trimmedBaseBranch.isEmpty)
-        .opacity(!isHandoffAvailable || isSubmitting || normalizedBranchName.isEmpty || trimmedBaseBranch.isEmpty ? 0.6 : 1)
+        .disabled(!isHandoffAvailable || isSubmitting || trimmedBaseBranch.isEmpty)
+        .opacity(!isHandoffAvailable || isSubmitting || trimmedBaseBranch.isEmpty ? 0.6 : 1)
     }
 }

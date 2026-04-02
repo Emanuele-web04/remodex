@@ -102,7 +102,11 @@ extension CodexService {
                 if let runtimeOverride, !runtimeOverride.isEmpty {
                     applyThreadRuntimeOverride(runtimeOverride, to: thread.id)
                 }
-                upsertThread(thread)
+                upsertThread(thread, treatAsServerState: true)
+                if let normalizedProjectPath = thread.normalizedProjectPath,
+                   CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+                    rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
+                }
                 resumedThreadIDs.insert(thread.id)
                 activeThreadId = thread.id
                 return thread
@@ -722,7 +726,7 @@ extension CodexService {
         if let threadValue = resultObject["thread"],
            var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
             decodedThread.syncState = .live
-            upsertThread(decodedThread)
+            upsertThread(decodedThread, treatAsServerState: true)
             resumedThread = decodedThread
 
             if let threadObject = threadValue.objectValue {
