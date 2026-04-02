@@ -51,7 +51,7 @@ final class ShellCommandRunner {
             }
 
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-lc", command]
+            process.arguments = ["-lc", self.wrappedShellCommand(command)]
             process.currentDirectoryURL = URL(fileURLWithPath: NSHomeDirectory())
             process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, override in
                 override
@@ -81,6 +81,15 @@ final class ShellCommandRunner {
             return result
         }.value
     }
+
+    // Silently loads interactive zsh PATH customizations so GUI-launched commands see the same global CLI install as Terminal.
+    private func wrappedShellCommand(_ command: String) -> String {
+        [
+            "export TERM=dumb",
+            "source ~/.zshrc >/dev/null 2>/dev/null || true",
+            command,
+        ].joined(separator: "; ")
+    }
 }
 
 final class BridgeControlService {
@@ -89,6 +98,10 @@ final class BridgeControlService {
     private let fileManager = FileManager.default
     private let defaultStateDirectory = URL(fileURLWithPath: NSHomeDirectory())
         .appendingPathComponent(".remodex", isDirectory: true)
+    private let launchAgentPlistURL = URL(fileURLWithPath: NSHomeDirectory())
+        .appendingPathComponent("Library", isDirectory: true)
+        .appendingPathComponent("LaunchAgents", isDirectory: true)
+        .appendingPathComponent("com.remodex.bridge.plist")
 
     init(runner: ShellCommandRunner = ShellCommandRunner()) {
         self.runner = runner
@@ -209,14 +222,15 @@ final class BridgeControlService {
             throw BridgeControlError.invalidSnapshot("Bridge status returned an unreadable CLI version.")
         }
 
-        let daemonConfig: BridgeDaemonConfig? = readStateFile(named: "daemon-config.json")
-        let bridgeStatus: BridgeRuntimeStatus? = readStateFile(named: "bridge-status.json")
-        let pairingSession: BridgePairingSession? = readStateFile(named: "pairing-session.json")
-        let stdoutLogPath = statusLines["stdout log"] ?? defaultStateDirectory.appendingPathComponent("logs/bridge.stdout.log").path
-        let stderrLogPath = statusLines["stderr log"] ?? defaultStateDirectory.appendingPathComponent("logs/bridge.stderr.log").path
+        let stateDirectory = resolveStateDirectory(statusLines: statusLines)
+        let daemonConfig: BridgeDaemonConfig? = readStateFile(named: "daemon-config.json", in: stateDirectory)
+        let bridgeStatus: BridgeRuntimeStatus? = readStateFile(named: "bridge-status.json", in: stateDirectory)
+        let pairingSession: BridgePairingSession? = readStateFile(named: "pairing-session.json", in: stateDirectory)
+        let stdoutLogPath = statusLines["stdout log"] ?? stateDirectory.appendingPathComponent("logs/bridge.stdout.log").path
+        let stderrLogPath = statusLines["stderr log"] ?? stateDirectory.appendingPathComponent("logs/bridge.stderr.log").path
         let launchdPid = parsePid(statusLines["pid"])
         let launchdLoaded = parseYesNo(statusLines["launchd loaded"]) ?? false
-        let installed = parseYesNo(statusLines["installed"]) ?? fileManager.fileExists(atPath: defaultStateDirectory.path)
+        let installed = parseYesNo(statusLines["installed"]) ?? fileManager.fileExists(atPath: launchAgentPlistURL.path)
 
         return BridgeSnapshot(
             currentVersion: currentVersion,
@@ -236,7 +250,7 @@ final class BridgeControlService {
     // Resolves both the CLI script and the Node runtime from stable absolute paths before the menu bar invokes them.
     private func resolveCLIInvocation() async throws -> BridgeCLIInvocation {
         let remodexPath = try await resolveExecutable(named: "remodex")
-        let nodePath = try await resolveExecutable(named: "node")
+        let nodePath = try await resolveNodePath(for: remodexPath)
         return BridgeCLIInvocation(nodePath: nodePath, remodexPath: remodexPath)
     }
 
@@ -284,13 +298,43 @@ final class BridgeControlService {
         return pid
     }
 
-    private func readStateFile<T: Decodable>(named filename: String) -> T? {
-        let targetURL = defaultStateDirectory.appendingPathComponent(filename)
+    // Reads daemon-state files from the same state root used by the bridge service.
+    private func readStateFile<T: Decodable>(named filename: String, in stateDirectory: URL) -> T? {
+        let targetURL = stateDirectory.appendingPathComponent(filename)
         guard let data = try? Data(contentsOf: targetURL) else {
             return nil
         }
 
         return try? decoder.decode(T.self, from: data)
+    }
+
+    // Prefers the Node runtime sitting next to the resolved CLI binary so mixed installs stay compatible.
+    private func resolveNodePath(for remodexPath: String) async throws -> String {
+        if let colocatedNodePath = resolveColocatedNodePath(for: remodexPath) {
+            return colocatedNodePath
+        }
+
+        return try await resolveExecutable(named: "node")
+    }
+
+    private func resolveColocatedNodePath(for remodexPath: String) -> String? {
+        let remodexURL = URL(fileURLWithPath: remodexPath)
+        let candidateDirectories = [
+            remodexURL.deletingLastPathComponent().path,
+            remodexURL.resolvingSymlinksInPath().deletingLastPathComponent().path,
+        ]
+
+        var seenDirectories = Set<String>()
+        for directory in candidateDirectories where seenDirectories.insert(directory).inserted {
+            let candidate = URL(fileURLWithPath: directory, isDirectory: true)
+                .appendingPathComponent("node")
+                .path
+            if fileManager.isExecutableFile(atPath: candidate) {
+                return candidate
+            }
+        }
+
+        return nil
     }
 
     private func resolveExecutable(named name: String) async throws -> String {
@@ -342,8 +386,108 @@ final class BridgeControlService {
         }
 
         return contents
-            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .sorted { compareVersionDirectoryNames($0.lastPathComponent, $1.lastPathComponent) == .orderedDescending }
             .map { $0.appendingPathComponent("bin", isDirectory: true).appendingPathComponent(name).path }
+    }
+
+    // Mirrors the bridge daemon-state lookup order so old CLI output still hydrates the companion correctly.
+    private func resolveStateDirectory(statusLines: [String: String]) -> URL {
+        if let explicitStateDirectory = normalizeNonEmptyString(ProcessInfo.processInfo.environment["REMODEX_DEVICE_STATE_DIR"]) {
+            return URL(fileURLWithPath: explicitStateDirectory, isDirectory: true)
+        }
+
+        if let installedStateDirectory = readLaunchAgentStateDirectory() {
+            return installedStateDirectory
+        }
+
+        if let derivedStateDirectory = deriveStateDirectory(fromLogPath: statusLines["stdout log"] ?? statusLines["stderr log"]) {
+            return derivedStateDirectory
+        }
+
+        return defaultStateDirectory
+    }
+
+    private func readLaunchAgentStateDirectory() -> URL? {
+        guard let data = try? Data(contentsOf: launchAgentPlistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+              let environment = plist["EnvironmentVariables"] as? [String: Any],
+              let stateDirectory = normalizeNonEmptyString(environment["REMODEX_DEVICE_STATE_DIR"] as? String) else {
+            return nil
+        }
+
+        return URL(fileURLWithPath: stateDirectory, isDirectory: true)
+    }
+
+    private func deriveStateDirectory(fromLogPath logPath: String?) -> URL? {
+        guard let logPath = normalizeNonEmptyString(logPath) else {
+            return nil
+        }
+
+        return URL(fileURLWithPath: logPath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+    }
+
+    private func compareVersionDirectoryNames(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let lhsVersion = parseVersionDirectoryName(lhs)
+        let rhsVersion = parseVersionDirectoryName(rhs)
+
+        switch (lhsVersion, rhsVersion) {
+        case let (.some(lhsVersion), .some(rhsVersion)):
+            return compareVersionComponents(lhsVersion, rhsVersion)
+        case (.some, .none):
+            return .orderedDescending
+        case (.none, .some):
+            return .orderedAscending
+        case (.none, .none):
+            return lhs.localizedStandardCompare(rhs)
+        }
+    }
+
+    private func parseVersionDirectoryName(_ value: String) -> [Int]? {
+        let normalized = value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "v", with: "", options: [.anchored])
+        let coreVersion = normalized.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: true).first
+        guard let coreVersion else {
+            return nil
+        }
+
+        let parts = coreVersion.split(separator: ".", omittingEmptySubsequences: false)
+        guard !parts.isEmpty else {
+            return nil
+        }
+
+        let numericParts = parts.compactMap { Int($0) }
+        guard numericParts.count == parts.count else {
+            return nil
+        }
+
+        return numericParts
+    }
+
+    private func compareVersionComponents(_ lhs: [Int], _ rhs: [Int]) -> ComparisonResult {
+        for index in 0..<max(lhs.count, rhs.count) {
+            let lhsValue = index < lhs.count ? lhs[index] : 0
+            let rhsValue = index < rhs.count ? rhs[index] : 0
+
+            if lhsValue == rhsValue {
+                continue
+            }
+
+            return lhsValue < rhsValue ? .orderedAscending : .orderedDescending
+        }
+
+        return .orderedSame
+    }
+
+    private func normalizeNonEmptyString(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // Maps shell failures into the explicit "missing global CLI" state shown by the menu bar.

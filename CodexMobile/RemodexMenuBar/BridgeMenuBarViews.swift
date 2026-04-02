@@ -487,8 +487,9 @@ struct BridgeMenuBarLabel: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Image(systemName: isBusy ? "bolt.horizontal.circle.fill" : "bolt.horizontal.circle")
-                .symbolRenderingMode(.monochrome)
+            Image(systemName: "terminal")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(isBusy ? Color.primary.opacity(0.7) : Color.primary)
             if updateState.isUpdateAvailable {
                 Circle()
                     .fill(.orange)

@@ -56,30 +56,13 @@ final class BridgeMenuBarStore: ObservableObject {
 
     // Refreshes the bridge snapshot plus npm update metadata so the menu bar is the new control surface.
     func refresh(showSpinner: Bool = false) async {
-        if showSpinner {
-            isRefreshing = true
-        }
-
-        defer {
-            isRefreshing = false
-        }
-
-        let cliAvailability = await refreshCLIAvailability()
-        guard cliAvailability.isAvailable else {
-            snapshot = nil
-            updateState = .empty
-            transientMessage = ""
-            errorMessage = ""
-            return
-        }
-
         do {
-            let snapshot = try await service.loadSnapshot(relayOverride: effectiveRelayOverride)
-            self.snapshot = snapshot
-            self.errorMessage = ""
-            self.updateState = await resolveUpdateState(installedVersion: snapshot.currentVersion)
+            _ = try await performRefresh(
+                showSpinner: showSpinner,
+                clearSnapshotOnFailure: false
+            )
         } catch {
-            self.errorMessage = error.localizedDescription
+            // Passive refreshes keep the last known snapshot so brief shell hiccups do not blank the menu bar.
         }
     }
 
@@ -112,7 +95,7 @@ final class BridgeMenuBarStore: ObservableObject {
         runAction(successMessage: "Bridge fermato.") {
             try await self.requireCLIAvailability()
             try await self.service.stopBridge(relayOverride: self.effectiveRelayOverride)
-            await self.refresh(showSpinner: false)
+            try await self.refreshAfterAction()
         }
     }
 
@@ -120,7 +103,7 @@ final class BridgeMenuBarStore: ObservableObject {
         runAction(successMessage: "Ultimo thread riaperto in Codex.") {
             try await self.requireCLIAvailability()
             try await self.service.resumeLastThread(relayOverride: self.effectiveRelayOverride)
-            await self.refresh(showSpinner: false)
+            try await self.refreshAfterAction()
         }
     }
 
@@ -128,7 +111,7 @@ final class BridgeMenuBarStore: ObservableObject {
         runAction(successMessage: "Pairing resettato.") {
             try await self.requireCLIAvailability()
             try await self.service.resetPairing(relayOverride: self.effectiveRelayOverride)
-            await self.refresh(showSpinner: false)
+            try await self.refreshAfterAction()
         }
     }
 
@@ -139,7 +122,7 @@ final class BridgeMenuBarStore: ObservableObject {
             if self.snapshot?.launchdLoaded == true {
                 try await self.service.startBridge(relayOverride: self.effectiveRelayOverride)
             }
-            await self.refresh(showSpinner: false)
+            try await self.refreshAfterAction()
         }
     }
 
@@ -232,6 +215,52 @@ final class BridgeMenuBarStore: ObservableObject {
                 latestVersion: nil,
                 errorMessage: error.localizedDescription
             )
+        }
+    }
+
+    // Lets command handlers fail loudly when the follow-up snapshot cannot be trusted.
+    private func refreshAfterAction() async throws {
+        _ = try await performRefresh(
+            showSpinner: false,
+            clearSnapshotOnFailure: true
+        )
+    }
+
+    @discardableResult
+    private func performRefresh(
+        showSpinner: Bool,
+        clearSnapshotOnFailure: Bool
+    ) async throws -> BridgeSnapshot? {
+        if showSpinner {
+            isRefreshing = true
+        }
+
+        defer {
+            isRefreshing = false
+        }
+
+        let cliAvailability = await refreshCLIAvailability()
+        guard cliAvailability.isAvailable else {
+            snapshot = nil
+            updateState = .empty
+            transientMessage = ""
+            errorMessage = ""
+            return nil
+        }
+
+        do {
+            let snapshot = try await service.loadSnapshot(relayOverride: effectiveRelayOverride)
+            self.snapshot = snapshot
+            self.errorMessage = ""
+            self.updateState = await resolveUpdateState(installedVersion: snapshot.currentVersion)
+            return snapshot
+        } catch {
+            if clearSnapshotOnFailure {
+                snapshot = nil
+                updateState = .empty
+            }
+            errorMessage = error.localizedDescription
+            throw error
         }
     }
 
