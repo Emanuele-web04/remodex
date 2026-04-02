@@ -77,17 +77,8 @@ private struct GitBranchAlertState {
             )
 
         case .switchTo(let branchName):
-            guard isDirty else { return nil }
-            return TurnGitSyncAlert(
-                title: "Commit changes before switching branch?",
-                message: dirtyBranchAlertMessage(
-                    intro: "These local changes can block checkout or be hard to reason about after the switch. Commit them on \(currentBranch.isEmpty ? "the current branch" : currentBranch) first, then switch to '\(branchName)'."
-                ),
-                buttons: [
-                    TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
-                    TurnGitSyncAlertButton(title: "Commit & Switch", role: nil, action: .commitAndContinueGitBranchOperation)
-                ]
-            )
+            _ = branchName
+            return nil
         }
     }
 
