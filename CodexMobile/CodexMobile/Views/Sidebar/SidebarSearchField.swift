@@ -25,6 +25,7 @@ struct SidebarSearchField: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .focused($isFocused)
+                    .accessibilityIdentifier("sidebar.search_field")
 
                 if !text.isEmpty {
                     Button {

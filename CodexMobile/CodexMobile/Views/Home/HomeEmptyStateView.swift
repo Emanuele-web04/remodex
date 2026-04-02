@@ -46,6 +46,7 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                     Text(statusLabel)
                         .font(AppFont.caption(weight: .medium))
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("home.connection_status_label")
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
@@ -94,6 +95,7 @@ struct HomeEmptyStateView<AuthSection: View>: View {
                 .buttonStyle(.plain)
                 .disabled(isBusy)
                 .padding(.top, 6)
+                .accessibilityIdentifier("home.primary_action_button")
 
                 authSection()
             }

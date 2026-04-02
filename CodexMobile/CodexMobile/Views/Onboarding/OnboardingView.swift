@@ -101,6 +101,7 @@ struct OnboardingView: View {
                 .background(.white, in: Capsule())
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("onboarding.continue_button")
 
             OpenSourceBadge(style: .light)
         }

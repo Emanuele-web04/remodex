@@ -23,6 +23,7 @@ struct SidebarFloatingSettingsButton: View {
         .buttonStyle(.plain)
         .contentShape(Circle())
         .accessibilityLabel("Settings")
+        .accessibilityIdentifier("sidebar.settings_button")
     }
 }
 

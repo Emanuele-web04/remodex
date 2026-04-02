@@ -354,6 +354,7 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Menu")
+        .accessibilityIdentifier("content.hamburger_button")
     }
 
     // MARK: - Sidebar Geometry

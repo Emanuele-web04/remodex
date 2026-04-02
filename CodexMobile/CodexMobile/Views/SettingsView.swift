@@ -82,6 +82,7 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .tint(settingsAccentColor)
+                .accessibilityIdentifier("settings.profile_picker")
             }
 
             if let selectedProfile = selectedRuntimeProfileDetailText {
@@ -107,6 +108,7 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .tint(settingsAccentColor)
+                .accessibilityIdentifier("settings.model_picker")
             }
 
             Text("Profile sets the base provider/model from `~/.codex/config.toml`. Model and reasoning choices below still override it when set.")
@@ -126,6 +128,7 @@ struct SettingsView: View {
                 .labelsHidden()
                 .tint(settingsAccentColor)
                 .disabled(runtimeReasoningOptions.isEmpty)
+                .accessibilityIdentifier("settings.reasoning_picker")
             }
 
             HStack {
@@ -140,6 +143,7 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .tint(settingsAccentColor)
+                .accessibilityIdentifier("settings.speed_picker")
             }
 
             HStack {
@@ -153,6 +157,7 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .tint(settingsAccentColor)
+                .accessibilityIdentifier("settings.access_picker")
             }
         }
     }
@@ -202,6 +207,7 @@ struct SettingsView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .tint(settingsAccentColor)
+                .accessibilityIdentifier("settings.transport_picker")
             }
 
             Text("Use LAN only, Convex only, or auto fallback without re-pairing.")
@@ -220,11 +226,13 @@ struct SettingsView: View {
                     HapticFeedback.shared.triggerImpactFeedback()
                     disconnectRelay()
                 }
+                .accessibilityIdentifier("settings.disconnect_button")
             } else if codex.hasTrustedMacReconnectCandidate {
                 SettingsButton("Forget Pair", role: .destructive) {
                     HapticFeedback.shared.triggerImpactFeedback()
                     codex.forgetTrustedMac()
                 }
+                .accessibilityIdentifier("settings.forget_pair_button")
             }
         }
     }
@@ -980,6 +988,7 @@ private struct SettingsArchivedChatsCard: View {
                 }
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("settings.archived_chats_link")
         }
     }
 }

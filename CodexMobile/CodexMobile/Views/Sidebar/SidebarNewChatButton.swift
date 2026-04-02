@@ -47,6 +47,7 @@ struct SidebarNewChatButton: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .disabled(!isEnabled || isCreatingThread)
         .opacity(isEnabled ? 1 : 0.35)
+        .accessibilityIdentifier("sidebar.new_chat_button")
     }
 }
 // MARK: - Previews

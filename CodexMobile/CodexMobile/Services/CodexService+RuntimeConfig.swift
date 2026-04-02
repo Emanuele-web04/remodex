@@ -87,6 +87,77 @@ extension CodexService {
             handleModelListFailure(error)
             throw error
         }
+
+        // When the selected profile has a custom api_base, fetch models directly
+        // from the provider's /v1/models endpoint and replace the bridge list.
+        if let apiBase = selectedProfileApiBase {
+            await fetchAndApplyProviderModels(apiBase: apiBase)
+        }
+    }
+
+    // Fetches available models from a custom provider's /v1/models endpoint
+    // (OpenAI-compatible).  On success the results replace availableModels so
+    // the picker shows native provider model names (e.g. glm-5, glm-4-plus).
+    func fetchAndApplyProviderModels(apiBase: String) async {
+        guard let url = buildProviderModelsURL(apiBase: apiBase) else {
+            debugRuntimeLog("provider models: invalid api_base \(apiBase)")
+            return
+        }
+
+        do {
+            let providerModels = try await fetchProviderModels(url: url)
+            if !providerModels.isEmpty {
+                availableModels = providerModels
+                modelsErrorMessage = nil
+                normalizeRuntimeSelectionsAfterModelsUpdate()
+                debugRuntimeLog("provider models: fetched \(providerModels.count) from \(url)")
+            }
+        } catch {
+            debugRuntimeLog("provider models: fetch failed — \(error.localizedDescription)")
+            // Keep bridge models as fallback; don't overwrite.
+        }
+    }
+
+    var selectedProfileApiBase: String? {
+        guard let name = selectedConfigProfileName else { return nil }
+        return availableConfigProfiles.first(where: { $0.id == name })?.apiBase
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    private func buildProviderModelsURL(apiBase: String) -> URL? {
+        var base = apiBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        // Append /v1/models unless the base already ends with a path segment.
+        if !base.hasSuffix("/v1") && !base.hasSuffix("/v1/models") {
+            base += "/v1/models"
+        } else if base.hasSuffix("/v1") {
+            base += "/models"
+        }
+        return URL(string: base)
+    }
+
+    private func fetchProviderModels(url: URL) async throws -> [CodexModelOption] {
+        let (data, response) = try await URLSession.shared.data(from: url)
+
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw CodexServiceError.invalidResponse("Provider returned HTTP \(statusCode)")
+        }
+
+        let decoded = try JSONDecoder().decode(OpenAIModelsResponse.self, from: data)
+        return decoded.data.compactMap { model in
+            guard !model.id.isEmpty else { return nil }
+            return CodexModelOption(
+                id: model.id,
+                model: model.id,
+                displayName: model.id,
+                description: model.ownedBy.map { "Provider: \($0)" } ?? "",
+                isDefault: false,
+                supportedReasoningEfforts: [],
+                defaultReasoningEffort: nil
+            )
+        }
     }
 
     func setSelectedModelId(_ modelId: String?) {
@@ -661,7 +732,8 @@ private struct CodexConfigReadPayload: Decodable {
                 CodexConfigProfileOption(
                     id: key,
                     model: value.model,
-                    modelProvider: value.modelProvider
+                    modelProvider: value.modelProvider,
+                    apiBase: value.apiBase
                 )
             }
             .sorted { lhs, rhs in
@@ -674,6 +746,7 @@ struct CodexConfigProfileOption: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let model: String?
     let modelProvider: String?
+    let apiBase: String?
 
     var detailText: String? {
         if let model {
@@ -685,10 +758,11 @@ struct CodexConfigProfileOption: Identifiable, Codable, Hashable, Sendable {
         return nil
     }
 
-    init(id: String, model: String?, modelProvider: String?) {
+    init(id: String, model: String?, modelProvider: String?, apiBase: String? = nil) {
         self.id = id
         self.model = model
         self.modelProvider = modelProvider
+        self.apiBase = apiBase
     }
 }
 
@@ -699,9 +773,27 @@ private struct CodexConfigReadConfig: Decodable {
 private struct CodexConfigReadProfile: Decodable {
     let model: String?
     let modelProvider: String?
+    let apiBase: String?
 
     private enum CodingKeys: String, CodingKey {
         case model
         case modelProvider = "model_provider"
+        case apiBase = "api_base"
+    }
+}
+
+// MARK: - OpenAI-compatible /v1/models response
+
+private struct OpenAIModelsResponse: Decodable {
+    let data: [OpenAIModelEntry]
+}
+
+private struct OpenAIModelEntry: Decodable {
+    let id: String
+    let ownedBy: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case ownedBy = "owned_by"
     }
 }

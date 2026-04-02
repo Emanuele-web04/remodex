@@ -35,6 +35,9 @@
 		8F1A2B3C4D5E6F708192A3B4 /* CodexPushNotificationRegistrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1A2B3C4D5E6F708192A3B5 /* CodexPushNotificationRegistrationTests.swift */; };
 		8F1A2B3C4D5E6F708192A3B6 /* CodexSecurePairingStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1A2B3C4D5E6F708192A3B7 /* CodexSecurePairingStateTests.swift */; };
 		90120FC72C9B8D0F5F03F14D /* CodexMobileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */; };
+		A7B8C9D0E1F234567890AB13 /* CodexMobileFullAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7B8C9D0E1F234567890AB12 /* CodexMobileFullAppTests.swift */; };
+		B8C9D0E1F234567890ABCD15 /* CodexMobileOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8C9D0E1F234567890ABCD14 /* CodexMobileOnboardingTests.swift */; };
+		C9D0E1F234567890ABCDEF17 /* CodexMobileFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9D0E1F234567890ABCDEF16 /* CodexMobileFixtureTests.swift */; };
 		90C796DE3848792306F5A0F2 /* CodexApprovalResponsePayloadTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B961D23D706484D0431EAE6 /* CodexApprovalResponsePayloadTests.swift */; };
 		917FDB047D338B126CE9691A /* ThinkingDisclosureParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 95E7966A2C9B53E28F95A8FA /* ThinkingDisclosureParserTests.swift */; };
 		9D7C9A8B7E6D5C4B3A291817 /* TurnViewModelQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */; };
@@ -137,6 +140,9 @@
 		C9E159B2FD57ABF57099721C /* TurnFileChangeSummaryParserTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnFileChangeSummaryParserTests.swift; sourceTree = "<group>"; };
 		D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingRunIndicatorTests.swift; sourceTree = "<group>"; };
 		D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileUITests.swift; sourceTree = "<group>"; };
+		A7B8C9D0E1F234567890AB12 /* CodexMobileFullAppTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileFullAppTests.swift; sourceTree = "<group>"; };
+		B8C9D0E1F234567890ABCD14 /* CodexMobileOnboardingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileOnboardingTests.swift; sourceTree = "<group>"; };
+		C9D0E1F234567890ABCDEF16 /* CodexMobileFixtureTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileFixtureTests.swift; sourceTree = "<group>"; };
 		D1F4E6E8817BA59CAD10FA35 /* TurnViewModelGitActionAvailabilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnViewModelGitActionAvailabilityTests.swift; sourceTree = "<group>"; };
 		DB3EE92F78CDED9B4B714E03 /* CodexServiceImmediateSyncTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceImmediateSyncTests.swift; sourceTree = "<group>"; };
 		E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QRScannerPairingValidatorTests.swift; sourceTree = "<group>"; };
@@ -295,6 +301,9 @@
 			isa = PBXGroup;
 			children = (
 				D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */,
+				A7B8C9D0E1F234567890AB12 /* CodexMobileFullAppTests.swift */,
+				B8C9D0E1F234567890ABCD14 /* CodexMobileOnboardingTests.swift */,
+				C9D0E1F234567890ABCDEF16 /* CodexMobileFixtureTests.swift */,
 			);
 			path = CodexMobileUITests;
 			sourceTree = "<group>";
