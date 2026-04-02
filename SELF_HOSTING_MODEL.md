@@ -34,7 +34,7 @@ The public repo now also includes the trusted-Mac reconnect flow, but the built-
 If you use the public repo, you should expect one of these flows:
 
 1. Local LAN pairing on your own machine with `./run-local-remodex.sh`
-2. A self-hosted relay on your own VPS, passed in through `REMODEX_RELAY`
+2. A self-hosted relay on your own VPS or private network, passed in through `REMODEX_RELAY`
 
 That means:
 
@@ -97,7 +97,7 @@ If you cloned Remodex from GitHub:
 
 - do not expect a private hosted relay to be built in
 - use `./run-local-remodex.sh` for local testing
-- use `REMODEX_RELAY` for your own VPS or hosted relay
+- use `REMODEX_RELAY` for your own VPS or self-hosted relay
 - use QR once to trust the Mac, then let reconnect reuse that trust
 - remember that the built-in daemon/background service path is currently macOS-only
 - treat the public repo as the self-hostable version of the project

@@ -5,7 +5,7 @@ This guide is for developers who clone the public GitHub repository and want to 
 It covers two supported setups:
 
 1. Local LAN pairing on your own machine
-2. A self-hosted VPS relay that your bridge connects to over the internet
+2. A self-hosted relay on your VPS or private network that your bridge connects to directly
 
 This document intentionally avoids any private hosted-service details. If you are using the public repo, assume you are bringing your own relay endpoint.
 

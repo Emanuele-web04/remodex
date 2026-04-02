@@ -174,7 +174,7 @@ A common private setup looks like this:
 
 If that relay is fronting a Mac bridge, the macOS daemon can keep the bridge alive for hands-free reconnects. If you self-host against a non-macOS bridge, the same relay path still works, but automatic background service management is not built in yet.
 
-Reverse-proxy subpaths work too, so a hosted relay behind Traefik can live under the same domain as other APIs:
+Reverse-proxy subpaths work too, so a self-hosted relay behind Traefik can live under the same domain as other APIs:
 
 ```sh
 REMODEX_RELAY="wss://api.example.com/remodex/relay" remodex up
@@ -192,16 +192,16 @@ If you point `REMODEX_RELAY` at your own self-hosted relay, managed push stays o
 
 ## Publish to npm
 
-Published npm packages can embed default private relay settings at pack time via the `prepack` script.
+If you publish your own bridge package, you can inject a default relay during `prepack` without changing the public source checkout.
 
-The current package version is `1.3.4`.
+The current package version is `1.3.7`.
 
-To publish the bridge with `api.phodex.app` as the default relay:
+For example:
 
 ```sh
 cd phodex-bridge
 npm login
-REMODEX_PACKAGE_DEFAULT_RELAY_URL="wss://api.phodex.app/relay" \
+REMODEX_PACKAGE_DEFAULT_RELAY_URL="wss://relay.example.com/relay" \
 npm publish
 ```
 
@@ -265,7 +265,7 @@ Prints the installed Remodex CLI version.
 
 ```sh
 remodex --version
-# => 1.3.4
+# => 1.3.7
 ```
 
 ### `remodex reset-pairing`
