@@ -35,6 +35,7 @@ const {
 } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
+const { version: bridgePackageVersion = "" } = require("../package.json");
 
 const execFileAsync = promisify(execFile);
 const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
@@ -42,6 +43,7 @@ const RELAY_WATCHDOG_STALE_AFTER_MS = 25_000;
 const BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS = 5_000;
 const STALE_RELAY_STATUS_MESSAGE = "Relay heartbeat stalled; reconnect pending.";
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
+const MINIMUM_SUPPORTED_IOS_APP_VERSION = "1.3";
 
 function startBridge({
   config: explicitConfig = null,
@@ -816,6 +818,15 @@ function startBridge({
     }
 
     if (method === "initialize" && parsed.id != null) {
+      const compatibilityError = bridgeManagedInitializeCompatibilityError(parsed.params || {});
+      if (compatibilityError) {
+        sendApplicationResponse(JSON.stringify({
+          id: parsed.id,
+          error: compatibilityError,
+        }));
+        return true;
+      }
+
       if (codexHandshakeState !== "warm") {
         forwardedInitializeRequestIds.add(String(parsed.id));
         return false;
@@ -835,6 +846,66 @@ function startBridge({
     }
 
     return false;
+  }
+
+  // Blocks bridge/app version skew before the phone starts calling newer bridge APIs.
+  function bridgeManagedInitializeCompatibilityError(params) {
+    const clientInfo = params && typeof params === "object" ? params.clientInfo : null;
+    const clientName = normalizeNonEmptyString(clientInfo?.name);
+    if (clientName !== "codexmobile_ios") {
+      return null;
+    }
+
+    const clientVersion = normalizeVersionString(clientInfo?.version);
+    if (clientVersion && compareNumericVersions(clientVersion, MINIMUM_SUPPORTED_IOS_APP_VERSION) >= 0) {
+      return null;
+    }
+
+    const message = clientVersion
+      ? `This Mac bridge is running Remodex ${bridgePackageVersion || "latest"}, which requires Remodex iPhone ${MINIMUM_SUPPORTED_IOS_APP_VERSION} or newer. Update the iPhone app, then reconnect.`
+      : `This Mac bridge requires Remodex iPhone ${MINIMUM_SUPPORTED_IOS_APP_VERSION} or newer. Update the iPhone app, then reconnect.`;
+
+    return {
+      code: -32001,
+      message,
+      data: {
+        errorCode: "ios_app_update_required",
+        minimumSupportedAppVersion: MINIMUM_SUPPORTED_IOS_APP_VERSION,
+        bridgeVersion: normalizeVersionString(bridgePackageVersion) || null,
+        clientVersion,
+      },
+    };
+  }
+
+  function normalizeVersionString(value) {
+    return typeof value === "string" ? value.trim() : "";
+  }
+
+  function compareNumericVersions(left, right) {
+    const leftParts = splitVersionParts(left);
+    const rightParts = splitVersionParts(right);
+    const maxLength = Math.max(leftParts.length, rightParts.length);
+
+    for (let index = 0; index < maxLength; index += 1) {
+      const leftPart = leftParts[index] || 0;
+      const rightPart = rightParts[index] || 0;
+      if (leftPart < rightPart) {
+        return -1;
+      }
+      if (leftPart > rightPart) {
+        return 1;
+      }
+    }
+
+    return 0;
+  }
+
+  function splitVersionParts(version) {
+    return normalizeVersionString(version)
+      .split(/[^0-9]+/)
+      .filter(Boolean)
+      .map((part) => Number.parseInt(part, 10))
+      .filter((part) => Number.isFinite(part));
   }
 
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.

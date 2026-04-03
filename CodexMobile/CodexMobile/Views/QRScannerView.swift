@@ -90,14 +90,23 @@ struct QRScannerView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                Text("Do these steps on your Mac")
-                    .font(AppFont.caption(weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                if let command = prompt.command, !command.isEmpty {
+                    Text("Do these steps on your Mac")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
 
-                bridgeUpdateStep(number: "1", title: "Update Remodex", detail: prompt.command, showsCopyButton: true)
-                bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
-                bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
-                bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
+                    bridgeUpdateStep(number: "1", title: "Update Remodex", detail: command, showsCopyButton: true)
+                    bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
+                    bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
+                    bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
+                } else {
+                    Text("Do these steps on your iPhone")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+
+                    bridgeUpdateStep(number: "1", title: "Update Remodex", detail: "Install the latest Remodex build on this iPhone.")
+                    bridgeUpdateStep(number: "2", title: "Come back here", detail: "Then retry the connection or scan a fresh QR code.")
+                }
             }
 
             Button("I Updated It") {

@@ -126,7 +126,7 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
     let id = UUID()
     let title: String
     let message: String
-    let command: String
+    let command: String?
 }
 
 struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
@@ -304,7 +304,8 @@ final class CodexService {
     var latestTurnTerminalStateByThread: [String: CodexTurnTerminalState] = [:]
     // Preserves terminal outcome per turn so completed/stopped blocks stay distinguishable.
     var terminalStateByTurnID: [String: CodexTurnTerminalState] = [:]
-    var pendingApproval: CodexApprovalRequest?
+    // Ordered pending runtime approvals keyed by request id so concurrent prompts do not overwrite each other.
+    var pendingApprovals: [CodexApprovalRequest] = []
     var lastRawMessage: String?
     var lastErrorMessage: String?
     var runtimeDebugLogEntries: [String] = []

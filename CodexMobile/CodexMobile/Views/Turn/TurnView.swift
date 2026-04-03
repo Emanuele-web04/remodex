@@ -24,6 +24,7 @@ struct TurnView: View {
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
     @State private var alertApprovalRequest: CodexApprovalRequest?
+    @State private var isApprovalAlertPresented = false
     @State private var isShowingMacHandoffConfirm = false
     @State private var isShowingWorktreeHandoff = false
     @State private var isShowingForkWorktree = false
@@ -225,7 +226,7 @@ struct TurnView: View {
             isThreadRunning: isThreadRunning,
             isConnected: codex.isConnected,
             scenePhase: scenePhase,
-            approvalRequestID: approvalForThread?.id,
+            approvalRequestChangeToken: approvalRequestChangeToken,
             photoPickerItems: viewModel.photoPickerItems,
             onTask: {
                 await prepareThreadIfReady(gitWorkingDirectory: gitWorkingDirectory)
@@ -274,8 +275,8 @@ struct TurnView: View {
                 cancelVoiceRecordingIfNeeded()
                 invalidatePendingVoicePreflight()
             },
-            onApprovalRequestIDChanged: {
-                alertApprovalRequest = approvalForThread
+            onApprovalRequestChanged: {
+                syncApprovalAlertPresentation()
             }
         )
         .onDisappear {
@@ -343,15 +344,28 @@ struct TurnView: View {
         }
         .turnViewAlerts(
             alertApprovalRequest: $alertApprovalRequest,
+            isApprovalAlertPresented: $isApprovalAlertPresented,
             isShowingNothingToCommitAlert: isShowingNothingToCommitAlertBinding,
             gitSyncAlert: gitSyncAlertBinding,
             isShowingMacHandoffConfirm: $isShowingMacHandoffConfirm,
             macHandoffErrorMessage: $macHandoffErrorMessage,
-            onDeclineApproval: {
-                viewModel.decline(codex: codex)
+            onDeclineApproval: { request in
+                viewModel.decline(request, codex: codex) { didSucceed in
+                    if didSucceed {
+                        syncApprovalAlertPresentation()
+                    } else {
+                        restoreApprovalAlert(afterFailureOf: request)
+                    }
+                }
             },
-            onApproveApproval: {
-                viewModel.approve(codex: codex)
+            onApproveApproval: { request in
+                viewModel.approve(request, codex: codex) { didSucceed in
+                    if didSucceed {
+                        syncApprovalAlertPresentation()
+                    } else {
+                        restoreApprovalAlert(afterFailureOf: request)
+                    }
+                }
             },
             onConfirmGitSyncAction: { alertAction in
                 viewModel.confirmGitSyncAlertAction(
@@ -718,7 +732,7 @@ struct TurnView: View {
     }
 
     private func handleInitialAppear(activeTurnID: String?) {
-        alertApprovalRequest = approvalForThread
+        syncApprovalAlertPresentation()
         if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
             viewModel.applyPendingComposerAction(pendingComposerAction)
             isInputFocused = true
@@ -1046,15 +1060,27 @@ struct TurnView: View {
     }
 
     private var approvalForThread: CodexApprovalRequest? {
-        guard let request = codex.pendingApproval else {
+        codex.pendingApproval(for: thread.id)
+    }
+
+    private var approvalRequestChangeToken: String? {
+        guard let request = approvalForThread else {
             return nil
         }
 
-        guard let requestThreadID = request.threadId else {
-            return request
-        }
+        let reason = request.reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let command = request.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return [request.id, reason, command].joined(separator: "|")
+    }
 
-        return requestThreadID == thread.id ? request : nil
+    private func syncApprovalAlertPresentation() {
+        alertApprovalRequest = approvalForThread
+        isApprovalAlertPresented = alertApprovalRequest != nil
+    }
+
+    private func restoreApprovalAlert(afterFailureOf request: CodexApprovalRequest) {
+        alertApprovalRequest = approvalForThread ?? request
+        isApprovalAlertPresented = alertApprovalRequest != nil
     }
 
     private var parentThread: CodexThread? {

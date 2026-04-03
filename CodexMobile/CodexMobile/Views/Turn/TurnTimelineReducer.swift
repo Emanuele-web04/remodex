@@ -45,7 +45,8 @@ enum TurnTimelineReducer {
     //
     // Multi-item turns (thinking/tool activity → response → more activity → response) are
     // detected by checking whether activity arrives on BOTH sides of an assistant row. When
-    // detected, only user messages are floated to the top; the interleaved flow is preserved.
+    // detected, only the original turn-opening user can be floated forward. Later user
+    // steer prompts must stay in-place so they do not jump above already-rendered output.
     static func enforceIntraTurnOrder(in messages: [CodexMessage]) -> [CodexMessage] {
         // Collect indices belonging to each turnId (may be scattered across the array).
         var indicesByTurn: [String: [Int]] = [:]
@@ -62,13 +63,32 @@ enum TurnTimelineReducer {
             let turnMessages = indices.map { result[$0] }
 
             let sorted: [CodexMessage]
-            if hasInterleavedAssistantActivityFlow(turnMessages) {
-                // Multi-item turn: only ensure user messages precede all others.
-                // Preserve the interleaved activity → response → activity → response order.
+            if hasInterleavedUserFlow(turnMessages) {
+                // Steer can append a later user row into the still-active turn before the
+                // assistant emits another distinct item. Preserve chronology so that user
+                // prompt stays visible near the tail instead of jumping to the turn start.
+                sorted = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+            } else if hasInterleavedAssistantActivityFlow(turnMessages) {
+                // Multi-item turn: keep the streamed interleaving intact. If the turn has
+                // only one user prompt, we can still float that original opener forward.
+                // Once a second user row exists, treat it as an in-turn steer and preserve
+                // full chronological order so it stays near the bottom of the active run.
+                let userCount = turnMessages.reduce(into: 0) { partialResult, message in
+                    if message.role == .user {
+                        partialResult += 1
+                    }
+                }
+                let openingUserID = userCount == 1
+                    ? turnMessages
+                        .filter { $0.role == .user }
+                        .min(by: { $0.orderIndex < $1.orderIndex })?
+                        .id
+                    : nil
+
                 sorted = turnMessages.sorted { a, b in
-                    let aIsUser = a.role == .user
-                    let bIsUser = b.role == .user
-                    if aIsUser != bIsUser { return aIsUser }
+                    let aIsOpeningUser = openingUserID != nil && a.id == openingUserID
+                    let bIsOpeningUser = openingUserID != nil && b.id == openingUserID
+                    if aIsOpeningUser != bIsOpeningUser { return aIsOpeningUser }
                     return a.orderIndex < b.orderIndex
                 }
             } else {
@@ -88,6 +108,25 @@ enum TurnTimelineReducer {
         }
 
         return result
+    }
+
+    // Detects steer-like flows where a later user prompt is appended inside the same turn.
+    // In those cases the original event order is authoritative for rendering.
+    private static func hasInterleavedUserFlow(_ turnMessages: [CodexMessage]) -> Bool {
+        let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+        var seenNonUser = false
+
+        for message in ordered {
+            if message.role == .user {
+                if seenNonUser {
+                    return true
+                }
+            } else {
+                seenNonUser = true
+            }
+        }
+
+        return false
     }
 
     // Detects multi-item turns where visible system activity appears on BOTH sides of an

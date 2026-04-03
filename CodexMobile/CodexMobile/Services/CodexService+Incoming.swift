@@ -148,13 +148,13 @@ extension CodexService {
                         )
                     } catch {
                         debugRuntimeLog("auto-approve failed method=\(method): \(error.localizedDescription)")
-                        pendingApproval = request
+                        enqueuePendingApproval(request)
                     }
                 }
                 return
             }
 
-            pendingApproval = request
+            enqueuePendingApproval(request)
             return
         }
 
@@ -3047,5 +3047,27 @@ extension CodexService {
         }
 
         return ""
+    }
+
+    // Cleans up any server-owned request once app-server confirms the specific request id is resolved.
+    func handleServerRequestResolved(_ paramsObject: IncomingParamsObject?) {
+        guard let requestID = paramsObject?["requestId"] else {
+            return
+        }
+
+        let threadId = normalizedResolvedRequestThreadID(paramsObject?["threadId"]?.stringValue)
+        removeStructuredUserInputPrompt(requestID: requestID, threadIdHint: threadId)
+        removePendingApproval(requestID: requestID)
+    }
+}
+
+private extension CodexService {
+    func normalizedResolvedRequestThreadID(_ rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

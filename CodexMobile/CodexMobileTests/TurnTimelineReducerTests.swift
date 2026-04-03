@@ -865,6 +865,89 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testEnforceIntraTurnOrderKeepsSteerUserNearBottomOfInterleavedTurn() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Initial prompt",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "thinking-1",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning block A",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "First response",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-steer",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Steer follow-up",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "thinking-2",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning block B",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "item-2",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-2",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Second response",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "item-2",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "thinking-1",
+            "assistant-1",
+            "user-steer",
+            "thinking-2",
+            "assistant-2",
+        ])
+    }
+
     func testEnforceIntraTurnOrderPreservesPartialInterleavedFlow() {
         let now = Date()
         var order = 0
@@ -985,6 +1068,65 @@ final class TurnTimelineReducerTests: XCTestCase {
             "thinking-1",
             "assistant-1",
             "tool-1",
+        ])
+    }
+
+    func testEnforceIntraTurnOrderPreservesSteerPromptAfterAssistantWithinSameTurn() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Initial request",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "First pass",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Actually check the failing tests first",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-2",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Refocusing on failures",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "item-2",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "assistant-1",
+            "user-2",
+            "assistant-2",
         ])
     }
 

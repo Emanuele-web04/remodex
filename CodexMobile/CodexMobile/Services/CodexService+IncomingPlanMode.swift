@@ -96,15 +96,6 @@ extension CodexService {
         )
     }
 
-    // Removes inline question cards once the server confirms the request was resolved.
-    func handleServerRequestResolved(_ paramsObject: IncomingParamsObject?) {
-        guard let requestID = paramsObject?["requestId"] else {
-            return
-        }
-
-        let threadId = normalizedPlanIdentifier(paramsObject?["threadId"]?.stringValue)
-        removeStructuredUserInputPrompt(requestID: requestID, threadIdHint: threadId)
-    }
 }
 
 private extension CodexService {

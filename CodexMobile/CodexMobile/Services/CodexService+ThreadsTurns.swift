@@ -16,6 +16,38 @@ extension CodexService {
         .object(["decision": .string(decision)])
     }
 
+    // Returns the next pending approval for a specific thread, falling back to thread-less requests.
+    func pendingApproval(for threadId: String? = nil) -> CodexApprovalRequest? {
+        guard let normalizedThreadID = normalizedApprovalThreadIdentifier(threadId) else {
+            return pendingApprovals.first
+        }
+
+        return pendingApprovals.first(where: { $0.threadId == normalizedThreadID })
+            ?? pendingApprovals.first(where: { $0.threadId == nil })
+    }
+
+    // Preserves arrival order while replacing retried copies of the same request id.
+    func enqueuePendingApproval(_ request: CodexApprovalRequest) {
+        if let existingIndex = pendingApprovals.firstIndex(where: { $0.id == request.id }) {
+            pendingApprovals[existingIndex] = request
+            return
+        }
+
+        pendingApprovals.append(request)
+    }
+
+    // Removes the exact resolved approval request when the server confirms it is gone.
+    @discardableResult
+    func removePendingApproval(requestID: JSONValue) -> CodexApprovalRequest? {
+        let requestKey = idKey(from: requestID)
+        return removePendingApproval(id: requestKey)
+    }
+
+    // Clears all volatile approval prompts on disconnect or server switch.
+    func clearPendingApprovals() {
+        pendingApprovals.removeAll()
+    }
+
     func listThreads(limit: Int? = nil) async throws {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
@@ -411,8 +443,9 @@ extension CodexService {
     }
 
     // Accepts the latest pending approval request.
-    func approvePendingRequest(forSession: Bool = false) async throws {
-        guard let request = pendingApproval else {
+    func approvePendingRequest(_ request: CodexApprovalRequest, forSession: Bool = false) async throws {
+        let requestKey = request.id
+        guard pendingApprovals.contains(where: { $0.id == requestKey }) else {
             throw CodexServiceError.noPendingApproval
         }
 
@@ -422,17 +455,36 @@ extension CodexService {
         let decision = (forSession && isCommandApproval) ? "acceptForSession" : "accept"
 
         try await sendResponse(id: request.requestID, result: approvalDecisionResult(decision))
-        pendingApproval = nil
+        removePendingApproval(requestID: request.requestID)
+    }
+
+    // Accepts the next pending approval request, optionally scoped to a thread.
+    func approvePendingRequest(forThread threadId: String? = nil, forSession: Bool = false) async throws {
+        guard let request = pendingApproval(for: threadId) else {
+            throw CodexServiceError.noPendingApproval
+        }
+
+        try await approvePendingRequest(request, forSession: forSession)
     }
 
     // Declines the latest pending approval request.
-    func declinePendingRequest() async throws {
-        guard let request = pendingApproval else {
+    func declinePendingRequest(_ request: CodexApprovalRequest) async throws {
+        let requestKey = request.id
+        guard pendingApprovals.contains(where: { $0.id == requestKey }) else {
             throw CodexServiceError.noPendingApproval
         }
 
         try await sendResponse(id: request.requestID, result: approvalDecisionResult("decline"))
-        pendingApproval = nil
+        removePendingApproval(requestID: request.requestID)
+    }
+
+    // Declines the next pending approval request, optionally scoped to a thread.
+    func declinePendingRequest(forThread threadId: String? = nil) async throws {
+        guard let request = pendingApproval(for: threadId) else {
+            throw CodexServiceError.noPendingApproval
+        }
+
+        try await declinePendingRequest(request)
     }
 
     // Responds to item/tool/requestUserInput using the exact app-server answer envelope.
@@ -547,6 +599,26 @@ extension CodexService {
 
         \(sections.joined(separator: "\n\n"))
         """
+    }
+}
+
+private extension CodexService {
+    @discardableResult
+    func removePendingApproval(id requestID: String) -> CodexApprovalRequest? {
+        guard let exactIndex = pendingApprovals.firstIndex(where: { $0.id == requestID }) else {
+            return nil
+        }
+
+        return pendingApprovals.remove(at: exactIndex)
+    }
+
+    func normalizedApprovalThreadIdentifier(_ rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
