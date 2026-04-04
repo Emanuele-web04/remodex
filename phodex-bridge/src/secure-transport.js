@@ -36,6 +36,7 @@ const MAX_BRIDGE_OUTBOUND_BYTES = 10 * 1024 * 1024;
 function createBridgeSecureTransport({
   sessionId,
   relayUrl,
+  relayHeaders = {},
   deviceState,
   onTrustedPhoneUpdate = null,
 }) {
@@ -54,7 +55,7 @@ function createBridgeSecureTransport({
 
   function createPairingPayload() {
     currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
-    return {
+    const pairingPayload = {
       v: PAIRING_QR_VERSION,
       relay: relayUrl,
       sessionId,
@@ -62,6 +63,10 @@ function createBridgeSecureTransport({
       macIdentityPublicKey: currentDeviceState.macIdentityPublicKey,
       expiresAt: currentPairingExpiresAt,
     };
+    if (Object.keys(relayHeaders).length > 0) {
+      pairingPayload.relayHeaders = relayHeaders;
+    }
+    return pairingPayload;
   }
 
   function handleIncomingWireMessage(rawMessage, { sendControlMessage, onApplicationMessage }) {

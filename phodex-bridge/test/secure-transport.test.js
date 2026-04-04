@@ -534,6 +534,29 @@ test("resume replay does not advance the replay watermark before a phone ack", (
   assert.equal(reboundPayload.payloadText, JSON.stringify({ id: "response-6", result: { ok: true } }));
 });
 
+test("pairing payload includes relay headers when configured", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const secureTransport = createBridgeSecureTransport({
+    sessionId: "session-headers",
+    relayUrl: "wss://relay.example/relay",
+    relayHeaders: {
+      "CF-Access-Client-Id": "client-id-123",
+      "CF-Access-Client-Secret": "client-secret-456",
+    },
+    deviceState: {
+      macDeviceId: "mac-headers",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+
+  assert.deepEqual(secureTransport.createPairingPayload().relayHeaders, {
+    "CF-Access-Client-Id": "client-id-123",
+    "CF-Access-Client-Secret": "client-secret-456",
+  });
+});
+
 function finishHandshake({
   secureTransport,
   sessionId,

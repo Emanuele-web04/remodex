@@ -163,6 +163,24 @@ npm install
 REMODEX_RELAY="wss://relay.example.com/relay" npm start
 ```
 
+If your relay sits behind Cloudflare Access, set the service-token headers before you start the bridge:
+
+```sh
+export REMODEX_RELAY="wss://relay.example.com/relay"
+export REMODEX_RELAY_CF_ACCESS_CLIENT_ID="your-service-token-id"
+export REMODEX_RELAY_CF_ACCESS_CLIENT_SECRET="your-service-token-secret"
+remodex up
+```
+
+For other reverse proxies, you can pass arbitrary headers as JSON:
+
+```sh
+export REMODEX_RELAY_HEADERS='{"X-Relay-Token":"secret-value"}'
+remodex up
+```
+
+Those headers are embedded in the pairing QR for the iPhone and then stored locally for trusted reconnect, so treat a visible pairing QR as sensitive.
+
 The bridge will print a QR code the first time you trust that Mac, or later if you intentionally reset trust.
 
 That QR carries the relay URL and session information, so the iPhone does not need a hardcoded relay endpoint in the public source build.

@@ -127,6 +127,7 @@ function startBridge({
   const secureTransport = createBridgeSecureTransport({
     sessionId,
     relayUrl: relayBaseUrl,
+    relayHeaders: config.relayHeaders,
     deviceState,
     onTrustedPhoneUpdate(nextDeviceState) {
       deviceState = nextDeviceState;
@@ -321,6 +322,7 @@ function startBridge({
     const nextSocket = new WebSocket(relaySessionUrl, {
       // The relay uses this per-session secret to authenticate the first push registration.
       headers: {
+        ...(config.relayHeaders || {}),
         "x-role": "mac",
         "x-notification-secret": notificationSecret,
         ...buildMacRegistrationHeaders(deviceState),

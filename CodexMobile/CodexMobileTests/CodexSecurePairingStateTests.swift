@@ -69,6 +69,31 @@ final class CodexSecurePairingStateTests: XCTestCase {
         XCTAssertEqual(service.secureMacFingerprint, codexSecureFingerprint(for: freshQRPublicKey))
     }
 
+    func testRememberRelayPairingPersistsRelayHeaders() {
+        let service = CodexService()
+
+        service.rememberRelayPairing(
+            CodexPairingQRPayload(
+                v: codexPairingQRVersion,
+                relay: "wss://relay.example.com/relay",
+                relayHeaders: [
+                    "CF-Access-Client-Id": "client-id-123",
+                    "CF-Access-Client-Secret": "client-secret-456",
+                ],
+                sessionId: "session-\(UUID().uuidString)",
+                macDeviceId: "mac-\(UUID().uuidString)",
+                macIdentityPublicKey: Data(repeating: 5, count: 32).base64EncodedString(),
+                expiresAt: Int64(Date().addingTimeInterval(60).timeIntervalSince1970 * 1000)
+            )
+        )
+
+        XCTAssertEqual(service.normalizedRelayHeaders["CF-Access-Client-Id"], "client-id-123")
+        XCTAssertEqual(
+            SecureStore.readCodable([String: String].self, for: CodexSecureKeys.relayHeaders)?["CF-Access-Client-Secret"],
+            "client-secret-456"
+        )
+    }
+
     func testResetSecureTransportStatePreservesRePairRequiredState() {
         let service = CodexService()
         service.relaySessionId = "session-\(UUID().uuidString)"
@@ -100,7 +125,11 @@ final class CodexSecurePairingStateTests: XCTestCase {
                 displayName: "Desk Mac",
                 sessionId: "fresh-session"
             ),
-            relayURL: "wss://relay.local/relay"
+            relayURL: "wss://relay.local/relay",
+            relayHeaders: [
+                "CF-Access-Client-Id": "client-id-123",
+                "CF-Access-Client-Secret": "client-secret-456",
+            ]
         )
 
         XCTAssertEqual(service.lastAppliedBridgeOutboundSeq, 0)
@@ -108,6 +137,7 @@ final class CodexSecurePairingStateTests: XCTestCase {
             SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
             "0"
         )
+        XCTAssertEqual(service.normalizedRelayHeaders["CF-Access-Client-Id"], "client-id-123")
     }
 
     func testApplyingResolvedTrustedSessionKeepsReplayCursorWhenLiveSessionIsUnchanged() {
@@ -128,7 +158,8 @@ final class CodexSecurePairingStateTests: XCTestCase {
                 displayName: "Desk Mac",
                 sessionId: "same-session"
             ),
-            relayURL: "wss://relay.local/relay"
+            relayURL: "wss://relay.local/relay",
+            relayHeaders: [:]
         )
 
         XCTAssertEqual(service.lastAppliedBridgeOutboundSeq, 17)
@@ -142,6 +173,7 @@ final class CodexSecurePairingStateTests: XCTestCase {
     private func clearStoredSecureRelayState() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayHeaders)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
