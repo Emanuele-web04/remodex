@@ -141,3 +141,63 @@ test("sanitizeThreadHistoryImagesForRelay leaves unrelated RPC payloads unchange
     rawMessage
   );
 });
+
+test("sanitizeThreadHistoryImagesForRelay strips bulky compaction replacement history", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-thread-resume",
+    result: {
+      thread: {
+        id: "thread-compaction",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "item-compaction",
+                type: "context_compaction",
+                payload: {
+                  message: "",
+                  replacement_history: [
+                    {
+                      type: "message",
+                      role: "assistant",
+                      content: [{ type: "output_text", text: "very old transcript" }],
+                    },
+                  ],
+                },
+              },
+              {
+                id: "item-compaction-camel",
+                type: "contextCompaction",
+                replacementHistory: [
+                  {
+                    type: "message",
+                    role: "user",
+                    content: [{ type: "input_text", text: "older prompt" }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/resume")
+  );
+  const items = sanitized.result.thread.turns[0].items;
+
+  assert.deepEqual(items[0], {
+    id: "item-compaction",
+    type: "context_compaction",
+    payload: {
+      message: "",
+    },
+  });
+  assert.deepEqual(items[1], {
+    id: "item-compaction-camel",
+    type: "contextCompaction",
+  });
+});

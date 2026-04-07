@@ -21,8 +21,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let activeTurnID: String?
     let isThreadRunning: Bool
     let latestTurnTerminalState: CodexTurnTerminalState?
+    let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
+    let planSessionSource: CodexPlanSessionSource?
+    let allowsAssistantPlanFallbackRecovery: Bool
+    let threadMessagesForPlanMatching: [CodexMessage]
     let isRetryAvailable: Bool
     let errorMessage: String?
     let hidesErrorMessage: Bool
@@ -68,6 +72,18 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         visibleTailCount < messages.count
     }
 
+    private var planMatchingFingerprint: Int {
+        var hasher = Hasher()
+        for message in threadMessagesForPlanMatching where message.kind == .userInputPrompt {
+            hasher.combine(message.id)
+            hasher.combine(message.turnId)
+            hasher.combine(message.orderIndex)
+            hasher.combine(message.structuredUserInputRequest?.requestID)
+            hasher.combine(message.structuredUserInputRequest?.questions)
+        }
+        return hasher.finalize()
+    }
+
     var body: some View {
         if messages.isEmpty {
             // Keep new/empty chats static to avoid scroll indicators and inert scrolling.
@@ -91,26 +107,24 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(spacing: 0) {
-                        // Keep the conversation virtualized in the common case so heavy
-                        // markdown/system rows do not all re-layout while the user scrolls.
-                        LazyVStack(spacing: 20) {
-                            timelineRows
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.top, 12)
-
-                        // Keep bottom anchor outside the message stack so it is always laid out.
-                        Color.clear
-                            .frame(height: 1)
-                            .id(scrollBottomAnchorID)
-                            .allowsHitTesting(false)
-                            .padding(.bottom, 12)
+                    VStack(spacing: 20) {
+                        timelineRows
                     }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 12)
+
+                    // Keep bottom anchor outside the message stack so it is always
+                    // reachable by scrollTo regardless of VStack layout timing.
+                    Color.clear
+                        .frame(height: 1)
+                        .id(scrollBottomAnchorID)
+                        .allowsHitTesting(false)
                 }
                 .accessibilityIdentifier("turn.timeline.scrollview")
                 .background(Color(.systemBackground))
-                .defaultScrollAnchor(.bottom)
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
                 .scrollDismissesKeyboard(.interactively)
                 .simultaneousGesture(
                     TapGesture().onEnded {
@@ -138,11 +152,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         contentHeight: geometry.contentSize.height
                     )
                 } action: { old, new in
-                    if new.viewportHeight > 0,
-                       abs(new.viewportHeight - old.viewportHeight) > 2 {
-                        viewportHeight = new.viewportHeight
+                    let viewportHeightChanged = new.viewportHeight > 0
+                        && abs(new.viewportHeight - old.viewportHeight) > 2
+
+                    if new.viewportHeight > 0 {
+                        if abs(new.viewportHeight - viewportHeight) > 1 {
+                            viewportHeight = new.viewportHeight
+                        }
                         performInitialRecoverySnapIfNeeded(using: proxy)
-                        if shouldPinTimelineToBottomDuringGeometryChange {
+                        if viewportHeightChanged, shouldPinTimelineToBottomDuringGeometryChange {
                             scheduleFollowBottomScroll(using: proxy)
                         }
                     }
@@ -182,8 +200,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     recomputeBlockInfoIfNeeded()
                 }
                 .onChange(of: visibleTailCount) { _, _ in
-                    // Loading older rows changes the visible slice even when the underlying
-                    // timeline revision is unchanged, so refresh slice-scoped accessories now.
                     recomputeBlockInfoIfNeeded()
                 }
                 .onChange(of: shouldAnchorToAssistantResponse) { _, newValue in
@@ -242,6 +258,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 isRetryAvailable: isRetryAvailable,
                 onRetryUserMessage: onRetryUserMessage,
                 assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
+                planSessionSource: planSessionSource,
+                allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                assistantTurnCompleted: message.turnId.map(completedTurnIDs.contains) ?? false,
+                threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                planMatchingFingerprint: planMatchingFingerprint,
                 // Keep streaming adornments stable while follow-bottom is active so
                 // transient bottom-geometry flips during content growth do not
                 // add/remove indicator height and make the viewport bounce.
@@ -255,8 +276,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    /// Recomputes assistant-block copy data and the inline-commit target only when inputs actually changed.
-    /// Works over the visible slice only so cost stays bounded regardless of total history.
     private func recomputeBlockInfoIfNeeded() {
         let visible = Array(visibleMessages)
         let key = blockInfoInputKey(for: visible)
@@ -315,7 +334,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
         return hasher.finalize()
     }
-
     @ViewBuilder
     private var emptyTimelineState: some View {
         if isThreadRunning {
@@ -492,8 +510,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    // Repairs the initial white/blank viewport race by doing a deferred snap, then
-    // one follow-up verification snap after the footer/lazy rows finish settling.
+    // Repairs the initial white/blank viewport race by snapping to bottom multiple
+    // times with increasing delays until the full VStack layout has settled.
     private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
         guard initialRecoverySnapPendingThreadID == threadID,
               initialRecoverySnapTask == nil,
@@ -506,38 +524,29 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
 
         let expectedThreadID = threadID
+        // Delays in nanoseconds: yield, 16ms, 50ms, 100ms — covers typical layout settle times.
+        let snapDelays: [UInt64] = [0, 16_000_000, 50_000_000, 100_000_000]
         initialRecoverySnapTask = Task { @MainActor in
-            await Task.yield()
-            guard !Task.isCancelled,
-                  initialRecoverySnapPendingThreadID == expectedThreadID,
-                  scrollSessionThreadID == expectedThreadID,
-                  !messages.isEmpty,
-                  viewportHeight > 0,
-                  autoScrollMode == .followBottom,
-                  !shouldPauseAutomaticScrolling,
-                  !shouldAnchorToAssistantResponse else {
-                initialRecoverySnapTask = nil
-                return
+            for delay in snapDelays {
+                if delay == 0 {
+                    await Task.yield()
+                } else {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+
+                guard !Task.isCancelled,
+                      initialRecoverySnapPendingThreadID == expectedThreadID,
+                      scrollSessionThreadID == expectedThreadID,
+                      !messages.isEmpty,
+                      viewportHeight > 0,
+                      autoScrollMode == .followBottom,
+                      !shouldPauseAutomaticScrolling,
+                      !shouldAnchorToAssistantResponse else {
+                    break
+                }
+
+                scrollToBottom(using: proxy, animated: false)
             }
-
-            scrollToBottom(using: proxy, animated: false)
-
-            // A second snap one frame later fixes the common case where the composer
-            // inset or lazy cell heights settle just after the first recovery jump.
-            try? await Task.sleep(nanoseconds: 16_000_000)
-            guard !Task.isCancelled,
-                  initialRecoverySnapPendingThreadID == expectedThreadID,
-                  scrollSessionThreadID == expectedThreadID,
-                  !messages.isEmpty,
-                  viewportHeight > 0,
-                  autoScrollMode == .followBottom,
-                  !shouldPauseAutomaticScrolling,
-                  !shouldAnchorToAssistantResponse else {
-                initialRecoverySnapTask = nil
-                return
-            }
-
-            scrollToBottom(using: proxy, animated: false)
             initialRecoverySnapPendingThreadID = nil
             initialRecoverySnapTask = nil
         }

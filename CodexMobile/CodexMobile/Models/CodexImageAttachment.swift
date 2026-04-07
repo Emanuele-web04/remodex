@@ -23,4 +23,45 @@ struct CodexImageAttachment: Identifiable, Codable, Hashable, Sendable {
         self.payloadDataURL = payloadDataURL
         self.sourceURL = sourceURL
     }
+
+    // History rows only need a thumbnail and, when available, a lightweight remote URL.
+    func sanitizedForStorage(preservingPayloadDataURL: Bool) -> CodexImageAttachment {
+        CodexImageAttachment(
+            id: id,
+            thumbnailBase64JPEG: thumbnailBase64JPEG,
+            payloadDataURL: preservingPayloadDataURL ? normalizedPayloadDataURL : nil,
+            sourceURL: normalizedSourceURL
+        )
+    }
+
+    // Keeps attachment matching stable without hashing giant inline data URLs.
+    var stableIdentityKey: String {
+        if let normalizedSourceURL {
+            return normalizedSourceURL
+        }
+        if !thumbnailBase64JPEG.isEmpty {
+            return thumbnailBase64JPEG
+        }
+        if let normalizedPayloadDataURL {
+            return normalizedPayloadDataURL
+        }
+        return id
+    }
+
+    private var normalizedPayloadDataURL: String? {
+        let trimmed = payloadDataURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private var normalizedSourceURL: String? {
+        let trimmed = sourceURL?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty, !Self.isInlineImageDataURL(trimmed) else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func isInlineImageDataURL(_ value: String) -> Bool {
+        value.lowercased().hasPrefix("data:image")
+    }
 }

@@ -24,6 +24,7 @@ struct SidebarView: View {
     @State private var threadPendingDeletion: CodexThread? = nil
     @State private var createThreadErrorMessage: String? = nil
     @State private var cachedDiffTotals: [String: TurnSessionDiffTotals] = [:]
+    @State private var cachedDiffRevisionByThreadID: [String: Int] = [:]
     @State private var cachedRunBadges: [String: CodexThreadRunBadgeState] = [:]
     @State private var lastDiffFingerprint: Int = 0
     @State private var lastBadgeFingerprint: Int = 0
@@ -316,6 +317,7 @@ struct SidebarView: View {
     // Cheap fingerprint: hashes thread IDs + message revisions (O(n) integer work, no message access).
     private var diffFingerprint: Int {
         var hasher = Hasher()
+        hasher.combine(codex.hasAnyRunningTurn)
         for thread in codex.threads {
             hasher.combine(thread.id)
             hasher.combine(codex.messageRevision(for: thread.id))
@@ -343,19 +345,25 @@ struct SidebarView: View {
     private func rebuildCachedDiffTotals() {
         let fp = diffFingerprint
         guard fp != lastDiffFingerprint else { return }
+        // Keep streaming smooth: diff totals are sidebar-only and can wait until active runs settle.
+        guard !codex.hasAnyRunningTurn else { return }
         lastDiffFingerprint = fp
 
-        var byThreadID: [String: TurnSessionDiffTotals] = [:]
+        let currentThreadIDs = Set(codex.threads.map(\.id))
+        cachedDiffTotals = cachedDiffTotals.filter { currentThreadIDs.contains($0.key) }
+        cachedDiffRevisionByThreadID = cachedDiffRevisionByThreadID.filter { currentThreadIDs.contains($0.key) }
+
         for thread in codex.threads {
+            let revision = codex.messageRevision(for: thread.id)
+            guard cachedDiffRevisionByThreadID[thread.id] != revision else { continue }
+
             let messages = codex.messages(for: thread.id)
-            if let totals = TurnSessionDiffSummaryCalculator.totals(
+            cachedDiffTotals[thread.id] = TurnSessionDiffSummaryCalculator.totals(
                 from: messages,
                 scope: .unpushedSession
-            ) {
-                byThreadID[thread.id] = totals
-            }
+            )
+            cachedDiffRevisionByThreadID[thread.id] = revision
         }
-        cachedDiffTotals = byThreadID
     }
 
     private func rebuildCachedRunBadges() {

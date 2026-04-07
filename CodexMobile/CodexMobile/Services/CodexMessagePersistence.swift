@@ -103,6 +103,19 @@ struct CodexMessagePersistence {
     // Keep pending structured prompts on disk so reconnects and relaunches can still surface
     // a request the server is waiting on; lifecycle cleanup removes them once the request resolves.
     private func sanitizedForPersistence(_ value: [String: [CodexMessage]]) -> [String: [CodexMessage]] {
-        value
+        value.mapValues { messages in
+            messages.map { message in
+                guard !message.attachments.isEmpty else {
+                    return message
+                }
+
+                var sanitizedMessage = message
+                let shouldPreservePayloadDataURL = message.deliveryState == .pending
+                sanitizedMessage.attachments = message.attachments.map {
+                    $0.sanitizedForStorage(preservingPayloadDataURL: shouldPreservePayloadDataURL)
+                }
+                return sanitizedMessage
+            }
+        }
     }
 }

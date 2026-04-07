@@ -7,7 +7,63 @@
 import Foundation
 import UIKit
 
+private enum RunningThreadHistoryCatchupPolicy {
+    // Running-thread reopen only needs the latest transcript tail to catch up the UI.
+    static let recentMergeWindow = 160
+    static let cancellationCheckInterval = 32
+}
+
 extension CodexService {
+    nonisolated static func shouldPreferRecentHistoryWindow(
+        existingCount: Int,
+        historyCount: Int,
+        windowSize: Int = RunningThreadHistoryCatchupPolicy.recentMergeWindow
+    ) -> Bool {
+        let normalizedWindowSize = max(1, windowSize)
+        guard existingCount > normalizedWindowSize,
+              historyCount > normalizedWindowSize else {
+            return false
+        }
+
+        // Only trust the local prefix when it is already deep enough to cover the
+        // server prefix we are about to skip. Otherwise fall back to canonical merge.
+        return existingCount >= (historyCount - normalizedWindowSize)
+    }
+
+    // Runs history reconciliation off the main actor and cancels the worker if the caller goes away.
+    func mergeHistoryMessagesOffMainActor(
+        existing: [CodexMessage],
+        history: [CodexMessage],
+        activeThreadIDs: Set<String>,
+        runningThreadIDs: Set<String>,
+        preferRecentWindow: Bool
+    ) async throws -> [CodexMessage] {
+        let mergeTask = Task.detached(priority: .userInitiated) { () throws -> [CodexMessage] in
+            if preferRecentWindow {
+                return try Self.mergeRecentHistoryWindow(
+                    existing,
+                    history,
+                    activeThreadIDs: activeThreadIDs,
+                    runningThreadIDs: runningThreadIDs,
+                    windowSize: RunningThreadHistoryCatchupPolicy.recentMergeWindow
+                )
+            }
+
+            return try Self.mergeHistoryMessages(
+                existing,
+                history,
+                activeThreadIDs: activeThreadIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+        }
+
+        return try await withTaskCancellationHandler {
+            try await mergeTask.value
+        } onCancel: {
+            mergeTask.cancel()
+        }
+    }
+
     // Decodes thread/read(includeTurns=true) payload into chronological message timeline.
     func decodeMessagesFromThreadRead(threadId: String, threadObject: [String: JSONValue]) -> [CodexMessage] {
         let baseDate = decodeHistoryBaseDate(from: threadObject)
@@ -355,6 +411,7 @@ extension CodexService {
                     payloadDataURL: payloadDataURL,
                     sourceURL: sourceURL
                 )
+                .sanitizedForStorage(preservingPayloadDataURL: false)
             )
         }
 
@@ -364,7 +421,7 @@ extension CodexService {
     func mergeHistoryMessages(_ existing: [CodexMessage], _ history: [CodexMessage]) -> [CodexMessage] {
         let activeThreadIDs = Set(activeTurnIdByThread.keys)
         let runningIDs = runningThreadIDs
-        return Self.mergeHistoryMessages(existing, history, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
+        return (try? Self.mergeHistoryMessages(existing, history, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)) ?? existing
     }
 
     nonisolated static func mergeHistoryMessages(
@@ -372,7 +429,7 @@ extension CodexService {
         _ history: [CodexMessage],
         activeThreadIDs: Set<String>,
         runningThreadIDs: Set<String>
-    ) -> [CodexMessage] {
+    ) throws -> [CodexMessage] {
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
             // so that the stable sort preserves server-provided chronology.
@@ -388,8 +445,15 @@ extension CodexService {
             grouping: history.filter { $0.role == .assistant }
         ) { $0.turnId ?? "" }
         .mapValues(\.count)
+        var processedHistoryMessages = 0
 
         for message in history {
+            processedHistoryMessages &+= 1
+            if processedHistoryMessages.isMultiple(of: RunningThreadHistoryCatchupPolicy.cancellationCheckInterval),
+               Task.isCancelled {
+                throw CancellationError()
+            }
+
             if message.role == .assistant,
                let turnId = message.turnId, !turnId.isEmpty,
                let index = merged.lastIndex(where: { candidate in
@@ -624,6 +688,45 @@ extension CodexService {
 
         merged.sort(by: { $0.orderIndex < $1.orderIndex })
         return merged
+    }
+
+    // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
+    // does not repeatedly reconcile the entire chat while output is still streaming.
+    nonisolated static func mergeRecentHistoryWindow(
+        _ existing: [CodexMessage],
+        _ history: [CodexMessage],
+        activeThreadIDs: Set<String>,
+        runningThreadIDs: Set<String>,
+        windowSize: Int
+    ) throws -> [CodexMessage] {
+        let normalizedWindowSize = max(1, windowSize)
+        guard !existing.isEmpty,
+              shouldPreferRecentHistoryWindow(
+                existingCount: existing.count,
+                historyCount: history.count,
+                windowSize: normalizedWindowSize
+              ) else {
+            return try mergeHistoryMessages(
+                existing,
+                history,
+                activeThreadIDs: activeThreadIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+        }
+
+        let prefixCount = max(existing.count - normalizedWindowSize, 0)
+        let stablePrefix = Array(existing.prefix(prefixCount))
+        let recentExisting = Array(existing.suffix(normalizedWindowSize))
+        let recentHistory = Array(history.suffix(normalizedWindowSize))
+        let mergedTail = try mergeHistoryMessages(
+            recentExisting,
+            recentHistory,
+            activeThreadIDs: activeThreadIDs,
+            runningThreadIDs: runningThreadIDs
+        )
+        let boundaryOverlapKeys = Set(stablePrefix.suffix(32).map(Self.historyMessageKey))
+        let filteredTail = mergedTail.filter { !boundaryOverlapKeys.contains(historyMessageKey(for: $0)) }
+        return stablePrefix + filteredTail
     }
 
     func decodeHistoryTimestamp(from object: [String: JSONValue]) -> Date? {
@@ -890,9 +993,7 @@ extension CodexService {
 
     nonisolated static func attachmentSignature(for attachments: [CodexImageAttachment]) -> String {
         attachments
-            .map { attachment in
-                attachment.payloadDataURL ?? attachment.sourceURL ?? attachment.thumbnailBase64JPEG
-            }
+            .map(\.stableIdentityKey)
             .joined(separator: "|")
     }
 

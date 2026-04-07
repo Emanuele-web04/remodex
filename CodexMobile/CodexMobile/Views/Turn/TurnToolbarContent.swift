@@ -238,9 +238,9 @@ private struct TurnToolbarDiffTotalsLabel: View {
                     .controlSize(.mini)
             }
             Text("+\(totals.additions)")
-                .foregroundStyle(.primary)
+                .foregroundStyle(Color.green)
             Text("-\(totals.deletions)")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.red)
             if totals.binaryFiles > 0 {
                 Text("B\(totals.binaryFiles)")
                     .foregroundStyle(.secondary)

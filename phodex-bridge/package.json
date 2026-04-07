@@ -13,6 +13,7 @@
   "scripts": {
     "start": "node ./bin/remodex.js up",
     "test": "node --test ./test/*.test.js",
+    "postinstall": "node ./src/bootstrap-codex-cli.js",
     "prepack": "node ./scripts/prepare-private-defaults.js",
     "postpack": "node ./scripts/cleanup-private-defaults.js"
   },

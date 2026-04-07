@@ -446,15 +446,25 @@ extension CodexService {
         if let threadId = activeThreadId
             ?? resolvedPreferredThreadId
             ?? firstLiveThreadID() {
-            await refreshInFlightTurnState(threadId: threadId)
-            if threadHasActiveOrRunningTurn(threadId) {
-                _ = try? await ensureThreadResumed(threadId: threadId, force: true)
+            let catchupOutcome = await catchUpRunningThreadIfNeeded(
+                threadId: threadId,
+                shouldForceResume: true
+            )
+            if catchupOutcome.isRunning {
+                if !catchupOutcome.didRunForcedResume {
+                    requestImmediateActiveThreadSync(threadId: threadId)
+                }
                 if activeThreadId == threadId {
                     currentOutput = messages(for: threadId)
                         .reversed()
                         .first(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
                         .text ?? ""
                 }
+            } else if shouldDeferHeavyDisplayHydration(threadId: threadId) {
+                markThreadNeedingCanonicalHistoryReconcile(
+                    threadId,
+                    requestImmediateSync: activeThreadId == threadId
+                )
             }
         }
     }
@@ -538,6 +548,7 @@ extension CodexService {
         postConnectSyncTask?.cancel()
         postConnectSyncTask = nil
         postConnectSyncToken = nil
+        cancelAllPerThreadRefreshWork()
     }
 
     // Avoids wiping thread/runtime state when reconnecting after a socket that already died.

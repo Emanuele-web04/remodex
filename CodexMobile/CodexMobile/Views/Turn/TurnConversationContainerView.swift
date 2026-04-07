@@ -13,8 +13,12 @@ struct TurnConversationContainerView: View {
     let activeTurnID: String?
     let isThreadRunning: Bool
     let latestTurnTerminalState: CodexTurnTerminalState?
+    let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
+    let planSessionSource: CodexPlanSessionSource?
+    let allowsAssistantPlanFallbackRecovery: Bool
+    let threadMessagesForPlanMatching: [CodexMessage]
     let errorMessage: String?
     let composerRecoveryAccessory: AnyView?
     let shouldAnchorToAssistantResponse: Binding<Bool>
@@ -78,8 +82,12 @@ struct TurnConversationContainerView: View {
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
                 latestTurnTerminalState: latestTurnTerminalState,
+                completedTurnIDs: completedTurnIDs,
                 stoppedTurnIDs: stoppedTurnIDs,
                 assistantRevertStatesByMessageID: assistantRevertStatesByMessageID,
+                planSessionSource: planSessionSource,
+                allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                threadMessagesForPlanMatching: threadMessagesForPlanMatching,
                 isRetryAvailable: !isThreadRunning,
                 errorMessage: errorMessage,
                 hidesErrorMessage: composerRecoveryAccessory != nil,

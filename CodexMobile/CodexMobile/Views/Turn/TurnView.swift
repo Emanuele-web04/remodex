@@ -47,6 +47,7 @@ struct TurnView: View {
         let timelineState = codex.timelineState(for: thread.id)
         let renderSnapshot = timelineState.renderSnapshot
         let activeTurnID = renderSnapshot.activeTurnID
+        let planSessionSource = codex.currentPlanSessionSource(for: thread.id)
         let gitWorkingDirectory = resolvedThread.gitWorkingDirectory
         let isThreadRunning = renderSnapshot.isThreadRunning
         let isEmptyThread = renderSnapshot.messages.isEmpty
@@ -71,8 +72,12 @@ struct TurnView: View {
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
                 latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
+                completedTurnIDs: renderSnapshot.completedTurnIDs,
                 stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
                 assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
+                planSessionSource: planSessionSource,
+                allowsAssistantPlanFallbackRecovery: planSessionSource == .compatibilityFallback,
+                threadMessagesForPlanMatching: renderSnapshot.planMatchingMessages,
                 errorMessage: codex.lastErrorMessage,
                 composerRecoveryAccessory: composerRecoveryAccessory,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
@@ -169,6 +174,7 @@ struct TurnView: View {
                 }
                 .accessibilityLabel("Runtime logs")
             }
+
         }
         .overlay {
             if isShowingWorktreeHandoff {
@@ -1591,58 +1597,6 @@ struct TurnView: View {
     }
 }
 
-private struct RuntimeDebugLogSheet: View {
-    @Environment(CodexService.self) private var codex
-    @Environment(\.dismiss) private var dismiss
-
-    private var combinedLogText: String {
-        codex.runtimeDebugLogEntries.joined(separator: "\n")
-    }
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if codex.runtimeDebugLogEntries.isEmpty {
-                    ContentUnavailableView(
-                        "No Runtime Logs Yet",
-                        systemImage: "list.bullet.rectangle",
-                        description: Text("Start a Plan Mode turn and the RPC events will appear here.")
-                    )
-                } else {
-                    ScrollView {
-                        Text(combinedLogText)
-                            .font(AppFont.mono(.footnote))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                    }
-                    .background(Color(.systemBackground))
-                }
-            }
-            .navigationTitle("Runtime Logs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") {
-                        dismiss()
-                    }
-                }
-
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("Clear") {
-                        codex.clearRuntimeDebugLog()
-                    }
-
-                    Button("Copy") {
-                        UIPasteboard.general.string = combinedLogText
-                    }
-                    .disabled(combinedLogText.isEmpty)
-                }
-            }
-        }
-    }
-}
-
 private enum VoiceRecoveryAction: Equatable {
     case reconnect
     case showSetupHelp
@@ -1713,6 +1667,58 @@ private struct CheckedOutElsewhereAlert: Identifiable {
         }
 
         return "'\(branch)' is already checked out in another worktree. Open that chat from the sidebar to continue there."
+    }
+}
+
+private struct RuntimeDebugLogSheet: View {
+    @Environment(CodexService.self) private var codex
+    @Environment(\.dismiss) private var dismiss
+
+    private var combinedLogText: String {
+        codex.runtimeDebugLogEntries.joined(separator: "\n")
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if codex.runtimeDebugLogEntries.isEmpty {
+                    ContentUnavailableView(
+                        "No Runtime Logs Yet",
+                        systemImage: "list.bullet.rectangle",
+                        description: Text("Start a Plan Mode turn and the RPC events will appear here.")
+                    )
+                } else {
+                    ScrollView {
+                        Text(combinedLogText)
+                            .font(AppFont.mono(.footnote))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                    }
+                    .background(Color(.systemBackground))
+                }
+            }
+            .navigationTitle("Runtime Logs")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Clear") {
+                        codex.clearRuntimeDebugLog()
+                    }
+
+                    Button("Copy") {
+                        UIPasteboard.general.string = combinedLogText
+                    }
+                    .disabled(combinedLogText.isEmpty)
+                }
+            }
+        }
     }
 }
 

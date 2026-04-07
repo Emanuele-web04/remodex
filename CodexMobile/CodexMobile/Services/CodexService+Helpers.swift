@@ -48,9 +48,10 @@ extension CodexService {
     }
 
     func upsertThread(_ incomingThread: CodexThread, treatAsServerState: Bool = false) {
+        let existingThread = self.thread(for: incomingThread.id)
         var resolvedThread = mergedThread(
             incomingThread,
-            with: self.thread(for: incomingThread.id),
+            with: existingThread,
             treatAsServerState: treatAsServerState
         )
         if resolvedThread.forkedFromThreadId == nil {
@@ -73,6 +74,17 @@ extension CodexService {
         }
 
         threads = sortThreads(threads)
+
+        if shouldRefreshDeferredHydrationForServerUpdate(
+            incomingThread: resolvedThread,
+            existingThread: existingThread,
+            treatAsServerState: treatAsServerState
+        ) {
+            markThreadNeedingCanonicalHistoryReconcile(
+                resolvedThread.id,
+                requestImmediateSync: activeThreadId == resolvedThread.id
+            )
+        }
     }
 
     // Preserves locally discovered child-thread identity while newer server payloads trickle in.
@@ -141,6 +153,34 @@ extension CodexService {
         }
 
         defaults.set(encoded, forKey: Self.forkedThreadOriginsDefaultsKey)
+    }
+
+    // Re-arms one canonical refresh when thread/list shows newer server metadata for a large active chat.
+    func shouldRefreshDeferredHydrationForServerUpdate(
+        incomingThread: CodexThread,
+        existingThread: CodexThread?,
+        treatAsServerState: Bool
+    ) -> Bool {
+        guard treatAsServerState,
+              activeThreadId == incomingThread.id,
+              threadsWithSatisfiedDeferredHistoryHydration.contains(incomingThread.id),
+              shouldDeferHeavyDisplayHydration(threadId: incomingThread.id),
+              let existingThread else {
+            return false
+        }
+
+        if let incomingUpdatedAt = incomingThread.updatedAt,
+           let existingUpdatedAt = existingThread.updatedAt,
+           incomingUpdatedAt > existingUpdatedAt {
+            return true
+        }
+
+        if existingThread.preview != incomingThread.preview,
+           incomingThread.preview?.isEmpty == false {
+            return true
+        }
+
+        return false
     }
 
     // Keeps user-renamed thread titles durable even when thread/list returns only the server fallback title.

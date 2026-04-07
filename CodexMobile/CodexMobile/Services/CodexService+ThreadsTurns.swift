@@ -772,63 +772,129 @@ extension CodexService {
             return nil
         }
 
+        if force {
+            forcedResumeEscalationThreadIDs.insert(threadId)
+        }
         if !force, resumedThreadIDs.contains(threadId) {
             return thread(for: threadId)
         }
+        let requestedSignature = CodexThreadResumeRequestSignature(
+            projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
+                ?? thread(for: threadId)?.gitWorkingDirectory,
+            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn()
+        )
+        let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
+        if let existingTask = threadResumeTaskByThreadID[threadId] {
+            if threadResumeRequestSignatureByThreadID[threadId] == requestedSignature {
+                return try await existingTask.value
+            }
 
-        var params: RPCObject = [
-            "threadId": .string(threadId),
-        ]
-        let resolvedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
-            ?? thread(for: threadId)?.gitWorkingDirectory
-        if let workingDirectory = resolvedProjectPath {
-            params["cwd"] = .string(workingDirectory)
+            _ = try await existingTask.value
+            return try await ensureThreadResumed(
+                threadId: threadId,
+                force: force,
+                preferredProjectPath: preferredProjectPath,
+                modelIdentifierOverride: modelIdentifierOverride
+            )
         }
-        if let modelIdentifier = modelIdentifierOverride ?? runtimeModelIdentifierForTurn() {
-            params["model"] = .string(modelIdentifier)
-        }
-        let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
 
-        guard let resultObject = response.result?.objectValue else {
-            resumedThreadIDs.insert(threadId)
-            return nil
-        }
-
-        var resumedThread: CodexThread?
-        if let threadValue = resultObject["thread"],
-           var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
-            decodedThread.syncState = .live
-            upsertThread(decodedThread, treatAsServerState: true)
-            resumedThread = decodedThread
-
-            if let threadObject = threadValue.objectValue {
-                let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
-                registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
-                if !historyMessages.isEmpty {
-                    let existingMessages = messagesByThread[threadId] ?? []
-                    let activeThreadIDs = Set(activeTurnIdByThread.keys)
-                    let runningIDs = runningThreadIDs
-                    let merged = await Task.detached {
-                        Self.mergeHistoryMessages(existingMessages, historyMessages, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
-                    }.value
-                    // Forced resumes are used when reopening a running thread, so merge the
-                    // latest snapshot even mid-run and let mergeHistoryMessages preserve
-                    // existing streaming rows instead of waiting for the final block.
-                    if (force || !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty)
-                        && merged != existingMessages {
-                        messagesByThread[threadId] = merged
-                        persistMessages()
-                        updateCurrentOutput(for: threadId)
-                    }
+        let task = Task<CodexThread?, Error> { @MainActor in
+            defer {
+                // Ignore stale refreshes so an older task cannot clear newer state.
+                if isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) {
+                    threadResumeTaskByThreadID.removeValue(forKey: threadId)
+                    threadResumeRequestSignatureByThreadID.removeValue(forKey: threadId)
+                    forcedResumeEscalationThreadIDs.remove(threadId)
                 }
             }
-        } else if let index = threadIndex(for: threadId) {
-            threads[index].syncState = .live
+
+            var params: RPCObject = [
+                "threadId": .string(threadId),
+            ]
+            let resolvedProjectPath = requestedSignature.projectPath
+            if let workingDirectory = resolvedProjectPath {
+                params["cwd"] = .string(workingDirectory)
+            }
+            if let modelIdentifier = requestedSignature.modelIdentifier {
+                params["model"] = .string(modelIdentifier)
+            }
+            let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            guard !Task.isCancelled,
+                  isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
+                throw CancellationError()
+            }
+
+            guard let resultObject = response.result?.objectValue else {
+                resumedThreadIDs.insert(threadId)
+                return nil
+            }
+
+            var resumedThread: CodexThread?
+            if let threadValue = resultObject["thread"],
+               var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
+                decodedThread.syncState = .live
+                upsertThread(decodedThread, treatAsServerState: true)
+                resumedThread = decodedThread
+
+                if let threadObject = threadValue.objectValue {
+                    let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                    registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
+                    if !historyMessages.isEmpty {
+                        let existingMessages = messagesByThread[threadId] ?? []
+                        let activeThreadIDs = Set(activeTurnIdByThread.keys)
+                        let runningIDs = runningThreadIDs
+                        let usedRecentWindow = threadHasActiveOrRunningTurn(threadId)
+                            && Self.shouldPreferRecentHistoryWindow(
+                                existingCount: existingMessages.count,
+                                historyCount: historyMessages.count
+                            )
+                        if usedRecentWindow {
+                            markThreadNeedingCanonicalHistoryReconcile(threadId)
+                        }
+                        let merged = try await mergeHistoryMessagesOffMainActor(
+                            existing: existingMessages,
+                            history: historyMessages,
+                            activeThreadIDs: activeThreadIDs,
+                            runningThreadIDs: runningIDs,
+                            preferRecentWindow: usedRecentWindow
+                        )
+                        guard !Task.isCancelled,
+                              isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
+                            throw CancellationError()
+                        }
+                        let shouldForceMerge = force || forcedResumeEscalationThreadIDs.contains(threadId)
+                        // Forced resumes are used when reopening a running thread, so merge the
+                        // latest snapshot even mid-run and let mergeHistoryMessages preserve
+                        // existing streaming rows instead of waiting for the final block.
+                        if (shouldForceMerge || !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty)
+                            && merged != existingMessages {
+                            messagesByThread[threadId] = merged
+                            persistMessages()
+                            updateCurrentOutput(for: threadId)
+                        }
+                        if usedRecentWindow, !threadHasActiveOrRunningTurn(threadId) {
+                            scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
+                        } else if !threadHasActiveOrRunningTurn(threadId) {
+                            markThreadCanonicalHistoryReconciled(threadId)
+                        }
+                    }
+                }
+            } else if let index = threadIndex(for: threadId) {
+                threads[index].syncState = .live
+            }
+
+            guard !Task.isCancelled,
+                  isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
+                throw CancellationError()
+            }
+            hydratedThreadIDs.insert(threadId)
+            resumedThreadIDs.insert(threadId)
+            return resumedThread
         }
 
-        hydratedThreadIDs.insert(threadId)
-        resumedThreadIDs.insert(threadId)
-        return resumedThread
+        threadResumeTaskByThreadID[threadId] = task
+        threadResumeRequestSignatureByThreadID[threadId] = requestedSignature
+        return try await task.value
     }
 
     func isThreadMissingOnServer(_ threadId: String) async -> Bool {
@@ -855,39 +921,59 @@ extension CodexService {
             return false
         }
 
-        do {
-            let snapshot = try await readThreadTurnStateSnapshot(threadId: normalizedThreadID)
-
-            if let runningTurnID = snapshot.interruptibleTurnID {
-                markThreadAsRunning(normalizedThreadID)
-                setProtectedRunningFallback(false, for: normalizedThreadID)
-                setActiveTurnID(runningTurnID, for: normalizedThreadID)
-                threadIdByTurnID[runningTurnID] = normalizedThreadID
-                activeTurnId = runningTurnID
-                return true
-            }
-
-            if snapshot.hasInterruptibleTurnWithoutID {
-                markThreadAsRunning(normalizedThreadID)
-                setProtectedRunningFallback(true, for: normalizedThreadID)
-            } else {
-                clearRunningState(for: normalizedThreadID)
-            }
-
-            if let existingTurnID = activeTurnID(for: normalizedThreadID) {
-                setActiveTurnID(nil, for: normalizedThreadID)
-                if threadIdByTurnID[existingTurnID] == normalizedThreadID {
-                    threadIdByTurnID.removeValue(forKey: existingTurnID)
-                }
-                if activeTurnId == existingTurnID {
-                    activeTurnId = nil
-                }
-            }
-            return true
-        } catch {
-            debugSyncLog("in-flight turn refresh failed thread=\(normalizedThreadID): \(error.localizedDescription)")
-            return false
+        let refreshGeneration = currentPerThreadRefreshGeneration(for: normalizedThreadID)
+        if let existingTask = turnStateRefreshTaskByThreadID[normalizedThreadID] {
+            return await existingTask.value
         }
+
+        let task = Task<Bool, Never> { @MainActor in
+            defer {
+                if isPerThreadRefreshCurrent(for: normalizedThreadID, generation: refreshGeneration) {
+                    turnStateRefreshTaskByThreadID.removeValue(forKey: normalizedThreadID)
+                }
+            }
+
+            do {
+                let snapshot = try await readThreadTurnStateSnapshot(threadId: normalizedThreadID)
+                guard !Task.isCancelled,
+                      isPerThreadRefreshCurrent(for: normalizedThreadID, generation: refreshGeneration) else {
+                    return false
+                }
+
+                if let runningTurnID = snapshot.interruptibleTurnID {
+                    markThreadAsRunning(normalizedThreadID)
+                    setProtectedRunningFallback(false, for: normalizedThreadID)
+                    setActiveTurnID(runningTurnID, for: normalizedThreadID)
+                    threadIdByTurnID[runningTurnID] = normalizedThreadID
+                    activeTurnId = runningTurnID
+                    return true
+                }
+
+                if snapshot.hasInterruptibleTurnWithoutID {
+                    markThreadAsRunning(normalizedThreadID)
+                    setProtectedRunningFallback(true, for: normalizedThreadID)
+                } else {
+                    clearRunningState(for: normalizedThreadID)
+                }
+
+                if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                    setActiveTurnID(nil, for: normalizedThreadID)
+                    if threadIdByTurnID[existingTurnID] == normalizedThreadID {
+                        threadIdByTurnID.removeValue(forKey: existingTurnID)
+                    }
+                    if activeTurnId == existingTurnID {
+                        activeTurnId = nil
+                    }
+                }
+                return true
+            } catch {
+                debugSyncLog("in-flight turn refresh failed thread=\(normalizedThreadID): \(error.localizedDescription)")
+                return false
+            }
+        }
+
+        turnStateRefreshTaskByThreadID[normalizedThreadID] = task
+        return await task.value
     }
 
     func sendTurnStart(

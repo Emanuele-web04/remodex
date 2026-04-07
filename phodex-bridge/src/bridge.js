@@ -1160,7 +1160,8 @@ function normalizeNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-// Shrinks `thread/read` and `thread/resume` snapshots by eliding inline image blobs.
+// Shrinks `thread/read` and `thread/resume` snapshots by eliding bulky history payloads
+// that the iPhone does not render directly (inline images, compaction replacement history).
 function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
   if (requestMethod !== "thread/read" && requestMethod !== "thread/resume") {
     return rawMessage;
@@ -1180,28 +1181,41 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
 
     let turnDidChange = false;
     const sanitizedItems = turn.items.map((item) => {
-      if (!item || typeof item !== "object" || !Array.isArray(item.content)) {
+      if (!item || typeof item !== "object") {
         return item;
       }
 
       let itemDidChange = false;
-      const sanitizedContent = item.content.map((contentItem) => {
-        const sanitizedEntry = sanitizeInlineHistoryImageContentItem(contentItem);
-        if (sanitizedEntry !== contentItem) {
-          itemDidChange = true;
-        }
-        return sanitizedEntry;
-      });
+      let sanitizedItem = item;
 
-      if (!itemDidChange) {
-        return item;
+      if (Array.isArray(item.content)) {
+        const sanitizedContent = item.content.map((contentItem) => {
+          const sanitizedEntry = sanitizeInlineHistoryImageContentItem(contentItem);
+          if (sanitizedEntry !== contentItem) {
+            itemDidChange = true;
+          }
+          return sanitizedEntry;
+        });
+
+        if (itemDidChange) {
+          sanitizedItem = {
+            ...sanitizedItem,
+            content: sanitizedContent,
+          };
+        }
       }
 
-      turnDidChange = true;
-      return {
-        ...item,
-        content: sanitizedContent,
-      };
+      const sanitizedCompactionItem = sanitizeCompactionHistoryItem(sanitizedItem);
+      if (sanitizedCompactionItem !== sanitizedItem) {
+        sanitizedItem = sanitizedCompactionItem;
+        itemDidChange = true;
+      }
+
+      if (itemDidChange) {
+        turnDidChange = true;
+      }
+
+      return itemDidChange ? sanitizedItem : item;
     });
 
     if (!turnDidChange) {
@@ -1229,6 +1243,48 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
       },
     },
   });
+}
+
+// Drops huge replacement-history blobs from compaction items because the phone only needs
+// the compacted marker itself, not the entire pre-compaction transcript snapshot.
+function sanitizeCompactionHistoryItem(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return item;
+  }
+
+  let sanitizedItem = omitCompactionReplacementHistory(item);
+  const payload = sanitizedItem.payload;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const sanitizedPayload = omitCompactionReplacementHistory(payload);
+    if (sanitizedPayload !== payload) {
+      sanitizedItem = {
+        ...sanitizedItem,
+        payload: sanitizedPayload,
+      };
+    }
+  }
+
+  return sanitizedItem;
+}
+
+function omitCompactionReplacementHistory(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  let nextValue = value;
+  let didChange = false;
+  for (const key of ["replacement_history", "replacementHistory"]) {
+    if (Object.prototype.hasOwnProperty.call(nextValue, key)) {
+      if (!didChange) {
+        nextValue = { ...nextValue };
+        didChange = true;
+      }
+      delete nextValue[key];
+    }
+  }
+
+  return didChange ? nextValue : value;
 }
 
 // Converts `data:image/...` history content into a tiny placeholder the iPhone can render safely.

@@ -31,6 +31,11 @@ struct CodexRunningThreadWatch: Equatable, Sendable {
     let expiresAt: Date
 }
 
+struct CodexThreadResumeRequestSignature: Equatable, Sendable {
+    let projectPath: String?
+    let modelIdentifier: String?
+}
+
 struct CodexSubagentIdentityEntry: Equatable, Sendable {
     var threadId: String?
     var agentId: String?
@@ -214,10 +219,12 @@ enum CodexPendingCodeReviewTarget: Equatable, Sendable {
 struct TurnTimelineRenderSnapshot: Equatable {
     let threadID: String
     let messages: [CodexMessage]
+    let planMatchingMessages: [CodexMessage]
     let timelineChangeToken: Int
     let activeTurnID: String?
     let isThreadRunning: Bool
     let latestTurnTerminalState: CodexTurnTerminalState?
+    let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
     let repoRefreshSignal: String?
@@ -226,10 +233,12 @@ struct TurnTimelineRenderSnapshot: Equatable {
         TurnTimelineRenderSnapshot(
             threadID: threadID,
             messages: [],
+            planMatchingMessages: [],
             timelineChangeToken: 0,
             activeTurnID: nil,
             isThreadRunning: false,
             latestTurnTerminalState: nil,
+            completedTurnIDs: [],
             stoppedTurnIDs: [],
             assistantRevertStatesByMessageID: [:],
             repoRefreshSignal: nil
@@ -246,6 +255,7 @@ final class ThreadTimelineState {
     var activeTurnID: String?
     var isThreadRunning: Bool
     var latestTurnTerminalState: CodexTurnTerminalState?
+    var completedTurnIDs: Set<String>
     var stoppedTurnIDs: Set<String>
     var repoRefreshSignal: String?
     var renderSnapshot: TurnTimelineRenderSnapshot
@@ -257,6 +267,7 @@ final class ThreadTimelineState {
         self.activeTurnID = nil
         self.isThreadRunning = false
         self.latestTurnTerminalState = nil
+        self.completedTurnIDs = []
         self.stoppedTurnIDs = []
         self.repoRefreshSignal = nil
         self.renderSnapshot = TurnTimelineRenderSnapshot.empty(threadID: threadID)
@@ -421,6 +432,36 @@ final class CodexService {
     var loadingThreadIDs: Set<String> = []
     @ObservationIgnored var subagentMetadataLoadingThreadIDs: Set<String> = []
     var resumedThreadIDs: Set<String> = []
+    // Coalesces per-thread thread/read history fetches so reconcile work can await the same RPC.
+    @ObservationIgnored var threadHistoryLoadTaskByThreadID: [String: Task<ThreadHistoryLoadOutcome, Error>] = [:]
+    // Lets a late force caller upgrade an in-flight history load without spawning another thread/read.
+    @ObservationIgnored var forcedHistoryLoadThreadIDs: Set<String> = []
+    // Preserves callers that need "not materialized" reads to keep retrying instead of marking hydrated.
+    @ObservationIgnored var deferHydratedMarkForNotMaterializedThreadIDs: Set<String> = []
+    // Coalesces per-thread resume work so rapid thread switches reuse the same in-flight refresh.
+    @ObservationIgnored var threadResumeTaskByThreadID: [String: Task<CodexThread?, Error>] = [:]
+    // Remembers which cwd/model pair an in-flight resume is actually targeting.
+    @ObservationIgnored var threadResumeRequestSignatureByThreadID: [String: CodexThreadResumeRequestSignature] = [:]
+    // Lets a late force caller upgrade an in-flight resume without spawning another RPC.
+    @ObservationIgnored var forcedResumeEscalationThreadIDs: Set<String> = []
+    // Coalesces running-state refreshes so foreground recovery cannot stampede the same thread.
+    @ObservationIgnored var turnStateRefreshTaskByThreadID: [String: Task<Bool, Never>] = [:]
+    // Coalesces the full running-thread catch-up pipeline so open/foreground/reconnect share one path.
+    @ObservationIgnored var runningThreadCatchupTaskByThreadID: [String: Task<RunningThreadCatchupOutcome, Never>] = [:]
+    // Lets a late foreground/open caller upgrade an in-flight running catch-up into a forced resume.
+    @ObservationIgnored var forcedRunningCatchupEscalationThreadIDs: Set<String> = []
+    // Invalidates stale async completions after archive/delete/reconnect tears refresh work down.
+    @ObservationIgnored var threadRefreshGenerationByThreadID: [String: UInt64] = [:]
+    // Throttles expensive forced resumes while the user bounces between running chats.
+    @ObservationIgnored var lastForcedRunningResumeAtByThread: [String: Date] = [:]
+    // Marks threads that used a lightweight running catch-up and still need one canonical history pass later.
+    @ObservationIgnored var threadsNeedingCanonicalHistoryReconcile: Set<String> = []
+    // Remembers which large closed chats already completed the one required canonical refresh after local-first paint.
+    @ObservationIgnored var threadsWithSatisfiedDeferredHistoryHydration: Set<String> = []
+    // Keeps post-run canonical reconcile work coalesced to one task per thread.
+    @ObservationIgnored var canonicalHistoryReconcileTaskByThreadID: [String: Task<Void, Never>] = [:]
+    // Tracks delayed retry timers for canonical reconcile so teardown can cancel the backoff too.
+    @ObservationIgnored var canonicalHistoryReconcileRetryTaskByThreadID: [String: Task<Void, Never>] = [:]
     var isAppInForeground = true
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
