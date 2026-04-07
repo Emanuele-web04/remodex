@@ -55,6 +55,10 @@ function createBridgeSecureTransport({
 
   function createPairingPayload() {
     currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
+    console.log(
+      `[remodex] pairing payload created session=${shortId(sessionId)} `
+      + `expiresAt=${new Date(currentPairingExpiresAt).toISOString()}`
+    );
     const pairingPayload = {
       v: PAIRING_QR_VERSION,
       relay: relayUrl,
@@ -167,11 +171,14 @@ function createBridgeSecureTransport({
     }
 
     if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP && Date.now() > currentPairingExpiresAt) {
-      sendControlMessage(createSecureError({
-        code: "pairing_expired",
-        message: "The pairing QR code has expired. Generate a new QR code from the bridge.",
-      }));
-      return;
+      const previousExpiresAt = currentPairingExpiresAt;
+      currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
+      console.warn(
+        `[remodex] pairing expiry drift detected session=${shortId(sessionId)} `
+        + `now=${new Date().toISOString()} `
+        + `previousExpiresAt=${new Date(previousExpiresAt).toISOString()} `
+        + `refreshedExpiresAt=${new Date(currentPairingExpiresAt).toISOString()}`
+      );
     }
 
     const trustedPhonePublicKey = getTrustedPhonePublicKey(currentDeviceState, phoneDeviceId);

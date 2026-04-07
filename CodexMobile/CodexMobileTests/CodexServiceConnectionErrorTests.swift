@@ -181,6 +181,18 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertFalse(service.requiresLocalNetworkAuthorization(for: url))
     }
 
+    func testAuthenticatedRelayHeadersPreferDirectRelayTransport() {
+        let service = CodexService()
+        let url = URL(string: "wss://macremodex.example.com/relay/session")!
+        service.relayHeaders = [
+            "CF-Access-Client-Id": "client-id-123",
+            "CF-Access-Client-Secret": "client-secret-456",
+        ]
+
+        XCTAssertTrue(service.prefersDirectRelayTransport(for: url))
+        XCTAssertFalse(service.requiresLocalNetworkAuthorization(for: url))
+    }
+
     func testDirectRelaySocketTimeoutRemainsRetryable() {
         let service = CodexService()
         let error = CodexServiceError.invalidInput(
