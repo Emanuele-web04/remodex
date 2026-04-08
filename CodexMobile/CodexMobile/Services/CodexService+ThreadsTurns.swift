@@ -7,9 +7,10 @@
 import Foundation
 
 extension CodexService {
-    // Keeps sidebar/project loading focused on recent conversations without hiding
-    // other active project groups when the latest chats all belong to one repo.
-    var recentThreadListLimit: Int { 40 }
+    // Keeps sidebar/project loading focused on recent live conversations while
+    // retaining a smaller archived slice for restart/recovery flows.
+    var recentActiveThreadListLimit: Int { 60 }
+    var recentArchivedThreadListLimit: Int { 20 }
 
     // Encodes manual approval replies using the app-server decision object shape.
     func approvalDecisionResult(_ decision: String) -> JSONValue {
@@ -52,12 +53,13 @@ extension CodexService {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
-        let effectiveLimit = limit ?? recentThreadListLimit
-        let activeThreads = try await fetchServerThreads(limit: effectiveLimit)
+        let activeLimit = limit ?? recentActiveThreadListLimit
+        let archivedLimit = limit ?? recentArchivedThreadListLimit
+        let activeThreads = try await fetchServerThreads(limit: activeLimit)
 
         var archivedThreads: [CodexThread] = []
         do {
-            archivedThreads = try await fetchServerThreads(limit: effectiveLimit, archived: true)
+            archivedThreads = try await fetchServerThreads(limit: archivedLimit, archived: true)
         } catch {
             debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
         }
