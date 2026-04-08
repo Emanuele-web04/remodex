@@ -188,6 +188,60 @@ test("gitCheckout surfaces a specific error when the branch is open in another w
   }
 });
 
+test("gitCheckout surfaces a specific error when untracked files would be overwritten", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "main-only.txt"), "tracked on main\n");
+    git(repoDir, "add", "main-only.txt");
+    git(repoDir, "commit", "-m", "Track main-only on main");
+    git(repoDir, "switch", "feature/clean-switch");
+    fs.writeFileSync(path.join(repoDir, "main-only.txt"), "scratch\n");
+
+    await assert.rejects(
+      __test.gitCheckout(repoDir, { branch: "main" }),
+      (error) =>
+        error?.errorCode === "checkout_conflict_untracked_collision"
+          && error?.userMessage === "Cannot switch branches: untracked files would be overwritten."
+    );
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitCheckout surfaces a specific error when the requested branch does not exist locally", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    await assert.rejects(
+      __test.gitCheckout(repoDir, { branch: "remodex/missing" }),
+      (error) =>
+        error?.errorCode === "branch_not_found"
+          && error?.userMessage === "Branch 'remodex/missing' does not exist locally."
+    );
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitStash includes untracked files so a blocked branch switch can succeed after stashing", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    git(repoDir, "switch", "feature/clean-switch");
+    fs.writeFileSync(path.join(repoDir, "main-only.txt"), "scratch\n");
+
+    const stashResult = await __test.gitStash(repoDir);
+    const checkoutResult = await __test.gitCheckout(repoDir, { branch: "main" });
+
+    assert.equal(stashResult.success, true);
+    assert.equal(checkoutResult.current, "main");
+    assert.equal(git(repoDir, "status", "--short"), "");
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
 test("gitCreateBranch normalizes bare names into remodex/* and checks out the new branch", async () => {
   const repoDir = makeTempRepo();
 
@@ -514,7 +568,7 @@ test("gitCreateWorktree carries tracked and untracked changes into the new workt
   process.env.CODEX_HOME = codexHome;
 
   try {
-    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\nmoved\n");
+    fs.writeFileSync(path.join(projectDir, "src", "index.js"), "export const ready = false;\n");
     fs.writeFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "carry me\n");
 
     const result = await __test.gitCreateWorktree(projectDir, {
@@ -523,8 +577,8 @@ test("gitCreateWorktree carries tracked and untracked changes into the new workt
     });
 
     assert.equal(
-      fs.readFileSync(path.join(result.worktreePath, "..", "README.md"), "utf8"),
-      "# Test\nmoved\n"
+      fs.readFileSync(path.join(result.worktreePath, "src", "index.js"), "utf8"),
+      "export const ready = false;\n"
     );
     assert.equal(
       fs.readFileSync(path.join(result.worktreePath, "scratch.txt"), "utf8"),
@@ -554,7 +608,7 @@ test("gitCreateWorktree can copy tracked and untracked changes into the new work
   process.env.CODEX_HOME = codexHome;
 
   try {
-    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\ncopied\n");
+    fs.writeFileSync(path.join(projectDir, "src", "index.js"), "export const ready = 'copied';\n");
     fs.writeFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "keep me too\n");
 
     const result = await __test.gitCreateWorktree(projectDir, {
@@ -564,18 +618,56 @@ test("gitCreateWorktree can copy tracked and untracked changes into the new work
     });
 
     assert.equal(
-      fs.readFileSync(path.join(result.worktreePath, "..", "README.md"), "utf8"),
-      "# Test\ncopied\n"
+      fs.readFileSync(path.join(result.worktreePath, "src", "index.js"), "utf8"),
+      "export const ready = 'copied';\n"
     );
     assert.equal(
       fs.readFileSync(path.join(result.worktreePath, "scratch.txt"), "utf8"),
       "keep me too\n"
     );
-    assert.match(git(repoDir, "status", "--short"), /README\.md/);
+    assert.match(git(repoDir, "status", "--short"), /phodex-bridge\/src\/index\.js/);
     assert.equal(
       fs.readFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "utf8"),
       "keep me too\n"
     );
+
+    git(repoDir, "worktree", "remove", "--force", path.dirname(result.worktreePath));
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateWorktree ignores dirty changes outside the current project scope", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\nroot only\n");
+
+    const result = await __test.gitCreateWorktree(projectDir, {
+      name: "scoped-worktree",
+      baseBranch: "feature/clean-switch",
+    });
+
+    assert.equal(
+      fs.readFileSync(path.join(path.dirname(result.worktreePath), "README.md"), "utf8"),
+      "# Test\n"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(repoDir, "README.md"), "utf8"),
+      "# Test\nroot only\n"
+    );
+    assert.match(git(repoDir, "status", "--short"), /README\.md/);
 
     git(repoDir, "worktree", "remove", "--force", path.dirname(result.worktreePath));
   } finally {
@@ -670,7 +762,7 @@ test("gitCreateManagedWorktree moves tracked changes into the detached worktree 
   process.env.CODEX_HOME = codexHome;
 
   try {
-    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\nmoved\n");
+    fs.writeFileSync(path.join(projectDir, "src", "index.js"), "export const ready = false;\n");
     fs.writeFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "carry me\n");
 
     const result = await __test.gitCreateManagedWorktree(projectDir, {
@@ -679,8 +771,8 @@ test("gitCreateManagedWorktree moves tracked changes into the detached worktree 
     });
 
     assert.equal(
-      fs.readFileSync(path.join(result.worktreePath, "..", "README.md"), "utf8"),
-      "# Test\nmoved\n"
+      fs.readFileSync(path.join(result.worktreePath, "src", "index.js"), "utf8"),
+      "export const ready = false;\n"
     );
     assert.equal(
       fs.readFileSync(path.join(result.worktreePath, "scratch.txt"), "utf8"),
@@ -708,7 +800,7 @@ test("gitCreateManagedWorktree copies tracked changes into the detached worktree
   process.env.CODEX_HOME = codexHome;
 
   try {
-    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\ncopied\n");
+    fs.writeFileSync(path.join(projectDir, "src", "index.js"), "export const ready = 'copied';\n");
     fs.writeFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "keep me too\n");
 
     const result = await __test.gitCreateManagedWorktree(projectDir, {
@@ -717,14 +809,14 @@ test("gitCreateManagedWorktree copies tracked changes into the detached worktree
     });
 
     assert.equal(
-      fs.readFileSync(path.join(result.worktreePath, "..", "README.md"), "utf8"),
-      "# Test\ncopied\n"
+      fs.readFileSync(path.join(result.worktreePath, "src", "index.js"), "utf8"),
+      "export const ready = 'copied';\n"
     );
     assert.equal(
       fs.readFileSync(path.join(result.worktreePath, "scratch.txt"), "utf8"),
       "keep me too\n"
     );
-    assert.match(git(repoDir, "status", "--short"), /README\.md/);
+    assert.match(git(repoDir, "status", "--short"), /phodex-bridge\/src\/index\.js/);
     assert.equal(
       fs.readFileSync(path.join(repoDir, "phodex-bridge", "scratch.txt"), "utf8"),
       "keep me too\n"
@@ -786,7 +878,7 @@ test("gitTransferManagedHandoff moves tracked changes from Local into an existin
       baseBranch: "main",
     });
 
-    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\nhandoff local\n");
+    fs.writeFileSync(path.join(projectDir, "src", "index.js"), "export const ready = 'handoff';\n");
     fs.writeFileSync(path.join(projectDir, "scratch.txt"), "from local\n");
 
     const result = await __test.gitTransferManagedHandoff(projectDir, {
@@ -796,8 +888,50 @@ test("gitTransferManagedHandoff moves tracked changes from Local into an existin
     assert.equal(result.success, true);
     assert.equal(git(repoDir, "status", "--short"), "");
     assert.equal(
-      fs.readFileSync(path.join(managed.worktreePath, "..", "README.md"), "utf8"),
-      "# Test\nhandoff local\n"
+      fs.readFileSync(path.join(managed.worktreePath, "src", "index.js"), "utf8"),
+      "export const ready = 'handoff';\n"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(managed.worktreePath, "scratch.txt"), "utf8"),
+      "from local\n"
+    );
+    assert.equal(fs.existsSync(path.join(projectDir, "scratch.txt")), false);
+  } finally {
+    if (previousCodexHome === undefined) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitTransferManagedHandoff moves only the current project scope into the managed worktree", async () => {
+  const repoDir = makeTempRepo();
+  const projectDir = path.join(repoDir, "phodex-bridge");
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+
+  process.env.CODEX_HOME = codexHome;
+
+  try {
+    const managed = await __test.gitCreateManagedWorktree(projectDir, {
+      baseBranch: "main",
+    });
+
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\nroot stays local\n");
+    fs.writeFileSync(path.join(projectDir, "scratch.txt"), "from local\n");
+
+    const result = await __test.gitTransferManagedHandoff(projectDir, {
+      targetPath: managed.worktreePath,
+    });
+
+    assert.equal(result.success, true);
+    assert.match(git(repoDir, "status", "--short"), /README\.md/);
+    assert.equal(
+      fs.readFileSync(path.join(path.dirname(managed.worktreePath), "README.md"), "utf8"),
+      "# Test\n"
     );
     assert.equal(
       fs.readFileSync(path.join(managed.worktreePath, "scratch.txt"), "utf8"),
@@ -828,7 +962,7 @@ test("gitTransferManagedHandoff moves tracked changes from a managed worktree ba
       baseBranch: "main",
     });
 
-    fs.writeFileSync(path.join(managed.worktreePath, "..", "README.md"), "# Test\nhandoff back\n");
+    fs.writeFileSync(path.join(managed.worktreePath, "src", "index.js"), "export const ready = 'back';\n");
     fs.writeFileSync(path.join(managed.worktreePath, "scratch.txt"), "from worktree\n");
 
     const result = await __test.gitTransferManagedHandoff(managed.worktreePath, {
@@ -838,8 +972,8 @@ test("gitTransferManagedHandoff moves tracked changes from a managed worktree ba
     assert.equal(result.success, true);
     assert.equal(git(path.join(managed.worktreePath, ".."), "status", "--short"), "");
     assert.equal(
-      fs.readFileSync(path.join(repoDir, "README.md"), "utf8"),
-      "# Test\nhandoff back\n"
+      fs.readFileSync(path.join(projectDir, "src", "index.js"), "utf8"),
+      "export const ready = 'back';\n"
     );
     assert.equal(
       fs.readFileSync(path.join(projectDir, "scratch.txt"), "utf8"),

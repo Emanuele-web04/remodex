@@ -203,6 +203,12 @@ final class TurnViewModel {
         return nil
     }
     var canCreatePullRequest: Bool { createPullRequestValidationMessage == nil }
+    var localSelectableGitDefaultBranch: String? {
+        remodexSelectableDefaultBranch(
+            defaultBranch: gitDefaultBranch,
+            availableGitBranchTargets: availableGitBranchTargets
+        )
+    }
     var shouldShowDiscardRuntimeChangesAndSync: Bool {
         guard let sync = gitRepoSync else { return false }
         let dangerousStates = ["dirty", "dirty_and_behind", "diverged"]
@@ -1955,7 +1961,7 @@ final class TurnViewModel {
         guard selection.target == .baseBranch else {
             return nil
         }
-        return selectedGitBaseBranch.nilIfEmpty ?? gitDefaultBranch.nilIfEmpty
+        return selectedGitBaseBranch.nilIfEmpty ?? localSelectableGitDefaultBranch
     }
 
     /// Removes the first occurrence of `token` that sits at a word boundary

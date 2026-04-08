@@ -31,13 +31,18 @@ enum GitActionsError: LocalizedError {
         case "protected_branch": return "This branch is protected."
         case "branch_behind_remote": return "Branch is behind remote. Pull first."
         case "dirty_and_behind": return "Uncommitted changes and branch is behind remote."
-        case "checkout_conflict_dirty_tree": return "Cannot switch branches: you have uncommitted changes."
+        case "checkout_conflict_dirty_tree":
+            return "Cannot switch branches: tracked local changes would be overwritten."
+        case "checkout_conflict_untracked_collision":
+            return "Cannot switch branches: untracked files would be overwritten."
         case "checkout_branch_in_other_worktree":
             return "Cannot switch branches: this branch is already open in another worktree."
         case "pull_conflict": return "Pull failed due to conflicts."
         case "branch_exists": return fallback ?? "Branch already exists."
         case "invalid_branch_name": return fallback ?? "Branch name is not valid for Git."
-        case "missing_branch", "missing_branch_name": return "Branch name is required."
+        case "missing_branch_name": return "Branch name is required."
+        case "branch_not_found": return fallback ?? "That branch does not exist locally."
+        case "missing_branch": return fallback ?? "Branch name is required."
         case "missing_base_branch": return fallback ?? "Base branch is required."
         case "branch_already_open_here":
             return fallback ?? "This branch is already open in the current project."

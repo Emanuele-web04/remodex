@@ -71,6 +71,7 @@ struct TurnComposerHostView: View {
             isThreadRunning: isThreadRunning,
             showsGitBranchSelector: showsGitControls,
             isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
+            availableGitBranchTargets: viewModel.availableGitBranchTargets,
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
             gitDefaultBranch: viewModel.gitDefaultBranch
         )

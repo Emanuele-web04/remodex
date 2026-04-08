@@ -313,19 +313,28 @@ async function gitCheckout(cwd, params) {
   }
 
   try {
-    await git(cwd, "checkout", branch);
+    await git(cwd, "switch", branch);
   } catch (err) {
-    if (err.message?.includes("would be overwritten")) {
+    if (err.message?.includes("untracked working tree files would be overwritten")) {
       throw gitError(
-        "checkout_conflict_dirty_tree",
-        "Cannot switch branches: you have uncommitted changes."
+        "checkout_conflict_untracked_collision",
+        "Cannot switch branches: untracked files would be overwritten."
       );
     }
-    if (err.message?.includes("already used by worktree")) {
+    if (err.message?.includes("local changes to the following files would be overwritten")) {
+      throw gitError(
+        "checkout_conflict_dirty_tree",
+        "Cannot switch branches: tracked local changes would be overwritten."
+      );
+    }
+    if (err.message?.includes("already used by worktree") || err.message?.includes("already checked out at")) {
       throw gitError(
         "checkout_branch_in_other_worktree",
         "Cannot switch branches: this branch is already open in another worktree."
       );
+    }
+    if (err.message?.includes("invalid reference") || err.message?.includes("unknown revision")) {
+      throw gitError("branch_not_found", `Branch '${branch}' does not exist locally.`);
     }
     throw gitError("checkout_failed", err.message || "Checkout failed.");
   }
@@ -379,7 +388,7 @@ async function gitCreateBranch(cwd, params) {
   }
 
   try {
-    await git(cwd, "checkout", "-b", name);
+    await git(cwd, "switch", "-c", name);
   } catch (err) {
     if (err.message?.includes("already exists")) {
       throw gitError("branch_exists", `Branch '${name}' already exists.`);
@@ -402,6 +411,7 @@ async function gitCreateWorktree(cwd, params) {
   const repoRoot = await resolveRepoRoot(cwd);
   const status = await gitStatus(cwd);
   const projectRelativePath = resolveProjectRelativePath(cwd, repoRoot);
+  const changeScope = await scopedProjectChanges(repoRoot, projectRelativePath);
   const baseBranch = resolveBaseBranchName(params.baseBranch, branchResult.defaultBranch);
   const changeTransfer = resolveWorktreeChangeTransfer(params.changeTransfer);
   if (!baseBranch) {
@@ -415,8 +425,8 @@ async function gitCreateWorktree(cwd, params) {
   }
 
   const currentBranch = typeof status.branch === "string" ? status.branch.trim() : "";
-  const canCarryLocalChanges = status.dirty && !!currentBranch && currentBranch === baseBranch;
-  if (status.dirty && changeTransfer !== "none" && !canCarryLocalChanges) {
+  const canCarryLocalChanges = changeScope.dirty && !!currentBranch && currentBranch === baseBranch;
+  if (changeScope.dirty && changeTransfer !== "none" && !canCarryLocalChanges) {
     const currentBranchLabel = currentBranch || "the current branch";
     const transferVerb = changeTransfer === "copy" ? "copy" : "move";
     throw gitError(
@@ -457,9 +467,9 @@ async function gitCreateWorktree(cwd, params) {
   try {
     if (canCarryLocalChanges) {
       if (changeTransfer === "copy") {
-        copiedLocalChangesPatch = await captureLocalChangesPatch(repoRoot);
+        copiedLocalChangesPatch = await captureLocalChangesPatch(repoRoot, changeScope.pathspecArgs);
       } else if (changeTransfer === "move") {
-        handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot);
+        handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot, changeScope.pathspecArgs);
       }
     }
 
@@ -511,6 +521,7 @@ async function gitCreateManagedWorktree(cwd, params) {
   const repoRoot = await resolveRepoRoot(cwd);
   const status = await gitStatus(cwd);
   const projectRelativePath = resolveProjectRelativePath(cwd, repoRoot);
+  const changeScope = await scopedProjectChanges(repoRoot, projectRelativePath);
   const baseBranch = resolveBaseBranchName(params.baseBranch, branchResult.defaultBranch);
   const changeTransfer = resolveWorktreeChangeTransfer(params.changeTransfer);
   if (!baseBranch) {
@@ -524,8 +535,8 @@ async function gitCreateManagedWorktree(cwd, params) {
   }
 
   const currentBranch = typeof status.branch === "string" ? status.branch.trim() : "";
-  const canCarryLocalChanges = status.dirty && !!currentBranch && currentBranch === baseBranch;
-  if (status.dirty && changeTransfer !== "none" && !canCarryLocalChanges) {
+  const canCarryLocalChanges = changeScope.dirty && !!currentBranch && currentBranch === baseBranch;
+  if (changeScope.dirty && changeTransfer !== "none" && !canCarryLocalChanges) {
     const currentBranchLabel = currentBranch || "the current branch";
     const transferVerb = changeTransfer === "copy" ? "copy" : "move";
     throw gitError(
@@ -542,9 +553,9 @@ async function gitCreateManagedWorktree(cwd, params) {
   try {
     if (canCarryLocalChanges) {
       if (changeTransfer === "copy") {
-        copiedLocalChangesPatch = await captureLocalChangesPatch(repoRoot);
+        copiedLocalChangesPatch = await captureLocalChangesPatch(repoRoot, changeScope.pathspecArgs);
       } else if (changeTransfer === "move") {
-        handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot);
+        handoffStashRef = await stashChangesForWorktreeHandoff(repoRoot, changeScope.pathspecArgs);
       }
     }
 
@@ -626,12 +637,14 @@ async function gitTransferManagedHandoff(cwd, params) {
     };
   }
 
-  const [sourceStatus, targetStatus] = await Promise.all([
-    gitStatus(cwd),
-    gitStatus(targetPath),
+  const sourceProjectRelativePath = resolveProjectRelativePath(cwd, sourceRepoRoot);
+  const targetProjectRelativePath = resolveProjectRelativePath(targetPath, targetRepoRoot);
+  const [sourceChangeScope, targetChangeScope] = await Promise.all([
+    scopedProjectChanges(sourceRepoRoot, sourceProjectRelativePath),
+    scopedProjectChanges(targetRepoRoot, targetProjectRelativePath),
   ]);
 
-  if (!sourceStatus.dirty) {
+  if (!sourceChangeScope.dirty) {
     return {
       success: true,
       targetPath: normalizeExistingPath(targetPath) ?? targetPath,
@@ -639,14 +652,14 @@ async function gitTransferManagedHandoff(cwd, params) {
     };
   }
 
-  if (targetStatus.dirty) {
+  if (targetChangeScope.dirty) {
     throw gitError(
       "handoff_target_dirty",
       "The handoff destination already has uncommitted changes. Clean it up before moving this thread there."
     );
   }
 
-  const stashRef = await stashChangesForWorktreeHandoff(sourceRepoRoot);
+  const stashRef = await stashChangesForWorktreeHandoff(sourceRepoRoot, sourceChangeScope.pathspecArgs);
   if (!stashRef) {
     return {
       success: true,
@@ -658,7 +671,7 @@ async function gitTransferManagedHandoff(cwd, params) {
   try {
     await applyWorktreeHandoffStash(targetRepoRoot, stashRef, { dropAfterApply: true });
   } catch (err) {
-    await rollbackFailedHandoffTransfer(targetRepoRoot);
+    await rollbackFailedHandoffTransfer(targetRepoRoot, targetChangeScope.pathspecArgs);
     await restoreWorktreeHandoffStash(sourceRepoRoot, stashRef);
     throw gitError(
       "handoff_transfer_failed",
@@ -701,7 +714,7 @@ async function gitRemoveWorktree(cwd, params) {
 // ─── Git Stash ────────────────────────────────────────────────
 
 async function gitStash(cwd) {
-  const output = await git(cwd, "stash");
+  const output = await git(cwd, "stash", "push", "--include-untracked");
   const saved = !output.includes("No local changes");
   return { success: saved, message: output.trim() };
 }
@@ -774,9 +787,17 @@ async function gitWorktreePathByBranch(cwd, options = {}) {
   return parseWorktreePathByBranch(output, options);
 }
 
-async function stashChangesForWorktreeHandoff(cwd) {
+async function stashChangesForWorktreeHandoff(cwd, pathspecArgs = []) {
   const stashLabel = `remodex-worktree-handoff-${randomBytes(6).toString("hex")}`;
-  const output = await git(cwd, "stash", "push", "--include-untracked", "--message", stashLabel);
+  const output = await git(
+    cwd,
+    "stash",
+    "push",
+    "--include-untracked",
+    "--message",
+    stashLabel,
+    ...pathspecArgs
+  );
   if (output.includes("No local changes")) {
     return null;
   }
@@ -789,9 +810,9 @@ async function stashChangesForWorktreeHandoff(cwd) {
   return stashRef;
 }
 
-async function captureLocalChangesPatch(cwd) {
-  const trackedPatch = await git(cwd, "diff", "--binary", "--find-renames", "HEAD");
-  const porcelain = await git(cwd, "status", "--porcelain=v1");
+async function captureLocalChangesPatch(cwd, pathspecArgs = []) {
+  const trackedPatch = await git(cwd, "diff", "--binary", "--find-renames", "HEAD", ...pathspecArgs);
+  const porcelain = await git(cwd, "status", "--porcelain=v1", ...pathspecArgs);
   const untrackedPaths = porcelain
     .trim()
     .split("\n")
@@ -868,7 +889,22 @@ async function restoreWorktreeHandoffStash(cwd, stashRef) {
   }
 }
 
-async function rollbackFailedHandoffTransfer(cwd) {
+async function rollbackFailedHandoffTransfer(cwd, pathspecArgs = []) {
+  if (pathspecArgs.length > 0) {
+    try {
+      await git(cwd, "restore", "--source=HEAD", "--staged", "--worktree", ...pathspecArgs);
+    } catch {
+      // Best effort: leave the original transfer error as the primary failure.
+    }
+
+    try {
+      await git(cwd, "clean", "-fd", ...pathspecArgs);
+    } catch {
+      // Best effort: leave the original transfer error as the primary failure.
+    }
+    return;
+  }
+
   try {
     await git(cwd, "reset", "--hard", "HEAD");
   } catch {
@@ -1248,6 +1284,43 @@ function resolveWorktreeChangeTransfer(rawValue) {
   return "move";
 }
 
+async function scopedProjectChanges(repoRoot, projectRelativePath) {
+  const pathspecArgs = gitPathspecArgs(projectRelativePath);
+  const porcelain = await git(repoRoot, "status", "--porcelain=v1", ...pathspecArgs);
+  const fileLines = porcelain
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+
+  return {
+    dirty: fileLines.length > 0,
+    fileLines,
+    pathspecArgs,
+  };
+}
+
+function gitPathspecArgs(projectRelativePath) {
+  const normalizedPath = normalizeGitPathspec(projectRelativePath);
+  if (!normalizedPath) {
+    return [];
+  }
+
+  return ["--", normalizedPath];
+}
+
+function normalizeGitPathspec(projectRelativePath) {
+  if (typeof projectRelativePath !== "string") {
+    return "";
+  }
+
+  const trimmedPath = projectRelativePath.trim();
+  if (!trimmedPath) {
+    return "";
+  }
+
+  return trimmedPath.split(path.sep).join("/");
+}
+
 function ensureTrailingNewline(value) {
   return value.endsWith("\n") ? value : `${value}\n`;
 }
@@ -1451,6 +1524,7 @@ module.exports = {
     gitCreateManagedWorktree,
     gitTransferManagedHandoff,
     gitCheckout,
+    gitStash,
     gitRemoveWorktree,
     isManagedWorktreePath,
     normalizeBranchListEntry,

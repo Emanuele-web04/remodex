@@ -24,11 +24,28 @@ func remodexCurrentBranchSelectionIsDisabled(
     gitWorktreePathsByBranch: [String: String],
     allowsSelectingCurrentBranch: Bool
 ) -> Bool {
+    if gitBranchesCheckedOutElsewhere.contains(branch), gitWorktreePathsByBranch[branch] == nil {
+        return true
+    }
+
     if !allowsSelectingCurrentBranch {
         return branch == currentBranch
     }
 
     return false
+}
+
+func remodexSelectableDefaultBranch(
+    defaultBranch: String,
+    availableGitBranchTargets: [String]
+) -> String? {
+    let trimmedDefaultBranch = defaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedDefaultBranch.isEmpty,
+          availableGitBranchTargets.contains(trimmedDefaultBranch) else {
+        return nil
+    }
+
+    return trimmedDefaultBranch
 }
 
 private enum TurnGitBranchPickerMode: String, Identifiable {
@@ -88,7 +105,14 @@ struct TurnGitBranchSelector: View {
 
     // Keep the repo default branch visible even if the latest branch-status payload omitted it.
     private var localDefaultBranch: String? {
-        normalizedDefaultBranch
+        guard let normalizedDefaultBranch else {
+            return nil
+        }
+
+        return remodexSelectableDefaultBranch(
+            defaultBranch: normalizedDefaultBranch,
+            availableGitBranchTargets: availableGitBranchTargets
+        )
     }
 
     private func defaultBranch(for pickerMode: TurnGitBranchPickerMode) -> String? {
@@ -96,7 +120,7 @@ struct TurnGitBranchSelector: View {
         case .currentBranch:
             return localDefaultBranch
         case .pullRequestTarget:
-            return normalizedDefaultBranch
+            return localDefaultBranch
         }
     }
 

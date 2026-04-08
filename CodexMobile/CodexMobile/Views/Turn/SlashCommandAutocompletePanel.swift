@@ -13,6 +13,7 @@ struct SlashCommandAutocompletePanel: View {
     let isThreadRunning: Bool
     let showsGitBranchSelector: Bool
     let isLoadingGitBranchTargets: Bool
+    let availableGitBranchTargets: [String]
     let selectedGitBaseBranch: String
     let gitDefaultBranch: String
     let onSelectCommand: (TurnComposerSlashCommand) -> Void
@@ -272,8 +273,10 @@ struct SlashCommandAutocompletePanel: View {
             return trimmedSelected
         }
 
-        let trimmedDefault = gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmedDefault.isEmpty ? nil : trimmedDefault
+        return remodexSelectableDefaultBranch(
+            defaultBranch: gitDefaultBranch,
+            availableGitBranchTargets: availableGitBranchTargets
+        )
     }
 
     private var isBaseBranchTargetAvailable: Bool {
