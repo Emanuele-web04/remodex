@@ -11,6 +11,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   loadOrCreateBridgeDeviceState,
+  readBridgeDeviceState,
+  rememberLastSeenPhoneAppVersion,
   rememberTrustedPhone,
   resetBridgeDeviceState,
   resolveBridgeRelaySession,
@@ -47,6 +49,18 @@ test("rememberTrustedPhone stores the trusted phone identity", () => {
   });
 });
 
+test("rememberLastSeenPhoneAppVersion stores the latest App Store version", () => {
+  const state = makeDeviceState();
+
+  const nextState = rememberLastSeenPhoneAppVersion(
+    state,
+    "1.0",
+    { persist: false }
+  );
+
+  assert.equal(nextState.lastSeenPhoneAppVersion, "1.0");
+});
+
 test("loadOrCreateBridgeDeviceState writes and reloads the canonical file state", () => {
   withTempDeviceStateEnv(() => {
     const firstState = loadOrCreateBridgeDeviceState();
@@ -54,6 +68,12 @@ test("loadOrCreateBridgeDeviceState writes and reloads the canonical file state"
 
     assert.deepEqual(secondState, firstState);
     assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(firstState));
+  });
+});
+
+test("readBridgeDeviceState returns null before the first pairing state exists", () => {
+  withTempDeviceStateEnv(() => {
+    assert.equal(readBridgeDeviceState(), null);
   });
 });
 
@@ -136,6 +156,19 @@ test("resolveBridgeRelaySession does not persist the fresh launch session id", (
   });
 });
 
+test("rememberLastSeenPhoneAppVersion persists across reloads", () => {
+  withTempDeviceStateEnv(() => {
+    rememberLastSeenPhoneAppVersion(
+      makeDeviceState(),
+      "1.1",
+      { persist: true }
+    );
+
+    const reloaded = loadOrCreateBridgeDeviceState();
+    assert.equal(reloaded.lastSeenPhoneAppVersion, "1.1");
+  });
+});
+
 test("resetBridgeDeviceState removes both canonical and mirrored pairing state", () => {
   withTempDeviceStateEnv(({ keychainMirrorFile, canonicalStateFile }) => {
     const state = makeDeviceState({
@@ -162,6 +195,7 @@ function makeDeviceState(overrides = {}) {
     macIdentityPublicKey: "mac-public-key",
     macIdentityPrivateKey: "mac-private-key",
     trustedPhones: {},
+    lastSeenPhoneAppVersion: null,
     ...overrides,
   };
 }

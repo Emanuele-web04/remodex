@@ -19,7 +19,6 @@ struct TurnView: View {
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
     @State private var isShowingStatusSheet = false
-    @State private var isShowingRuntimeLogSheet = false
     @State private var isLoadingRepositoryDiff = false
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
@@ -165,16 +164,6 @@ struct TurnView: View {
                 },
                 isShowingPathSheet: $isShowingThreadPathSheet
             )
-
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    isShowingRuntimeLogSheet = true
-                } label: {
-                    Image(systemName: "list.bullet.rectangle")
-                }
-                .accessibilityLabel("Runtime logs")
-            }
-
         }
         .overlay {
             if isShowingWorktreeHandoff {
@@ -324,9 +313,6 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
-        }
-        .sheet(isPresented: $isShowingRuntimeLogSheet) {
-            RuntimeDebugLogSheet()
         }
         .sheet(isPresented: $isShowingVoiceSetupSheet) {
             GPTVoiceSetupSheet()

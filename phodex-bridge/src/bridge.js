@@ -2,7 +2,7 @@
 // Purpose: Runs Codex locally, bridges relay traffic, and coordinates desktop refreshes for Codex.app.
 // Layer: CLI service
 // Exports: startBridge
-// Depends on: ws, crypto, os, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch, ./voice-handler
+// Depends on: ws, crypto, os, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch, ./voice-handler, ./ios-app-compatibility
 
 const WebSocket = require("ws");
 const { randomBytes } = require("crypto");
@@ -31,11 +31,18 @@ const { createPushNotificationServiceClient } = require("./push-notification-ser
 const { createPushNotificationTracker } = require("./push-notification-tracker");
 const {
   loadOrCreateBridgeDeviceState,
+  rememberLastSeenPhoneAppVersion,
   resolveBridgeRelaySession,
 } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const { version: bridgePackageVersion = "" } = require("../package.json");
+const {
+  MINIMUM_SUPPORTED_IOS_APP_VERSION,
+  buildCachedIOSAppCompatibilityWarning,
+  buildIOSAppCompatibilitySnapshot,
+  normalizeVersionString,
+} = require("./ios-app-compatibility");
 
 const execFileAsync = promisify(execFile);
 const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
@@ -43,8 +50,6 @@ const RELAY_WATCHDOG_STALE_AFTER_MS = 25_000;
 const BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS = 5_000;
 const STALE_RELAY_STATUS_MESSAGE = "Relay heartbeat stalled; reconnect pending.";
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
-const MINIMUM_SUPPORTED_IOS_APP_VERSION = "1.3";
-
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -68,6 +73,12 @@ function startBridge({
   }
   const relaySession = resolveBridgeRelaySession(deviceState);
   deviceState = relaySession.deviceState;
+  let lastIOSAppCompatibilityWarning = "";
+  const cachedIOSAppCompatibilityWarning = buildCachedIOSAppCompatibilityWarning({
+    bridgeVersion: bridgePackageVersion,
+    iosAppVersion: deviceState.lastSeenPhoneAppVersion,
+  });
+  logIOSAppCompatibilityWarning(cachedIOSAppCompatibilityWarning);
   const sessionId = relaySession.sessionId;
   const relaySessionUrl = `${relayBaseUrl}/${sessionId}`;
   const notificationSecret = randomBytes(24).toString("hex");
@@ -857,55 +868,45 @@ function startBridge({
     }
 
     const clientVersion = normalizeVersionString(clientInfo?.version);
-    if (clientVersion && compareNumericVersions(clientVersion, MINIMUM_SUPPORTED_IOS_APP_VERSION) >= 0) {
+    if (clientVersion) {
+      deviceState = rememberLastSeenPhoneAppVersion(deviceState, clientVersion);
+    }
+
+    const compatibility = buildIOSAppCompatibilitySnapshot({
+      bridgeVersion: bridgePackageVersion,
+      iosAppVersion: clientVersion,
+    });
+    if (!compatibility.requiresAppUpdate) {
       return null;
     }
 
-    const message = clientVersion
-      ? `This Mac bridge is running Remodex ${bridgePackageVersion || "latest"}, which requires Remodex iPhone ${MINIMUM_SUPPORTED_IOS_APP_VERSION} or newer. Update the iPhone app, then reconnect.`
-      : `This Mac bridge requires Remodex iPhone ${MINIMUM_SUPPORTED_IOS_APP_VERSION} or newer. Update the iPhone app, then reconnect.`;
+    logIOSAppCompatibilityWarning(buildCachedIOSAppCompatibilityWarning({
+      bridgeVersion: bridgePackageVersion,
+      iosAppVersion: clientVersion,
+    }));
 
     return {
       code: -32001,
-      message,
+      message: compatibility.message,
       data: {
         errorCode: "ios_app_update_required",
         minimumSupportedAppVersion: MINIMUM_SUPPORTED_IOS_APP_VERSION,
         bridgeVersion: normalizeVersionString(bridgePackageVersion) || null,
         clientVersion,
+        compatibleBridgeVersion: compatibility.legacyBridgeVersion,
+        downgradeCommand: compatibility.downgradeCommand,
       },
     };
   }
 
-  function normalizeVersionString(value) {
-    return typeof value === "string" ? value.trim() : "";
-  }
-
-  function compareNumericVersions(left, right) {
-    const leftParts = splitVersionParts(left);
-    const rightParts = splitVersionParts(right);
-    const maxLength = Math.max(leftParts.length, rightParts.length);
-
-    for (let index = 0; index < maxLength; index += 1) {
-      const leftPart = leftParts[index] || 0;
-      const rightPart = rightParts[index] || 0;
-      if (leftPart < rightPart) {
-        return -1;
-      }
-      if (leftPart > rightPart) {
-        return 1;
-      }
+  function logIOSAppCompatibilityWarning(warning) {
+    const normalizedWarning = typeof warning === "string" ? warning.trim() : "";
+    if (!normalizedWarning || normalizedWarning === lastIOSAppCompatibilityWarning) {
+      return;
     }
 
-    return 0;
-  }
-
-  function splitVersionParts(version) {
-    return normalizeVersionString(version)
-      .split(/[^0-9]+/)
-      .filter(Boolean)
-      .map((part) => Number.parseInt(part, 10))
-      .filter((part) => Number.isFinite(part));
+    lastIOSAppCompatibilityWarning = normalizedWarning;
+    console.warn(normalizedWarning);
   }
 
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
