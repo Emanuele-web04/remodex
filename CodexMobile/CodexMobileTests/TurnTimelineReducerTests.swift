@@ -286,6 +286,119 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["assistant-1", "assistant-3"])
     }
 
+    func testRemoveDuplicateUserMessagesCollapsesPendingPhoneRowWithConfirmedEcho() {
+        let now = Date()
+        var pending = makeMessage(
+            id: "user-pending",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now
+        )
+        pending.deliveryState = .pending
+
+        let confirmed = makeMessage(
+            id: "user-confirmed",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(1),
+            turnID: "turn-1"
+        )
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [pending, confirmed])
+
+        XCTAssertEqual(deduped.count, 1)
+        XCTAssertEqual(deduped[0].id, "user-pending")
+        XCTAssertEqual(deduped[0].deliveryState, .confirmed)
+        XCTAssertEqual(deduped[0].turnId, "turn-1")
+    }
+
+    func testRemoveDuplicateUserMessagesKeepsRepeatedConfirmedPrompts() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                text: "Fix this",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                text: "Fix this",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2"
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2"])
+    }
+
+    func testRemoveDuplicateUserMessagesKeepsPromptsWithDifferentFileMentions() {
+        let now = Date()
+        var first = makeMessage(
+            id: "user-1",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now
+        )
+        first.deliveryState = .pending
+        first.fileMentions = ["Sources/App.swift"]
+
+        var second = makeMessage(
+            id: "user-2",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(1),
+            turnID: "turn-1"
+        )
+        second.deliveryState = .confirmed
+        second.fileMentions = ["Sources/Other.swift"]
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [first, second])
+        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2"])
+    }
+
+    func testRemoveDuplicateUserMessagesDoesNotGuessBetweenTwoIdenticalPendingRows() {
+        let now = Date()
+        var first = makeMessage(
+            id: "user-1",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now
+        )
+        first.deliveryState = .pending
+
+        var second = makeMessage(
+            id: "user-2",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(0.2)
+        )
+        second.deliveryState = .pending
+
+        let confirmed = makeMessage(
+            id: "user-3",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(0.4),
+            turnID: "turn-1"
+        )
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [first, second, confirmed])
+        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2", "user-3"])
+    }
+
     func testRemoveDuplicateAssistantMessagesKeepsDistinctItemsInSameTurn() {
         let now = Date()
         let messages = [
@@ -544,6 +657,86 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
         XCTAssertEqual(deduped.map(\.id), ["diff-2"])
+    }
+
+    func testRemoveDuplicateFileChangeMessagesDedupesSingleFileRowsAcrossPathRepresentations() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Edited TurnToolbarContent.swift +2 -13",
+                createdAt: now,
+                turnID: nil,
+                itemID: nil,
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnToolbarContent.swift
+                Kind: update
+                Totals: +2 -13
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "turn-diff-1",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["diff-2"])
+    }
+
+    func testRemoveDuplicateFileChangeMessagesKeepsDistinctDirectoryScopedSnapshots() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/FeatureA/TurnToolbarContent.swift
+                Kind: update
+                Totals: +2 -13
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "diff-a",
+                isStreaming: false
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/FeatureB/TurnToolbarContent.swift
+                Kind: update
+                Totals: +2 -13
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "diff-b",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["diff-1", "diff-2"])
     }
 
     func testRemoveDuplicateFileChangeMessagesKeepsNewestSnapshotForSamePaths() {

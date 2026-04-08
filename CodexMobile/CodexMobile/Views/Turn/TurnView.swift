@@ -184,8 +184,9 @@ struct TurnView: View {
                     isHandoffAvailable: isWorktreeHandoffAvailable,
                     isSubmitting: viewModel.isCreatingGitWorktree,
                     onClose: { isShowingWorktreeHandoff = false },
-                    onSubmit: { baseBranch in
+                    onSubmit: { branchName, baseBranch in
                         submitWorktreeHandoff(
+                            branchName: branchName,
                             baseBranch: baseBranch,
                             gitWorkingDirectory: gitWorkingDirectory,
                             activeTurnID: activeTurnID
@@ -202,8 +203,9 @@ struct TurnView: View {
                     isHandoffAvailable: isWorktreeHandoffAvailable,
                     isSubmitting: viewModel.isCreatingGitWorktree || isForkingThread,
                     onClose: { isShowingForkWorktree = false },
-                    onSubmit: { baseBranch in
+                    onSubmit: { branchName, baseBranch in
                         submitForkIntoNewWorktree(
+                            branchName: branchName,
                             baseBranch: baseBranch,
                             gitWorkingDirectory: gitWorkingDirectory,
                             activeTurnID: activeTurnID
@@ -871,49 +873,60 @@ struct TurnView: View {
         return viewModel.gitDefaultBranch
     }
 
-    // Creates the managed worktree inside the coordinator, then rebinds this same chat to the returned project path.
+    // Creates a named worktree, then rebinds this same chat to that checkout.
     private func submitWorktreeHandoff(
+        branchName: String,
         baseBranch: String,
         gitWorkingDirectory: String?,
         activeTurnID: String?
     ) {
-        guard activeTurnID == nil,
-              !codex.runningThreadIDs.contains(thread.id),
-              !viewModel.isRunningGitAction,
-              !viewModel.isSwitchingGitBranch,
-              !viewModel.isCreatingGitWorktree else { return }
-
-        Task { @MainActor in
-            viewModel.isCreatingGitWorktree = true
-            defer { viewModel.isCreatingGitWorktree = false }
-
-            do {
-                let outcome = try await WorktreeFlowCoordinator.handoffThreadToWorktree(
-                    threadID: thread.id,
-                    sourceProjectPath: gitWorkingDirectory,
-                    associatedWorktreePath: nil,
-                    baseBranchForNewWorktree: baseBranch,
-                    codex: codex
-                )
-
-                if case .moved(let move) = outcome {
-                    isShowingWorktreeHandoff = false
-                    viewModel.refreshGitBranchTargets(
-                        codex: codex,
-                        workingDirectory: move.projectPath,
-                        threadID: thread.id
+        viewModel.requestCreateGitWorktree(
+            named: branchName,
+            fromBaseBranch: baseBranch,
+            changeTransfer: .none,
+            codex: codex,
+            workingDirectory: gitWorkingDirectory,
+            threadID: thread.id,
+            activeTurnID: activeTurnID,
+            onOpenWorktree: { result in
+                guard !result.alreadyExisted else {
+                    viewModel.gitSyncAlert = TurnGitSyncAlert(
+                        title: "Branch Already Exists",
+                        message: "A worktree for '\(result.branch)' already exists. Choose a different name.",
+                        action: .dismissOnly
                     )
+                    return
                 }
-            } catch {
-                viewModel.gitSyncAlert = TurnGitSyncAlert(
-                    title: "Worktree Handoff Failed",
-                    message: error.localizedDescription.isEmpty
-                        ? "Could not hand off the thread to the new worktree."
-                        : error.localizedDescription,
-                    action: .dismissOnly
-                )
+
+                Task { @MainActor in
+                    do {
+                        let outcome = try await WorktreeFlowCoordinator.handoffThreadToWorktree(
+                            threadID: thread.id,
+                            sourceProjectPath: gitWorkingDirectory,
+                            associatedWorktreePath: result.worktreePath,
+                            codex: codex
+                        )
+
+                        if case .moved(let move) = outcome {
+                            isShowingWorktreeHandoff = false
+                            viewModel.refreshGitBranchTargets(
+                                codex: codex,
+                                workingDirectory: move.projectPath,
+                                threadID: thread.id
+                            )
+                        }
+                    } catch {
+                        viewModel.gitSyncAlert = TurnGitSyncAlert(
+                            title: "Worktree Handoff Failed",
+                            message: error.localizedDescription.isEmpty
+                                ? "Could not hand off the thread to the new worktree."
+                                : error.localizedDescription,
+                            action: .dismissOnly
+                        )
+                    }
+                }
             }
-        }
+        )
     }
 
     // Forks the current conversation into the Local checkout when possible.
@@ -952,42 +965,54 @@ struct TurnView: View {
         }
     }
 
-    // Creates a fresh clean detached worktree inside the coordinator, then forks the conversation into it.
+    // Creates a named worktree, then forks the conversation into that checkout.
     private func submitForkIntoNewWorktree(
+        branchName: String,
         baseBranch: String,
         gitWorkingDirectory: String?,
         activeTurnID: String?
     ) {
-        guard activeTurnID == nil,
-              !codex.runningThreadIDs.contains(thread.id),
-              !viewModel.isRunningGitAction,
-              !viewModel.isSwitchingGitBranch,
-              !viewModel.isCreatingGitWorktree,
-              !isForkingThread else { return }
+        viewModel.requestCreateGitWorktree(
+            named: branchName,
+            fromBaseBranch: baseBranch,
+            changeTransfer: .none,
+            codex: codex,
+            workingDirectory: gitWorkingDirectory,
+            threadID: thread.id,
+            activeTurnID: activeTurnID,
+            onOpenWorktree: { result in
+                guard !result.alreadyExisted else {
+                    viewModel.gitSyncAlert = TurnGitSyncAlert(
+                        title: "Branch Already Exists",
+                        message: "A worktree for '\(result.branch)' already exists. Choose a different name.",
+                        action: .dismissOnly
+                    )
+                    return
+                }
 
-        isForkingThread = true
-        Task { @MainActor in
-            defer { isForkingThread = false }
+                isForkingThread = true
+                Task { @MainActor in
+                    defer { isForkingThread = false }
 
-            do {
-                let forkedThread = try await WorktreeFlowCoordinator.forkThreadToWorktree(
-                    sourceThreadId: thread.id,
-                    sourceProjectPath: gitWorkingDirectory,
-                    baseBranch: baseBranch,
-                    codex: codex
-                )
-                isShowingForkWorktree = false
-                openThread(forkedThread.id)
-            } catch {
-                viewModel.gitSyncAlert = TurnGitSyncAlert(
-                    title: "Worktree Fork Failed",
-                    message: error.localizedDescription.isEmpty
-                        ? "Could not fork the thread into the new worktree."
-                        : error.localizedDescription,
-                    action: .dismissOnly
-                )
+                    do {
+                        let forkedThread = try await codex.forkThreadIfReady(
+                            from: thread.id,
+                            target: .projectPath(result.worktreePath)
+                        )
+                        isShowingForkWorktree = false
+                        openThread(forkedThread.id)
+                    } catch {
+                        viewModel.gitSyncAlert = TurnGitSyncAlert(
+                            title: "Worktree Fork Failed",
+                            message: error.localizedDescription.isEmpty
+                                ? "Could not fork the thread into the new worktree."
+                                : error.localizedDescription,
+                            action: .dismissOnly
+                        )
+                    }
+                }
             }
-        }
+        )
     }
 
     // Re-resolves the thread at action time so follow-up chats inherit the freshest cwd after sync/reconnect.

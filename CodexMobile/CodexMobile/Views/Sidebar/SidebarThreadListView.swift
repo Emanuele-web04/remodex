@@ -478,7 +478,7 @@ struct SidebarThreadListView: View {
 }
 
 enum SidebarProjectThreadPreviewState {
-    static let collapsedRootThreadLimit = 10
+    static let collapsedRootThreadLimit = 6
 
     // Caps each project section to the latest root conversations until the user expands it.
     static func visibleRootThreads(

@@ -545,13 +545,11 @@ extension CodexService {
 
             if message.role == .user,
                let turnId = message.turnId, !turnId.isEmpty,
-               let index = merged.lastIndex(where: { candidate in
-                   candidate.role == .user
-                       && candidate.deliveryState != .failed
-                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
-                       && attachmentSignature(for: candidate.attachments) == attachmentSignature(for: message.attachments)
-                       && (candidate.turnId == nil || candidate.turnId == turnId)
-               }) {
+               let index = uniqueUserHistoryMergeIndex(
+                   in: merged,
+                   message: message,
+                   turnId: turnId
+               ) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
@@ -673,12 +671,10 @@ extension CodexService {
             }
 
             if message.role == .user,
-               let pendingIndex = merged.lastIndex(where: { candidate in
-                   candidate.role == .user
-                       && candidate.deliveryState == .pending
-                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
-                       && attachmentSignature(for: candidate.attachments) == attachmentSignature(for: message.attachments)
-               }) {
+               let pendingIndex = uniquePendingUserHistoryMergeIndex(
+                   in: merged,
+                   message: message
+               ) {
                 merged[pendingIndex] = reconcileExistingMessage(merged[pendingIndex], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
@@ -995,6 +991,100 @@ extension CodexService {
         attachments
             .map(\.stableIdentityKey)
             .joined(separator: "|")
+    }
+
+    nonisolated static func fileMentionsSignature(for fileMentions: [String]) -> String {
+        fileMentions
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+            .sorted()
+            .joined(separator: "|")
+    }
+
+    nonisolated static func userMessageMetadataLooksCompatible(
+        localMessage: CodexMessage,
+        serverMessage: CodexMessage
+    ) -> Bool {
+        let localFileMentions = fileMentionsSignature(for: localMessage.fileMentions)
+        let serverFileMentions = fileMentionsSignature(for: serverMessage.fileMentions)
+        if !localFileMentions.isEmpty,
+           !serverFileMentions.isEmpty,
+           localFileMentions != serverFileMentions {
+            return false
+        }
+
+        let localAttachments = attachmentSignature(for: localMessage.attachments)
+        let serverAttachments = attachmentSignature(for: serverMessage.attachments)
+        if !localAttachments.isEmpty,
+           !serverAttachments.isEmpty,
+           localAttachments != serverAttachments {
+            return false
+        }
+
+        return true
+    }
+
+    nonisolated static func shouldReconcileUserHistoryMessage(
+        _ candidate: CodexMessage,
+        with message: CodexMessage,
+        turnId: String
+    ) -> Bool {
+        guard candidate.role == .user,
+              candidate.deliveryState != .failed,
+              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
+              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+            return false
+        }
+
+        let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+        return candidateTurnId == nil || candidateTurnId == turnId
+    }
+
+    nonisolated static func shouldReconcilePendingUserHistoryMessage(
+        _ candidate: CodexMessage,
+        with message: CodexMessage
+    ) -> Bool {
+        guard candidate.role == .user,
+              candidate.deliveryState == .pending,
+              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
+              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+            return false
+        }
+
+        return true
+    }
+
+    nonisolated static func uniqueUserHistoryMergeIndex(
+        in merged: [CodexMessage],
+        message: CodexMessage,
+        turnId: String
+    ) -> Int? {
+        // Keep intentionally repeated sends separate when more than one local row fits.
+        let matchingIndices = merged.indices.filter { index in
+            shouldReconcileUserHistoryMessage(merged[index], with: message, turnId: turnId)
+        }
+
+        guard matchingIndices.count == 1 else {
+            return nil
+        }
+
+        return matchingIndices[0]
+    }
+
+    nonisolated static func uniquePendingUserHistoryMergeIndex(
+        in merged: [CodexMessage],
+        message: CodexMessage
+    ) -> Int? {
+        // Pending rows are especially easy to confuse during phone-started turns.
+        let matchingIndices = merged.indices.filter { index in
+            shouldReconcilePendingUserHistoryMessage(merged[index], with: message)
+        }
+
+        guard matchingIndices.count == 1 else {
+            return nil
+        }
+
+        return matchingIndices[0]
     }
 
     func normalizedItemType(_ rawType: String) -> String {

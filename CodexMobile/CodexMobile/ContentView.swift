@@ -28,7 +28,7 @@ struct ContentView: View {
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
 
-    private let sidebarWidth: CGFloat = 330
+    private let sidebarWidth: CGFloat = 350
     // Lets the drawer gesture start a bit inside the content instead of only on the bezel edge.
     private let sidebarOpenActivationWidth: CGFloat = 80
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)

@@ -346,7 +346,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertFalse(shouldReveal)
     }
 
-    func testProjectThreadPreviewStateShowsOnlyLatestTenRootThreadsByDefault() throws {
+    func testProjectThreadPreviewStateShowsOnlyLatestSixRootThreadsByDefault() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = (0..<12).map { index in
             makeThread(
@@ -365,8 +365,8 @@ final class SidebarThreadGroupingTests: XCTestCase {
             manuallyExpandedGroupIDs: []
         )
 
-        XCTAssertEqual(visibleRootThreads.count, 10)
-        XCTAssertEqual(visibleRootThreads.map(\.id), (0..<10).map { "thread-\($0)" })
+        XCTAssertEqual(visibleRootThreads.count, 6)
+        XCTAssertEqual(visibleRootThreads.map(\.id), (0..<6).map { "thread-\($0)" })
         XCTAssertTrue(
             SidebarProjectThreadPreviewState.shouldShowMoreButton(
                 for: projectGroup,
