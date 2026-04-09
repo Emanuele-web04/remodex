@@ -250,7 +250,8 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         XCTAssertEqual(group.messages.map(\.id), toolMessages.map(\.id))
         XCTAssertEqual(group.hiddenCount, 2)
-        XCTAssertEqual(group.collapsedMessages.map(\.id), ["tool-3", "tool-4", "tool-5", "tool-6", "tool-7"])
+        XCTAssertEqual(group.pinnedMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5"])
+        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-6", "tool-7"])
     }
 
     func testTimelineRenderProjectionKeepsShortToolRunsExpanded() {

@@ -27,15 +27,16 @@ struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
         self.id = "tool-burst:\(messages.first?.id ?? "unknown")"
     }
 
-    var hiddenCount: Int {
-        max(messages.count - Self.collapsedVisibleCount, 0)
+    var pinnedMessages: [CodexMessage] {
+        Array(messages.prefix(Self.collapsedVisibleCount))
     }
 
-    var collapsedMessages: [CodexMessage] {
-        if hiddenCount > 0 {
-            return Array(messages.suffix(Self.collapsedVisibleCount))
-        }
-        return messages
+    var overflowMessages: [CodexMessage] {
+        Array(messages.dropFirst(Self.collapsedVisibleCount))
+    }
+
+    var hiddenCount: Int {
+        overflowMessages.count
     }
 }
 
@@ -177,32 +178,17 @@ private struct TurnTimelineToolBurstView: View {
 
     @State private var isExpanded = false
 
-    private var visibleMessages: [CodexMessage] {
-        isExpanded ? group.messages : group.collapsedMessages
+    private var summaryCountLabel: String {
+        "+\(group.hiddenCount)"
+    }
+
+    private var summaryNounLabel: String {
+        group.hiddenCount == 1 ? "tool call" : "tool calls"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if group.hiddenCount > 0 {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isExpanded.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(AppFont.system(size: 10, weight: .semibold))
-                        Text(isExpanded ? "Hide \(group.hiddenCount) earlier calls" : "+\(group.hiddenCount) earlier calls")
-                            .font(AppFont.caption())
-                    }
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-
-            ForEach(visibleMessages) { message in
+            ForEach(group.pinnedMessages) { message in
                 TurnTimelineMessageRow(
                     message: message,
                     isRetryAvailable: isRetryAvailable,
@@ -218,6 +204,51 @@ private struct TurnTimelineToolBurstView: View {
                     onTapAssistantRevert: onTapAssistantRevert,
                     onTapSubagent: onTapSubagent
                 )
+            }
+
+            if group.hiddenCount > 0 {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(AppFont.system(size: 10, weight: .semibold))
+                        (
+                            Text(summaryCountLabel)
+                                .font(AppFont.subheadline(weight: .medium))
+                                .foregroundStyle(.secondary)
+                            +
+                            Text(" " + summaryNounLabel)
+                                .font(AppFont.subheadline())
+                                .foregroundStyle(.tertiary)
+                        )
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            if isExpanded {
+                ForEach(group.overflowMessages) { message in
+                    TurnTimelineMessageRow(
+                        message: message,
+                        isRetryAvailable: isRetryAvailable,
+                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                        planSessionSource: planSessionSource,
+                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                        completedTurnIDs: completedTurnIDs,
+                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        planMatchingFingerprint: planMatchingFingerprint,
+                        newestStreamingMessageID: newestStreamingMessageID,
+                        autoScrollMode: autoScrollMode,
+                        onRetryUserMessage: onRetryUserMessage,
+                        onTapAssistantRevert: onTapAssistantRevert,
+                        onTapSubagent: onTapSubagent
+                    )
+                }
             }
         }
     }

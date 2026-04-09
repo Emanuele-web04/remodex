@@ -13,6 +13,7 @@ struct SidebarView: View {
     @Binding var selectedThread: CodexThread?
     @Binding var showSettings: Bool
     @Binding var isSearchActive: Bool
+    var showsInlineCloseButton: Bool = false
     var isVisible: Bool = true
 
     let onClose: () -> Void
@@ -37,7 +38,10 @@ struct SidebarView: View {
         let diffTotalsByThreadID = cachedDiffTotals
 
         VStack(alignment: .leading, spacing: 0) {
-            SidebarHeaderView()
+            SidebarHeaderView(
+                showsCloseButton: showsInlineCloseButton,
+                onClose: onClose
+            )
 
             SidebarSearchField(text: $searchText, isActive: $isSearchActive)
                 .padding(.horizontal, 16)

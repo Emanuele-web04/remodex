@@ -156,7 +156,7 @@ private struct TurnMacHandoffToolbarLabel: View {
                     .controlSize(.small)
                     .frame(width: 24, height: 24)
             } else {
-                ResizableThreadActionSymbol(systemName: "arrow.up", pointSize: 14)
+                ResizableThreadActionSymbol(systemName: "arrow.trianglehead.branch", pointSize: 14)
                     .foregroundStyle(.primary)
                     .frame(width: 24, height: 24)
             }

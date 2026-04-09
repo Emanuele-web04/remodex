@@ -12,6 +12,7 @@ struct ContentView: View {
     @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     @State private var viewModel = ContentViewModel()
     @State private var isSidebarOpen = false
@@ -255,26 +256,36 @@ struct ContentView: View {
         )
     }
 
-    private var effectiveSidebarWidth: CGFloat {
-        isSearchActive ? UIScreen.main.bounds.width : sidebarWidth
+    // Expands the drawer to the full container width on compact layouts so the sidebar
+    // can comfortably host longer titles, paths, and search results.
+    private var shouldUseFullWidthSidebar: Bool {
+        horizontalSizeClass == .compact || isSearchActive
+    }
+
+    private func effectiveSidebarWidth(for availableWidth: CGFloat) -> CGFloat {
+        shouldUseFullWidthSidebar ? availableWidth : min(sidebarWidth, availableWidth)
     }
 
     private var mainAppBody: some View {
         GeometryReader { proxy in
+            let currentSidebarWidth = effectiveSidebarWidth(for: proxy.size.width)
+            let currentSidebarRevealWidth = sidebarRevealWidth(for: currentSidebarWidth)
+
             ZStack(alignment: .leading) {
                 if sidebarVisible || isSidebarPrewarmed {
                     SidebarView(
                         selectedThread: $selectedThread,
                         showSettings: $showSettings,
                         isSearchActive: $isSearchActive,
+                        showsInlineCloseButton: shouldUseFullWidthSidebar,
                         isVisible: sidebarVisible,
                         onClose: { closeSidebar() },
                         onOpenThread: { thread in
                             openThreadFromSidebar(thread)
                         }
                     )
-                    .frame(width: effectiveSidebarWidth)
-                    .animation(.easeInOut(duration: 0.25), value: isSearchActive)
+                    .frame(width: currentSidebarWidth)
+                    .animation(.easeInOut(duration: 0.25), value: shouldUseFullWidthSidebar)
                 }
 
                 ZStack(alignment: .leading) {
@@ -283,7 +294,7 @@ struct ContentView: View {
 
                     if sidebarVisible {
                         (colorScheme == .dark ? Color.white : Color.black)
-                            .opacity(contentDimOpacity)
+                            .opacity(contentDimOpacity(for: currentSidebarWidth))
                             .frame(width: proxy.size.width)
                             .ignoresSafeArea()
                             .allowsHitTesting(isSidebarOpen)
@@ -296,7 +307,7 @@ struct ContentView: View {
                         verticalOverflow: max(proxy.size.height, 400)
                     )
                 )
-                .offset(x: sidebarRevealWidth)
+                .offset(x: currentSidebarRevealWidth)
             }
         }
         .simultaneousGesture(edgeDragGesture)
@@ -400,15 +411,24 @@ struct ContentView: View {
     }
 
     private var sidebarRevealWidth: CGFloat {
+        sidebarRevealWidth(for: fallbackSidebarWidth)
+    }
+
+    private var fallbackSidebarWidth: CGFloat {
+        effectiveSidebarWidth(for: UIScreen.main.bounds.width)
+    }
+
+    private func sidebarRevealWidth(for targetWidth: CGFloat) -> CGFloat {
         if isSidebarOpen {
-            return max(0, effectiveSidebarWidth + sidebarDragOffset)
+            return max(0, targetWidth + sidebarDragOffset)
         } else {
             return max(0, sidebarDragOffset)
         }
     }
 
-    private var contentDimOpacity: Double {
-        let progress = min(1, sidebarRevealWidth / effectiveSidebarWidth)
+    private func contentDimOpacity(for targetWidth: CGFloat) -> Double {
+        guard targetWidth > 0 else { return 0 }
+        let progress = min(1, sidebarRevealWidth(for: targetWidth) / targetWidth)
         return 0.08 * progress
     }
 
@@ -850,7 +870,7 @@ struct ContentView: View {
     }
 }
 
-private struct TwoLineHamburgerIcon: View {
+struct TwoLineHamburgerIcon: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             RoundedRectangle(cornerRadius: 1)
