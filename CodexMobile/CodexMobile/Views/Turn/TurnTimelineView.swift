@@ -14,6 +14,116 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockRevertPresentation: AssistantRevertPresentation?
 }
 
+private struct TurnTimelineRowsSection: View {
+    let shouldWarmRecentTailProgressively: Bool
+    let hasEarlierMessages: Bool
+    let visibleMessages: ArraySlice<CodexMessage>
+    let isRetryAvailable: Bool
+    let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
+    let planSessionSource: CodexPlanSessionSource?
+    let allowsAssistantPlanFallbackRecovery: Bool
+    let completedTurnIDs: Set<String>
+    let threadMessagesForPlanMatching: [CodexMessage]
+    let planMatchingFingerprint: Int
+    let newestStreamingMessageID: String?
+    let autoScrollMode: TurnAutoScrollMode
+    let onRetryUserMessage: (String) -> Void
+    let onTapAssistantRevert: (CodexMessage) -> Void
+    let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
+    let onLoadEarlierMessages: () -> Void
+
+    var body: some View {
+        if shouldWarmRecentTailProgressively {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading recent messages...")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+
+        if hasEarlierMessages {
+            Button(action: onLoadEarlierMessages) {
+                Text("Load earlier messages")
+                    .font(AppFont.subheadline())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+        }
+
+        ForEach(visibleMessages) { message in
+            MessageRow(
+                message: message,
+                isRetryAvailable: isRetryAvailable,
+                onRetryUserMessage: onRetryUserMessage,
+                assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
+                planSessionSource: planSessionSource,
+                allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                assistantTurnCompleted: message.turnId.map(completedTurnIDs.contains) ?? false,
+                threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                planMatchingFingerprint: planMatchingFingerprint,
+                showsStreamingAnimations: autoScrollMode == .followBottom
+                    && message.id == newestStreamingMessageID,
+                assistantRevertAction: onTapAssistantRevert,
+                subagentOpenAction: onTapSubagent
+            )
+            .equatable()
+            .id(message.id)
+        }
+    }
+}
+
+private struct TurnTimelineFooterContainer<Composer: View>: View {
+    let hidesErrorMessage: Bool
+    let errorMessage: String?
+    let shouldShowScrollToLatestButton: Bool
+    let scrollToLatestButtonLift: CGFloat
+    let onScrollToLatest: (() -> Void)?
+    @ViewBuilder let composer: () -> Composer
+
+    var body: some View {
+        let footerContent = VStack(spacing: 0) {
+            if !hidesErrorMessage, let errorMessage, !errorMessage.isEmpty {
+                Text(errorMessage)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+            }
+
+            composer()
+        }
+
+        footerContent
+            .overlay(alignment: .top) {
+                if shouldShowScrollToLatestButton, let onScrollToLatest {
+                    scrollToLatestButton(action: onScrollToLatest)
+                        .offset(y: -scrollToLatestButtonLift)
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: shouldShowScrollToLatestButton)
+    }
+
+    private func scrollToLatestButton(action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(AppFont.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 34, height: 34)
+                .adaptiveGlass(.regular, in: Circle())
+        }
+        .frame(width: 44, height: 44)
+        .buttonStyle(TurnFloatingButtonPressStyle())
+        .contentShape(Circle())
+        .accessibilityLabel("Scroll to latest message")
+        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+    }
+}
+
 struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let threadID: String
     let messages: [CodexMessage]
@@ -134,7 +244,24 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 20) {
-                        timelineRows
+                        TurnTimelineRowsSection(
+                            shouldWarmRecentTailProgressively: shouldWarmRecentTailProgressively,
+                            hasEarlierMessages: hasEarlierMessages,
+                            visibleMessages: visibleMessages,
+                            isRetryAvailable: isRetryAvailable,
+                            cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                            planSessionSource: planSessionSource,
+                            allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                            completedTurnIDs: completedTurnIDs,
+                            threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                            planMatchingFingerprint: planMatchingFingerprint,
+                            newestStreamingMessageID: cachedNewestStreamingMessageID,
+                            autoScrollMode: autoScrollMode,
+                            onRetryUserMessage: onRetryUserMessage,
+                            onTapAssistantRevert: onTapAssistantRevert,
+                            onTapSubagent: onTapSubagent,
+                            onLoadEarlierMessages: handleLoadEarlierMessages
+                        )
                     }
                     .padding(.horizontal, 16)
                     .padding(.top, 12)
@@ -252,11 +379,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 // Keeps footer pinned to bottom without adding a solid spacer block above it.
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     footer(scrollToBottomAction: {
-                        autoScrollMode = .followBottom
-                        initialRecoverySnapPendingThreadID = nil
-                        isUserDraggingScroll = false
-                        userScrollCooldownUntil = nil
-                        scrollToBottom(using: proxy, animated: true)
+                        handleScrollToLatestButtonTap(using: proxy)
                     })
                 }
                 .onAppear {
@@ -271,64 +394,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     cancelScrollTasks()
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private var timelineRows: some View {
-        if shouldWarmRecentTailProgressively {
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("Loading recent messages...")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-
-        if hasEarlierMessages {
-            Button {
-                progressiveTailRevealTask?.cancel()
-                progressiveTailRevealTask = nil
-                isProgressivelyRevealingRecentTail = false
-                withAnimation(.easeOut(duration: 0.15)) {
-                    visibleTailCount = min(
-                        visibleTailCount + Self.pageSize,
-                        messages.count
-                    )
-                }
-            } label: {
-                Text("Load earlier messages")
-                    .font(AppFont.subheadline())
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            }
-            .buttonStyle(.plain)
-        }
-
-        ForEach(visibleMessages) { message in
-            MessageRow(
-                message: message,
-                isRetryAvailable: isRetryAvailable,
-                onRetryUserMessage: onRetryUserMessage,
-                assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
-                planSessionSource: planSessionSource,
-                allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                assistantTurnCompleted: message.turnId.map(completedTurnIDs.contains) ?? false,
-                threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                planMatchingFingerprint: planMatchingFingerprint,
-                // Keep streaming adornments stable while follow-bottom is active so
-                // transient bottom-geometry flips during content growth do not
-                // add/remove indicator height and make the viewport bounce.
-                showsStreamingAnimations: autoScrollMode == .followBottom
-                    && message.id == cachedNewestStreamingMessageID,
-                assistantRevertAction: onTapAssistantRevert,
-                subagentOpenAction: onTapSubagent
-            )
-            .equatable()
-            .id(message.id)
         }
     }
 
@@ -413,49 +478,14 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     // Keeps the composer/footer visually stable so scrolling does not animate the bottom inset.
     private func footer(scrollToBottomAction: (() -> Void)? = nil) -> some View {
-        let footerContent = VStack(spacing: 0) {
-            if !hidesErrorMessage, let errorMessage, !errorMessage.isEmpty {
-                Text(errorMessage)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-            }
-
-            composer()
-        }
-
-        return footerContent
-            // Keep the jump button visually attached to the footer/composer stack so it
-            // floats above the input instead of overlapping the glass container itself.
-            .overlay(alignment: .top) {
-                if shouldShowScrollToLatestButton, let scrollToBottomAction {
-                    scrollToLatestButton {
-                        scrollToBottomAction()
-                    }
-                    .offset(y: -Self.scrollToLatestButtonLift)
-                }
-            }
-            .animation(.easeInOut(duration: 0.2), value: shouldShowScrollToLatestButton)
-    }
-
-    private func scrollToLatestButton(_ action: @escaping () -> Void) -> some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            shouldAnchorToAssistantResponse = false
-            action()
-        } label: {
-            Image(systemName: "arrow.down")
-                .font(AppFont.system(size: 13, weight: .semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 34, height: 34)
-                .adaptiveGlass(.regular, in: Circle())
-        }
-        .frame(width: 44, height: 44)
-        .buttonStyle(TurnFloatingButtonPressStyle())
-        .contentShape(Circle())
-        .accessibilityLabel("Scroll to latest message")
-        .transition(.opacity.combined(with: .scale(scale: 0.85)))
+        TurnTimelineFooterContainer(
+            hidesErrorMessage: hidesErrorMessage,
+            errorMessage: errorMessage,
+            shouldShowScrollToLatestButton: shouldShowScrollToLatestButton,
+            scrollToLatestButtonLift: Self.scrollToLatestButtonLift,
+            onScrollToLatest: scrollToBottomAction,
+            composer: composer
+        )
     }
 
     // Restores swipe-to-dismiss in brand-new chats without putting a drag
@@ -475,6 +505,25 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             messageCount: messages.count,
             isScrolledToBottom: isScrolledToBottom
         )
+    }
+
+    private func handleLoadEarlierMessages() {
+        progressiveTailRevealTask?.cancel()
+        progressiveTailRevealTask = nil
+        isProgressivelyRevealingRecentTail = false
+        withAnimation(.easeOut(duration: 0.15)) {
+            visibleTailCount = min(visibleTailCount + Self.pageSize, messages.count)
+        }
+    }
+
+    private func handleScrollToLatestButtonTap(using proxy: ScrollViewProxy) {
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        shouldAnchorToAssistantResponse = false
+        autoScrollMode = .followBottom
+        initialRecoverySnapPendingThreadID = nil
+        isUserDraggingScroll = false
+        userScrollCooldownUntil = nil
+        scrollToBottom(using: proxy, animated: true)
     }
 
     // Resets per-thread scroll intent so each opened conversation gets one fresh

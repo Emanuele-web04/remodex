@@ -277,19 +277,26 @@ struct ContentView: View {
                     .animation(.easeInOut(duration: 0.25), value: isSearchActive)
                 }
 
-                mainNavigationLayer
-                    .frame(width: proxy.size.width, alignment: .leading)
-                    .offset(x: sidebarRevealWidth)
+                ZStack(alignment: .leading) {
+                    mainNavigationLayer
+                        .frame(width: proxy.size.width, alignment: .leading)
 
-                if sidebarVisible {
-                    (colorScheme == .dark ? Color.white : Color.black)
-                        .opacity(contentDimOpacity)
-                        .frame(width: proxy.size.width)
-                        .ignoresSafeArea()
-                        .offset(x: sidebarRevealWidth)
-                        .allowsHitTesting(isSidebarOpen)
-                        .onTapGesture { closeSidebar() }
+                    if sidebarVisible {
+                        (colorScheme == .dark ? Color.white : Color.black)
+                            .opacity(contentDimOpacity)
+                            .frame(width: proxy.size.width)
+                            .ignoresSafeArea()
+                            .allowsHitTesting(isSidebarOpen)
+                            .onTapGesture { closeSidebar() }
+                    }
                 }
+                .frame(width: proxy.size.width, alignment: .leading)
+                .clipShape(
+                    HorizontalRevealViewportShape(
+                        verticalOverflow: max(proxy.size.height, 400)
+                    )
+                )
+                .offset(x: sidebarRevealWidth)
             }
         }
         .simultaneousGesture(edgeDragGesture)
@@ -853,6 +860,20 @@ private struct TwoLineHamburgerIcon: View {
                 .frame(width: 10, height: 2)
         }
         .frame(width: 20, height: 14, alignment: .leading)
+    }
+}
+
+private struct HorizontalRevealViewportShape: Shape {
+    let verticalOverflow: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let expandedRect = CGRect(
+            x: rect.minX,
+            y: rect.minY - verticalOverflow,
+            width: rect.width,
+            height: rect.height + (verticalOverflow * 2)
+        )
+        return Path(expandedRect)
     }
 }
 
