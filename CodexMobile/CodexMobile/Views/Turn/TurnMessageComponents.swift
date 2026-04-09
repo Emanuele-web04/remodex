@@ -120,109 +120,6 @@ struct MarkdownTextView: View {
     }
 }
 
-private struct MeasuredContentHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
-private let collapsibleMessageHeightUpdateThreshold: CGFloat = 1
-
-// Keeps long text messages compact in the timeline without slicing the source
-// string, so markdown, links, and code fences stay valid when collapsed.
-private struct CollapsibleMessageBlock<Content: View>: View {
-    let contentIdentity: String
-    let isCollapsible: Bool
-    let collapsedLineCount: Int
-    let lineHeight: CGFloat
-    @ViewBuilder let content: () -> Content
-
-    @State private var measuredHeight: CGFloat = 0
-    @State private var isExpanded = false
-
-    private var collapsedHeight: CGFloat {
-        ceil(lineHeight * CGFloat(max(collapsedLineCount, 1)))
-    }
-
-    private var shouldShowToggle: Bool {
-        isCollapsible && measuredHeight > collapsedHeight + 1
-    }
-
-    private var shouldClampContent: Bool {
-        isCollapsible && !isExpanded && (measuredHeight == 0 || shouldShowToggle)
-    }
-
-    var body: some View {
-        if !isCollapsible {
-            content()
-        } else {
-            measuredBody
-        }
-    }
-
-    private var measuredBody: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            collapsibleContent
-
-            if shouldShowToggle {
-                HStack {
-                    Spacer(minLength: 0)
-
-                    Button(isExpanded ? "Show less" : "Show more") {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isExpanded.toggle()
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .font(AppFont.footnote())
-                    .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .onPreferenceChange(MeasuredContentHeightPreferenceKey.self) { newHeight in
-            guard abs(newHeight - measuredHeight) > collapsibleMessageHeightUpdateThreshold else {
-                return
-            }
-            // Defer the @State write to the next runloop tick so the current
-            // layout pass finishes before we request another one — breaks the
-            // "tried to update multiple times per frame" preference cycling.
-            DispatchQueue.main.async {
-                guard abs(newHeight - measuredHeight) > collapsibleMessageHeightUpdateThreshold else {
-                    return
-                }
-                measuredHeight = newHeight
-            }
-        }
-        .onChange(of: contentIdentity) { _, _ in
-            measuredHeight = 0
-            isExpanded = false
-        }
-    }
-
-    @ViewBuilder
-    private var collapsibleContent: some View {
-        let measuredContent = content()
-            .background {
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: MeasuredContentHeightPreferenceKey.self,
-                        value: proxy.size.height
-                    )
-                }
-            }
-
-        if shouldClampContent {
-            measuredContent
-                .frame(maxHeight: collapsedHeight, alignment: .topLeading)
-                .clipped()
-        } else {
-            measuredContent
-        }
-    }
-}
-
 private struct CodeCommentFindingCard: View {
     let finding: CodeCommentDirectiveFinding
 
@@ -766,15 +663,8 @@ struct MessageRow: View, Equatable {
                 }
 
                 if !text.isEmpty {
-                    CollapsibleMessageBlock(
-                        contentIdentity: message.id,
-                        isCollapsible: true,
-                        collapsedLineCount: 10,
-                        lineHeight: AppFont.uiFont(size: 15, textStyle: .body).lineHeight
-                    ) {
-                        userBubbleText(text)
-                            .font(AppFont.body())
-                    }
+                    userBubbleText(text)
+                        .font(AppFont.body())
                         .padding(.vertical, 12)
                         .padding(.horizontal, 16)
                         .background {

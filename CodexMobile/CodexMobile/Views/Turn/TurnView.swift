@@ -1647,21 +1647,10 @@ struct TurnView: View {
     // MARK: - Empty State
 
     private var loadingState: some View {
-        VStack(spacing: 12) {
-            Spacer()
-            ProgressView()
-                .controlSize(.large)
-            Text("Loading chat...")
-                .font(AppFont.title3(weight: .semibold))
-            Text("Fetching the latest messages for this conversation.")
-                .font(AppFont.body())
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding()
+        chatPlaceholderState(
+            title: "Loading chat...",
+            subtitle: "Fetching the latest messages for this conversation."
+        )
     }
 
     private func resolvedEmptyState(for phase: CodexService.ThreadDisplayPhase) -> AnyView {
@@ -1674,6 +1663,13 @@ struct TurnView: View {
     }
 
     private var emptyState: some View {
+        chatPlaceholderState(
+            title: "Hi! How can I help you?",
+            subtitle: "Chats are End-to-end encrypted"
+        )
+    }
+
+    private func chatPlaceholderState(title: String, subtitle: String) -> some View {
         VStack(spacing: 12) {
             Spacer()
             Image("AppLogo")
@@ -1682,12 +1678,13 @@ struct TurnView: View {
                 .frame(width: 56, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            Text("Hi! How can I help you?")
+            Text(title)
                 .font(AppFont.title2(weight: .semibold))
-            // Reinforces the secure transport upgrade right where a new chat starts.
-            Text("Chats are End-to-end encrypted")
+            Text(subtitle)
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

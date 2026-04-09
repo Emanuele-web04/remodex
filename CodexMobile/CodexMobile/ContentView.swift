@@ -39,7 +39,6 @@ struct ContentView: View {
     private let sidebarOpenActivationWidth: CGFloat = 80
     private let sidebarPrewarmDelayNanoseconds: UInt64 = 700_000_000
     private let sidebarGestureLogBucketWidth: CGFloat = 40
-    private let sidebarSwipePreviewLimit: CGFloat = 26
     private let sidebarSwipeCommitDistance: CGFloat = 30
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
 
@@ -262,8 +261,6 @@ struct ContentView: View {
 
     private var mainAppBody: some View {
         GeometryReader { proxy in
-            let mainContentWidth = max(0, proxy.size.width - sidebarRevealWidth)
-
             ZStack(alignment: .leading) {
                 if sidebarVisible || isSidebarPrewarmed {
                     SidebarView(
@@ -271,21 +268,23 @@ struct ContentView: View {
                         showSettings: $showSettings,
                         isSearchActive: $isSearchActive,
                         isVisible: sidebarVisible,
-                        onClose: { closeSidebar() }
+                        onClose: { closeSidebar() },
+                        onOpenThread: { thread in
+                            openThreadFromSidebar(thread)
+                        }
                     )
                     .frame(width: effectiveSidebarWidth)
                     .animation(.easeInOut(duration: 0.25), value: isSearchActive)
                 }
 
                 mainNavigationLayer
-                    .frame(width: mainContentWidth, alignment: .leading)
+                    .frame(width: proxy.size.width, alignment: .leading)
                     .offset(x: sidebarRevealWidth)
-                    .clipped()
 
                 if sidebarVisible {
                     (colorScheme == .dark ? Color.white : Color.black)
                         .opacity(contentDimOpacity)
-                        .frame(width: mainContentWidth)
+                        .frame(width: proxy.size.width)
                         .ignoresSafeArea()
                         .offset(x: sidebarRevealWidth)
                         .allowsHitTesting(isSidebarOpen)
@@ -418,8 +417,7 @@ struct ContentView: View {
                     guard value.startLocation.x < sidebarOpenActivationWidth,
                           isOpeningSidebarGesture(value) else { return }
                     beginSidebarGestureDebugIfNeeded(kind: "open", startX: value.startLocation.x)
-                    sidebarDragOffset = min(max(0, value.translation.width), sidebarSwipePreviewLimit)
-                    logSidebarGestureProgressIfNeeded(translation: sidebarDragOffset)
+                    logSidebarGestureProgressIfNeeded(translation: value.translation.width)
                     guard value.translation.width >= sidebarSwipeCommitDistance else { return }
                     sidebarGestureAutoCommitted = true
                     debugSidebarLog(
@@ -430,8 +428,7 @@ struct ContentView: View {
                 } else {
                     guard isClosingSidebarGesture(value) else { return }
                     beginSidebarGestureDebugIfNeeded(kind: "close", startX: value.startLocation.x)
-                    sidebarDragOffset = -min(max(0, -value.translation.width), sidebarSwipePreviewLimit)
-                    logSidebarGestureProgressIfNeeded(translation: -sidebarDragOffset)
+                    logSidebarGestureProgressIfNeeded(translation: -value.translation.width)
                     guard -value.translation.width >= sidebarSwipeCommitDistance else { return }
                     sidebarGestureAutoCommitted = true
                     debugSidebarLog(
@@ -452,9 +449,7 @@ struct ContentView: View {
                     guard value.startLocation.x < sidebarOpenActivationWidth,
                           isOpeningSidebarGesture(value) else {
                         debugSidebarLog("gesture cancelled before open")
-                        withAnimation(Self.sidebarSpring) {
-                            sidebarDragOffset = 0
-                        }
+                        sidebarDragOffset = 0
                         sidebarGestureAutoCommitted = false
                         resetSidebarGestureDebug()
                         return
@@ -464,16 +459,12 @@ struct ContentView: View {
                             + "translation=\(Int(value.translation.width)) predicted=\(Int(value.predictedEndTranslation.width)) "
                             + "commit=\(Int(sidebarSwipeCommitDistance)) decision=snap-close"
                     )
-                    withAnimation(Self.sidebarSpring) {
-                        sidebarDragOffset = 0
-                    }
+                    sidebarDragOffset = 0
                     resetSidebarGestureDebug()
                 } else {
                     guard isClosingSidebarGesture(value) else {
                         debugSidebarLog("gesture cancelled before close")
-                        withAnimation(Self.sidebarSpring) {
-                            sidebarDragOffset = 0
-                        }
+                        sidebarDragOffset = 0
                         sidebarGestureAutoCommitted = false
                         resetSidebarGestureDebug()
                         return
@@ -483,9 +474,7 @@ struct ContentView: View {
                             + "translation=\(Int(-value.translation.width)) predicted=\(Int(-value.predictedEndTranslation.width)) "
                             + "commit=\(Int(sidebarSwipeCommitDistance)) decision=snap-open"
                     )
-                    withAnimation(Self.sidebarSpring) {
-                        sidebarDragOffset = 0
-                    }
+                    sidebarDragOffset = 0
                     resetSidebarGestureDebug()
                 }
             }
@@ -515,6 +504,17 @@ struct ContentView: View {
     private func closeSidebar() {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
         setSidebar(open: false)
+    }
+
+    private func openThreadFromSidebar(_ thread: CodexThread) {
+        if isSidebarOpen || sidebarDragOffset > 0 {
+            closeSidebar()
+        }
+
+        selectedThread = thread
+        codex.activeThreadId = thread.id
+        codex.markThreadAsViewed(thread.id)
+        codex.requestImmediateActiveThreadSync(threadId: thread.id)
     }
 
     // Keeps first-run installs in the scanner by default, while still letting users back out later.
@@ -809,13 +809,7 @@ struct ContentView: View {
             return
         }
 
-        if isSidebarOpen {
-            closeSidebar()
-        }
-        selectedThread = thread
-        codex.activeThreadId = thread.id
-        codex.markThreadAsViewed(thread.id)
-        codex.requestImmediateActiveThreadSync(threadId: thread.id)
+        openThreadFromSidebar(thread)
     }
 
     private func dismissThreadCompletionBanner() {

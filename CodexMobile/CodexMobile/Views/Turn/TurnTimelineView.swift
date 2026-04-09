@@ -46,8 +46,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private let scrollBottomAnchorID = "turn-scroll-bottom-anchor"
     /// Number of messages to show per page.  Only the tail slice is rendered;
     /// scrolling to the top reveals a "Load earlier messages" button.
-    private static var pageSize: Int { 40 }
-    /// Heavy chats first paint with a full-screen loader before warming the recent tail.
+    private static var pageSize: Int { 16 }
+    /// Heavy-chat staged warmup is temporarily disabled until geometry settles reliably.
     private static var initialWarmTailCount: Int { 0 }
     private static var scrollToLatestButtonLift: CGFloat { 44 + 18 }
 
@@ -95,8 +95,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     private var shouldStageHeavyThreadOpen: Bool {
-        messages.count > Self.pageSize
-            && !TurnTimelineWarmThreadCache.contains(threadID)
+        false
     }
 
     private var planMatchingFingerprint: Int {

@@ -16,6 +16,7 @@ struct SidebarView: View {
     var isVisible: Bool = true
 
     let onClose: () -> Void
+    let onOpenThread: (CodexThread) -> Void
 
     @State private var searchText = ""
     @State private var isCreatingThread = false
@@ -258,8 +259,7 @@ struct SidebarView: View {
                     preferredProjectPath: preferredProjectPath,
                     codex: codex
                 )
-                selectedThread = thread
-                onClose()
+                onOpenThread(thread)
             } catch {
                 let message = error.localizedDescription
                 codex.lastErrorMessage = message
@@ -279,8 +279,7 @@ struct SidebarView: View {
                     preferredProjectPath: preferredProjectPath,
                     codex: codex
                 )
-                selectedThread = thread
-                onClose()
+                onOpenThread(thread)
             } catch {
                 let message = error.localizedDescription
                 codex.lastErrorMessage = message
@@ -292,11 +291,7 @@ struct SidebarView: View {
     private func selectThread(_ thread: CodexThread) {
         debugSidebarLog("selectThread id=\(thread.id) title=\(thread.displayTitle)")
         searchText = ""
-        codex.activeThreadId = thread.id
-        codex.markThreadAsViewed(thread.id)
-        codex.requestImmediateActiveThreadSync(threadId: thread.id)
-        selectedThread = thread
-        onClose()
+        onOpenThread(thread)
     }
 
     private func openSettings() {
