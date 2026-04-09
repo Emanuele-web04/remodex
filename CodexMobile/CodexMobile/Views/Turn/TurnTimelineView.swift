@@ -156,7 +156,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private let scrollBottomAnchorID = "turn-scroll-bottom-anchor"
     /// Number of messages to show per page.  Only the tail slice is rendered;
     /// scrolling to the top reveals a "Load earlier messages" button.
-    private static var pageSize: Int { 16 }
+    private static var pageSize: Int { 40 }
     /// Heavy-chat staged warmup is temporarily disabled until geometry settles reliably.
     private static var initialWarmTailCount: Int { 0 }
     private static var scrollToLatestButtonLift: CGFloat { 44 + 18 }
