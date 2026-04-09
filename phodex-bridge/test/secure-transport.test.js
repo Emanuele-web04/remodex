@@ -534,6 +534,76 @@ test("resume replay does not advance the replay watermark before a phone ack", (
   assert.equal(reboundPayload.payloadText, JSON.stringify({ id: "response-6", result: { ok: true } }));
 });
 
+test("pairing payload includes relay headers when configured", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const secureTransport = createBridgeSecureTransport({
+    sessionId: "session-headers",
+    relayUrl: "wss://relay.example/relay",
+    relayHeaders: {
+      "CF-Access-Client-Id": "client-id-123",
+      "CF-Access-Client-Secret": "client-secret-456",
+    },
+    deviceState: {
+      macDeviceId: "mac-headers",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+
+  assert.deepEqual(secureTransport.createPairingPayload().relayHeaders, {
+    "CF-Access-Client-Id": "client-id-123",
+    "CF-Access-Client-Secret": "client-secret-456",
+  });
+});
+
+test("qr bootstrap refreshes an expired pairing window before rejecting a fresh handshake", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const phoneEphemeral = createOkpKeyPair("x25519");
+  const secureTransport = createBridgeSecureTransport({
+    sessionId: "session-expiry",
+    relayUrl: "wss://relay.example/relay",
+    deviceState: {
+      macDeviceId: "mac-expiry",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+  const pairingPayload = secureTransport.createPairingPayload();
+  const originalDateNow = Date.now;
+  const controlMessages = [];
+
+  try {
+    Date.now = () => pairingPayload.expiresAt + 1;
+
+    secureTransport.handleIncomingWireMessage(
+      JSON.stringify({
+        kind: "clientHello",
+        protocolVersion: 1,
+        sessionId: "session-expiry",
+        handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
+        phoneDeviceId: "phone-expiry",
+        phoneIdentityPublicKey: phoneIdentity.publicKey,
+        phoneEphemeralPublicKey: phoneEphemeral.publicKey,
+        clientNonce: Buffer.alloc(32, 7).toString("base64"),
+      }),
+      {
+        sendControlMessage(message) {
+          controlMessages.push(message);
+        },
+        onApplicationMessage() {},
+      }
+    );
+  } finally {
+    Date.now = originalDateNow;
+  }
+
+  assert.equal(controlMessages.some((message) => message.code === "pairing_expired"), false);
+  assert.ok(controlMessages.some((message) => message.kind === "serverHello"));
+});
+
 function finishHandshake({
   secureTransport,
   sessionId,

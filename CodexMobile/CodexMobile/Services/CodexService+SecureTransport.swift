@@ -260,12 +260,15 @@ extension CodexService {
     func rememberRelayPairing(_ payload: CodexPairingQRPayload) {
         SecureStore.writeString(payload.sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(payload.relay, for: CodexSecureKeys.relayUrl)
+        let normalizedRelayHeaders = codexNormalizedRelayHeaders(payload.relayHeaders)
+        SecureStore.writeCodable(normalizedRelayHeaders, for: CodexSecureKeys.relayHeaders)
         SecureStore.writeString(payload.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(payload.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = payload.sessionId
         relayUrl = payload.relay
+        relayHeaders = normalizedRelayHeaders
         relayMacDeviceId = payload.macDeviceId
         relayMacIdentityPublicKey = payload.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion
@@ -359,14 +362,22 @@ extension CodexService {
     }
 
     // Persists the resolved live relay session and resets replay cursors when the live session changed.
-    func applyResolvedTrustedSession(_ resolved: CodexTrustedSessionResolveResponse, relayURL: String) {
+    func applyResolvedTrustedSession(
+        _ resolved: CodexTrustedSessionResolveResponse,
+        relayURL: String,
+        relayHeaders: [String: String] = [:]
+    ) {
         let previousSessionId = normalizedRelaySessionId
         let shouldResetReplayCursor = previousSessionId == nil || previousSessionId != resolved.sessionId
         if shouldResetReplayCursor {
             SecureStore.writeString("0", for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
             lastAppliedBridgeOutboundSeq = 0
         }
-        rememberResolvedTrustedSession(resolved, relayURL: relayURL)
+        rememberResolvedTrustedSession(
+            resolved,
+            relayURL: relayURL,
+            relayHeaders: codexNormalizedRelayHeaders(relayHeaders)
+        )
     }
 }
 
@@ -537,6 +548,7 @@ private extension CodexService {
             macIdentityPublicKey: publicKey,
             lastPairedAt: Date(),
             relayURL: relayURL ?? existing?.relayURL,
+            relayHeaders: normalizedRelayHeaders.isEmpty ? existing?.relayHeaders : normalizedRelayHeaders,
             displayName: displayName ?? existing?.displayName,
             lastResolvedSessionId: existing?.lastResolvedSessionId,
             lastResolvedAt: existing?.lastResolvedAt,
@@ -560,6 +572,8 @@ private extension CodexService {
         guard let resolveURL = trustedSessionResolveURL(from: relayURL) else {
             throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay URL is invalid.")
         }
+        let trustedRelayHeaders = codexNormalizedRelayHeaders(trustedMac.relayHeaders)
+        let relayHeaders = trustedRelayHeaders.isEmpty ? normalizedRelayHeaders : trustedRelayHeaders
 
         let nonce = UUID().uuidString
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
@@ -588,6 +602,9 @@ private extension CodexService {
         request.httpMethod = "POST"
         request.timeoutInterval = 8
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (headerName, headerValue) in relayHeaders {
+            request.setValue(headerValue, forHTTPHeaderField: headerName)
+        }
         request.httpBody = try JSONEncoder().encode(requestBody)
 
         let session = trustedSessionResolveURLSession(for: resolveURL)
@@ -617,7 +634,7 @@ private extension CodexService {
                   resolved.ok else {
                 throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay returned malformed session data.")
             }
-            applyResolvedTrustedSession(resolved, relayURL: relayURL)
+            applyResolvedTrustedSession(resolved, relayURL: relayURL, relayHeaders: relayHeaders)
             return resolved
         }
 
@@ -646,14 +663,20 @@ private extension CodexService {
         }
     }
 
-    private func rememberResolvedTrustedSession(_ resolved: CodexTrustedSessionResolveResponse, relayURL: String) {
+    private func rememberResolvedTrustedSession(
+        _ resolved: CodexTrustedSessionResolveResponse,
+        relayURL: String,
+        relayHeaders: [String: String]
+    ) {
         SecureStore.writeString(resolved.sessionId, for: CodexSecureKeys.relaySessionId)
         SecureStore.writeString(relayURL, for: CodexSecureKeys.relayUrl)
+        SecureStore.writeCodable(relayHeaders, for: CodexSecureKeys.relayHeaders)
         SecureStore.writeString(resolved.macDeviceId, for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.writeString(resolved.macIdentityPublicKey, for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.writeString(String(codexSecureProtocolVersion), for: CodexSecureKeys.relayProtocolVersion)
         relaySessionId = resolved.sessionId
         relayUrl = relayURL
+        self.relayHeaders = relayHeaders
         relayMacDeviceId = resolved.macDeviceId
         relayMacIdentityPublicKey = resolved.macIdentityPublicKey
         relayProtocolVersion = codexSecureProtocolVersion
@@ -666,6 +689,7 @@ private extension CodexService {
 
         if var trustedMac = trustedMacRegistry.records[resolved.macDeviceId] {
             trustedMac.relayURL = relayURL
+            trustedMac.relayHeaders = relayHeaders
             trustedMac.displayName = resolved.displayName ?? trustedMac.displayName
             trustedMac.lastResolvedSessionId = resolved.sessionId
             trustedMac.lastResolvedAt = Date()

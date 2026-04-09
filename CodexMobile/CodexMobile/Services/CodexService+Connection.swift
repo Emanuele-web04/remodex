@@ -184,12 +184,14 @@ extension CodexService {
     func clearSavedRelaySession() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayHeaders)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacDeviceId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayMacIdentityPublicKey)
         SecureStore.deleteValue(for: CodexSecureKeys.relayProtocolVersion)
         SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
         relaySessionId = nil
         relayUrl = nil
+        relayHeaders = [:]
         relayMacDeviceId = nil
         relayMacIdentityPublicKey = nil
         relayProtocolVersion = codexSecureProtocolVersion
@@ -1064,9 +1066,14 @@ extension CodexService {
             || isLocalIPv6Host(host)
     }
 
-    // Chooses the most direct relay transport for LAN-style hosts plus private overlays like Tailscale.
-    // Tailscale's 100.64.0.0/10 range should bypass the WebSocket URL path that iOS may proxy.
+    // Chooses the most direct relay transport for LAN-style hosts, private overlays like Tailscale,
+    // and authenticated relays that require custom upgrade headers. Some higher-level iOS websocket
+    // stacks have been unreliable at preserving Access-style headers on the handshake.
     func prefersDirectRelayTransport(for url: URL) -> Bool {
+        if !normalizedRelayHeaders.isEmpty {
+            return true
+        }
+
         guard let host = url.host?.lowercased() else {
             return false
         }

@@ -390,12 +390,7 @@ extension CodexService {
         // Network.framework defaults this low enough to reject larger encrypted envelopes.
         webSocketOptions.maximumMessageSize = codexWebSocketMaximumMessageSizeBytes
 
-        var additionalHeaders: [(name: String, value: String)] = []
-        if let role, !role.isEmpty {
-            additionalHeaders.append((name: "x-role", value: role))
-        } else if !token.isEmpty {
-            additionalHeaders.append((name: "Authorization", value: "Bearer \(token)"))
-        }
+        let additionalHeaders = relayRequestHeaders(token: token, role: role)
         if !additionalHeaders.isEmpty {
             webSocketOptions.setAdditionalHeaders(additionalHeaders)
         }
@@ -443,10 +438,8 @@ extension CodexService {
         role: String? = nil
     ) async throws -> CodexWebSocketTransport {
         var request = URLRequest(url: url)
-        if let role, !role.isEmpty {
-            request.setValue(role, forHTTPHeaderField: "x-role")
-        } else if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        for header in relayRequestHeaders(token: token, role: role) {
+            request.setValue(header.value, forHTTPHeaderField: header.name)
         }
 
         let configuration = URLSessionConfiguration.default
@@ -630,10 +623,8 @@ extension CodexService {
             "Sec-WebSocket-Key: \(key)",
             "Sec-WebSocket-Version: 13",
         ]
-        if let role, !role.isEmpty {
-            requestLines.append("x-role: \(role)")
-        } else if !token.isEmpty {
-            requestLines.append("Authorization: Bearer \(token)")
+        for header in relayRequestHeaders(token: token, role: role) {
+            requestLines.append("\(header.name): \(header.value)")
         }
         requestLines.append(contentsOf: ["", ""])
 
@@ -714,6 +705,25 @@ extension CodexService {
         guard headers["sec-websocket-accept"] == expectedAccept else {
             throw CodexServiceError.invalidInput("Relay returned an invalid websocket accept key")
         }
+    }
+
+    private func relayRequestHeaders(token: String, role: String?) -> [(name: String, value: String)] {
+        var headers = normalizedRelayHeaders
+
+        if let role, !role.isEmpty {
+            headers["x-role"] = role
+        } else {
+            let trimmedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedToken.isEmpty {
+                headers["Authorization"] = "Bearer \(trimmedToken)"
+            }
+        }
+
+        return headers
+            .map { (name: $0.key, value: $0.value) }
+            .sorted { lhs, rhs in
+                lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
     }
 
     func drainManualWebSocketFrames(on connection: NWConnection) async throws {

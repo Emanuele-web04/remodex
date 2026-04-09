@@ -199,6 +199,49 @@ test("readBridgeConfig disables managed push defaults when a self-hosted relay o
   assert.equal(config.pushServiceUrl, "");
 });
 
+test("readBridgeConfig loads Cloudflare Access relay headers from env", () => {
+  const config = readBridgeConfig({
+    env: {
+      REMODEX_RELAY_CF_ACCESS_CLIENT_ID: "client-id-123",
+      REMODEX_RELAY_CF_ACCESS_CLIENT_SECRET: "client-secret-456",
+    },
+    runtimeRoot: "/workspace/phodex-bridge",
+    fsImpl: {
+      existsSync() {
+        return false;
+      },
+    },
+  });
+
+  assert.deepEqual(config.relayHeaders, {
+    "CF-Access-Client-Id": "client-id-123",
+    "CF-Access-Client-Secret": "client-secret-456",
+  });
+});
+
+test("readBridgeConfig merges generic relay headers with explicit Cloudflare env overrides", () => {
+  const config = readBridgeConfig({
+    env: {
+      REMODEX_RELAY_HEADERS: JSON.stringify({
+        "CF-Access-Client-Id": "stale-id",
+        "X-Relay-Test": "ok",
+      }),
+      REMODEX_RELAY_CF_ACCESS_CLIENT_ID: "fresh-id",
+    },
+    runtimeRoot: "/workspace/phodex-bridge",
+    fsImpl: {
+      existsSync() {
+        return false;
+      },
+    },
+  });
+
+  assert.deepEqual(config.relayHeaders, {
+    "CF-Access-Client-Id": "fresh-id",
+    "X-Relay-Test": "ok",
+  });
+});
+
 test("thread/start falls back once to the new-thread route when thread id is still unknown", async () => {
   const refreshCalls = [];
   const refresher = new CodexDesktopRefresher({

@@ -532,6 +532,10 @@ function readBridgeConfig({
     "",
     env
   );
+  const relayHeaders = readRelayHeaders({
+    env,
+    fallback: sourceCheckout ? {} : privateDefaults.relayHeaders,
+  });
   const relayUrl = readFirstDefinedEnv(
     ["REMODEX_RELAY", "PHODEX_RELAY"],
     defaultRelayUrl,
@@ -554,6 +558,7 @@ function readBridgeConfig({
   // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
   const defaultRefreshEnabled = false;
   return {
+    relayHeaders,
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(
       ["REMODEX_PUSH_SERVICE_URL"],
@@ -583,6 +588,7 @@ function readPrivatePackageDefaults({ runtimeRoot, fsImpl }) {
   if (!fsImpl.existsSync(defaultsPath)) {
     return {
       relayUrl: "",
+      relayHeaders: {},
       pushServiceUrl: "",
     };
   }
@@ -591,11 +597,13 @@ function readPrivatePackageDefaults({ runtimeRoot, fsImpl }) {
     const parsed = safeParseJSON(fsImpl.readFileSync(defaultsPath, "utf8"));
     return {
       relayUrl: readString(parsed?.relayUrl) || "",
+      relayHeaders: normalizeRelayHeaders(parsed?.relayHeaders),
       pushServiceUrl: readString(parsed?.pushServiceUrl) || "",
     };
   } catch {
     return {
       relayUrl: "",
+      relayHeaders: {},
       pushServiceUrl: "",
     };
   }
@@ -733,6 +741,65 @@ function parseBooleanEnv(value) {
 function parseIntegerEnv(value, fallback) {
   const parsed = Number.parseInt(String(value), 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function readRelayHeaders({ env = process.env, fallback = {} } = {}) {
+  const headers = {
+    ...normalizeRelayHeaders(fallback),
+  };
+  const rawHeaders = readFirstDefinedEnv(
+    ["REMODEX_RELAY_HEADERS", "PHODEX_RELAY_HEADERS"],
+    "",
+    env
+  );
+
+  if (rawHeaders) {
+    const parsed = safeParseJSON(rawHeaders);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+      throw new Error("REMODEX_RELAY_HEADERS must be a JSON object of header names to values.");
+    }
+    Object.assign(headers, normalizeRelayHeaders(parsed));
+  }
+
+  applyHeaderEnvOverride(headers, "CF-Access-Client-Id", [
+    "REMODEX_RELAY_CF_ACCESS_CLIENT_ID",
+    "PHODEX_RELAY_CF_ACCESS_CLIENT_ID",
+  ], env);
+  applyHeaderEnvOverride(headers, "CF-Access-Client-Secret", [
+    "REMODEX_RELAY_CF_ACCESS_CLIENT_SECRET",
+    "PHODEX_RELAY_CF_ACCESS_CLIENT_SECRET",
+  ], env);
+  applyHeaderEnvOverride(headers, "Authorization", [
+    "REMODEX_RELAY_AUTHORIZATION",
+    "PHODEX_RELAY_AUTHORIZATION",
+  ], env);
+
+  return headers;
+}
+
+function applyHeaderEnvOverride(headers, headerName, envKeys, env) {
+  const value = readFirstDefinedEnv(envKeys, "", env);
+  if (value) {
+    headers[headerName] = value;
+  }
+}
+
+function normalizeRelayHeaders(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const normalized = {};
+  for (const [rawName, rawValue] of Object.entries(value)) {
+    const name = readString(rawName);
+    const headerValue = readString(rawValue);
+    if (!name || !headerValue) {
+      continue;
+    }
+    normalized[name] = headerValue;
+  }
+
+  return normalized;
 }
 
 function extractErrorMessage(error) {

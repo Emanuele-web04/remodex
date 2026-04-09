@@ -34,10 +34,29 @@ enum CodexSecureConnectionState: Equatable, Sendable {
 struct CodexPairingQRPayload: Codable, Sendable {
     let v: Int
     let relay: String
+    let relayHeaders: [String: String]?
     let sessionId: String
     let macDeviceId: String
     let macIdentityPublicKey: String
     let expiresAt: Int64
+
+    init(
+        v: Int,
+        relay: String,
+        relayHeaders: [String: String]? = nil,
+        sessionId: String,
+        macDeviceId: String,
+        macIdentityPublicKey: String,
+        expiresAt: Int64
+    ) {
+        self.v = v
+        self.relay = relay
+        self.relayHeaders = relayHeaders
+        self.sessionId = sessionId
+        self.macDeviceId = macDeviceId
+        self.macIdentityPublicKey = macIdentityPublicKey
+        self.expiresAt = expiresAt
+    }
 }
 
 struct CodexPhoneIdentityState: Codable, Sendable {
@@ -50,11 +69,34 @@ struct CodexTrustedMacRecord: Codable, Sendable {
     let macDeviceId: String
     let macIdentityPublicKey: String
     let lastPairedAt: Date
-    var relayURL: String? = nil
-    var displayName: String? = nil
-    var lastResolvedSessionId: String? = nil
-    var lastResolvedAt: Date? = nil
-    var lastUsedAt: Date? = nil
+    var relayURL: String?
+    var relayHeaders: [String: String]?
+    var displayName: String?
+    var lastResolvedSessionId: String?
+    var lastResolvedAt: Date?
+    var lastUsedAt: Date?
+
+    init(
+        macDeviceId: String,
+        macIdentityPublicKey: String,
+        lastPairedAt: Date,
+        relayURL: String? = nil,
+        relayHeaders: [String: String]? = nil,
+        displayName: String? = nil,
+        lastResolvedSessionId: String? = nil,
+        lastResolvedAt: Date? = nil,
+        lastUsedAt: Date? = nil
+    ) {
+        self.macDeviceId = macDeviceId
+        self.macIdentityPublicKey = macIdentityPublicKey
+        self.lastPairedAt = lastPairedAt
+        self.relayURL = relayURL
+        self.relayHeaders = relayHeaders
+        self.displayName = displayName
+        self.lastResolvedSessionId = lastResolvedSessionId
+        self.lastResolvedAt = lastResolvedAt
+        self.lastUsedAt = lastUsedAt
+    }
 }
 
 struct CodexTrustedMacRegistry: Codable, Sendable {
@@ -217,6 +259,21 @@ enum CodexTrustedSessionResolveError: LocalizedError {
              .network(let message):
             return message
         }
+    }
+}
+
+func codexNormalizedRelayHeaders(_ headers: [String: String]?) -> [String: String] {
+    guard let headers else {
+        return [:]
+    }
+
+    return headers.reduce(into: [:]) { partialResult, entry in
+        let name = entry.key.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !value.isEmpty else {
+            return
+        }
+        partialResult[name] = value
     }
 }
 
