@@ -12,6 +12,7 @@ struct TurnView: View {
     let thread: CodexThread
 
     @Environment(CodexService.self) private var codex
+    @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.scenePhase) private var scenePhase
@@ -93,6 +94,9 @@ struct TurnView: View {
                     showsGitControls: showsGitControls,
                     gitWorkingDirectory: gitWorkingDirectory
                 )),
+                structuredPromptReplacementComposer: { message in
+                    AnyView(composerStructuredPromptReplacement(message: message))
+                },
                 repositoryLoadingToastOverlay: AnyView(EmptyView()),
                 usageToastOverlay: AnyView(EmptyView()),
                 isRepositoryLoadingToastVisible: false,
@@ -294,6 +298,9 @@ struct TurnView: View {
                 workingDirectory: gitWorkingDirectory,
                 threadID: thread.id
             )
+        }
+        .onChange(of: renderSnapshot.timelineChangeToken) { _, _ in
+            viewModel.reconcileDismissedStructuredPlanPrompts(messages: renderSnapshot.messages, codex: codex)
         }
         .sheet(isPresented: $isShowingThreadPathSheet) {
             if let context = threadNavigationContext(for: resolvedThread) {
@@ -607,7 +614,50 @@ struct TurnView: View {
     private func handleSend() {
         isInputFocused = false
         viewModel.clearComposerAutocomplete()
-        viewModel.sendTurn(codex: codex, threadID: thread.id)
+        viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
+    }
+
+    @ViewBuilder
+    private func composerStructuredPromptReplacement(message: CodexMessage) -> some View {
+        if let request = message.structuredUserInputRequest {
+            let isDismissed = viewModel.isStructuredPlanPromptDismissed(request.requestID, codex: codex)
+            let isDismissing = viewModel.isStructuredPlanPromptDismissing(request.requestID, codex: codex)
+
+            if !isDismissed {
+                StructuredUserInputCard(
+                    request: request,
+                    isInteractionLocked: isDismissing,
+                    secondaryActionTitle: isDismissing ? "Closing..." : "ESC",
+                    onSecondaryAction: isDismissing ? nil : {
+                        isInputFocused = true
+                        viewModel.dismissStructuredPlanPrompt(message, codex: codex, threadID: thread.id)
+                    }
+                )
+                .id(request.requestID)
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+            } else {
+                composerWithSubagentAccessory(
+                    currentThread: currentResolvedThread,
+                    activeTurnID: codex.activeTurnID(for: thread.id),
+                    isThreadRunning: codex.timelineState(for: thread.id).renderSnapshot.isThreadRunning,
+                    isEmptyThread: codex.timelineState(for: thread.id).renderSnapshot.messages.isEmpty,
+                    isWorktreeProject: currentResolvedThread.isManagedWorktreeProject,
+                    showsGitControls: codex.isConnected && currentResolvedThread.gitWorkingDirectory != nil,
+                    gitWorkingDirectory: currentResolvedThread.gitWorkingDirectory
+                )
+            }
+        } else {
+            composerWithSubagentAccessory(
+                currentThread: currentResolvedThread,
+                activeTurnID: codex.activeTurnID(for: thread.id),
+                isThreadRunning: codex.timelineState(for: thread.id).renderSnapshot.isThreadRunning,
+                isEmptyThread: codex.timelineState(for: thread.id).renderSnapshot.messages.isEmpty,
+                isWorktreeProject: currentResolvedThread.isManagedWorktreeProject,
+                showsGitControls: codex.isConnected && currentResolvedThread.gitWorkingDirectory != nil,
+                gitWorkingDirectory: currentResolvedThread.gitWorkingDirectory
+            )
+        }
     }
 
     private func handleGitActionSelection(

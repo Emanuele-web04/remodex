@@ -1277,6 +1277,28 @@ extension CodexService {
         }
     }
 
+    // Clears all unresolved structured prompts in a thread when the user exits native plan mode.
+    func removeAllStructuredUserInputPrompts(threadId: String) {
+        guard var threadMessages = messagesByThread[threadId] else {
+            return
+        }
+
+        let previousCount = threadMessages.count
+        threadMessages.removeAll { message in
+            message.kind == .userInputPrompt
+        }
+
+        guard threadMessages.count != previousCount else {
+            return
+        }
+
+        messagesByThread[threadId] = threadMessages
+        persistMessages()
+        if let activeThreadId {
+            updateCurrentOutput(for: activeThreadId)
+        }
+    }
+
     // Persists a hidden push-reset marker across all threads bound to the same repo.
     func appendHiddenPushResetMarkers(
         threadId: String,

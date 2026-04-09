@@ -27,6 +27,7 @@ struct TurnConversationContainerView: View {
     let isComposerAutocompletePresented: Bool
     let emptyState: AnyView
     let composer: AnyView
+    let structuredPromptReplacementComposer: ((CodexMessage) -> AnyView)?
     let repositoryLoadingToastOverlay: AnyView
     let usageToastOverlay: AnyView
     let isRepositoryLoadingToastVisible: Bool
@@ -44,7 +45,10 @@ struct TurnConversationContainerView: View {
     private var messageLayout: TimelineMessageLayout {
         guard lastMessageLayoutThreadID == threadID,
               lastMessageLayoutToken == timelineChangeToken else {
-            return Self.buildMessageLayout(from: messages)
+            return Self.buildMessageLayout(
+                from: messages,
+                planSessionSource: planSessionSource
+            )
         }
         return cachedMessageLayout
     }
@@ -53,6 +57,10 @@ struct TurnConversationContainerView: View {
     private var timelineEmptyState: AnyView {
         guard messageLayout.timelineMessages.isEmpty else {
             return emptyState
+        }
+
+        if messageLayout.activeStructuredPromptMessage != nil {
+            return AnyView(EmptyView())
         }
 
         if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
@@ -151,9 +159,15 @@ struct TurnConversationContainerView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            composer
+            if let activeStructuredPromptMessage = messageLayout.activeStructuredPromptMessage,
+               let structuredPromptReplacementComposer {
+                structuredPromptReplacementComposer(activeStructuredPromptMessage)
+            } else {
+                composer
+            }
         }
         .animation(.easeInOut(duration: 0.18), value: messageLayout.pinnedTaskPlanMessage?.id)
+        .animation(.easeInOut(duration: 0.18), value: messageLayout.activeStructuredPromptMessage?.id)
     }
 
     // Rebuilds the plan/timeline split only when the thread or timeline token really changed.
@@ -166,14 +180,22 @@ struct TurnConversationContainerView: View {
 
         lastMessageLayoutThreadID = threadID
         lastMessageLayoutToken = timelineChangeToken
-        cachedMessageLayout = Self.buildMessageLayout(from: messages)
+        cachedMessageLayout = Self.buildMessageLayout(
+            from: messages,
+            planSessionSource: planSessionSource
+        )
     }
 
     // Separates pinned plan content from renderable timeline rows in one pass.
-    private static func buildMessageLayout(from messages: [CodexMessage]) -> TimelineMessageLayout {
+    private static func buildMessageLayout(
+        from messages: [CodexMessage],
+        planSessionSource: CodexPlanSessionSource?
+    ) -> TimelineMessageLayout {
         var timelineMessages: [CodexMessage] = []
         timelineMessages.reserveCapacity(messages.count)
         var pinnedTaskPlanMessage: CodexMessage?
+        var activeStructuredPromptMessage: CodexMessage?
+        let canReplaceComposerWithPrompt = planSessionSource?.isNative == true
 
         for message in messages {
             if message.shouldDisplayPinnedPlanAccessory {
@@ -184,12 +206,22 @@ struct TurnConversationContainerView: View {
                 continue
             } else {
                 timelineMessages.append(message)
+                if canReplaceComposerWithPrompt,
+                   message.shouldDisplayComposerStructuredPrompt {
+                    activeStructuredPromptMessage = message
+                }
             }
+        }
+
+        if let activeStructuredPromptMessage,
+           let activeIndex = timelineMessages.lastIndex(where: { $0.id == activeStructuredPromptMessage.id }) {
+            timelineMessages.remove(at: activeIndex)
         }
 
         return TimelineMessageLayout(
             timelineMessages: timelineMessages,
-            pinnedTaskPlanMessage: pinnedTaskPlanMessage
+            pinnedTaskPlanMessage: pinnedTaskPlanMessage,
+            activeStructuredPromptMessage: activeStructuredPromptMessage
         )
     }
 }
@@ -197,10 +229,12 @@ struct TurnConversationContainerView: View {
 private struct TimelineMessageLayout: Equatable {
     let timelineMessages: [CodexMessage]
     let pinnedTaskPlanMessage: CodexMessage?
+    let activeStructuredPromptMessage: CodexMessage?
 
     static let empty = TimelineMessageLayout(
         timelineMessages: [],
-        pinnedTaskPlanMessage: nil
+        pinnedTaskPlanMessage: nil,
+        activeStructuredPromptMessage: nil
     )
 }
 
@@ -281,5 +315,9 @@ extension CodexMessage {
         }
 
         return proposedPlan != nil
+    }
+
+    var shouldDisplayComposerStructuredPrompt: Bool {
+        role == .system && kind == .userInputPrompt && structuredUserInputRequest != nil
     }
 }

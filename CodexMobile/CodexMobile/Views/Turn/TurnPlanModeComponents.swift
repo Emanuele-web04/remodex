@@ -194,7 +194,10 @@ struct InferredPlanQuestionnaireCard: View {
             questions: questionnaire.questions,
             isSubmitting: isSubmitting,
             hasSubmittedResponse: hasSubmittedResponse,
+            isInteractionLocked: false,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: nil,
+            onSecondaryAction: nil,
             onSubmit: { answers in
                 submitAnswers(answers)
             }
@@ -358,16 +361,34 @@ struct StructuredUserInputCard: View {
     @Environment(CodexService.self) private var codex
 
     let request: CodexStructuredUserInputRequest
+    let isInteractionLocked: Bool
+    let secondaryActionTitle: String?
+    let onSecondaryAction: (() -> Void)?
 
     @State private var isSubmitting = false
     @State private var hasSubmittedResponse = false
+
+    init(
+        request: CodexStructuredUserInputRequest,
+        isInteractionLocked: Bool = false,
+        secondaryActionTitle: String? = nil,
+        onSecondaryAction: (() -> Void)? = nil
+    ) {
+        self.request = request
+        self.isInteractionLocked = isInteractionLocked
+        self.secondaryActionTitle = secondaryActionTitle
+        self.onSecondaryAction = onSecondaryAction
+    }
 
     var body: some View {
         StructuredUserInputCardView(
             questions: request.questions,
             isSubmitting: isSubmitting,
             hasSubmittedResponse: hasSubmittedResponse,
+            isInteractionLocked: isInteractionLocked,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: secondaryActionTitle,
+            onSecondaryAction: onSecondaryAction,
             onSubmit: { answers in
                 submitAnswers(answers)
             }

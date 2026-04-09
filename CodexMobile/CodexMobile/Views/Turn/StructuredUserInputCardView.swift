@@ -10,7 +10,10 @@ struct StructuredUserInputCardView: View {
     let questions: [CodexStructuredUserInputQuestion]
     let isSubmitting: Bool
     let hasSubmittedResponse: Bool
+    let isInteractionLocked: Bool
     let onSelectOption: (_ questionID: String, _ optionLabel: String) -> Void
+    let secondaryActionTitle: String?
+    let onSecondaryAction: (() -> Void)?
     let onSubmit: (_ answersByQuestionID: [String: [String]]) -> Void
 
     @State private var selectedOptionsByQuestionID: [String: [String]] = [:]
@@ -143,7 +146,7 @@ struct StructuredUserInputCardView: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(isSubmitting)
+        .disabled(isInteractionBusy)
     }
 
     // MARK: - Answer field
@@ -169,7 +172,7 @@ struct StructuredUserInputCardView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(Color(.systemBackground).opacity(0.6), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .disabled(isSubmitting)
+        .disabled(isInteractionBusy)
     }
 
     // MARK: - Flow controls
@@ -229,8 +232,12 @@ struct StructuredUserInputCardView: View {
         return resolvedAnswers(for: currentQuestion) != nil
     }
 
+    private var isInteractionBusy: Bool {
+        isSubmitting || isInteractionLocked
+    }
+
     private var isSubmitDisabled: Bool {
-        isSubmitting || hasSubmittedResponse || !questions.allSatisfy { question in
+        isInteractionBusy || hasSubmittedResponse || !questions.allSatisfy { question in
             resolvedAnswers(for: question) != nil
         }
     }
@@ -254,18 +261,40 @@ struct StructuredUserInputCardView: View {
                     .padding(.vertical, 9)
                 }
                 .buttonStyle(.plain)
-                .foregroundColor(isSubmitting ? Color(.tertiaryLabel) : Color(.secondaryLabel))
+                .foregroundColor(isInteractionBusy ? Color(.tertiaryLabel) : Color(.secondaryLabel))
                 .background(Color(.quaternarySystemFill), in: Capsule())
-                .disabled(isSubmitting)
+                .disabled(isInteractionBusy)
                 .transition(.opacity.combined(with: .move(edge: .leading)))
             }
 
             Spacer(minLength: 0)
 
-            if currentQuestionIndex < max(questions.count - 1, 0) {
-                nextButton
-            } else {
-                submitButton
+            HStack(spacing: 8) {
+                if let secondaryActionTitle {
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onSecondaryAction?()
+                    } label: {
+                        Text(secondaryActionTitle)
+                            .font(AppFont.subheadline(weight: .medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(
+                        (isInteractionBusy || hasSubmittedResponse || onSecondaryAction == nil)
+                            ? Color(.tertiaryLabel)
+                            : Color(.secondaryLabel)
+                    )
+                    .background(Color(.quaternarySystemFill), in: Capsule())
+                    .disabled(isInteractionBusy || hasSubmittedResponse || onSecondaryAction == nil)
+                }
+
+                if currentQuestionIndex < max(questions.count - 1, 0) {
+                    nextButton
+                } else {
+                    submitButton
+                }
             }
         }
     }
@@ -294,7 +323,7 @@ struct StructuredUserInputCardView: View {
                 : AnyShapeStyle(Color(.quaternarySystemFill)),
             in: Capsule()
         )
-        .disabled(!canMoveForward || isSubmitting)
+        .disabled(!canMoveForward || isInteractionBusy)
     }
 
     private var submitButton: some View {
@@ -490,7 +519,10 @@ extension CodexStructuredUserInputOption {
             ],
             isSubmitting: false,
             hasSubmittedResponse: false,
+            isInteractionLocked: false,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: nil,
+            onSecondaryAction: nil,
             onSubmit: { _ in }
         )
         .padding(.horizontal, 16)
@@ -513,7 +545,10 @@ extension CodexStructuredUserInputOption {
             ],
             isSubmitting: false,
             hasSubmittedResponse: false,
+            isInteractionLocked: false,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: nil,
+            onSecondaryAction: nil,
             onSubmit: { _ in }
         )
         .padding(.horizontal, 16)
@@ -536,7 +571,10 @@ extension CodexStructuredUserInputOption {
             ],
             isSubmitting: false,
             hasSubmittedResponse: false,
+            isInteractionLocked: false,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: nil,
+            onSecondaryAction: nil,
             onSubmit: { _ in }
         )
         .padding(.horizontal, 16)
@@ -563,7 +601,10 @@ extension CodexStructuredUserInputOption {
             ],
             isSubmitting: false,
             hasSubmittedResponse: false,
+            isInteractionLocked: false,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: nil,
+            onSecondaryAction: nil,
             onSubmit: { _ in }
         )
         .padding(.horizontal, 16)
@@ -608,7 +649,10 @@ extension CodexStructuredUserInputOption {
             ],
             isSubmitting: false,
             hasSubmittedResponse: false,
+            isInteractionLocked: false,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: nil,
+            onSecondaryAction: nil,
             onSubmit: { _ in }
         )
         .padding(.horizontal, 16)
@@ -634,7 +678,10 @@ extension CodexStructuredUserInputOption {
             ],
             isSubmitting: true,
             hasSubmittedResponse: false,
+            isInteractionLocked: false,
             onSelectOption: { _, _ in },
+            secondaryActionTitle: nil,
+            onSecondaryAction: nil,
             onSubmit: { _ in }
         )
         .padding(.horizontal, 16)

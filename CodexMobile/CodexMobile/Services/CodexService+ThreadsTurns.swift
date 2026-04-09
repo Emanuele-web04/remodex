@@ -517,6 +517,26 @@ extension CodexService {
         ])
     }
 
+    // Interrupts the active plan turn, only tearing down local prompt/session state once it is safe.
+    func cancelStructuredPlanSession(
+        requestID _: JSONValue,
+        turnId: String?,
+        threadId: String
+    ) async throws {
+        do {
+            try await interruptTurn(turnId: turnId, threadId: threadId)
+            removeAllStructuredUserInputPrompts(threadId: threadId)
+            resetPlanSessionState(for: threadId)
+        } catch let error as CodexServiceError {
+            if case .invalidInput = error {
+                removeAllStructuredUserInputPrompts(threadId: threadId)
+                resetPlanSessionState(for: threadId)
+                return
+            }
+            throw error
+        }
+    }
+
     // Falls back to a normal plan-mode user reply when the runtime asked clarifying
     // questions in plain text instead of emitting `item/tool/requestUserInput`.
     func submitInferredPlanQuestionnaireResponse(
