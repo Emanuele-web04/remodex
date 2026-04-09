@@ -1,5 +1,5 @@
 // FILE: GPTVoiceSetupSheet.swift
-// Purpose: Explains the Mac-side ChatGPT steps needed before Remodex voice mode can work.
+// Purpose: Shows a compact info sheet that explains how Remodex voice uses the paired Mac's ChatGPT session.
 // Layer: View
 // Exports: GPTVoiceSetupSheet
 // Depends on: SwiftUI, AppFont
@@ -7,8 +7,6 @@
 import SwiftUI
 
 struct GPTVoiceSetupSheet: View {
-    @Environment(\.dismiss) private var dismiss
-
     var body: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 18) {
@@ -23,59 +21,53 @@ struct GPTVoiceSetupSheet: View {
                         )
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Voice uses ChatGPT from your Mac")
+                        Text("GPT voice uses the ChatGPT session on your Mac")
                             .font(AppFont.subheadline(weight: .semibold))
-                        Text("Remodex reads the ChatGPT session from your paired Mac bridge so your iPhone can transcribe with that account.")
+                        Text("Remodex does not keep a separate GPT voice login on the iPhone. It uses the ChatGPT session already active on your paired Mac.")
                             .font(AppFont.caption())
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    setupStep(
+                    infoStep(
                         number: "1",
-                        title: "Open ChatGPT on your Mac",
-                        detail: "Use the same Mac that is paired with this iPhone."
+                        title: "You speak on the iPhone",
+                        detail: "Remodex records the voice clip locally on the phone when you hold to talk."
                     )
-                    setupStep(
+                    infoStep(
                         number: "2",
-                        title: "Sign in or refresh ChatGPT there",
-                        detail: "Make sure the ChatGPT account you want for voice is active on that Mac."
+                        title: "The phone checks your paired Mac",
+                        detail: "Remodex asks the paired Mac bridge for the active ChatGPT session that is already connected there."
                     )
-                    setupStep(
+                    infoStep(
                         number: "3",
-                        title: "Come back to Remodex",
-                        detail: "Keep the bridge connected, then try voice mode again after the status refreshes."
+                        title: "GPT transcribes the clip",
+                        detail: "The voice clip is sent with that Mac-backed GPT session so GPT can turn it into text."
+                    )
+                    infoStep(
+                        number: "4",
+                        title: "The text comes back to Remodex",
+                        detail: "The transcript returns to the app and gets dropped into your message composer."
                     )
                 }
 
-                Text("You do not need a separate ChatGPT login flow on this iPhone.")
+                Text("In short: iPhone voice in, Mac ChatGPT session for auth, GPT transcript back to the iPhone.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
                 Spacer(minLength: 0)
-
-                SettingsButton("Close") {
-                    dismiss()
-                }
             }
             .padding(20)
             .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
-            .navigationTitle("Use ChatGPT on Mac")
+            .navigationTitle("How GPT Voice Works")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") {
-                        dismiss()
-                    }
-                }
-            }
         }
     }
 
-    // Keeps the setup instructions scannable in a compact sheet.
-    private func setupStep(number: String, title: String, detail: String) -> some View {
+    // Keeps the voice flow easy to scan in a compact informational sheet.
+    private func infoStep(number: String, title: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text(number)
                 .font(AppFont.caption(weight: .semibold))

@@ -55,7 +55,8 @@ extension CodexService {
             return .ready
         }
 
-        if shouldSkipInitialDisplayHydration(threadId: threadId) {
+        if shouldSkipInitialDisplayHydration(threadId: threadId)
+            || shouldShowImmediateEmptyPlaceholder(threadId: threadId) {
             return .empty
         }
 
@@ -68,6 +69,25 @@ extension CodexService {
         }
 
         return .empty
+    }
+
+    // Treats placeholder-only chats as intentionally blank so the UI does not flash
+    // a loading state before the thread-open preparation path can confirm the skip.
+    func shouldShowImmediateEmptyPlaceholder(threadId: String) -> Bool {
+        guard !hydratedThreadIDs.contains(threadId),
+              !threadHasActiveOrRunningTurn(threadId),
+              messages(for: threadId).isEmpty,
+              let thread = thread(for: threadId),
+              thread.syncState == .live else {
+            return false
+        }
+
+        let preview = thread.preview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard preview.isEmpty else {
+            return false
+        }
+
+        return thread.displayTitle == CodexThread.defaultDisplayTitle
     }
 
     // Returns a lightweight per-thread revision token for any message timeline mutation.

@@ -395,23 +395,17 @@ private struct SettingsUsageCard: View {
     var body: some View {
         SettingsCard(title: "Usage") {
             UsageStatusSummaryContent(
-                contextWindowUsage: activeThreadContextWindowUsage,
+                contextWindowUsage: nil,
+                showsContextWindowSection: false,
                 rateLimitBuckets: codex.rateLimitBuckets,
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage,
-                contextPlacement: .bottom,
                 refreshControl: UsageStatusRefreshControl(
                     title: "Refresh",
                     isRefreshing: isRefreshing,
                     action: refreshStatus
                 )
             )
-
-            if activeThreadID == nil {
-                Text("Open a chat to populate the current thread context window here.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
         }
         .task {
             await refreshStatusIfNeeded()
@@ -422,24 +416,6 @@ private struct SettingsUsageCard: View {
                 await refreshStatusIfNeeded()
             }
         }
-        .onChange(of: activeThreadID) { _, _ in
-            Task {
-                await refreshStatusIfNeeded()
-            }
-        }
-    }
-
-    private var activeThreadID: String? {
-        let trimmed = codex.activeThreadId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmed, !trimmed.isEmpty {
-            return trimmed
-        }
-        return nil
-    }
-
-    private var activeThreadContextWindowUsage: ContextWindowUsage? {
-        guard let activeThreadID else { return nil }
-        return codex.contextWindowUsageByThread[activeThreadID]
     }
 
     private func refreshStatus() {
@@ -457,7 +433,7 @@ private struct SettingsUsageCard: View {
 
     private func refreshStatusIfNeeded() async {
         guard !isRefreshing else { return }
-        guard codex.shouldAutoRefreshUsageStatus(threadId: activeThreadID) else { return }
+        guard codex.shouldAutoRefreshUsageStatus(threadId: nil) else { return }
 
         await MainActor.run {
             isRefreshing = true
@@ -468,9 +444,9 @@ private struct SettingsUsageCard: View {
         }
     }
 
-    // Loads account-wide windows globally and thread context from the active chat when available.
+    // Settings only needs the account-wide usage windows.
     private func refreshStatusData() async {
-        await codex.refreshUsageStatus(threadId: activeThreadID)
+        await codex.refreshUsageStatus(threadId: nil)
     }
 }
 
@@ -579,7 +555,6 @@ private struct SettingsNotificationsCard: View {
 private struct SettingsGPTAccountCard: View {
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
-    @State private var isLoggingOut = false
     @State private var isShowingMacLoginInfo = false
 
     var body: some View {
@@ -615,20 +590,6 @@ private struct SettingsGPTAccountCard: View {
                 Text(hint)
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
-            }
-
-            if let errorMessage = codex.gptAccountErrorMessage,
-               !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(errorMessage)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.red)
-            }
-
-            if snapshot.canLogout {
-                SettingsButton("Log out", role: .destructive, isLoading: isLoggingOut) {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    logout()
-                }
             }
         }
         .task {
@@ -692,18 +653,6 @@ private struct SettingsGPTAccountCard: View {
             return .red
         case .notLoggedIn, .unknown, .unavailable:
             return .secondary
-        }
-    }
-
-    private func logout() {
-        guard !isLoggingOut else { return }
-        isLoggingOut = true
-        codex.gptAccountErrorMessage = nil
-
-        Task { @MainActor in
-            await codex.logoutGPTAccount()
-            await codex.refreshGPTAccountState()
-            isLoggingOut = false
         }
     }
 }

@@ -225,6 +225,100 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(projection.messages.map(\.id), ["thinking-1", "tool-1"])
     }
 
+    func testTimelineRenderProjectionGroupsLongContiguousToolRuns() {
+        let now = Date()
+        let toolMessages = (1...7).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: index.isMultiple(of: 2) ? .toolActivity : .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1",
+                itemID: "item-\(index)",
+                isStreaming: index == 7
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(messages: toolMessages)
+        XCTAssertEqual(items.count, 1)
+
+        guard case .toolBurst(let group) = items[0] else {
+            return XCTFail("Expected one grouped tool burst")
+        }
+
+        XCTAssertEqual(group.messages.map(\.id), toolMessages.map(\.id))
+        XCTAssertEqual(group.hiddenCount, 2)
+        XCTAssertEqual(group.collapsedMessages.map(\.id), ["tool-3", "tool-4", "tool-5", "tool-6", "tool-7"])
+    }
+
+    func testTimelineRenderProjectionKeepsShortToolRunsExpanded() {
+        let now = Date()
+        let toolMessages = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1",
+                itemID: "item-\(index)"
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(messages: toolMessages)
+        XCTAssertEqual(items.count, 5)
+
+        let messageIDs = items.compactMap { item -> String? in
+            if case .message(let message) = item {
+                return message.id
+            }
+            return nil
+        }
+
+        XCTAssertEqual(messageIDs, toolMessages.map(\.id))
+    }
+
+    func testTimelineRenderProjectionSplitsToolRunsAcrossStableTurnIDs() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "tool-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool 1",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "item-1"
+            ),
+            makeMessage(
+                id: "tool-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool 2",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                itemID: "item-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+        XCTAssertEqual(items.count, 2)
+
+        let messageIDs = items.compactMap { item -> String? in
+            if case .message(let message) = item {
+                return message.id
+            }
+            return nil
+        }
+
+        XCTAssertEqual(messageIDs, ["tool-1", "tool-2"])
+    }
+
     func testRemoveDuplicateAssistantMessagesByTurnAndText() {
         let now = Date()
         let messages = [

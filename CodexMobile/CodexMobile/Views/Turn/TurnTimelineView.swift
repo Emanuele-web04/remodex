@@ -14,6 +14,215 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockRevertPresentation: AssistantRevertPresentation?
 }
 
+// ─── Tool Burst Projection ─────────────────────────────────────
+
+struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
+    static let collapsedVisibleCount = 5
+
+    let id: String
+    let messages: [CodexMessage]
+
+    init(messages: [CodexMessage]) {
+        self.messages = messages
+        self.id = "tool-burst:\(messages.first?.id ?? "unknown")"
+    }
+
+    var hiddenCount: Int {
+        max(messages.count - Self.collapsedVisibleCount, 0)
+    }
+
+    var collapsedMessages: [CodexMessage] {
+        if hiddenCount > 0 {
+            return Array(messages.suffix(Self.collapsedVisibleCount))
+        }
+        return messages
+    }
+}
+
+enum TurnTimelineRenderItem: Identifiable, Equatable {
+    case message(CodexMessage)
+    case toolBurst(TurnTimelineToolBurstGroup)
+
+    var id: String {
+        switch self {
+        case .message(let message):
+            return message.id
+        case .toolBurst(let group):
+            return group.id
+        }
+    }
+}
+
+enum TurnTimelineRenderProjection {
+    // Groups long contiguous tool-call runs into one stable container so the main
+    // timeline height stays bounded without introducing nested scrolling.
+    static func project(messages: [CodexMessage]) -> [TurnTimelineRenderItem] {
+        var items: [TurnTimelineRenderItem] = []
+        var bufferedToolMessages: [CodexMessage] = []
+
+        func flushBufferedToolMessages() {
+            guard !bufferedToolMessages.isEmpty else { return }
+            if bufferedToolMessages.count > TurnTimelineToolBurstGroup.collapsedVisibleCount {
+                items.append(.toolBurst(TurnTimelineToolBurstGroup(messages: bufferedToolMessages)))
+            } else {
+                items.append(contentsOf: bufferedToolMessages.map(TurnTimelineRenderItem.message))
+            }
+            bufferedToolMessages.removeAll(keepingCapacity: true)
+        }
+
+        for message in messages {
+            guard isToolBurstCandidate(message) else {
+                flushBufferedToolMessages()
+                items.append(.message(message))
+                continue
+            }
+
+            if let previous = bufferedToolMessages.last,
+               !canShareToolBurst(previous: previous, incoming: message) {
+                flushBufferedToolMessages()
+            }
+
+            bufferedToolMessages.append(message)
+        }
+
+        flushBufferedToolMessages()
+        return items
+    }
+
+    private static func isToolBurstCandidate(_ message: CodexMessage) -> Bool {
+        guard message.role == .system else {
+            return false
+        }
+
+        switch message.kind {
+        case .toolActivity, .commandExecution:
+            return true
+        case .thinking, .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
+            return false
+        }
+    }
+
+    // Late turn ids can arrive mid-stream, so only split when both rows already
+    // have distinct stable turn ids.
+    private static func canShareToolBurst(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        let previousTurnID = normalizedIdentifier(previous.turnId)
+        let incomingTurnID = normalizedIdentifier(incoming.turnId)
+
+        guard let previousTurnID, let incomingTurnID else {
+            return true
+        }
+
+        return previousTurnID == incomingTurnID
+    }
+
+    private static func normalizedIdentifier(_ value: String?) -> String? {
+        guard let value else {
+            return nil
+        }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private struct TurnTimelineMessageRow: View {
+    let message: CodexMessage
+    let isRetryAvailable: Bool
+    let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
+    let planSessionSource: CodexPlanSessionSource?
+    let allowsAssistantPlanFallbackRecovery: Bool
+    let completedTurnIDs: Set<String>
+    let threadMessagesForPlanMatching: [CodexMessage]
+    let planMatchingFingerprint: Int
+    let newestStreamingMessageID: String?
+    let autoScrollMode: TurnAutoScrollMode
+    let onRetryUserMessage: (String) -> Void
+    let onTapAssistantRevert: (CodexMessage) -> Void
+    let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
+
+    var body: some View {
+        MessageRow(
+            message: message,
+            isRetryAvailable: isRetryAvailable,
+            onRetryUserMessage: onRetryUserMessage,
+            assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
+            planSessionSource: planSessionSource,
+            allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+            assistantTurnCompleted: message.turnId.map(completedTurnIDs.contains) ?? false,
+            threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+            planMatchingFingerprint: planMatchingFingerprint,
+            showsStreamingAnimations: autoScrollMode == .followBottom
+                && message.id == newestStreamingMessageID,
+            assistantRevertAction: onTapAssistantRevert,
+            subagentOpenAction: onTapSubagent
+        )
+        .equatable()
+        .id(message.id)
+    }
+}
+
+private struct TurnTimelineToolBurstView: View {
+    let group: TurnTimelineToolBurstGroup
+    let isRetryAvailable: Bool
+    let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
+    let planSessionSource: CodexPlanSessionSource?
+    let allowsAssistantPlanFallbackRecovery: Bool
+    let completedTurnIDs: Set<String>
+    let threadMessagesForPlanMatching: [CodexMessage]
+    let planMatchingFingerprint: Int
+    let newestStreamingMessageID: String?
+    let autoScrollMode: TurnAutoScrollMode
+    let onRetryUserMessage: (String) -> Void
+    let onTapAssistantRevert: (CodexMessage) -> Void
+    let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
+
+    @State private var isExpanded = false
+
+    private var visibleMessages: [CodexMessage] {
+        isExpanded ? group.messages : group.collapsedMessages
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if group.hiddenCount > 0 {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(AppFont.system(size: 10, weight: .semibold))
+                        Text(isExpanded ? "Hide \(group.hiddenCount) earlier calls" : "+\(group.hiddenCount) earlier calls")
+                            .font(AppFont.caption())
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            ForEach(visibleMessages) { message in
+                TurnTimelineMessageRow(
+                    message: message,
+                    isRetryAvailable: isRetryAvailable,
+                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                    planSessionSource: planSessionSource,
+                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                    completedTurnIDs: completedTurnIDs,
+                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    planMatchingFingerprint: planMatchingFingerprint,
+                    newestStreamingMessageID: newestStreamingMessageID,
+                    autoScrollMode: autoScrollMode,
+                    onRetryUserMessage: onRetryUserMessage,
+                    onTapAssistantRevert: onTapAssistantRevert,
+                    onTapSubagent: onTapSubagent
+                )
+            }
+        }
+    }
+}
+
 private struct TurnTimelineRowsSection: View {
     let shouldWarmRecentTailProgressively: Bool
     let hasEarlierMessages: Bool
@@ -31,6 +240,10 @@ private struct TurnTimelineRowsSection: View {
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
     let onLoadEarlierMessages: () -> Void
+
+    private var renderItems: [TurnTimelineRenderItem] {
+        TurnTimelineRenderProjection.project(messages: Array(visibleMessages))
+    }
 
     var body: some View {
         if shouldWarmRecentTailProgressively {
@@ -55,24 +268,41 @@ private struct TurnTimelineRowsSection: View {
             .buttonStyle(.plain)
         }
 
-        ForEach(visibleMessages) { message in
-            MessageRow(
-                message: message,
-                isRetryAvailable: isRetryAvailable,
-                onRetryUserMessage: onRetryUserMessage,
-                assistantBlockAccessoryState: cachedBlockInfoByMessageID[message.id],
-                planSessionSource: planSessionSource,
-                allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                assistantTurnCompleted: message.turnId.map(completedTurnIDs.contains) ?? false,
-                threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                planMatchingFingerprint: planMatchingFingerprint,
-                showsStreamingAnimations: autoScrollMode == .followBottom
-                    && message.id == newestStreamingMessageID,
-                assistantRevertAction: onTapAssistantRevert,
-                subagentOpenAction: onTapSubagent
-            )
-            .equatable()
-            .id(message.id)
+        ForEach(renderItems) { item in
+            switch item {
+            case .message(let message):
+                TurnTimelineMessageRow(
+                    message: message,
+                    isRetryAvailable: isRetryAvailable,
+                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                    planSessionSource: planSessionSource,
+                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                    completedTurnIDs: completedTurnIDs,
+                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    planMatchingFingerprint: planMatchingFingerprint,
+                    newestStreamingMessageID: newestStreamingMessageID,
+                    autoScrollMode: autoScrollMode,
+                    onRetryUserMessage: onRetryUserMessage,
+                    onTapAssistantRevert: onTapAssistantRevert,
+                    onTapSubagent: onTapSubagent
+                )
+            case .toolBurst(let group):
+                TurnTimelineToolBurstView(
+                    group: group,
+                    isRetryAvailable: isRetryAvailable,
+                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                    planSessionSource: planSessionSource,
+                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                    completedTurnIDs: completedTurnIDs,
+                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    planMatchingFingerprint: planMatchingFingerprint,
+                    newestStreamingMessageID: newestStreamingMessageID,
+                    autoScrollMode: autoScrollMode,
+                    onRetryUserMessage: onRetryUserMessage,
+                    onTapAssistantRevert: onTapAssistantRevert,
+                    onTapSubagent: onTapSubagent
+                )
+            }
         }
     }
 }
