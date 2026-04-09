@@ -129,7 +129,21 @@ async function continueOnMac(
   // real device switch: close, reopen, then focus the requested thread.
   if (desktopKnown && !appRunning) {
     try {
-      await openCodexTarget(targetUrl, { bundleId, appPath, executor });
+      // Cold-launch the desktop app first, then deep-link the thread once the
+      // router is ready. A single `open codex://threads/...` can land on the
+      // default new-chat route when Codex.app is not fully booted yet.
+      await openCodexApp({ bundleId, appPath, executor });
+      await sleepFn(appBootWaitMs);
+      await openWhenThreadReady(threadId, targetUrl, {
+        bundleId,
+        appPath,
+        executor,
+        env,
+        fsModule,
+        sleepFn,
+        waitMs: threadMaterializeWaitMs,
+        pollMs: threadMaterializePollMs,
+      });
     } catch (error) {
       throw desktopError(
         "handoff_failed",
