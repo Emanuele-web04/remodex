@@ -8,6 +8,7 @@ import SwiftUI
 import UIKit
 
 struct TurnComposerInputTextView: UIViewRepresentable {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var text: String
     @Binding var isFocused: Bool
     let isEditable: Bool
@@ -27,6 +28,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.textColor = UIColor.label
         textView.typingAttributes[.font] = composerUIFont()
         textView.typingAttributes[.foregroundColor] = UIColor.label
+        textView.adjustsFontForContentSizeCategory = true
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
@@ -68,6 +70,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         uiView.font = composerUIFont()
         uiView.typingAttributes[.font] = composerUIFont()
         uiView.typingAttributes[.foregroundColor] = UIColor.label
+        uiView.adjustsFontForContentSizeCategory = true
         uiView.textContainer.widthTracksTextView = true
         // Preserve internal scrolling without letting composer drags dismiss the keyboard.
         uiView.keyboardDismissMode = .none
@@ -96,11 +99,9 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     // Keeps the composer aligned with the app's normal body sizing instead of
     // the smaller ad hoc size that made the input feel visually detached.
     private func composerUIFont() -> UIFont {
-        let composerFontSize: CGFloat = 15
-        if AppFont.currentStyle == .system {
-            return UIFont.systemFont(ofSize: composerFontSize)
-        }
-        return AppFont.uiFont(size: composerFontSize, textStyle: .body)
+        // Read the SwiftUI environment so UIKit gets refreshed when Dynamic Type changes.
+        let _ = dynamicTypeSize
+        return AppFont.uiFont(size: 15, textStyle: .body)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {

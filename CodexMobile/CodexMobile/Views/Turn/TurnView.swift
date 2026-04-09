@@ -51,6 +51,7 @@ struct TurnView: View {
         let gitWorkingDirectory = resolvedThread.gitWorkingDirectory
         let isThreadRunning = renderSnapshot.isThreadRunning
         let isEmptyThread = renderSnapshot.messages.isEmpty
+        let threadDisplayPhase = codex.threadDisplayPhase(threadId: thread.id)
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
         let isWorktreeProject = resolvedThread.isManagedWorktreeProject
         let isComposerAutocompletePresented = viewModel.isFileAutocompleteVisible
@@ -64,6 +65,25 @@ struct TurnView: View {
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
         )
+        let toolbarNavigationContext = threadNavigationContext(for: resolvedThread)
+        let toolbarWorktreeHandoffTitle = isWorktreeProject ? "Hand off to Local" : "Hand off to Worktree"
+        let isGitActionEnabled = canRunGitAction(
+            isThreadRunning: isThreadRunning,
+            gitWorkingDirectory: gitWorkingDirectory
+        )
+        let disabledGitActions: Set<TurnGitActionKind> = viewModel.canCreatePullRequest ? [] : [.createPR]
+        let onTapMacHandoff: (() -> Void)? = codex.isConnected ? {
+            isShowingMacHandoffConfirm = true
+        } : nil
+        let onTapWorktreeHandoff: (() -> Void)? = showsGitControls ? {
+            handleWorktreeHandoffTap(currentThread: resolvedThread)
+        } : nil
+        let onTapNewChat: (() -> Void)? = codex.isConnected && !isWorktreeProject ? {
+            startSiblingChat()
+        } : nil
+        let onTapRepoDiff: (() -> Void)? = showsGitControls ? {
+            presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
+        } : nil
 
         return TurnConversationContainerView(
                 threadID: thread.id,
@@ -84,7 +104,7 @@ struct TurnView: View {
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
                 isComposerAutocompletePresented: isComposerAutocompletePresented,
-                emptyState: AnyView(emptyState),
+                emptyState: resolvedEmptyState(for: threadDisplayPhase),
                 composer: AnyView(composerWithSubagentAccessory(
                     currentThread: resolvedThread,
                     activeTurnID: activeTurnID,
@@ -129,36 +149,25 @@ struct TurnView: View {
         .toolbar {
             TurnToolbarContent(
                 displayTitle: resolvedThread.displayTitle,
-                navigationContext: threadNavigationContext(for: resolvedThread),
+                navigationContext: toolbarNavigationContext,
                 showsThreadActions: codex.isConnected,
                 isHandingOffToMac: isHandingOffToMac,
                 isStartingNewChat: isStartingSiblingChat,
                 canHandOffToWorktree: canHandOffToWorktree,
-                worktreeHandoffTitle: isWorktreeProject ? "Hand off to Local" : "Hand off to Worktree",
+                worktreeHandoffTitle: toolbarWorktreeHandoffTitle,
                 isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
                 repoDiffTotals: viewModel.gitRepoSync?.repoDiffTotals,
                 isLoadingRepoDiff: isLoadingRepositoryDiff,
                 showsGitActions: showsGitControls,
-                isGitActionEnabled: canRunGitAction(
-                    isThreadRunning: isThreadRunning,
-                    gitWorkingDirectory: gitWorkingDirectory
-                ),
-                disabledGitActions: viewModel.canCreatePullRequest ? [] : [.createPR],
+                isGitActionEnabled: isGitActionEnabled,
+                disabledGitActions: disabledGitActions,
                 isRunningGitAction: viewModel.isRunningGitAction,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
-                onTapMacHandoff: codex.isConnected ? {
-                    isShowingMacHandoffConfirm = true
-                } : nil,
-                onTapWorktreeHandoff: showsGitControls ? {
-                    handleWorktreeHandoffTap(currentThread: resolvedThread)
-                } : nil,
-                onTapNewChat: codex.isConnected && !isWorktreeProject ? {
-                    startSiblingChat()
-                } : nil,
-                onTapRepoDiff: showsGitControls ? {
-                    presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
-                } : nil,
+                onTapMacHandoff: onTapMacHandoff,
+                onTapWorktreeHandoff: onTapWorktreeHandoff,
+                onTapNewChat: onTapNewChat,
+                onTapRepoDiff: onTapRepoDiff,
                 onGitAction: { action in
                     handleGitActionSelection(
                         action,
@@ -1632,9 +1641,37 @@ struct TurnView: View {
     private func openThread(_ threadId: String) {
         codex.activeThreadId = threadId
         codex.markThreadAsViewed(threadId)
+        codex.requestImmediateActiveThreadSync(threadId: threadId)
     }
 
     // MARK: - Empty State
+
+    private var loadingState: some View {
+        VStack(spacing: 12) {
+            Spacer()
+            ProgressView()
+                .controlSize(.large)
+            Text("Loading chat...")
+                .font(AppFont.title3(weight: .semibold))
+            Text("Fetching the latest messages for this conversation.")
+                .font(AppFont.body())
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
+    }
+
+    private func resolvedEmptyState(for phase: CodexService.ThreadDisplayPhase) -> AnyView {
+        switch phase {
+        case .loading:
+            return AnyView(loadingState)
+        case .empty, .ready:
+            return AnyView(emptyState)
+        }
+    }
 
     private var emptyState: some View {
         VStack(spacing: 12) {

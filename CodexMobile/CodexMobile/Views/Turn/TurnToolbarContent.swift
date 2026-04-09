@@ -37,7 +37,7 @@ struct TurnToolbarContent: ToolbarContent {
     @Binding var isShowingPathSheet: Bool
 
     var body: some ToolbarContent {
-        let hasTrailingCluster = repoDiffTotals != nil
+        let hasTrailingCluster = repoDiffTotals != nil || showsGitActions
         let isThreadActionLoading = isHandingOffToMac || isStartingNewChat
         let canTapMacHandoff = onTapMacHandoff != nil && !isThreadActionLoading
         let canTapWorktreeHandoff = onTapWorktreeHandoff != nil
@@ -121,13 +121,24 @@ struct TurnToolbarContent: ToolbarContent {
             }
         }
 
-        if repoDiffTotals != nil {
+        if repoDiffTotals != nil || showsGitActions {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if let repoDiffTotals {
                     TurnToolbarDiffTotalsLabel(
                         totals: repoDiffTotals,
                         isLoading: isLoadingRepoDiff,
                         onTap: onTapRepoDiff
+                    )
+                }
+
+                if showsGitActions {
+                    TurnGitActionsToolbarButton(
+                        isEnabled: isGitActionEnabled,
+                        disabledActions: disabledGitActions,
+                        isRunningAction: isRunningGitAction,
+                        showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+                        gitSyncState: gitSyncState,
+                        onSelect: onGitAction
                     )
                 }
             }

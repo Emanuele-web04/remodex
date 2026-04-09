@@ -220,6 +220,7 @@ struct ComposerBottomBar: View {
                 leadingImageIsSystem: true
             )
         }
+        .fixedSize(horizontal: true, vertical: false)
         .tint(metaLabelColor)
     }
 
@@ -277,6 +278,8 @@ struct ComposerBottomBar: View {
                 leadingImageIsSystem: false
             )
         }
+        .fixedSize(horizontal: true, vertical: false)
+        .layoutPriority(1)
         .tint(metaLabelColor)
     }
 
@@ -346,6 +349,9 @@ struct ComposerBottomBar: View {
         .padding(.vertical, metaVerticalPadding)
         .padding(.horizontal, 4)
         .foregroundStyle(metaLabelColor)
+        // Keep adjacent menus from borrowing each other's touch region when the
+        // phone composer gets tight while the keyboard is up.
+        .fixedSize(horizontal: true, vertical: false)
         .contentShape(Rectangle())
     }
 }

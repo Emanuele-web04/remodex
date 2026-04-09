@@ -37,9 +37,37 @@ extension CodexService {
         }
     }
 
+    enum ThreadDisplayPhase: Equatable {
+        case loading
+        case empty
+        case ready
+    }
+
     // Returns the full persisted timeline for a single thread.
     func messages(for threadId: String) -> [CodexMessage] {
         messagesByThread[threadId] ?? []
+    }
+
+    // Centralizes first-open display state so reconnect jitter does not bounce
+    // an existing chat between loading and the empty placeholder.
+    func threadDisplayPhase(threadId: String) -> ThreadDisplayPhase {
+        if !messages(for: threadId).isEmpty || threadHasActiveOrRunningTurn(threadId) {
+            return .ready
+        }
+
+        if shouldSkipInitialDisplayHydration(threadId: threadId) {
+            return .empty
+        }
+
+        if loadingThreadIDs.contains(threadId) {
+            return .loading
+        }
+
+        if !hydratedThreadIDs.contains(threadId) {
+            return .loading
+        }
+
+        return .empty
     }
 
     // Returns a lightweight per-thread revision token for any message timeline mutation.

@@ -114,7 +114,7 @@ struct TurnComposerView: View {
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
                         Text("Ask anything... @files, $skills, /commands")
-                            .font(AppFont.system(size: 15))
+                            .font(AppFont.body())
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
                     }

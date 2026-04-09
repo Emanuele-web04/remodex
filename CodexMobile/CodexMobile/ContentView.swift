@@ -16,6 +16,7 @@ struct ContentView: View {
     @State private var viewModel = ContentViewModel()
     @State private var isSidebarOpen = false
     @State private var sidebarDragOffset: CGFloat = 0
+    @State private var isSidebarPrewarmed = false
     @State private var selectedThread: CodexThread?
     @State private var navigationPath = NavigationPath()
     @State private var showSettings = false
@@ -26,11 +27,20 @@ struct ContentView: View {
     @State private var isRetryingBridgeUpdate = false
     @State private var isPreparingManualScanner = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
+    @State private var sidebarPrewarmTask: Task<Void, Never>?
+    @State private var sidebarGestureDebugSequence = 0
+    @State private var activeSidebarGestureDebugID: Int?
+    @State private var lastSidebarGestureLogBucket: Int?
+    @State private var sidebarGestureAutoCommitted = false
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
 
-    private let sidebarWidth: CGFloat = 350
+    private let sidebarWidth: CGFloat = 330
     // Lets the drawer gesture start a bit inside the content instead of only on the bezel edge.
     private let sidebarOpenActivationWidth: CGFloat = 80
+    private let sidebarPrewarmDelayNanoseconds: UInt64 = 700_000_000
+    private let sidebarGestureLogBucketWidth: CGFloat = 40
+    private let sidebarSwipePreviewLimit: CGFloat = 26
+    private let sidebarSwipeCommitDistance: CGFloat = 30
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
 
     var body: some View {
@@ -38,9 +48,12 @@ struct ContentView: View {
             // Only resume saved-pairing recovery after onboarding is done and the manual scanner is not in control.
             .task {
                 guard hasSeenOnboarding, !isShowingManualScanner else {
+                    debugSidebarLog("launch task skipped onboardingSeen=\(hasSeenOnboarding) manualScanner=\(isShowingManualScanner)")
                     return
                 }
+                debugSidebarLog("launch task autoConnect begin connected=\(codex.isConnected) threadCount=\(codex.threads.count)")
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
+                scheduleSidebarPrewarmIfNeeded()
             }
             .onChange(of: showSettings) { _, show in
                 if show {
@@ -49,19 +62,29 @@ struct ContentView: View {
                 }
             }
             .onChange(of: isSidebarOpen) { wasOpen, isOpen in
+                debugSidebarLog(
+                    "open-state changed wasOpen=\(wasOpen) isOpen=\(isOpen) prewarmed=\(isSidebarPrewarmed) "
+                        + "dragOffset=\(Int(sidebarDragOffset)) threadCount=\(codex.threads.count)"
+                )
                 guard !wasOpen, isOpen else {
                     return
                 }
-                if viewModel.shouldRequestSidebarFreshSync(isConnected: codex.isConnected) {
+                if !isSidebarPrewarmed,
+                   viewModel.shouldRequestSidebarFreshSync(isConnected: codex.isConnected) {
+                    debugSidebarLog("sidebar open triggers immediate sync activeThread=\(codex.activeThreadId ?? "nil")")
                     codex.requestImmediateSync(threadId: codex.activeThreadId)
+                } else {
+                    debugSidebarLog("sidebar open skips immediate sync prewarmed=\(isSidebarPrewarmed) connected=\(codex.isConnected)")
                 }
             }
             .onChange(of: navigationPath) { _, _ in
+                debugSidebarLog("navigation path changed count=\(navigationPath.count) sidebarOpen=\(isSidebarOpen)")
                 if isSidebarOpen {
                     closeSidebar()
                 }
             }
             .onChange(of: selectedThread) { previousThread, thread in
+                debugSidebarLog("selectedThread changed from=\(previousThread?.id ?? "nil") to=\(thread?.id ?? "nil")")
                 codex.handleDisplayedThreadChange(
                     from: previousThread?.id,
                     to: thread?.id
@@ -69,6 +92,7 @@ struct ContentView: View {
                 codex.activeThreadId = thread?.id
             }
             .onChange(of: codex.activeThreadId) { _, activeThreadId in
+                debugSidebarLog("activeThreadId changed to=\(activeThreadId ?? "nil")")
                 guard let activeThreadId,
                       let matchingThread = codex.threads.first(where: { $0.id == activeThreadId }),
                       selectedThread?.id != matchingThread.id else {
@@ -77,9 +101,12 @@ struct ContentView: View {
                 selectedThread = matchingThread
             }
             .onChange(of: codex.threads) { _, threads in
+                debugSidebarLog("threads changed count=\(threads.count) sidebarOpen=\(isSidebarOpen) prewarmed=\(isSidebarPrewarmed)")
                 syncSelectedThread(with: threads)
+                scheduleSidebarPrewarmIfNeeded()
             }
             .onChange(of: scenePhase) { _, phase in
+                debugSidebarLog("scenePhase changed phase=\(String(describing: phase))")
                 codex.setForegroundState(phase != .background)
                 if phase == .active {
                     Task {
@@ -92,7 +119,10 @@ struct ContentView: View {
 
                         await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
                         await subscriptionRefresh
+                        scheduleSidebarPrewarmIfNeeded()
                     }
+                } else if phase == .background {
+                    teardownSidebarPrewarm()
                 }
             }
             .onChange(of: codex.shouldAutoReconnectOnForeground) { _, shouldReconnect in
@@ -104,10 +134,12 @@ struct ContentView: View {
                 }
             }
             .onChange(of: codex.isConnected) { wasConnected, isNowConnected in
+                debugSidebarLog("connection changed wasConnected=\(wasConnected) isConnected=\(isNowConnected)")
                 if !wasConnected, isNowConnected {
                     Task {
                         await codex.requestNotificationPermissionOnFirstLaunchIfNeeded()
                     }
+                    scheduleSidebarPrewarmIfNeeded()
                 }
             }
             .onChange(of: codex.threadCompletionBanner) { _, banner in
@@ -229,28 +261,36 @@ struct ContentView: View {
     }
 
     private var mainAppBody: some View {
-        ZStack(alignment: .leading) {
-            if sidebarVisible {
-                SidebarView(
-                    selectedThread: $selectedThread,
-                    showSettings: $showSettings,
-                    isSearchActive: $isSearchActive,
-                    onClose: { closeSidebar() }
-                )
-                .frame(width: effectiveSidebarWidth)
-                .animation(.easeInOut(duration: 0.25), value: isSearchActive)
-            }
+        GeometryReader { proxy in
+            let mainContentWidth = max(0, proxy.size.width - sidebarRevealWidth)
 
-            mainNavigationLayer
-                .offset(x: contentOffset)
+            ZStack(alignment: .leading) {
+                if sidebarVisible || isSidebarPrewarmed {
+                    SidebarView(
+                        selectedThread: $selectedThread,
+                        showSettings: $showSettings,
+                        isSearchActive: $isSearchActive,
+                        isVisible: sidebarVisible,
+                        onClose: { closeSidebar() }
+                    )
+                    .frame(width: effectiveSidebarWidth)
+                    .animation(.easeInOut(duration: 0.25), value: isSearchActive)
+                }
 
-            if sidebarVisible {
-                (colorScheme == .dark ? Color.white : Color.black)
-                    .opacity(contentDimOpacity)
-                    .ignoresSafeArea()
-                    .offset(x: contentOffset)
-                    .allowsHitTesting(isSidebarOpen)
-                    .onTapGesture { closeSidebar() }
+                mainNavigationLayer
+                    .frame(width: mainContentWidth, alignment: .leading)
+                    .offset(x: sidebarRevealWidth)
+                    .clipped()
+
+                if sidebarVisible {
+                    (colorScheme == .dark ? Color.white : Color.black)
+                        .opacity(contentDimOpacity)
+                        .frame(width: mainContentWidth)
+                        .ignoresSafeArea()
+                        .offset(x: sidebarRevealWidth)
+                        .allowsHitTesting(isSidebarOpen)
+                        .onTapGesture { closeSidebar() }
+                }
             }
         }
         .simultaneousGesture(edgeDragGesture)
@@ -353,7 +393,7 @@ struct ContentView: View {
         isSidebarOpen || sidebarDragOffset > 0
     }
 
-    private var contentOffset: CGFloat {
+    private var sidebarRevealWidth: CGFloat {
         if isSidebarOpen {
             return max(0, effectiveSidebarWidth + sidebarDragOffset)
         } else {
@@ -362,49 +402,91 @@ struct ContentView: View {
     }
 
     private var contentDimOpacity: Double {
-        let progress = min(1, contentOffset / effectiveSidebarWidth)
+        let progress = min(1, sidebarRevealWidth / effectiveSidebarWidth)
         return 0.08 * progress
     }
 
     // MARK: - Gestures
 
     private var edgeDragGesture: some Gesture {
-        DragGesture(minimumDistance: 15)
+        DragGesture(minimumDistance: 15, coordinateSpace: .global)
             .onChanged { value in
                 guard navigationPath.isEmpty else { return }
+                guard !sidebarGestureAutoCommitted else { return }
 
                 if !isSidebarOpen {
                     guard value.startLocation.x < sidebarOpenActivationWidth,
                           isOpeningSidebarGesture(value) else { return }
-                    sidebarDragOffset = max(0, value.translation.width)
+                    beginSidebarGestureDebugIfNeeded(kind: "open", startX: value.startLocation.x)
+                    sidebarDragOffset = min(max(0, value.translation.width), sidebarSwipePreviewLimit)
+                    logSidebarGestureProgressIfNeeded(translation: sidebarDragOffset)
+                    guard value.translation.width >= sidebarSwipeCommitDistance else { return }
+                    sidebarGestureAutoCommitted = true
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) auto-commit kind=open "
+                            + "translation=\(Int(value.translation.width)) commit=\(Int(sidebarSwipeCommitDistance))"
+                    )
+                    finishGesture(open: true)
                 } else {
                     guard isClosingSidebarGesture(value) else { return }
-                    sidebarDragOffset = min(0, value.translation.width)
+                    beginSidebarGestureDebugIfNeeded(kind: "close", startX: value.startLocation.x)
+                    sidebarDragOffset = -min(max(0, -value.translation.width), sidebarSwipePreviewLimit)
+                    logSidebarGestureProgressIfNeeded(translation: -sidebarDragOffset)
+                    guard -value.translation.width >= sidebarSwipeCommitDistance else { return }
+                    sidebarGestureAutoCommitted = true
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) auto-commit kind=close "
+                            + "translation=\(Int(-value.translation.width)) commit=\(Int(sidebarSwipeCommitDistance))"
+                    )
+                    finishGesture(open: false)
                 }
             }
             .onEnded { value in
                 guard navigationPath.isEmpty else { return }
-
-                let currentWidth = effectiveSidebarWidth
-                let threshold = currentWidth * 0.4
+                if sidebarGestureAutoCommitted {
+                    sidebarGestureAutoCommitted = false
+                    return
+                }
 
                 if !isSidebarOpen {
                     guard value.startLocation.x < sidebarOpenActivationWidth,
                           isOpeningSidebarGesture(value) else {
-                        sidebarDragOffset = 0
+                        debugSidebarLog("gesture cancelled before open")
+                        withAnimation(Self.sidebarSpring) {
+                            sidebarDragOffset = 0
+                        }
+                        sidebarGestureAutoCommitted = false
+                        resetSidebarGestureDebug()
                         return
                     }
-                    let shouldOpen = value.translation.width > threshold
-                        || value.predictedEndTranslation.width > currentWidth * 0.5
-                    finishGesture(open: shouldOpen)
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) end kind=open "
+                            + "translation=\(Int(value.translation.width)) predicted=\(Int(value.predictedEndTranslation.width)) "
+                            + "commit=\(Int(sidebarSwipeCommitDistance)) decision=snap-close"
+                    )
+                    withAnimation(Self.sidebarSpring) {
+                        sidebarDragOffset = 0
+                    }
+                    resetSidebarGestureDebug()
                 } else {
                     guard isClosingSidebarGesture(value) else {
-                        sidebarDragOffset = 0
+                        debugSidebarLog("gesture cancelled before close")
+                        withAnimation(Self.sidebarSpring) {
+                            sidebarDragOffset = 0
+                        }
+                        sidebarGestureAutoCommitted = false
+                        resetSidebarGestureDebug()
                         return
                     }
-                    let shouldClose = -value.translation.width > threshold
-                        || -value.predictedEndTranslation.width > currentWidth * 0.5
-                    finishGesture(open: !shouldClose)
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) end kind=close "
+                            + "translation=\(Int(-value.translation.width)) predicted=\(Int(-value.predictedEndTranslation.width)) "
+                            + "commit=\(Int(sidebarSwipeCommitDistance)) decision=snap-open"
+                    )
+                    withAnimation(Self.sidebarSpring) {
+                        sidebarDragOffset = 0
+                    }
+                    resetSidebarGestureDebug()
                 }
             }
     }
@@ -497,11 +579,16 @@ struct ContentView: View {
 
     private func finishGesture(open: Bool) {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        debugSidebarLog("finishGesture open=\(open)")
         setSidebar(open: open)
     }
 
     // Forces UIKit-backed inputs like the composer text view to resign before the drawer settles open.
     private func setSidebar(open: Bool) {
+        debugSidebarLog(
+            "setSidebar open=\(open) prewarmed=\(isSidebarPrewarmed) "
+                + "visible=\(sidebarVisible) revealWidth=\(Int(sidebarRevealWidth))"
+        )
         if open {
             dismissActiveKeyboard()
         }
@@ -509,6 +596,88 @@ struct ContentView: View {
             isSidebarOpen = open
             sidebarDragOffset = 0
         }
+        sidebarGestureAutoCommitted = false
+        resetSidebarGestureDebug()
+    }
+
+    // Warms the sidebar view tree offscreen after launch/reconnect so the first drawer gesture
+    // doesn't pay the full mount/grouping cost in the animation frame budget.
+    private func scheduleSidebarPrewarmIfNeeded() {
+        guard scenePhase == .active,
+              hasSeenOnboarding,
+              subscriptions.hasAppAccess,
+              !isShowingManualScanner,
+              !isSidebarPrewarmed,
+              sidebarPrewarmTask == nil,
+              (codex.isConnected || !codex.threads.isEmpty) else {
+            debugSidebarLog(
+                "prewarm skipped phase=\(String(describing: scenePhase)) onboarding=\(hasSeenOnboarding) "
+                    + "appAccess=\(subscriptions.hasAppAccess) scanner=\(isShowingManualScanner) "
+                    + "prewarmed=\(isSidebarPrewarmed) taskActive=\(sidebarPrewarmTask != nil) "
+                    + "connected=\(codex.isConnected) threadCount=\(codex.threads.count)"
+            )
+            return
+        }
+
+        debugSidebarLog("prewarm scheduled delayMs=\(sidebarPrewarmDelayNanoseconds / 1_000_000)")
+        sidebarPrewarmTask = Task { @MainActor in
+            defer { sidebarPrewarmTask = nil }
+            try? await Task.sleep(nanoseconds: sidebarPrewarmDelayNanoseconds)
+            guard !Task.isCancelled,
+                  scenePhase == .active,
+                  hasSeenOnboarding,
+                  subscriptions.hasAppAccess,
+                  !isShowingManualScanner,
+                  !isSidebarOpen,
+                  sidebarDragOffset == 0,
+                  (codex.isConnected || !codex.threads.isEmpty) else {
+                debugSidebarLog("prewarm cancelled before completion")
+                return
+            }
+            isSidebarPrewarmed = true
+            debugSidebarLog("prewarm completed threadCount=\(codex.threads.count)")
+        }
+    }
+
+    private func teardownSidebarPrewarm() {
+        debugSidebarLog("prewarm teardown requested sidebarOpen=\(isSidebarOpen) dragOffset=\(Int(sidebarDragOffset))")
+        sidebarPrewarmTask?.cancel()
+        sidebarPrewarmTask = nil
+        if !isSidebarOpen, sidebarDragOffset == 0 {
+            isSidebarPrewarmed = false
+            debugSidebarLog("prewarm cleared")
+        }
+    }
+
+    private func beginSidebarGestureDebugIfNeeded(kind: String, startX: CGFloat) {
+        guard activeSidebarGestureDebugID == nil else { return }
+        sidebarGestureDebugSequence += 1
+        activeSidebarGestureDebugID = sidebarGestureDebugSequence
+        lastSidebarGestureLogBucket = nil
+        debugSidebarLog(
+            "gesture #\(sidebarGestureDebugSequence) begin kind=\(kind) "
+                + "startX=\(Int(startX)) sidebarOpen=\(isSidebarOpen) prewarmed=\(isSidebarPrewarmed)"
+        )
+    }
+
+    private func logSidebarGestureProgressIfNeeded(translation: CGFloat) {
+        guard let gestureID = activeSidebarGestureDebugID else { return }
+        let bucket = max(0, Int(translation / sidebarGestureLogBucketWidth))
+        guard bucket != lastSidebarGestureLogBucket else { return }
+        lastSidebarGestureLogBucket = bucket
+        debugSidebarLog(
+            "gesture #\(gestureID) progress translation=\(Int(translation)) "
+                + "bucket=\(bucket) revealWidth=\(Int(sidebarRevealWidth))"
+        )
+    }
+
+    private func resetSidebarGestureDebug() {
+        activeSidebarGestureDebugID = nil
+        lastSidebarGestureLogBucket = nil
+    }
+
+    private func debugSidebarLog(_ message: String) {
+        print("[SidebarDebug] \(message)")
     }
 
     // Uses the responder chain instead of per-view bindings so mixed SwiftUI/UIKit inputs all close together.
@@ -646,6 +815,7 @@ struct ContentView: View {
         selectedThread = thread
         codex.activeThreadId = thread.id
         codex.markThreadAsViewed(thread.id)
+        codex.requestImmediateActiveThreadSync(threadId: thread.id)
     }
 
     private func dismissThreadCompletionBanner() {
