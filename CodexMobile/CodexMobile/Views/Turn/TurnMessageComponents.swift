@@ -1180,9 +1180,9 @@ struct MessageRow: View, Equatable {
     @State private var isShowingBlockDiffSheet = false
 
     private var hasTurnEndActions: Bool {
-        guard let accessory = assistantBlockAccessoryState else { return false }
-        return accessory.blockRevertPresentation != nil
-            || accessory.blockDiffEntries != nil
+        AssistantTurnEndActionVisibility.shouldShow(
+            accessoryState: assistantBlockAccessoryState
+        )
     }
 
     private var isInlineCommitAndPushRunning: Bool {
@@ -1840,6 +1840,16 @@ struct ToolCallSystemBlockPreviewHost: View {
             )
         }
         .environment(CodexService())
+    }
+}
+
+enum AssistantTurnEndActionVisibility {
+    // Ties Diff/Revert to the block's own streaming state so interrupted and
+    // turn-less recovered rows keep their end-of-turn controls once settled.
+    static func shouldShow(accessoryState: AssistantBlockAccessoryState?) -> Bool {
+        guard let accessoryState, !accessoryState.showsRunningIndicator else { return false }
+        return accessoryState.blockRevertPresentation != nil
+            || accessoryState.blockDiffEntries != nil
     }
 }
 

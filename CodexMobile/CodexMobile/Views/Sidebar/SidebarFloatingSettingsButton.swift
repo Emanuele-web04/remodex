@@ -32,6 +32,8 @@ struct SidebarMacConnectionStatusView: View {
     let isConnected: Bool
 
     var body: some View {
+        // Let the trusted-Mac label use the sidebar width instead of truncating
+        // inside a narrow fixed box while the center spacer absorbs the space.
         VStack(alignment: .trailing, spacing: 2) {
             Text(statusTitle)
                 .font(AppFont.mono(.caption))
@@ -42,9 +44,9 @@ struct SidebarMacConnectionStatusView: View {
                 .font(AppFont.mono(.subheadline))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.65)
         }
-        .frame(maxWidth: 170, alignment: .trailing)
+        .layoutPriority(1)
     }
 
     private var statusTitle: String {

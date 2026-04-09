@@ -28,7 +28,7 @@ struct SidebarHeaderView: View {
                 Button(action: onClose) {
                     TwoLineHamburgerIcon()
                         .foregroundStyle(.primary)
-                        .padding(8)
+                        .frame(width: 44, height: 44)
                         .adaptiveGlass(.regular, in: Circle())
                         .contentShape(Circle())
                 }

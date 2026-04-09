@@ -52,6 +52,9 @@ struct TurnView: View {
         let isThreadRunning = renderSnapshot.isThreadRunning
         let isEmptyThread = renderSnapshot.messages.isEmpty
         let threadDisplayPhase = codex.threadDisplayPhase(threadId: thread.id)
+        // Keep the service-owned loading vs empty-state decision intact while
+        // history hydration catches up for previously active conversations.
+        let resolvedEmptyConversationState = resolvedEmptyState(for: threadDisplayPhase)
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
         let isWorktreeProject = resolvedThread.isManagedWorktreeProject
         let isComposerAutocompletePresented = viewModel.isFileAutocompleteVisible
@@ -104,7 +107,7 @@ struct TurnView: View {
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
                 isComposerAutocompletePresented: isComposerAutocompletePresented,
-                emptyState: resolvedEmptyState(for: threadDisplayPhase),
+                emptyState: resolvedEmptyConversationState,
                 composer: AnyView(composerWithSubagentAccessory(
                     currentThread: resolvedThread,
                     activeTurnID: activeTurnID,
