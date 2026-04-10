@@ -88,7 +88,6 @@ struct TurnComposerView: View {
     let onSend: () -> Void
 
     @State private var composerInputHeight: CGFloat = 32
-    @State private var keyboardBottomInset: CGFloat = 0
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -238,27 +237,9 @@ struct TurnComposerView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 4)
-        .padding(.bottom, 4 + keyboardBottomInset)
+        .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
-            keyboardBottomInset = Self.keyboardBottomInset(from: notification)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
-            keyboardBottomInset = 0
-        }
         .animation(.easeInOut(duration: 0.18), value: isInputFocused.wrappedValue)
-        .animation(.easeInOut(duration: 0.18), value: keyboardBottomInset)
-    }
-
-    private static func keyboardBottomInset(from notification: Notification) -> CGFloat {
-        guard let userInfo = notification.userInfo,
-              let keyboardFrameValue = userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue else {
-            return 0
-        }
-
-        let keyboardFrame = keyboardFrameValue.cgRectValue
-        let screenHeight = UIScreen.main.bounds.height
-        return max(0, screenHeight - keyboardFrame.minY)
     }
 
 }
