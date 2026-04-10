@@ -294,7 +294,7 @@ struct ComposerBottomBar: View {
         }
         .padding(.vertical, metaVerticalPadding)
         .padding(.horizontal, 4)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(Color(.plan))
     }
 
 

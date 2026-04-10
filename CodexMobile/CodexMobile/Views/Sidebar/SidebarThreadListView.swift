@@ -165,7 +165,7 @@ struct SidebarThreadListView: View {
     private func projectHeader(_ group: SidebarThreadGroup) -> some View {
         let isExpanded = expandedProjectGroupIDs.contains(group.id)
 
-        HStack(spacing: 12) {
+        return HStack(spacing: 12) {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 toggleProjectGroupExpansion(group.id)
