@@ -56,8 +56,8 @@ final class ContentViewModel {
         do {
             try await connectWithAutoRecovery(
                 codex: codex,
-                serverURL: fullURL,
-                performAutoRetry: true
+                performAutoRetry: true,
+                serverURLProvider: { fullURL }
             )
         } catch {
             if codex.lastErrorMessage?.isEmpty ?? true {
@@ -89,22 +89,12 @@ final class ContentViewModel {
             codex.connectionRecoveryState = .idle
             return
         }
-
-        guard let fullURL = await preferredReconnectURL(codex: codex) else {
-            codex.connectionRecoveryState = .idle
-            return
-        }
-
-        guard shouldContinueManualReconnect else {
-            codex.connectionRecoveryState = .idle
-            return
-        }
         do {
             try await connectWithAutoRecovery(
                 codex: codex,
-                serverURL: fullURL,
                 performAutoRetry: true,
-                continueWhile: { self.shouldContinueManualReconnect }
+                continueWhile: { self.shouldContinueManualReconnect },
+                serverURLProvider: { await self.preferredReconnectURL(codex: codex) }
             )
         } catch {
             if isCancellationLikeError(error) {
@@ -166,15 +156,11 @@ final class ContentViewModel {
             return
         }
 
-        guard let fullURL = await preferredReconnectURL(codex: codex) else {
-            return
-        }
-
         do {
             try await connectWithAutoRecovery(
                 codex: codex,
-                serverURL: fullURL,
-                performAutoRetry: true
+                performAutoRetry: true,
+                serverURLProvider: { await self.preferredReconnectURL(codex: codex) }
             )
         } catch {
             // Keep the saved pairing so temporary Mac/relay outages can recover on the next retry.
@@ -307,11 +293,13 @@ extension ContentViewModel {
         )
     }
 
+    // Re-resolves the reconnect target on every retry so bridge restarts cannot pin
+    // launch/manual recovery loops to one stale saved session id.
     func connectWithAutoRecovery(
         codex: CodexService,
-        serverURL: String,
         performAutoRetry: Bool,
-        continueWhile shouldContinue: (() -> Bool)? = nil
+        continueWhile shouldContinue: (() -> Bool)? = nil,
+        serverURLProvider: () async -> String?
     ) async throws {
         guard !isRunningAutoReconnect else {
             return
@@ -324,6 +312,16 @@ extension ContentViewModel {
         var lastError: Error?
 
         for attemptIndex in 0...maxAttemptIndex {
+            guard shouldContinue?() ?? true else {
+                codex.connectionRecoveryState = .idle
+                throw CancellationError()
+            }
+
+            guard let serverURL = await serverURLProvider() else {
+                codex.connectionRecoveryState = .idle
+                return
+            }
+
             guard shouldContinue?() ?? true else {
                 codex.connectionRecoveryState = .idle
                 throw CancellationError()

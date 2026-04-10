@@ -37,6 +37,7 @@ struct TurnView: View {
     @State private var isVoicePreflighting = false
     @State private var voicePreflightGeneration = 0
     @State private var isVoiceTranscribing = false
+    @State private var hasTriggeredVoiceAutoStop = false
     @State private var voiceRecoveryReason: CodexVoiceFailureReason?
     @State private var isShowingVoiceSetupSheet = false
     @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
@@ -313,6 +314,19 @@ struct TurnView: View {
         }
         .onChange(of: renderSnapshot.timelineChangeToken) { _, _ in
             viewModel.reconcileDismissedStructuredPlanPrompts(messages: renderSnapshot.messages, codex: codex)
+        }
+        .onReceive(voiceTranscriptionManager.$recordingDuration) { duration in
+            guard isVoiceRecording,
+                  !isVoiceTranscribing,
+                  !hasTriggeredVoiceAutoStop,
+                  duration >= voiceAutoStopThreshold else {
+                return
+            }
+
+            hasTriggeredVoiceAutoStop = true
+            Task { @MainActor in
+                await stopVoiceTranscription()
+            }
         }
         .sheet(isPresented: $isShowingThreadPathSheet) {
             if let context = threadNavigationContext(for: resolvedThread) {
@@ -1379,6 +1393,7 @@ struct TurnView: View {
 
     // Stops the recorder, transcribes through the bridge, and appends the final text into the draft.
     private func stopVoiceTranscription() async {
+        hasTriggeredVoiceAutoStop = false
         isVoiceTranscribing = true
         defer { isVoiceTranscribing = false }
 
@@ -1429,6 +1444,7 @@ struct TurnView: View {
 
         clearVoiceRecovery()
         codex.lastErrorMessage = nil
+        hasTriggeredVoiceAutoStop = false
         // Dismiss any active text focus before recording so the keyboard does not
         // compete with the waveform UI or waste vertical space during capture.
         isInputFocused = false
@@ -1465,6 +1481,12 @@ struct TurnView: View {
 
         voiceTranscriptionManager.cancelRecording()
         isVoiceRecording = false
+        hasTriggeredVoiceAutoStop = false
+    }
+
+    // Trigger a hair before the hard validation limit so the saved WAV never misses by timer drift.
+    private var voiceAutoStopThreshold: TimeInterval {
+        max(0, CodexVoiceTranscriptionPreflight.maxDurationSeconds - 0.25)
     }
 
     private func clearVoiceRecovery() {

@@ -74,8 +74,7 @@ extension CodexService {
     // Treats placeholder-only chats as intentionally blank so the UI does not flash
     // a loading state before the thread-open preparation path can confirm the skip.
     func shouldShowImmediateEmptyPlaceholder(threadId: String) -> Bool {
-        guard !hydratedThreadIDs.contains(threadId),
-              !threadHasActiveOrRunningTurn(threadId),
+        guard !threadHasActiveOrRunningTurn(threadId),
               messages(for: threadId).isEmpty,
               let thread = thread(for: threadId),
               thread.syncState == .live else {
@@ -87,6 +86,8 @@ extension CodexService {
             return false
         }
 
+        // Keep a brand-new blank chat on the empty composer even if a hydration
+        // race briefly toggled the thread into a loading state behind the scenes.
         return thread.displayTitle == CodexThread.defaultDisplayTitle
     }
 

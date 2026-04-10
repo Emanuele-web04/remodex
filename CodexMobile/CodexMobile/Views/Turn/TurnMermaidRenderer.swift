@@ -84,7 +84,8 @@ struct MermaidMarkdownContentView: View {
                     MarkdownTextView(
                         text: markdown,
                         profile: .assistantProse,
-                        enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                        enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                        constrainsToAvailableWidth: true
                     )
                 case .mermaid(let source):
                     MermaidBlockView(source: source)

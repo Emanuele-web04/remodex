@@ -123,7 +123,8 @@ extension CodexService {
                 isTrustedReconnectAttempt: isTrustedReconnectAttempt
             )
             presentConnectionErrorIfNeeded(error)
-            await disconnect()
+            // Keep foreground auto-recovery armed across internal reconnect failures.
+            await disconnect(preserveReconnectIntent: shouldAutoReconnectOnForeground)
             if shouldResetSavedSession {
                 recoverTrustedReconnectCandidate()
             }
@@ -378,7 +379,6 @@ extension CodexService {
         cancelCurrentSocketConnection()
 
         let disposition = receiveErrorDisposition(for: error, relayCloseCode: relayCloseCode)
-        let wasTrustedReconnectAttempt = secureConnectionState == .reconnecting
         isConnected = false
         isInitialized = false
         shouldAutoReconnectOnForeground = disposition.shouldAutoReconnectOnForeground
@@ -388,15 +388,9 @@ extension CodexService {
             // Reset volatile secure state so reconnect UI does not keep showing the last encrypted session.
             resetSecureTransportState()
         }
-        if wasTrustedReconnectAttempt && !disposition.shouldClearSavedRelaySession {
-            if recordTrustedReconnectFailureIfNeeded(isTrustedReconnectAttempt: true) {
-                shouldAutoReconnectOnForeground = false
-                connectionRecoveryState = .idle
-                recoverTrustedReconnectCandidate()
-                failAllPendingRequests(with: error)
-                return
-            }
-        } else if disposition.shouldClearSavedRelaySession || !shouldAutoReconnectOnForeground {
+        // Leave trusted reconnect failure accounting to the outer connect attempt so
+        // one transport drop cannot burn the retry budget twice.
+        if disposition.shouldClearSavedRelaySession || !shouldAutoReconnectOnForeground {
             trustedReconnectFailureCount = 0
         }
         connectionRecoveryState = disposition.connectionRecoveryState

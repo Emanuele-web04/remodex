@@ -43,6 +43,24 @@ final class CodexServiceThreadDisplayPhaseTests: XCTestCase {
         XCTAssertEqual(service.threadDisplayPhase(threadId: threadID), .loading)
     }
 
+    func testThreadDisplayPhaseKeepsBlankPlaceholderEmptyEvenIfLoadingStateAlreadyStarted() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.threads = [
+            CodexThread(
+                id: threadID,
+                title: CodexThread.defaultDisplayTitle,
+                preview: nil,
+                syncState: .live
+            )
+        ]
+        service.hydratedThreadIDs.insert(threadID)
+        service.loadingThreadIDs.insert(threadID)
+
+        XCTAssertEqual(service.threadDisplayPhase(threadId: threadID), .empty)
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexServiceThreadDisplayPhaseTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

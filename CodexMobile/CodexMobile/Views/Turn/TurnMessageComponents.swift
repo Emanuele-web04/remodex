@@ -103,6 +103,7 @@ struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
     var enablesSelection: Bool = false
+    var constrainsToAvailableWidth: Bool = false
 
     var body: some View {
         let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
@@ -115,11 +116,21 @@ struct MarkdownTextView: View {
             .textual.structuredTextStyle(.gitHub)
             .textual.overflowMode(.wrap)
 
-        if enablesSelection {
-            baseView
-                .textual.textSelection(.enabled)
+        let renderedContent = Group {
+            if enablesSelection {
+                baseView
+                    .textual.textSelection(.enabled)
+            } else {
+                baseView
+            }
+        }
+
+        if constrainsToAvailableWidth {
+            renderedContent
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
-            baseView
+            renderedContent
         }
     }
 }
@@ -956,7 +967,8 @@ struct MessageRow: View, Equatable {
                         MarkdownTextView(
                             text: introText,
                             profile: .assistantProse,
-                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                            constrainsToAvailableWidth: true
                         )
                     }
 
@@ -977,7 +989,8 @@ struct MessageRow: View, Equatable {
                         MarkdownTextView(
                             text: renderedPlanText,
                             profile: .assistantProse,
-                            enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                            enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                            constrainsToAvailableWidth: true
                         )
                     }
 
@@ -991,7 +1004,8 @@ struct MessageRow: View, Equatable {
                     MarkdownTextView(
                         text: visibleAssistantText,
                         profile: .assistantProse,
-                        enablesSelection: enablesInlineMarkdownSelectionInTimeline
+                        enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                        constrainsToAvailableWidth: true
                     )
                 }
             }

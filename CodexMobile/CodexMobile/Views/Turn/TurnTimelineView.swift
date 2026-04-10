@@ -388,6 +388,8 @@ private struct TurnTimelineFooterContainer<Composer: View>: View {
 }
 
 struct TurnTimelineView<EmptyState: View, Composer: View>: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     let threadID: String
     let messages: [CodexMessage]
     let timelineChangeToken: Int
@@ -467,6 +469,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         shouldWarmRecentTailProgressively && visibleTailCount == 0
     }
 
+    // Keeps larger accessibility text inside a slightly roomier gutter so assistant
+    // prose does not read as edge-to-edge when Dynamic Type is bumped up.
+    private var timelineHorizontalPadding: CGFloat {
+        dynamicTypeSize.isAccessibilitySize ? 20 : 16
+    }
+
     private var shouldStageHeavyThreadOpen: Bool {
         false
     }
@@ -526,7 +534,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             onLoadEarlierMessages: handleLoadEarlierMessages
                         )
                     }
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, timelineHorizontalPadding)
                     .padding(.top, 12)
                     .padding(.bottom, 12)
 

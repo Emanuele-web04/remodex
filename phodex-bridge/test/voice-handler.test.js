@@ -247,6 +247,42 @@ test("voice/transcribe rejects malformed or non-WAV audio before contacting the 
   }
 });
 
+test("voice/transcribe rejects clips longer than two minutes before contacting the provider", async () => {
+  const responses = [];
+  let authRequests = 0;
+  let fetchCalls = 0;
+  const handler = createVoiceHandler({
+    sendCodexRequest: async () => {
+      authRequests += 1;
+      throw new Error("auth should not be requested for overlong audio");
+    },
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error("fetch should not run for overlong audio");
+    },
+  });
+
+  handler.handleVoiceRequest(JSON.stringify({
+    id: "voice-too-long",
+    method: "voice/transcribe",
+    params: {
+      mimeType: "audio/wav",
+      audioBase64: makeTestWavBase64(),
+      sampleRateHz: 24_000,
+      durationMs: 120_100,
+    },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  });
+
+  await tick();
+
+  assert.equal(authRequests, 0);
+  assert.equal(fetchCalls, 0);
+  assert.equal(responses[0].error?.data?.errorCode, "duration_too_long");
+  assert.match(responses[0].error?.message || "", /120 seconds/);
+});
+
 // ─── resolveVoiceAuth tests ─────────────────────────────────
 
 const { resolveVoiceAuth } = require("../src/voice-handler");

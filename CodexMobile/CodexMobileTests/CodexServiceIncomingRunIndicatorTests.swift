@@ -619,7 +619,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(service.shouldAutoReconnectOnForeground)
     }
 
-    func testRepeatedTrustedReconnectDisconnectsPreserveSavedReconnectCandidate() {
+    func testTrustedReconnectReceiveErrorDoesNotAdvanceFailureBudgetByItself() {
         let service = makeService()
         let macDeviceID = "mac-\(UUID().uuidString)"
         let macPublicKey = "public-key-\(UUID().uuidString)"
@@ -640,17 +640,14 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             service.handleReceiveError(NWError.posix(.ECONNABORTED))
         }
 
-        XCTAssertEqual(service.trustedReconnectFailureCount, 3)
-        XCTAssertFalse(service.shouldAutoReconnectOnForeground)
-        XCTAssertEqual(service.connectionRecoveryState, .idle)
-        XCTAssertEqual(service.secureConnectionState, .liveSessionUnresolved)
+        XCTAssertEqual(service.trustedReconnectFailureCount, 0)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
+        XCTAssertEqual(service.secureConnectionState, .trustedMac)
         XCTAssertNotNil(service.relaySessionId)
         XCTAssertNotNil(service.relayUrl)
         XCTAssertEqual(service.relayMacDeviceId, macDeviceID)
-        XCTAssertEqual(
-            service.lastErrorMessage,
-            "Secure reconnect could not be restored from the saved session. Try reconnecting again."
-        )
+        XCTAssertNil(service.lastErrorMessage)
         XCTAssertTrue(service.hasSavedRelaySession)
         XCTAssertTrue(service.hasTrustedMacReconnectCandidate)
     }
