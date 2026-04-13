@@ -1903,6 +1903,70 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(blockInfo[1]?.blockDiffText?.contains("```diff"), true)
     }
 
+    func testAssistantBlockInfoKeepsRepeatedSameFileChunksAtFinalTotals() {
+        let now = Date()
+        let firstDiff = """
+        @@ -1,3 +1,4 @@
+        +let firstChange = true
+        """
+        let secondDiff = """
+        @@ -10,3 +10,4 @@
+        +let secondChange = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-with-repeated-path",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+
+                ```diff
+                \(firstDiff)
+                ```
+
+                Path: Sources/App.swift
+
+                ```diff
+                \(secondDiff)
+                ```
+
+                Totals: +2 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.additions, 2)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.deletions, 0)
+        XCTAssertEqual(blockInfo[1]?.blockDiffText?.contains("firstChange"), true)
+        XCTAssertEqual(blockInfo[1]?.blockDiffText?.contains("secondChange"), true)
+    }
+
     func testAssistantBlockInfoKeepsSummaryOnlyFileWhenSiblingHasDiffChunk() {
         let now = Date()
         let diffCode = """
