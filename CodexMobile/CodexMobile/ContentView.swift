@@ -7,6 +7,20 @@
 import SwiftUI
 import UIKit
 
+private enum RootSheetRoute: Identifiable, Equatable {
+    case bridgeUpdate(CodexBridgeUpdatePrompt)
+    case whatsNew(version: String)
+
+    var id: String {
+        switch self {
+        case .bridgeUpdate(let prompt):
+            return "bridge-update-\(prompt.id.uuidString)"
+        case .whatsNew(let version):
+            return "whats-new-\(version)"
+        }
+    }
+}
+
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
@@ -34,20 +48,26 @@ struct ContentView: View {
     @State private var isWakingSavedMacDisplay = false
     @State private var hasAttemptedAutomaticWakeSavedMacDisplay = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
+    @State private var whatsNewPresentationTask: Task<Void, Never>?
     @State private var sidebarPrewarmTask: Task<Void, Never>?
+    @State private var presentedRootSheet: RootSheetRoute?
+    @State private var isWhatsNewPresentationReady = false
     @State private var sidebarGestureDebugSequence = 0
     @State private var activeSidebarGestureDebugID: Int?
     @State private var lastSidebarGestureLogBucket: Int?
     @State private var sidebarGestureAutoCommitted = false
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
+    @AppStorage("codex.whatsNew.lastPresentedVersion") private var lastPresentedWhatsNewVersion = ""
 
     private let sidebarWidth: CGFloat = 330
     // Lets the drawer gesture start a bit inside the content instead of only on the bezel edge.
     private let sidebarOpenActivationWidth: CGFloat = 80
     private let sidebarPrewarmDelayNanoseconds: UInt64 = 700_000_000
+    private let whatsNewPresentationDelayNanoseconds: UInt64 = 15_000_000_000
     private let sidebarGestureLogBucketWidth: CGFloat = 40
     private let sidebarSwipeCommitDistance: CGFloat = 30
     private let wakingSavedMacDisplayStatusMessage = "Trying to wake your Mac display..."
+    private let whatsNewReleaseVersion = "1.1"
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
 
     var body: some View {
@@ -66,6 +86,12 @@ struct ContentView: View {
                 debugSidebarLog("launch task autoConnect begin connected=\(codex.isConnected) threadCount=\(codex.threads.count)")
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
                 scheduleSidebarPrewarmIfNeeded()
+            }
+            .task(id: whatsNewPresentationScheduleFingerprint) {
+                await scheduleWhatsNewPresentationIfNeeded()
+            }
+            .task(id: rootSheetPresentationFingerprint) {
+                syncRootSheetPresentationIfNeeded()
             }
             .onChange(of: showSettings) { _, show in
                 if show {
@@ -167,9 +193,15 @@ struct ContentView: View {
     // Keeps sheets and alerts out of the lifecycle chain so the compiler can reason about each stage separately.
     private var rootContentWithPresentations: some View {
         rootContentWithLifecycleObservers
-            // Presents actionable recovery when the saved bridge package is too old/new for this app build.
-            .sheet(item: bridgeUpdatePromptBinding, onDismiss: dismissBridgeUpdatePrompt) { prompt in
-                bridgeUpdateSheet(prompt: prompt)
+            // Presents exactly one root-owned sheet at a time so onboarding, paywall, updates,
+            // and delayed announcements cannot race each other into stacked presentations.
+            .sheet(item: presentedRootSheetBinding) { route in
+                switch route {
+                case .bridgeUpdate(let prompt):
+                    bridgeUpdateSheet(prompt: prompt)
+                case .whatsNew(let version):
+                    whatsNewSheet(version: version)
+                }
             }
             .alert(
                 "Chat Deleted",
@@ -850,10 +882,22 @@ struct ContentView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
-    private var bridgeUpdatePromptBinding: Binding<CodexBridgeUpdatePrompt?> {
+    // Keeps SwiftUI's sheet binding in sync with the route we last chose to present.
+    private var presentedRootSheetBinding: Binding<RootSheetRoute?> {
         Binding(
-            get: { codex.bridgeUpdatePrompt },
-            set: { codex.bridgeUpdatePrompt = $0 }
+            get: { presentedRootSheet },
+            set: { nextValue in
+                guard nextValue?.id != presentedRootSheet?.id else {
+                    presentedRootSheet = nextValue
+                    return
+                }
+
+                if nextValue == nil {
+                    dismissPresentedRootSheet()
+                } else {
+                    presentedRootSheet = nextValue
+                }
+            }
         )
     }
 
@@ -868,9 +912,142 @@ struct ContentView: View {
         )
     }
 
+    // Serializes root-owned sheets under one priority list instead of letting each feature present itself.
+    private func syncRootSheetPresentationIfNeeded() {
+        if case .bridgeUpdate = presentedRootSheet,
+           codex.bridgeUpdatePrompt == nil {
+            dismissPresentedRootSheet()
+            return
+        }
+
+        guard presentedRootSheet == nil,
+              let desiredRoute = desiredRootSheetRoute else {
+            return
+        }
+
+        presentedRootSheet = desiredRoute
+    }
+
+    private var desiredRootSheetRoute: RootSheetRoute? {
+        guard canPresentDeferredRootSheet else {
+            return nil
+        }
+
+        if let prompt = codex.bridgeUpdatePrompt {
+            return .bridgeUpdate(prompt)
+        }
+
+        if let whatsNewVersion = pendingWhatsNewVersion {
+            return .whatsNew(version: whatsNewVersion)
+        }
+
+        return nil
+    }
+
+    // Blocks lower-priority sheets while onboarding, pairing, paywall, or root alerts own the screen.
+    private var canPresentDeferredRootSheet: Bool {
+        scenePhase == .active
+            && hasSeenOnboarding
+            && subscriptions.hasAppAccess
+            && !isShowingManualScanner
+            && !shouldShowQRScanner
+            && !isShowingManualPairingEntry
+            && manualPairingErrorMessage == nil
+            && codex.missingNotificationThreadPrompt == nil
+    }
+
+    // Shows What's New only once per version and only after the root has been calm for a while.
+    private var pendingWhatsNewVersion: String? {
+        guard isWhatsNewPresentationReady,
+              lastPresentedWhatsNewVersion != whatsNewReleaseVersion else {
+            return nil
+        }
+
+        return whatsNewReleaseVersion
+    }
+
+    private var whatsNewPresentationScheduleFingerprint: String {
+        [
+            String(scenePhase == .active),
+            String(hasSeenOnboarding),
+            String(subscriptions.hasAppAccess),
+            String(isShowingManualScanner),
+            String(shouldShowQRScanner),
+            String(isShowingManualPairingEntry),
+            String(manualPairingErrorMessage != nil),
+            String(codex.missingNotificationThreadPrompt != nil),
+            String(codex.bridgeUpdatePrompt != nil),
+            whatsNewReleaseVersion,
+            lastPresentedWhatsNewVersion,
+        ].joined(separator: "|")
+    }
+
+    private var rootSheetPresentationFingerprint: String {
+        [
+            String(canPresentDeferredRootSheet),
+            codex.bridgeUpdatePrompt?.id.uuidString ?? "nil",
+            pendingWhatsNewVersion ?? "nil",
+            presentedRootSheet?.id ?? "nil",
+        ].joined(separator: "|")
+    }
+
+    private func scheduleWhatsNewPresentationIfNeeded() async {
+        whatsNewPresentationTask?.cancel()
+        whatsNewPresentationTask = nil
+        isWhatsNewPresentationReady = false
+
+        guard shouldScheduleWhatsNewPresentation else {
+            return
+        }
+
+        let task = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: whatsNewPresentationDelayNanoseconds)
+            guard !Task.isCancelled,
+                  shouldScheduleWhatsNewPresentation else {
+                return
+            }
+
+            isWhatsNewPresentationReady = true
+            syncRootSheetPresentationIfNeeded()
+        }
+
+        whatsNewPresentationTask = task
+    }
+
+    private var shouldScheduleWhatsNewPresentation: Bool {
+        canPresentDeferredRootSheet
+            && codex.bridgeUpdatePrompt == nil
+            && pendingWhatsNewVersion == nil
+    }
+
+    private func handleDismissedRootSheet(_ route: RootSheetRoute) {
+        switch route {
+        case .bridgeUpdate:
+            dismissBridgeUpdatePrompt()
+        case .whatsNew(let version):
+            dismissWhatsNewSheet(version: version)
+        }
+
+        syncRootSheetPresentationIfNeeded()
+    }
+
+    private func dismissPresentedRootSheet() {
+        guard let dismissedRoute = presentedRootSheet else {
+            return
+        }
+
+        presentedRootSheet = nil
+        handleDismissedRootSheet(dismissedRoute)
+    }
+
     private func dismissBridgeUpdatePrompt() {
         codex.bridgeUpdatePrompt = nil
         isRetryingBridgeUpdate = false
+    }
+
+    private func dismissWhatsNewSheet(version: String) {
+        lastPresentedWhatsNewVersion = version
+        isWhatsNewPresentationReady = false
     }
 
     private func bridgeUpdateSheet(prompt: CodexBridgeUpdatePrompt) -> some View {
@@ -884,10 +1061,21 @@ struct ContentView: View {
                 presentManualScannerForBridgeRecovery()
             },
             onDismiss: {
-                codex.bridgeUpdatePrompt = nil
+                dismissPresentedRootSheet()
             }
         )
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func whatsNewSheet(version: String) -> some View {
+        WhatsNewSheet(
+            version: version,
+            onDismiss: {
+                dismissPresentedRootSheet()
+            }
+        )
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 
@@ -909,9 +1097,18 @@ struct ContentView: View {
 
     // Switches the user back to the QR path when the old relay session is no longer useful.
     private func presentManualScannerForBridgeRecovery() {
-        codex.bridgeUpdatePrompt = nil
-        isRetryingBridgeUpdate = false
-        presentManualScannerAfterStoppingReconnect()
+        guard !isShowingManualScanner else {
+            return
+        }
+
+        hasDismissedAutomaticScanner = false
+        scannerCanReturnToOnboarding = false
+        isShowingManualScanner = true
+        dismissPresentedRootSheet()
+
+        Task {
+            await viewModel.stopAutoReconnectForManualScan(codex: codex)
+        }
     }
 
     // Shows pairing recovery immediately and tears down any stale reconnect in the background.

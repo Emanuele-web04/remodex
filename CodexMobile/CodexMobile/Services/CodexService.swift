@@ -132,6 +132,16 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
     let title: String
     let message: String
     let command: String?
+
+    init(
+        title: String,
+        message: String,
+        command: String?
+    ) {
+        self.title = title
+        self.message = message
+        self.command = command
+    }
 }
 
 struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
