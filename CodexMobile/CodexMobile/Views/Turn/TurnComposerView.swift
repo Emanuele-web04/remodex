@@ -117,7 +117,6 @@ struct TurnComposerView: View {
                         Text("Ask anything... @files, $skills, /commands")
                             .font(AppFont.body())
                             .foregroundStyle(Color(.placeholderText))
-                            .padding(.vertical, 6)
                             .allowsHitTesting(false)
                     }
 
@@ -139,6 +138,11 @@ struct TurnComposerView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding + 4)
                 .padding(.bottom, 14)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !isComposerInteractionLocked else { return }
+                    isInputFocused.wrappedValue = true
+                }
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)

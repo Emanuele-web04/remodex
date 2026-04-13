@@ -19,8 +19,6 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
     private let minVisibleLines: CGFloat = 1
     private let maxVisibleLines: CGFloat = 4
-    private let verticalTextInset: CGFloat = 6
-
     func makeUIView(context: Context) -> TurnComposerPasteInterceptingTextView {
         let textView = TurnComposerPasteInterceptingTextView(frame: .zero, textContainer: nil)
         textView.delegate = context.coordinator
@@ -30,7 +28,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.typingAttributes[.font] = composerUIFont()
         textView.typingAttributes[.foregroundColor] = UIColor.label
         textView.adjustsFontForContentSizeCategory = true
-        textView.textContainerInset = composerTextInsets()
+        textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
         textView.autocorrectionType = .default
@@ -72,7 +70,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         uiView.typingAttributes[.font] = composerUIFont()
         uiView.typingAttributes[.foregroundColor] = UIColor.label
         uiView.adjustsFontForContentSizeCategory = true
-        uiView.textContainerInset = composerTextInsets()
+        uiView.textContainerInset = .zero
         uiView.textContainer.widthTracksTextView = true
         // Preserve internal scrolling without letting composer drags dismiss the keyboard.
         uiView.keyboardDismissMode = .none
@@ -104,11 +102,6 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         // Read the SwiftUI environment so UIKit gets refreshed when Dynamic Type changes.
         let _ = dynamicTypeSize
         return AppFont.uiFont(size: 15, textStyle: .body)
-    }
-
-    // Adds a little vertical breathing room so the single-line composer remains easy to tap.
-    private func composerTextInsets() -> UIEdgeInsets {
-        UIEdgeInsets(top: verticalTextInset, left: 0, bottom: verticalTextInset, right: 0)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
@@ -169,9 +162,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             textView.layoutIfNeeded()
             textView.layoutManager.ensureLayout(for: textView.textContainer)
             let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
-            let verticalInsets = textView.textContainerInset.top + textView.textContainerInset.bottom
-            let minHeight = lineHeight * minVisibleLines + verticalInsets
-            let maxHeight = lineHeight * maxVisibleLines + verticalInsets
+            let minHeight = lineHeight * minVisibleLines
+            let maxHeight = lineHeight * maxVisibleLines
             let targetWidth = max(textView.bounds.width, textView.textContainer.size.width, 1)
             let fitSize = CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
             var measured = textView.sizeThatFits(fitSize).height
