@@ -1,8 +1,8 @@
 // FILE: TurnMessageEnvironmentKeys.swift
 // Purpose: SwiftUI environment keys for turn-scoped actions such as reconnect, inline commit/push, assistant revert, and subagent open.
 // Layer: View Support
-// Exports: EnvironmentValues.reconnectAction, EnvironmentValues.wakeMacDisplayAction, EnvironmentValues.inlineCommitAndPushAction,
-//   EnvironmentValues.assistantRevertAction, EnvironmentValues.subagentOpenAction
+// Exports: EnvironmentValues.reconnectAction, EnvironmentValues.wakeMacDisplayAction, EnvironmentValues.isWakingMacDisplayRecovery,
+//   EnvironmentValues.inlineCommitAndPushAction, EnvironmentValues.assistantRevertAction, EnvironmentValues.subagentOpenAction
 // Depends on: SwiftUI, CodexMessage
 
 import SwiftUI
@@ -26,6 +26,17 @@ extension EnvironmentValues {
     var wakeMacDisplayAction: (() -> Void)? {
         get { self[WakeMacDisplayActionKey.self] }
         set { self[WakeMacDisplayActionKey.self] = newValue }
+    }
+}
+
+private struct IsWakingMacDisplayRecoveryKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var isWakingMacDisplayRecovery: Bool {
+        get { self[IsWakingMacDisplayRecoveryKey.self] }
+        set { self[IsWakingMacDisplayRecoveryKey.self] = newValue }
     }
 }
 

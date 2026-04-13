@@ -16,6 +16,7 @@ struct TurnView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.wakeMacDisplayAction) private var wakeMacDisplayAction
+    @Environment(\.isWakingMacDisplayRecovery) private var isWakingMacDisplayRecovery
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
@@ -465,31 +466,16 @@ struct TurnView: View {
     }
 
     private var connectionRecoverySnapshot: ConnectionRecoverySnapshot? {
-        guard codex.hasReconnectCandidate,
-              !codex.isConnected,
-              codex.secureConnectionState != .rePairRequired else {
-            return nil
-        }
-
-        if codex.isConnecting || codex.shouldAutoReconnectOnForeground || isRetryingConnectionRecovery {
-            return ConnectionRecoverySnapshot(
-                summary: "Trying to reconnect to your Mac.",
-                status: .reconnecting,
-                trailingStyle: .progress
-            )
-        }
-
-        let trimmedError = codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let summary = {
-            guard let trimmedError, !trimmedError.isEmpty else {
-                return "Reconnect to your Mac to keep this chat in sync."
-            }
-            return trimmedError
-        }()
-        return ConnectionRecoverySnapshot(
-            summary: summary,
-            status: .interrupted,
-            trailingStyle: .action(canWakeSavedMacDisplay ? "Wake Screen" : "Reconnect")
+        TurnConnectionRecoverySnapshotBuilder.makeSnapshot(
+            hasReconnectCandidate: codex.hasReconnectCandidate,
+            isConnected: codex.isConnected,
+            secureConnectionState: codex.secureConnectionState,
+            showsWakeSavedMacDisplayAction: shouldOfferWakeSavedMacDisplayAction,
+            isWakingMacDisplayRecovery: isWakingMacDisplayRecovery,
+            isConnecting: codex.isConnecting,
+            shouldAutoReconnectOnForeground: codex.shouldAutoReconnectOnForeground,
+            isRetryingConnectionRecovery: isRetryingConnectionRecovery,
+            lastErrorMessage: codex.lastErrorMessage
         )
     }
 
@@ -502,6 +488,11 @@ struct TurnView: View {
         }
 
         return codex.prefersDirectRelayTransport(for: url)
+    }
+
+    // Matches the root fallback gate so the turn card only offers wake after the silent attempt already ran.
+    private var shouldOfferWakeSavedMacDisplayAction: Bool {
+        canWakeSavedMacDisplay && wakeMacDisplayAction != nil
     }
 
     private var isRetryingConnectionRecovery: Bool {
@@ -1649,7 +1640,7 @@ struct TurnView: View {
     }
 
     private func handleConnectionRecoveryAction() {
-        if canWakeSavedMacDisplay {
+        if shouldOfferWakeSavedMacDisplayAction {
             wakeMacDisplayAction?()
             return
         }

@@ -134,6 +134,7 @@ struct TurnComposerView: View {
                     )
                     .frame(height: composerInputHeight)
                 }
+                .frame(minHeight: composerInputHeight + 8, alignment: .topLeading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding + 4)
