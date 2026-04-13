@@ -115,6 +115,7 @@ function startBridge({
   let lastRelayActivityAt = 0;
   let lastPublishedBridgeStatus = null;
   let lastConnectionStatus = null;
+  let codexLaunchState = config.codexEndpoint ? "connected" : "starting";
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
   const forwardedInitializeRequestIds = new Set();
   const bridgeManagedCodexRequestWaiters = new Map();
@@ -168,6 +169,7 @@ function startBridge({
   const codex = createCodexTransport({
     endpoint: config.codexEndpoint,
     env: process.env,
+    appPath: config.codexAppPath,
     logPrefix: "[remodex]",
   });
   const voiceHandler = createVoiceHandler({
@@ -183,6 +185,7 @@ function startBridge({
   });
 
   codex.onError((error) => {
+    codexLaunchState = "error";
     publishBridgeStatus({
       state: "error",
       connectionStatus: "error",
@@ -198,6 +201,15 @@ function startBridge({
     }
     console.error(error.message);
     process.exit(1);
+  });
+  // Marks the local Codex runtime as launchable before relay/network recovery updates.
+  codex.onStarted(() => {
+    codexLaunchState = "connected";
+    if (!lastPublishedBridgeStatus) {
+      return;
+    }
+
+    publishBridgeStatus(lastPublishedBridgeStatus);
   });
 
   function clearReconnectTimer() {
@@ -1025,8 +1037,12 @@ function startBridge({
   }
 
   function publishBridgeStatus(status) {
-    lastPublishedBridgeStatus = status;
-    onBridgeStatus?.(status);
+    const nextStatus = {
+      ...status,
+      codexLaunchState,
+    };
+    lastPublishedBridgeStatus = nextStatus;
+    onBridgeStatus?.(nextStatus);
   }
 
   // Refreshes the relay's trusted-mac index after the QR bootstrap locks in a phone identity.

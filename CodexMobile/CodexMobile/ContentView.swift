@@ -387,6 +387,10 @@ struct ContentView: View {
                         reconnectSecondaryActions
                     }
                 }
+            } footer: {
+                if codex.hasReconnectCandidate && !codex.isConnected {
+                    reconnectFooterAction
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -844,26 +848,27 @@ struct ContentView: View {
 
     // Keeps QR and code recovery as one quiet secondary row under the main reconnect CTA.
     private var reconnectSecondaryActions: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 10) {
-                secondaryReconnectActionButton("New QR Code") {
-                    presentManualScannerAfterStoppingReconnect()
-                }
-                .disabled(isPreparingManualScanner)
-
-                secondaryReconnectActionButton("Pair with Code") {
-                    presentManualScannerAfterStoppingReconnect(openPairingCodeEntry: true)
-                }
-                .disabled(isPreparingManualScanner)
+        HStack(spacing: 10) {
+            secondaryReconnectActionButton("New QR Code") {
+                presentManualScannerAfterStoppingReconnect()
             }
+            .disabled(isPreparingManualScanner)
 
-            Button("Forget Pair") {
-                codex.forgetReconnectCandidate()
+            secondaryReconnectActionButton("Pair with Code") {
+                presentManualScannerAfterStoppingReconnect(openPairingCodeEntry: true)
             }
-            .font(AppFont.subheadline(weight: .semibold))
-            .foregroundStyle(.secondary)
-            .buttonStyle(.plain)
+            .disabled(isPreparingManualScanner)
         }
+    }
+
+    // Keeps the destructive saved-pair action visually separate from the reconnect controls.
+    private var reconnectFooterAction: some View {
+        Button("Forget Pair") {
+            codex.forgetReconnectCandidate()
+        }
+        .font(AppFont.caption(weight: .semibold))
+        .foregroundStyle(.secondary)
+        .buttonStyle(.plain)
     }
 
     // Mirrors the reconnect button corner language in a lighter outline-only treatment.

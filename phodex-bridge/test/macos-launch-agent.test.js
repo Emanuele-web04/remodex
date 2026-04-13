@@ -12,6 +12,7 @@ const path = require("path");
 const {
   buildLaunchAgentPlist,
   getMacOSBridgeServiceStatus,
+  mergeBridgeStatusForDaemon,
   resetMacOSBridgePairing,
   resolveLaunchAgentPlistPath,
   runMacOSBridgeService,
@@ -152,6 +153,73 @@ test("runMacOSBridgeService records a clean error state instead of throwing when
     assert.equal(status?.lastError, "No relay URL configured for the macOS bridge service.");
     assert.equal(typeof status?.updatedAt, "string");
   });
+});
+
+test("mergeBridgeStatusForDaemon keeps the last fatal startup error visible during reconnect loops", () => {
+  assert.deepEqual(
+    mergeBridgeStatusForDaemon(
+      {
+        state: "running",
+        connectionStatus: "connecting",
+        pid: 27479,
+        lastError: "",
+        codexLaunchState: "starting",
+      },
+      {
+        state: "error",
+        connectionStatus: "error",
+        pid: 27479,
+        lastError: "spawn codex ENOENT",
+      }
+    ),
+    {
+      state: "running",
+      connectionStatus: "connecting",
+      pid: 27479,
+      lastError: "spawn codex ENOENT",
+      codexLaunchState: "starting",
+    }
+  );
+});
+
+test("mergeBridgeStatusForDaemon clears preserved errors once the bridge is actually connected", () => {
+  const connectedStatus = {
+    state: "running",
+    connectionStatus: "connected",
+    pid: 27479,
+    lastError: "",
+  };
+
+  assert.deepEqual(
+    mergeBridgeStatusForDaemon(connectedStatus, {
+      state: "error",
+      connectionStatus: "error",
+      pid: 27479,
+      lastError: "spawn codex ENOENT",
+    }),
+    connectedStatus
+  );
+});
+
+test("mergeBridgeStatusForDaemon stops preserving startup errors once Codex has launched", () => {
+  const reconnectingStatus = {
+    state: "running",
+    connectionStatus: "connecting",
+    pid: 27479,
+    lastError: "",
+    codexLaunchState: "connected",
+  };
+
+  assert.deepEqual(
+    mergeBridgeStatusForDaemon(reconnectingStatus, {
+      state: "error",
+      connectionStatus: "error",
+      pid: 27479,
+      lastError: "spawn codex ENOENT",
+      codexLaunchState: "error",
+    }),
+    reconnectingStatus
+  );
 });
 
 test("getMacOSBridgeServiceStatus reports launchd + runtime metadata together", () => {

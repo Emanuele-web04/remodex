@@ -57,7 +57,10 @@ function runMacOSBridgeService({ env = process.env } = {}) {
       writePairingSession(pairingSession, { env });
     },
     onBridgeStatus(status) {
-      writeBridgeStatus(status, { env });
+      writeBridgeStatus(
+        mergeBridgeStatusForDaemon(status, readBridgeStatus({ env })),
+        { env }
+      );
     },
   });
 }
@@ -442,9 +445,42 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function mergeBridgeStatusForDaemon(nextStatus, persistedStatus) {
+  if (!nextStatus || typeof nextStatus !== "object") {
+    return nextStatus;
+  }
+
+  const lastError = normalizeNonEmptyString(nextStatus.lastError);
+  if (lastError || nextStatus.connectionStatus === "connected") {
+    return nextStatus;
+  }
+
+  if (
+    nextStatus.codexLaunchState !== "starting"
+    || (nextStatus.connectionStatus !== "starting" && nextStatus.connectionStatus !== "connecting")
+  ) {
+    return nextStatus;
+  }
+
+  const persistedError = normalizeNonEmptyString(persistedStatus?.lastError);
+  if (!persistedError) {
+    return nextStatus;
+  }
+
+  return {
+    ...nextStatus,
+    lastError: persistedError,
+  };
+}
+
+function normalizeNonEmptyString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
 module.exports = {
   buildLaunchAgentPlist,
   getMacOSBridgeServiceStatus,
+  mergeBridgeStatusForDaemon,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
   resetMacOSBridgePairing,

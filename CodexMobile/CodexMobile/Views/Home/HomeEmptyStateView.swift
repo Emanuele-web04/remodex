@@ -6,7 +6,7 @@
 
 import SwiftUI
 
-struct HomeEmptyStateView<AuthSection: View>: View {
+struct HomeEmptyStateView<AuthSection: View, Footer: View>: View {
     let connectionPhase: CodexConnectionPhase
     let statusMessage: String?
     let securityLabel: String?
@@ -14,6 +14,7 @@ struct HomeEmptyStateView<AuthSection: View>: View {
     let offlinePrimaryButtonTitle: String
     let onPrimaryAction: () -> Void
     @ViewBuilder let authSection: () -> AuthSection
+    @ViewBuilder let footer: () -> Footer
 
     @State private var dotPulse = false
     @State private var connectionAttemptStartedAt: Date?
@@ -100,6 +101,11 @@ struct HomeEmptyStateView<AuthSection: View>: View {
             .frame(maxWidth: 280)
 
             Spacer()
+
+            footer()
+                .frame(maxWidth: 280)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 28)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .navigationTitle("Remodex")
