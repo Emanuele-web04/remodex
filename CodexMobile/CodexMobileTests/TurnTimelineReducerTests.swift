@@ -1634,6 +1634,459 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(blockInfo, [nil])
     }
 
+    func testAssistantBlockInfoDeduplicatesEquivalentSingleFileDiffSnapshots() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+         struct TurnMessageComponents {}
+        +let assistantCopyText = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-absolute",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: /Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-relative",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(
+            blockInfo[2]?.blockDiffEntries?.first?.path,
+            "CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift"
+        )
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 0)
+    }
+
+    func testAssistantBlockInfoMergesDifferentSnapshotsForSameFile() {
+        let now = Date()
+        let firstDiff = """
+        @@ -1,3 +1,4 @@
+        struct TurnMessageComponents {}
+        +let firstChange = true
+        """
+        let secondDiff = """
+        @@ -10,3 +10,4 @@
+         struct TurnDiffSheet {}
+        +let secondChange = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(firstDiff)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: /Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(secondDiff)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 2)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 0)
+    }
+
+    func testAssistantBlockInfoPrefersLatestSummaryTotalsAfterDiffChunk() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+        +let diffBackedFile = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "summary-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 3)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffText?.contains("```diff"), true)
+    }
+
+    func testAssistantBlockInfoPrefersInlineTotalsOverSameMessageDiffCounts() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+        +let diffBackedFile = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-with-inline-totals",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+
+                ```diff
+                \(diffCode)
+                ```
+
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.additions, 3)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.deletions, 1)
+        XCTAssertEqual(blockInfo[1]?.blockDiffText?.contains("```diff"), true)
+    }
+
+    func testAssistantBlockInfoKeepsSummaryOnlyFileWhenSiblingHasDiffChunk() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+        +let diffBackedFile = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-with-code",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "summary-only",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Composer.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 2)
+        XCTAssertEqual(
+            blockInfo[2]?.blockDiffEntries?.map(\.path),
+            ["Sources/App.swift", "Sources/Composer.swift"]
+        )
+    }
+
+    func testAssistantBlockInfoKeepsSummaryOnlyEntriesWithoutDiffFencesSeparated() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Composer.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 2)
+        XCTAssertEqual(
+            blockInfo[2]?.blockDiffEntries?.map(\.path),
+            ["Sources/App.swift", "Sources/Composer.swift"]
+        )
+    }
+
+    func testAssistantBlockInfoDoesNotDoubleCountIdenticalSummaryOnlySnapshots() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: /Users/emanueledipietro/Developer/Remodex/Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 2)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 1)
+    }
+
     func testScrollTrackerPausesAutomaticScrollingDuringUserDrag() {
         XCTAssertTrue(
             TurnScrollStateTracker.isAutomaticScrollingPaused(

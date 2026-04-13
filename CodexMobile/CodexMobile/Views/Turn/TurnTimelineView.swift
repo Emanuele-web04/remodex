@@ -14,6 +14,15 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockRevertPresentation: AssistantRevertPresentation?
 }
 
+private struct AssistantBlockFileChangeAggregate {
+    var path: String
+    var additions: Int
+    var deletions: Int
+    var action: TurnFileChangeAction?
+    var diffSections: [String]
+    var lastTotalsSourceIndex: Int
+}
+
 // ─── Tool Burst Projection ─────────────────────────────────────
 
 struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
@@ -1176,22 +1185,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             )
 
             // Aggregate file-change entries across the block for the turn-end Diff button.
-            let fileChangeMessages = messages[blockStart...blockEnd].filter {
+            let fileChangeMessages = Array(messages[blockStart...blockEnd].filter {
                 $0.role == .system && $0.kind == .fileChange && !$0.isStreaming
-            }
-            let blockDiffEntries: [TurnFileChangeSummaryEntry]? = fileChangeMessages.isEmpty ? nil : {
-                var allEntries: [TurnFileChangeSummaryEntry] = []
-                for msg in fileChangeMessages {
-                    if let parsed = TurnFileChangeSummaryParser.parse(from: msg.text) {
-                        allEntries.append(contentsOf: parsed.entries)
-                    }
-                }
-                return allEntries.isEmpty ? nil : allEntries
-            }()
-            let blockDiffText: String? = fileChangeMessages.isEmpty ? nil :
-                fileChangeMessages.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: "\n\n")
+            })
+            let blockDiffPresentation = buildAssistantBlockFileChanges(from: fileChangeMessages)
+            let blockDiffText = blockDiffPresentation?.bodyText
+            let blockDiffEntries = blockDiffPresentation?.entries
 
             // Use the last assistant revert presentation in this block.
             let blockRevert = messages[blockStart...blockEnd]
@@ -1211,6 +1210,183 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             i = blockStart - 1
         }
         return result
+    }
+
+    // Builds a single per-file presentation model from the raw system messages so
+    // summary-only files stay visible even when sibling files include real diff hunks.
+    private static func buildAssistantBlockFileChanges(
+        from messages: [CodexMessage]
+    ) -> (entries: [TurnFileChangeSummaryEntry], bodyText: String)? {
+        guard !messages.isEmpty else {
+            return nil
+        }
+
+        var aggregates: [AssistantBlockFileChangeAggregate] = []
+        aggregates.reserveCapacity(messages.count)
+
+        for (messageIndex, message) in messages.enumerated() {
+            let parsedEntries = TurnFileChangeSummaryParser.parse(from: message.text)?.entries ?? []
+            let diffChunks = parsedDiffChunks(from: message.text, entries: parsedEntries)
+
+            for chunk in diffChunks {
+                mergeDiffChunk(chunk, sourceIndex: messageIndex, into: &aggregates)
+            }
+
+            for entry in parsedEntries {
+                mergeSummaryEntry(entry, sourceIndex: messageIndex, into: &aggregates)
+            }
+        }
+
+        let entries = aggregates.map { aggregate in
+            TurnFileChangeSummaryEntry(
+                path: aggregate.path,
+                additions: aggregate.additions,
+                deletions: aggregate.deletions,
+                action: aggregate.action
+            )
+        }
+        guard !entries.isEmpty else {
+            return nil
+        }
+
+        let bodyText = aggregates.map { aggregate in
+            let action = aggregate.action?.rawValue.lowercased() ?? "edited"
+            let diffBody = aggregate.diffSections.isEmpty
+                ? ""
+                : """
+
+                ```diff
+                \(aggregate.diffSections.joined(separator: "\n\n"))
+                ```
+                """
+
+            return """
+            Path: \(aggregate.path)
+            Kind: \(action)
+            Totals: +\(aggregate.additions) -\(aggregate.deletions)\(diffBody)
+            """
+        }
+        .joined(separator: "\n\n---\n\n")
+
+        return (entries, bodyText)
+    }
+
+    private static func parsedDiffChunks(
+        from bodyText: String,
+        entries: [TurnFileChangeSummaryEntry]
+    ) -> [PerFileDiffChunk] {
+        guard bodyText.contains("```"), !entries.isEmpty else {
+            return []
+        }
+
+        return PerFileDiffParser.parse(bodyText: bodyText, entries: entries).filter { chunk in
+            let trimmed = chunk.diffCode.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !trimmed.isEmpty && TurnDiffLineKind.detectVerifiedPatch(in: trimmed)
+        }
+    }
+
+    private static func mergeSummaryEntry(
+        _ entry: TurnFileChangeSummaryEntry,
+        sourceIndex: Int,
+        into aggregates: inout [AssistantBlockFileChangeAggregate]
+    ) {
+        if let existingIndex = aggregates.firstIndex(where: {
+            FileChangePathIdentity.representsSameFile($0.path, entry.path)
+        }) {
+            let existing = aggregates[existingIndex]
+            var updated = existing
+            updated.path = FileChangePathIdentity.preferredDisplayPath(existing.path, entry.path)
+            updated.action = mergedFileChangeAction(existing: existing.action, incoming: entry.action)
+
+            // Summary rows carry the latest totals even when an older diff chunk already exists.
+            if sourceIndex >= existing.lastTotalsSourceIndex {
+                updated.additions = entry.additions
+                updated.deletions = entry.deletions
+                updated.lastTotalsSourceIndex = sourceIndex
+            }
+
+            aggregates[existingIndex] = updated
+            return
+        }
+
+        aggregates.append(
+            AssistantBlockFileChangeAggregate(
+                path: entry.path,
+                additions: entry.additions,
+                deletions: entry.deletions,
+                action: entry.action,
+                diffSections: [],
+                lastTotalsSourceIndex: sourceIndex
+            )
+        )
+    }
+
+    private static func mergeDiffChunk(
+        _ chunk: PerFileDiffChunk,
+        sourceIndex: Int,
+        into aggregates: inout [AssistantBlockFileChangeAggregate]
+    ) {
+        let normalizedDiff = chunk.diffCode.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let existingIndex = aggregates.firstIndex(where: {
+            FileChangePathIdentity.representsSameFile($0.path, chunk.path)
+        }) {
+            var existing = aggregates[existingIndex]
+            existing.path = FileChangePathIdentity.preferredDisplayPath(existing.path, chunk.path)
+            existing.action = mergedFileChangeAction(existing: existing.action, incoming: chunk.action)
+
+            if existing.diffSections.contains(normalizedDiff) {
+                aggregates[existingIndex] = existing
+                return
+            }
+
+            if existing.diffSections.isEmpty {
+                existing.additions = chunk.additions
+                existing.deletions = chunk.deletions
+            } else {
+                existing.additions += chunk.additions
+                existing.deletions += chunk.deletions
+            }
+            existing.lastTotalsSourceIndex = sourceIndex
+            existing.diffSections.append(normalizedDiff)
+            aggregates[existingIndex] = existing
+            return
+        }
+
+        aggregates.append(
+            AssistantBlockFileChangeAggregate(
+                path: chunk.path,
+                additions: chunk.additions,
+                deletions: chunk.deletions,
+                action: chunk.action,
+                diffSections: normalizedDiff.isEmpty ? [] : [normalizedDiff],
+                lastTotalsSourceIndex: sourceIndex
+            )
+        )
+    }
+
+    private static func mergedFileChangeAction(
+        existing: TurnFileChangeAction?,
+        incoming: TurnFileChangeAction?
+    ) -> TurnFileChangeAction? {
+        switch (existing, incoming) {
+        case let (lhs?, rhs?) where lhs == rhs:
+            return lhs
+        case (.added, _), (_, .added):
+            return .added
+        case (.deleted, _), (_, .deleted):
+            return .deleted
+        case (.renamed, _), (_, .renamed):
+            return .renamed
+        case let (lhs?, nil):
+            return lhs
+        case let (nil, rhs?):
+            return rhs
+        case (.edited, _), (_, .edited):
+            return .edited
+        case (nil, nil):
+            return nil
+        }
     }
 
     // Keeps Copy aligned with real run completion instead of per-message streaming heuristics.

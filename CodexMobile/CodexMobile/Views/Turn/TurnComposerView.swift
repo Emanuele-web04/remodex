@@ -117,6 +117,7 @@ struct TurnComposerView: View {
                         Text("Ask anything... @files, $skills, /commands")
                             .font(AppFont.body())
                             .foregroundStyle(Color(.placeholderText))
+                            .padding(.vertical, 6)
                             .allowsHitTesting(false)
                     }
 

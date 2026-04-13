@@ -81,6 +81,216 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(second.summary?.entries.first?.path, "B.swift")
     }
 
+    func testPerFileDiffParserKeepsSameNamedFilesInDifferentDirectoriesSeparate() {
+        let bodyText = """
+        Path: Sources/FeatureA/TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let featureA = true
+        ```
+
+        Path: Sources/FeatureB/TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let featureB = true
+        ```
+        """
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "Sources/FeatureA/TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+            TurnFileChangeSummaryEntry(
+                path: "Sources/FeatureB/TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+
+        let chunks = PerFileDiffParser.parse(bodyText: bodyText, entries: entries)
+
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks.map(\.path), entries.map(\.path))
+    }
+
+    func testPerFileDiffParserDoesNotMergeBareFilenameWithDirectoryScopedPath() {
+        let bodyText = """
+        Path: TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let filenameOnly = true
+        ```
+
+        Path: Sources/FeatureA/TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let directoryScoped = true
+        ```
+        """
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+            TurnFileChangeSummaryEntry(
+                path: "Sources/FeatureA/TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+
+        let chunks = PerFileDiffParser.parse(bodyText: bodyText, entries: entries)
+
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks.map(\.path), entries.map(\.path))
+    }
+
+    func testPerFileDiffParserMergesMultipleSnapshotsForSameFile() {
+        let bodyText = """
+        Path: /Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let firstChange = true
+        ```
+
+        Path: CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -10,3 +10,4 @@
+        +let secondChange = true
+        ```
+        """
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "/Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+            TurnFileChangeSummaryEntry(
+                path: "CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+
+        let chunks = PerFileDiffParser.parse(bodyText: bodyText, entries: entries)
+
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks.first?.path, "CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift")
+        XCTAssertEqual(chunks.first?.additions, 2)
+        XCTAssertTrue(chunks.first?.diffCode.contains("firstChange") == true)
+        XCTAssertTrue(chunks.first?.diffCode.contains("secondChange") == true)
+    }
+
+    func testPerFileDiffParserDeduplicatesIdenticalSnapshotsForSameFile() {
+        let bodyText = """
+        Path: /Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let duplicateChange = true
+        ```
+
+        Path: CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+        Kind: update
+        Totals: +1 -0
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let duplicateChange = true
+        ```
+        """
+        let entries = [
+            TurnFileChangeSummaryEntry(
+                path: "/Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+            TurnFileChangeSummaryEntry(
+                path: "CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift",
+                additions: 1,
+                deletions: 0,
+                action: .edited
+            ),
+        ]
+
+        let chunks = PerFileDiffParser.parse(bodyText: bodyText, entries: entries)
+
+        XCTAssertEqual(chunks.count, 1)
+        XCTAssertEqual(chunks.first?.additions, 1)
+        XCTAssertEqual(chunks.first?.deletions, 0)
+    }
+
+    func testFileChangeSummaryParserPrefersInlineTotalsWhenTheyFollowDiffBlock() {
+        let text = """
+        Status: completed
+
+        Path: Sources/App.swift
+        Kind: update
+
+        ```diff
+        @@ -1,3 +1,4 @@
+        +let diffBackedFile = true
+        ```
+
+        Totals: +3 -1
+        """
+
+        let summary = TurnFileChangeSummaryParser.parse(from: text)
+
+        XCTAssertEqual(summary?.entries.count, 1)
+        XCTAssertEqual(summary?.entries.first?.path, "Sources/App.swift")
+        XCTAssertEqual(summary?.entries.first?.additions, 3)
+        XCTAssertEqual(summary?.entries.first?.deletions, 1)
+    }
+
+    func testFileChangeSummaryParserDoesNotDuplicateRepeatedPathWithoutNewEvidence() {
+        let text = """
+        Status: completed
+
+        Path: Sources/App.swift
+        Kind: update
+
+        Path: Sources/App.swift
+        Totals: +10 -3
+        """
+
+        let summary = TurnFileChangeSummaryParser.parse(from: text)
+
+        XCTAssertEqual(summary?.entries.count, 1)
+        XCTAssertEqual(summary?.entries.first?.path, "Sources/App.swift")
+        XCTAssertEqual(summary?.entries.first?.additions, 10)
+        XCTAssertEqual(summary?.entries.first?.deletions, 3)
+    }
+
     private func fileChangeText(path: String) -> String {
         """
         Status: completed
