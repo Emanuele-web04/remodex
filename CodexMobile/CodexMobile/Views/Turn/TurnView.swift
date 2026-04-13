@@ -15,6 +15,7 @@ struct TurnView: View {
     @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
+    @Environment(\.wakeMacDisplayAction) private var wakeMacDisplayAction
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
@@ -446,7 +447,7 @@ struct TurnView: View {
 
         return AnyView(
             ConnectionRecoveryCard(snapshot: snapshot) {
-                reconnectAction?()
+                handleConnectionRecoveryAction()
             }
         )
     }
@@ -488,8 +489,19 @@ struct TurnView: View {
         return ConnectionRecoverySnapshot(
             summary: summary,
             status: .interrupted,
-            trailingStyle: .action("Reconnect")
+            trailingStyle: .action(canWakeSavedMacDisplay ? "Wake Screen" : "Reconnect")
         )
+    }
+
+    private var canWakeSavedMacDisplay: Bool {
+        guard !codex.isConnected,
+              codex.hasSavedRelaySession,
+              let relayURL = codex.normalizedRelayURL,
+              let url = URL(string: relayURL) else {
+            return false
+        }
+
+        return codex.prefersDirectRelayTransport(for: url)
     }
 
     private var isRetryingConnectionRecovery: Bool {
@@ -1312,6 +1324,9 @@ struct TurnView: View {
                 onOpenWorktreeHandoff: {
                     handleWorktreeHandoffTap(currentThread: currentThread)
                 },
+                onOpenFeedbackMail: {
+                    openURL(AppEnvironment.feedbackMailtoURL)
+                },
                 onShowStatus: presentStatusSheet,
                 voiceButtonPresentation: voiceButtonPresentation,
                 isVoiceRecording: isVoiceRecording,
@@ -1631,6 +1646,15 @@ struct TurnView: View {
         case .none:
             break
         }
+    }
+
+    private func handleConnectionRecoveryAction() {
+        if canWakeSavedMacDisplay {
+            wakeMacDisplayAction?()
+            return
+        }
+
+        reconnectAction?()
     }
 
     // Invalidates any in-flight async mic startup so it cannot reopen the recorder after leaving the screen.

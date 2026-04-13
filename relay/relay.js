@@ -1,7 +1,7 @@
 // FILE: relay.js
 // Purpose: Thin self-hostable WebSocket relay for Remodex pairing, trusted-session lookup, and encrypted forwarding.
 // Layer: Standalone server module
-// Exports: setupRelay, getRelayStats, hasActiveMacSession, hasAuthenticatedMacSession, resolveTrustedMacSession
+// Exports: setupRelay, getRelayStats, hasActiveMacSession, hasAuthenticatedMacSession, resolveTrustedMacSession, resolvePairingCode
 
 const { createHash, createPublicKey, verify } = require("crypto");
 const { WebSocket } = require("ws");
@@ -14,10 +14,13 @@ const CLOSE_CODE_MAC_ABSENCE_BUFFER_FULL = 4004;
 const MAC_ABSENCE_GRACE_MS = 15_000;
 const TRUSTED_SESSION_RESOLVE_TAG = "remodex-trusted-session-resolve-v1";
 const TRUSTED_SESSION_RESOLVE_SKEW_MS = 90_000;
+const SHORT_PAIRING_CODE_MIN_LENGTH = 8;
+const SHORT_PAIRING_CODE_MAX_LENGTH = 12;
 
 // In-memory session registry for one Mac host and one live iPhone client per session.
 const sessions = new Map();
 const liveSessionsByMacDeviceId = new Map();
+const liveSessionsByPairingCode = new Map();
 const usedResolveNonces = new Map();
 
 // Attaches relay behavior to a ws WebSocketServer instance.
@@ -359,6 +362,44 @@ function resolveTrustedMacSession({
   };
 }
 
+// Resolves the bootstrap metadata behind a short-lived manual pairing code.
+function resolvePairingCode({
+  code,
+  now = Date.now(),
+} = {}) {
+  const normalizedCode = normalizeShortPairingCode(code);
+  if (!normalizedCode) {
+    throw createRelayError(400, "invalid_request", "The pairing code is missing or malformed.");
+  }
+
+  const registration = liveSessionsByPairingCode.get(normalizedCode);
+  if (!registration || !hasActiveMacSession(registration.sessionId)) {
+    throw createRelayError(404, "pairing_code_unavailable", "This pairing code is unavailable.");
+  }
+
+  if (!Number.isFinite(registration.pairingExpiresAt) || now > registration.pairingExpiresAt) {
+    liveSessionsByPairingCode.delete(normalizedCode);
+    throw createRelayError(410, "pairing_code_expired", "This pairing code has expired.");
+  }
+
+  if (
+    !registration.macDeviceId
+    || !registration.macIdentityPublicKey
+    || !Number.isFinite(registration.pairingVersion)
+  ) {
+    throw createRelayError(409, "pairing_code_incomplete", "The bridge pairing metadata is incomplete.");
+  }
+
+  return {
+    ok: true,
+    v: registration.pairingVersion,
+    sessionId: registration.sessionId,
+    macDeviceId: registration.macDeviceId,
+    macIdentityPublicKey: registration.macIdentityPublicKey,
+    expiresAt: registration.pairingExpiresAt,
+  };
+}
+
 // Exposes lightweight runtime stats for health/status endpoints.
 function getRelayStats() {
   let totalClients = 0;
@@ -375,6 +416,7 @@ function getRelayStats() {
     activeSessions: sessions.size,
     sessionsWithMac,
     totalClients,
+    pairingCodes: liveSessionsByPairingCode.size,
   };
 }
 
@@ -403,6 +445,9 @@ function registerLiveMacSession(macRegistration) {
     return;
   }
   liveSessionsByMacDeviceId.set(macRegistration.macDeviceId, macRegistration);
+  if (macRegistration.pairingCode && Number.isFinite(macRegistration.pairingExpiresAt)) {
+    liveSessionsByPairingCode.set(macRegistration.pairingCode, macRegistration);
+  }
 }
 
 function applyMacRegistrationMessage(session, sessionId, rawMessage) {
@@ -411,6 +456,7 @@ function applyMacRegistrationMessage(session, sessionId, rawMessage) {
     return false;
   }
 
+  unregisterLiveMacSession(session.macRegistration, sessionId);
   session.macRegistration = normalizeMacRegistration(parsed.registration, sessionId);
   registerLiveMacSession(session.macRegistration);
   return true;
@@ -426,6 +472,14 @@ function unregisterLiveMacSession(macRegistration, sessionId) {
   if (existing?.sessionId === sessionId) {
     liveSessionsByMacDeviceId.delete(macDeviceId);
   }
+
+  const pairingCode = macRegistration?.pairingCode;
+  if (pairingCode) {
+    const existingPairingCode = liveSessionsByPairingCode.get(pairingCode);
+    if (existingPairingCode?.sessionId === sessionId) {
+      liveSessionsByPairingCode.delete(pairingCode);
+    }
+  }
 }
 
 function readMacRegistrationHeaders(headers, sessionId) {
@@ -435,6 +489,9 @@ function readMacRegistrationHeaders(headers, sessionId) {
     displayName: readHeaderString(headers["x-machine-name"]),
     trustedPhoneDeviceId: readHeaderString(headers["x-trusted-phone-device-id"]),
     trustedPhonePublicKey: readHeaderString(headers["x-trusted-phone-public-key"]),
+    pairingCode: readHeaderString(headers["x-pairing-code"]),
+    pairingVersion: readHeaderString(headers["x-pairing-version"]),
+    pairingExpiresAt: readHeaderString(headers["x-pairing-expires-at"]),
   }, sessionId);
 }
 
@@ -446,6 +503,9 @@ function normalizeMacRegistration(registration, sessionId) {
     displayName: normalizeNonEmptyString(registration?.displayName),
     trustedPhoneDeviceId: normalizeNonEmptyString(registration?.trustedPhoneDeviceId),
     trustedPhonePublicKey: normalizeNonEmptyString(registration?.trustedPhonePublicKey),
+    pairingCode: normalizeShortPairingCode(registration?.pairingCode),
+    pairingVersion: normalizePositiveInteger(registration?.pairingVersion),
+    pairingExpiresAt: normalizePositiveInteger(registration?.pairingExpiresAt),
   };
 }
 
@@ -515,6 +575,31 @@ function normalizeNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function normalizeShortPairingCode(value) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const normalized = value
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, "");
+  if (
+    normalized.length < SHORT_PAIRING_CODE_MIN_LENGTH
+    || normalized.length > SHORT_PAIRING_CODE_MAX_LENGTH
+    || !/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]+$/.test(normalized)
+  ) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function normalizePositiveInteger(value) {
+  const normalized = Number(value);
+  return Number.isFinite(normalized) && normalized > 0 ? normalized : 0;
+}
+
 function createRelayError(status, code, message) {
   return Object.assign(new Error(message), {
     status,
@@ -544,5 +629,6 @@ module.exports = {
   getRelayStats,
   hasActiveMacSession,
   hasAuthenticatedMacSession,
+  resolvePairingCode,
   resolveTrustedMacSession,
 };

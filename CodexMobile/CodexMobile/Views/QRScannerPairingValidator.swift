@@ -1,5 +1,5 @@
 // FILE: QRScannerPairingValidator.swift
-// Purpose: Classifies scanned QR payloads so the pairing flow can block outdated Mac bridges before reconnecting.
+// Purpose: Classifies scanned or pasted pairing payloads so the pairing flow can block outdated Mac bridges before reconnecting.
 // Layer: View support
 // Exports: validatePairingQRCode
 // Depends on: Foundation, CodexPairingQRPayload, CodexBridgeUpdatePrompt
@@ -8,16 +8,37 @@ import Foundation
 
 enum QRScannerPairingValidationResult {
     case success(CodexPairingQRPayload)
+    case shortCode(String)
     case scanError(String)
     case bridgeUpdateRequired(CodexBridgeUpdatePrompt)
 }
 
 private let qrScannerBridgeUpdateCommand = "npm install -g remodex@latest"
+private let qrScannerPairingCodePrefix = "RMX1:"
+private let qrScannerShortCodePattern = "^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8,12}$"
 
 // Distinguishes a usable pairing QR from stale bridge payloads and generic camera mis-scans.
 func validatePairingQRCode(_ code: String, now: Date = Date()) -> QRScannerPairingValidationResult {
-    guard let data = code.data(using: .utf8) else {
-        return .scanError("QR code contains invalid text encoding.")
+    let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedShortCode = trimmedCode
+        .uppercased()
+        .replacingOccurrences(of: "-", with: "")
+        .replacingOccurrences(of: " ", with: "")
+    if normalizedShortCode.range(of: qrScannerShortCodePattern, options: .regularExpression) != nil {
+        return .shortCode(normalizedShortCode)
+    }
+    let normalizedCode: String
+    if trimmedCode.hasPrefix(qrScannerPairingCodePrefix) {
+        guard let decodedCode = decodePairingCode(trimmedCode) else {
+            return .scanError("This pairing code is unreadable. Copy it again from the Mac bridge.")
+        }
+        normalizedCode = decodedCode
+    } else {
+        normalizedCode = trimmedCode
+    }
+
+    guard let data = normalizedCode.data(using: .utf8) else {
+        return .scanError("Pairing code contains invalid text encoding.")
     }
 
     let decoder = JSONDecoder()
@@ -31,16 +52,16 @@ func validatePairingQRCode(_ code: String, now: Date = Date()) -> QRScannerPairi
         }
 
         guard !payload.relay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .scanError("QR code is missing the relay URL. Re-generate the code from the bridge.")
+            return .scanError("Pairing code is missing the relay URL. Re-generate it from the bridge.")
         }
 
         guard !payload.sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return .scanError("QR code is missing the session ID. Re-generate the code from the bridge.")
+            return .scanError("Pairing code is missing the session ID. Re-generate it from the bridge.")
         }
 
         let expiryDate = Date(timeIntervalSince1970: TimeInterval(payload.expiresAt) / 1000)
         guard expiryDate.addingTimeInterval(codexSecureClockSkewToleranceSeconds) >= now else {
-            return .scanError("This pairing QR code has expired. Generate a new one from the Mac bridge.")
+            return .scanError("This pairing code has expired. Generate a new one from the Mac bridge.")
         }
 
         return .success(payload)
@@ -55,6 +76,19 @@ func validatePairingQRCode(_ code: String, now: Date = Date()) -> QRScannerPairi
     }
 
     return .scanError("Not a valid secure pairing code. Make sure you're scanning a QR from the latest Remodex bridge.")
+}
+
+// Reuses the QR validator for manual entry by decoding the bridge's paste-friendly token back into JSON.
+private func decodePairingCode(_ code: String) -> String? {
+    let encoded = String(code.dropFirst(qrScannerPairingCodePrefix.count))
+        .replacingOccurrences(of: "-", with: "+")
+        .replacingOccurrences(of: "_", with: "/")
+    let paddingCount = (4 - (encoded.count % 4)) % 4
+    let padded = encoded + String(repeating: "=", count: paddingCount)
+    guard let data = Data(base64Encoded: padded) else {
+        return nil
+    }
+    return String(data: data, encoding: .utf8)
 }
 
 private func looksLikeRemodexPairingPayload(_ data: Data) -> Bool {

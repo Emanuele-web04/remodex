@@ -24,9 +24,11 @@ struct ContentView: View {
     @State private var isShowingManualScanner = false
     @State private var hasDismissedAutomaticScanner = false
     @State private var scannerCanReturnToOnboarding = false
+    @State private var opensManualPairingCodeEntry = false
     @State private var isSearchActive = false
     @State private var isRetryingBridgeUpdate = false
     @State private var isPreparingManualScanner = false
+    @State private var isWakingSavedMacDisplay = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
     @State private var sidebarPrewarmTask: Task<Void, Never>?
     @State private var sidebarGestureDebugSequence = 0
@@ -241,12 +243,17 @@ struct ContentView: View {
 
     private var qrScannerBody: some View {
         QRScannerView(
+            opensManualPairingEntryOnAppear: opensManualPairingCodeEntry,
             onBack: scannerBackAction,
+            resolvePairingCode: { code in
+                try await codex.resolvePairingCode(code)
+            },
             onScan: { pairingPayload in
                 Task {
                     isShowingManualScanner = false
                     hasDismissedAutomaticScanner = false
                     scannerCanReturnToOnboarding = false
+                    opensManualPairingCodeEntry = false
                     await viewModel.connectToRelay(
                         pairingPayload: pairingPayload,
                         codex: codex
@@ -339,6 +346,9 @@ struct ContentView: View {
                         await viewModel.toggleConnection(codex: codex)
                     }
                 })
+                .environment(\.wakeMacDisplayAction, {
+                    wakeSavedMacDisplay()
+                })
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         hamburgerButton
@@ -363,21 +373,18 @@ struct ContentView: View {
                 }
             ) {
                 if homeConnectionPhase == .connecting || (codex.hasReconnectCandidate && !codex.isConnected) {
-                    Button("Scan New QR Code") {
-                        presentManualScannerAfterStoppingReconnect()
-                    }
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .buttonStyle(.plain)
-                    .disabled(isPreparingManualScanner)
-
-                    if codex.hasReconnectCandidate {
-                        Button("Forget Pair") {
-                            codex.forgetReconnectCandidate()
+                    if canWakeSavedMacDisplay {
+                        Button(isWakingSavedMacDisplay ? "Waking Mac Screen..." : "Wake Mac Screen") {
+                            wakeSavedMacDisplay()
                         }
                         .font(AppFont.subheadline(weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
                         .buttonStyle(.plain)
+                        .disabled(isPreparingManualScanner || isWakingSavedMacDisplay)
+                    }
+
+                    if codex.hasReconnectCandidate {
+                        reconnectSecondaryActions
                     }
                 }
             }
@@ -402,6 +409,38 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Menu")
+    }
+
+    // Offers a one-tap display wake only for saved local-style relays where the Mac may still be alive.
+    private var canWakeSavedMacDisplay: Bool {
+        guard homeConnectionPhase == .offline,
+              !codex.isConnected,
+              codex.hasSavedRelaySession,
+              let relayURL = codex.normalizedRelayURL,
+              let url = URL(string: relayURL) else {
+            return false
+        }
+
+        return codex.prefersDirectRelayTransport(for: url)
+    }
+
+    // Uses a temporary bridge request to wake display sleep, then immediately retries the main connection.
+    private func wakeSavedMacDisplay() {
+        guard !isWakingSavedMacDisplay else { return }
+        isWakingSavedMacDisplay = true
+        codex.lastErrorMessage = "Trying to wake your Mac display..."
+
+        Task { @MainActor in
+            defer { isWakingSavedMacDisplay = false }
+
+            do {
+                await viewModel.stopAutoReconnectForManualRetry(codex: codex)
+                let handoffService = DesktopHandoffService(codex: codex)
+                try await handoffService.wakeDisplay()
+            } catch {
+                codex.lastErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     // MARK: - Sidebar Geometry
@@ -753,14 +792,16 @@ struct ContentView: View {
         presentManualScannerAfterStoppingReconnect()
     }
 
-    // Shows the QR scanner immediately and tears down any stale reconnect in the background.
-    private func presentManualScannerAfterStoppingReconnect() {
+    // Shows pairing recovery immediately and tears down any stale reconnect in the background.
+    private func presentManualScannerAfterStoppingReconnect(openPairingCodeEntry: Bool = false) {
         guard !isShowingManualScanner else {
+            opensManualPairingCodeEntry = openPairingCodeEntry
             return
         }
 
         hasDismissedAutomaticScanner = false
         scannerCanReturnToOnboarding = false
+        opensManualPairingCodeEntry = openPairingCodeEntry
         isShowingManualScanner = true
 
         Task {
@@ -772,6 +813,7 @@ struct ContentView: View {
     private func presentAutomaticScanner() {
         withAnimation {
             hasDismissedAutomaticScanner = false
+            opensManualPairingCodeEntry = false
         }
     }
 
@@ -781,6 +823,7 @@ struct ContentView: View {
             isShowingManualScanner = false
             hasDismissedAutomaticScanner = true
             scannerCanReturnToOnboarding = false
+            opensManualPairingCodeEntry = false
         }
     }
 
@@ -794,8 +837,50 @@ struct ContentView: View {
             isShowingManualScanner = false
             hasDismissedAutomaticScanner = false
             scannerCanReturnToOnboarding = false
+            opensManualPairingCodeEntry = false
             hasSeenOnboarding = false
         }
+    }
+
+    // Keeps QR and code recovery as one quiet secondary row under the main reconnect CTA.
+    private var reconnectSecondaryActions: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                secondaryReconnectActionButton("New QR Code") {
+                    presentManualScannerAfterStoppingReconnect()
+                }
+                .disabled(isPreparingManualScanner)
+
+                secondaryReconnectActionButton("Pair with Code") {
+                    presentManualScannerAfterStoppingReconnect(openPairingCodeEntry: true)
+                }
+                .disabled(isPreparingManualScanner)
+            }
+
+            Button("Forget Pair") {
+                codex.forgetReconnectCandidate()
+            }
+            .font(AppFont.subheadline(weight: .semibold))
+            .foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+        }
+    }
+
+    // Mirrors the reconnect button corner language in a lighter outline-only treatment.
+    private func secondaryReconnectActionButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(AppFont.subheadline(weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+        }
+        .foregroundStyle(.primary)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+        )
+        .buttonStyle(.plain)
     }
 
     private func startNewThreadFromMissingNotificationAlert() async {

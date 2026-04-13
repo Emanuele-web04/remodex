@@ -1,5 +1,5 @@
 // FILE: QRScannerView.swift
-// Purpose: AVFoundation camera-based QR scanner for relay session pairing.
+// Purpose: AVFoundation pairing screen that supports both camera QR scans and pasted fallback codes.
 // Layer: View
 // Exports: QRScannerView
 // Depends on: SwiftUI, AVFoundation
@@ -10,25 +10,35 @@ import SwiftUI
 struct QRScannerView: View {
     let onBack: (() -> Void)?
     let onScan: (CodexPairingQRPayload) -> Void
+    let resolvePairingCode: ((String) async throws -> CodexPairingQRPayload)?
 
     @State private var scannerError: String?
     @State private var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
+    @State private var isShowingManualPairingEntry = false
+    @State private var isResolvingPairingCode = false
+    @State private var manualPairingCode = ""
     @State private var didCopyBridgeUpdateCommand = false
     @State private var hasCameraPermission = false
     @State private var isCheckingPermission = true
+    @State private var defersCameraPermissionCheck = false
 
     init(
         initialBridgeUpdatePrompt: CodexBridgeUpdatePrompt? = nil,
         initialHasCameraPermission: Bool = false,
         initialIsCheckingPermission: Bool = true,
+        opensManualPairingEntryOnAppear: Bool = false,
         onBack: (() -> Void)? = nil,
+        resolvePairingCode: ((String) async throws -> CodexPairingQRPayload)? = nil,
         onScan: @escaping (CodexPairingQRPayload) -> Void
     ) {
         self.onBack = onBack
+        self.resolvePairingCode = resolvePairingCode
         self.onScan = onScan
         _bridgeUpdatePrompt = State(initialValue: initialBridgeUpdatePrompt)
+        _isShowingManualPairingEntry = State(initialValue: opensManualPairingEntryOnAppear)
         _hasCameraPermission = State(initialValue: initialHasCameraPermission)
-        _isCheckingPermission = State(initialValue: initialIsCheckingPermission)
+        _isCheckingPermission = State(initialValue: opensManualPairingEntryOnAppear ? false : initialIsCheckingPermission)
+        _defersCameraPermissionCheck = State(initialValue: opensManualPairingEntryOnAppear)
     }
 
     var body: some View {
@@ -40,6 +50,8 @@ struct QRScannerView: View {
                     .tint(.white)
             } else if let bridgeUpdatePrompt {
                 bridgeUpdateView(prompt: bridgeUpdatePrompt)
+            } else if defersCameraPermissionCheck {
+                manualEntryBackdrop
             } else if hasCameraPermission {
                 QRCameraPreview { code, resetScanLock in
                     handleScanResult(code, resetScanLock: resetScanLock)
@@ -49,6 +61,13 @@ struct QRScannerView: View {
                 scannerOverlay
             } else {
                 cameraPermissionView
+            }
+
+            if isResolvingPairingCode {
+                ProgressView()
+                    .tint(.white)
+                    .padding(20)
+                    .background(Color.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
         }
         .safeAreaInset(edge: .top) {
@@ -62,15 +81,31 @@ struct QRScannerView: View {
             }
         }
         .task {
+            guard !defersCameraPermissionCheck else {
+                return
+            }
             await checkCameraPermission()
         }
-        .alert("Scan Error", isPresented: Binding(
+        .alert("Pairing Error", isPresented: Binding(
             get: { scannerError != nil },
             set: { if !$0 { scannerError = nil } }
         )) {
             Button("OK", role: .cancel) { scannerError = nil }
         } message: {
             Text(scannerError ?? "Invalid QR code")
+        }
+        .alert("Enter Pairing Code", isPresented: $isShowingManualPairingEntry) {
+            TextField("AB23CD34EF", text: $manualPairingCode)
+
+            Button("Enter") {
+                startPairingInput(manualPairingCode)
+            }
+
+            Button("Cancel", role: .cancel) {
+                manualPairingCode = ""
+            }
+        } message: {
+            Text("Paste the pairing code shown in the terminal on your Mac or in your phone shell.")
         }
     }
 
@@ -201,9 +236,42 @@ struct QRScannerView: View {
                 .stroke(Color.white.opacity(0.6), lineWidth: 2)
                 .frame(width: 250, height: 250)
 
-            Text("Scan QR code from Remodex CLI")
+            Text("Scan the Remodex QR or paste the pairing code")
                 .font(AppFont.subheadline(weight: .medium))
                 .foregroundStyle(.white)
+
+            manualPairingEntryButton(
+                title: "Paste or Enter Code",
+                foregroundStyle: .black,
+                backgroundStyle: AnyShapeStyle(.white)
+            )
+
+            Spacer()
+        }
+    }
+
+    private var manualEntryBackdrop: some View {
+        VStack(spacing: 18) {
+            Spacer()
+
+            VStack(spacing: 10) {
+                Text("Enter the pairing code")
+                    .font(AppFont.title3(weight: .semibold))
+                    .foregroundStyle(.white)
+
+                Text("Paste the short code from your Mac. Camera access is not needed for this step.")
+                    .font(AppFont.subheadline())
+                    .foregroundStyle(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+
+            Button("Use QR Instead") {
+                requestCameraScanner()
+            }
+            .font(AppFont.body(weight: .semibold))
+            .foregroundStyle(.white)
+            .buttonStyle(.plain)
 
             Spacer()
         }
@@ -231,6 +299,46 @@ struct QRScannerView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
+
+            manualPairingEntryButton(
+                title: "Paste or Enter Code Instead",
+                foregroundStyle: .white
+            )
+        }
+    }
+
+    // Keeps the fallback flow lightweight and familiar, closer to native iOS code-entry prompts.
+    private func manualPairingEntryButton(
+        title: String,
+        foregroundStyle: Color,
+        backgroundStyle: AnyShapeStyle? = nil
+    ) -> some View {
+        Button(title) {
+            presentManualPairingEntry()
+        }
+        .font(AppFont.body(weight: .semibold))
+        .foregroundStyle(foregroundStyle)
+        .padding(.horizontal, backgroundStyle == nil ? 0 : 18)
+        .padding(.vertical, backgroundStyle == nil ? 0 : 12)
+        .background(
+            Group {
+                if let backgroundStyle {
+                    Capsule().fill(backgroundStyle)
+                }
+            }
+        )
+        .buttonStyle(.plain)
+    }
+
+    private func requestCameraScanner() {
+        guard defersCameraPermissionCheck else {
+            return
+        }
+
+        defersCameraPermissionCheck = false
+        isCheckingPermission = true
+        Task {
+            await checkCameraPermission()
         }
     }
 
@@ -257,17 +365,61 @@ struct QRScannerView: View {
         isCheckingPermission = false
     }
 
+    // Seeds the alert from the clipboard when available so phone-local terminals become one-tap to reconnect.
+    private func presentManualPairingEntry() {
+        let clipboardString = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !clipboardString.isEmpty {
+            manualPairingCode = clipboardString
+        }
+        isShowingManualPairingEntry = true
+    }
+
     private func handleScanResult(_ code: String, resetScanLock: @escaping () -> Void) {
+        startPairingInput(code, resetScanLock: resetScanLock)
+    }
+
+    // Routes camera scans and pasted codes through the same validator so pairing rules stay identical.
+    private func startPairingInput(_ code: String, resetScanLock: (() -> Void)? = nil) {
+        Task {
+            await handlePairingInput(code, resetScanLock: resetScanLock)
+        }
+    }
+
+    // Resolves short pairing codes asynchronously while keeping QR payload handling unchanged.
+    @MainActor
+    private func handlePairingInput(_ code: String, resetScanLock: (() -> Void)? = nil) async {
         switch validatePairingQRCode(code) {
         case .success(let payload):
+            isShowingManualPairingEntry = false
+            manualPairingCode = ""
             onScan(payload)
+        case .shortCode(let shortCode):
+            guard let resolvePairingCode else {
+                scannerError = "This Remodex build cannot resolve pairing codes yet. Scan the QR code instead."
+                resetScanLock?()
+                return
+            }
+            isResolvingPairingCode = true
+            defer {
+                isResolvingPairingCode = false
+                resetScanLock?()
+            }
+            do {
+                let payload = try await resolvePairingCode(shortCode)
+                isShowingManualPairingEntry = false
+                manualPairingCode = ""
+                onScan(payload)
+            } catch {
+                scannerError = error.localizedDescription
+            }
         case .scanError(let message):
             scannerError = message
-            resetScanLock()
+            resetScanLock?()
         case .bridgeUpdateRequired(let prompt):
             didCopyBridgeUpdateCommand = false
+            isShowingManualPairingEntry = false
             bridgeUpdatePrompt = prompt
-            resetScanLock()
+            resetScanLock?()
         }
     }
 }

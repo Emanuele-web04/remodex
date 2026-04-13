@@ -29,6 +29,7 @@ struct TurnComposerHostView: View {
     let onStartForkThreadLocally: () -> Void
     let onOpenForkWorktree: () -> Void
     let onOpenWorktreeHandoff: () -> Void
+    let onOpenFeedbackMail: () -> Void
     let onShowStatus: () -> Void
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
     let isVoiceRecording: Bool
@@ -185,6 +186,9 @@ struct TurnComposerHostView: View {
                 switch command {
                 case .codeReview:
                     viewModel.onSelectSlashCommand(command)
+                case .feedback:
+                    viewModel.onSelectSlashCommand(command)
+                    onOpenFeedbackMail()
                 case .fork:
                     viewModel.onSelectSlashCommand(
                         command,

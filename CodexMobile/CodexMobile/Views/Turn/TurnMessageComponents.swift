@@ -949,6 +949,15 @@ struct MessageRow: View, Equatable {
             && visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && inferredQuestionnaire == nil
             && mermaidContent == nil
+        // Prefer copying the exact assistant block the user can see instead of the
+        // whole non-user turn aggregate assembled by the timeline footer cache.
+        let assistantCopyText: String? = {
+            let trimmedVisibleText = visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedVisibleText.isEmpty {
+                return trimmedVisibleText
+            }
+            return assistantBlockAccessoryState?.copyText
+        }()
         let hasRenderableAssistantContent = !visibleAssistantText.isEmpty || proposedPlan != nil
         return VStack(alignment: .leading, spacing: 8) {
             if let commentContent, commentContent.hasFindings {
@@ -1020,7 +1029,7 @@ struct MessageRow: View, Equatable {
 
             if !suppressNativeProposedPlanShell, let assistantBlockAccessoryState {
                 CopyBlockButton(
-                    text: assistantBlockAccessoryState.copyText,
+                    text: assistantCopyText,
                     isRunning: assistantBlockAccessoryState.showsRunningIndicator
                 )
             }

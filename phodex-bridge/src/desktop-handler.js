@@ -1,5 +1,5 @@
 // FILE: desktop-handler.js
-// Purpose: Handles explicit desktop-handoff bridge actions for Codex.app.
+// Purpose: Handles explicit desktop handoff and display-wake bridge actions for Codex.app.
 // Layer: Bridge handler
 // Exports: handleDesktopRequest
 // Depends on: child_process, fs, os, path, ./rollout-watch
@@ -19,6 +19,7 @@ const DEFAULT_RELAUNCH_WAIT_MS = 300;
 const DEFAULT_APP_BOOT_WAIT_MS = 1_200;
 const DEFAULT_THREAD_MATERIALIZE_WAIT_MS = 4_000;
 const DEFAULT_THREAD_MATERIALIZE_POLL_MS = 250;
+const DEFAULT_WAKE_DISPLAY_DURATION_SECONDS = 5;
 
 function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
   let parsed;
@@ -91,6 +92,10 @@ async function handleDesktopMethod(method, params, options = {}) {
         relaunchWaitMs,
         threadMaterializeWaitMs,
         threadMaterializePollMs,
+      });
+    case "desktop/wakeDisplay":
+      return wakeDisplay({
+        executor,
       });
     default:
       throw desktopError("unknown_method", `Unknown desktop method: ${method}`);
@@ -228,6 +233,26 @@ async function continueOnMac(
     targetUrl,
     threadId,
     desktopKnown,
+  };
+}
+
+// Nudges macOS user activity so display sleep can recover without changing long-lived power settings.
+async function wakeDisplay({ executor }) {
+  try {
+    await executor("/usr/bin/caffeinate", ["-u", "-t", String(DEFAULT_WAKE_DISPLAY_DURATION_SECONDS)], {
+      timeout: HANDOFF_TIMEOUT_MS,
+    });
+  } catch (error) {
+    throw desktopError(
+      "wake_display_failed",
+      "Could not wake your Mac display right now.",
+      error
+    );
+  }
+
+  return {
+    success: true,
+    durationSeconds: DEFAULT_WAKE_DISPLAY_DURATION_SECONDS,
   };
 }
 

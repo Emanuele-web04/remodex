@@ -200,6 +200,73 @@ test("trusted session resolve returns the current live session for a trusted iph
   });
 });
 
+test("pairing code resolve returns bootstrap metadata for a live mac session", async () => {
+  await withServer(async ({ port }) => {
+    const expiresAt = Date.now() + 60_000;
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/pairing-live-1`, {
+      headers: {
+        "x-role": "mac",
+        "x-mac-device-id": "mac-pairing-1",
+        "x-mac-identity-public-key": "mac-public-key-pairing-1",
+        "x-pairing-code": "AB23CD34EF",
+        "x-pairing-version": "2",
+        "x-pairing-expires-at": String(expiresAt),
+      },
+    });
+    await onceOpen(mac);
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/pairing/code/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "AB23-CD34EF" }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      v: 2,
+      sessionId: "pairing-live-1",
+      macDeviceId: "mac-pairing-1",
+      macIdentityPublicKey: "mac-public-key-pairing-1",
+      expiresAt,
+    });
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+  });
+});
+
+test("pairing code resolve rejects expired codes", async () => {
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/pairing-live-2`, {
+      headers: {
+        "x-role": "mac",
+        "x-mac-device-id": "mac-pairing-2",
+        "x-mac-identity-public-key": "mac-public-key-pairing-2",
+        "x-pairing-code": "ZX34CV56BN",
+        "x-pairing-version": "2",
+        "x-pairing-expires-at": String(Date.now() - 1_000),
+      },
+    });
+    await onceOpen(mac);
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/pairing/code/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "ZX34CV56BN" }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 410);
+    assert.equal(body.code, "pairing_code_expired");
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+  });
+});
+
 test("trusted session resolve rejects iphones that are not trusted for the live mac", async () => {
   const trustedPhone = makePhoneIdentity();
   const otherPhone = makePhoneIdentity();

@@ -769,6 +769,9 @@ final class TurnViewModel {
         case .codeReview:
             removeTrailingSlashCommandTokenFromInputIfNeeded()
             armCodeReviewSelection(command: command, target: nil)
+        case .feedback:
+            removeTrailingSlashCommandTokenFromInputIfNeeded()
+            resetSlashCommandState(clearPendingSelection: true)
         case .fork:
             slashCommandPanelState = .forkDestinations(availableForkDestinations)
         case .status:
@@ -1719,7 +1722,8 @@ final class TurnViewModel {
     ) async -> Bool {
         guard wasBusy,
               codex.activeTurnID(for: threadID) == nil,
-              codex.runningThreadIDs.contains(threadID) else {
+              (codex.runningThreadIDs.contains(threadID)
+                || codex.protectedRunningFallbackThreadIDs.contains(threadID)) else {
             return wasBusy
         }
 
@@ -1728,7 +1732,7 @@ final class TurnViewModel {
     }
 
     private func isThreadBusy(codex: CodexService, threadID: String) -> Bool {
-        codex.activeTurnID(for: threadID) != nil || codex.runningThreadIDs.contains(threadID)
+        codex.threadHasActiveOrRunningTurn(threadID)
     }
 
     // Queues normal follow-ups while a run is active; explicit steer stays behind the queued-draft action.

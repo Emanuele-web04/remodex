@@ -553,106 +553,17 @@ private struct SettingsNotificationsCard: View {
 }
 
 private struct SettingsGPTAccountCard: View {
-    @Environment(CodexService.self) private var codex
-    @Environment(\.scenePhase) private var scenePhase
     @State private var isShowingMacLoginInfo = false
 
     var body: some View {
-        let snapshot = codex.gptAccountSnapshot
-
         SettingsCard(title: "ChatGPT") {
-            HStack(spacing: 10) {
-                Image(systemName: statusIconName(for: snapshot))
-                    .foregroundStyle(statusIconColor(for: snapshot))
-                Text("Status")
-                Spacer()
-                SettingsStatusPill(label: snapshot.statusLabel)
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    isShowingMacLoginInfo = true
-                } label: {
-                    Image(systemName: "info.circle")
-                        .font(AppFont.subheadline(weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("How ChatGPT voice works on your Mac")
-            }
-
-            if let detail = snapshot.detailText {
-                Text(detail)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-
-            if let hint = hintText(for: snapshot) {
-                Text(hint)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .task {
-            await codex.refreshGPTAccountState()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            Task {
-                await codex.refreshGPTAccountState()
+            SettingsButton("Info") {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                isShowingMacLoginInfo = true
             }
         }
         .sheet(isPresented: $isShowingMacLoginInfo) {
             GPTVoiceSetupSheet()
-        }
-    }
-
-    private func hintText(for snapshot: CodexGPTAccountSnapshot) -> String? {
-        if snapshot.needsReauth {
-            return "The paired Mac bridge needs a fresh ChatGPT sign-in before voice transcription can run again."
-        }
-        if snapshot.isAuthenticated && snapshot.isVoiceTokenReady {
-            return "Voice transcription uses the ChatGPT session already active on your paired Mac."
-        }
-        if snapshot.isAuthenticated {
-            return "Finishing voice setup on your paired Mac bridge..."
-        }
-        if snapshot.hasActiveLogin && codex.isConnected {
-            return "Finish the ChatGPT sign-in flow in the browser on your Mac, then come back here."
-        }
-        if snapshot.hasActiveLogin {
-            return "Reconnect to your paired Mac bridge to finish ChatGPT sign-in."
-        }
-        if !codex.isConnected {
-            return "Connect to your paired Mac bridge first."
-        }
-        return "Voice transcription uses the ChatGPT account already signed in on your paired Mac."
-    }
-
-    private func statusIconName(for snapshot: CodexGPTAccountSnapshot) -> String {
-        switch snapshot.status {
-        case .authenticated:
-            return snapshot.needsReauth ? "exclamationmark.triangle.fill" : "checkmark.shield.fill"
-        case .loginPending:
-            return "arrow.up.forward.app.fill"
-        case .expired:
-            return "exclamationmark.triangle.fill"
-        case .notLoggedIn, .unknown:
-            return "person.crop.circle.badge.plus"
-        case .unavailable:
-            return "wifi.slash"
-        }
-    }
-
-    private func statusIconColor(for snapshot: CodexGPTAccountSnapshot) -> Color {
-        switch snapshot.status {
-        case .authenticated:
-            return snapshot.needsReauth ? .orange : .green
-        case .loginPending:
-            return .orange
-        case .expired:
-            return .red
-        case .notLoggedIn, .unknown, .unavailable:
-            return .secondary
         }
     }
 }

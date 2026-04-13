@@ -92,6 +92,20 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertFalse(viewModel.isSending)
     }
 
+    func testFlushQueueDoesNothingWhenProtectedRunningFallbackIsActive() {
+        let service = makeService()
+        service.isConnected = true
+        service.protectedRunningFallbackThreadIDs.insert("thread-queue")
+
+        let viewModel = makeViewModel()
+        service.queuedTurnDraftsByThread["thread-queue"] = [makeDraft(text: "queued")]
+
+        viewModel.flushQueueIfPossible(codex: service, threadID: "thread-queue")
+
+        XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
+        XCTAssertFalse(viewModel.isSending)
+    }
+
     func testFlushQueueFailureRequeuesAndPausesQueue() async {
         let service = makeService()
         service.isConnected = true

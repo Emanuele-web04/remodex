@@ -299,6 +299,8 @@ struct SlashCommandAutocompletePanel: View {
         switch command {
         case .codeReview:
             return !hasComposerContentConflictingWithReview
+        case .feedback:
+            return true
         case .fork:
             return !isThreadRunning
         case .status:

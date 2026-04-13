@@ -162,6 +162,15 @@ struct CodexTrustedSessionResolveResponse: Codable, Sendable {
     let sessionId: String
 }
 
+struct CodexPairingCodeResolveResponse: Codable, Sendable {
+    let ok: Bool
+    let v: Int
+    let sessionId: String
+    let macDeviceId: String
+    let macIdentityPublicKey: String
+    let expiresAt: Int64
+}
+
 struct CodexRelayErrorResponse: Codable, Sendable {
     let ok: Bool?
     let error: String?

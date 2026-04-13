@@ -285,3 +285,35 @@ test("desktop/continueOnMac refuses non-mac platforms", async () => {
   assert.equal(responses[0].id, "request-3");
   assert.equal(responses[0].error?.data?.errorCode, "unsupported_platform");
 });
+
+test("desktop/wakeDisplay sends a short caffeinate user-activity pulse", async () => {
+  const executorCalls = [];
+  const responses = [];
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-4",
+    method: "desktop/wakeDisplay",
+    params: {},
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    executor: async (...args) => {
+      executorCalls.push(args);
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(executorCalls.length, 1);
+  assert.equal(executorCalls[0][0], "/usr/bin/caffeinate");
+  assert.deepEqual(executorCalls[0][1], ["-u", "-t", "5"]);
+  assert.deepEqual(responses, [{
+    id: "request-4",
+    result: {
+      success: true,
+      durationSeconds: 5,
+    },
+  }]);
+});

@@ -196,6 +196,17 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertNil(service.latestTurnTerminalState(for: threadID))
     }
 
+    func testProtectedRunningFallbackAloneStillKeepsTimelineRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.protectedRunningFallbackThreadIDs.insert(threadID)
+        service.refreshThreadTimelineState(for: threadID)
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.timelineState(for: threadID).renderSnapshot.isThreadRunning)
+    }
+
     func testStreamingFallbackMarksRunningWithoutActiveTurnMapping() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
