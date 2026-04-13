@@ -137,7 +137,7 @@ struct TurnComposerView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding + 6)
-                .padding(.bottom, 4)
+                .padding(.bottom, 8)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     guard !isComposerInteractionLocked else { return }
