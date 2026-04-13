@@ -63,7 +63,7 @@ struct ContentView: View {
     // Lets the drawer gesture start a bit inside the content instead of only on the bezel edge.
     private let sidebarOpenActivationWidth: CGFloat = 80
     private let sidebarPrewarmDelayNanoseconds: UInt64 = 700_000_000
-    private let whatsNewPresentationDelayNanoseconds: UInt64 = 15_000_000_000
+    private let whatsNewPresentationDelayNanoseconds: UInt64 = 30_000_000_000
     private let sidebarGestureLogBucketWidth: CGFloat = 40
     private let sidebarSwipeCommitDistance: CGFloat = 30
     private let wakingSavedMacDisplayStatusMessage = "Trying to wake your Mac display..."
@@ -920,8 +920,26 @@ struct ContentView: View {
             return
         }
 
-        guard presentedRootSheet == nil,
-              let desiredRoute = desiredRootSheetRoute else {
+        guard let desiredRoute = desiredRootSheetRoute else {
+            return
+        }
+
+        // Let bridge recovery take over immediately without marking What's New as already seen.
+        if case .whatsNew = presentedRootSheet,
+           case .bridgeUpdate = desiredRoute {
+            presentedRootSheet = desiredRoute
+            return
+        }
+
+        // Refresh an already-visible bridge sheet when the prompt changes underneath it.
+        if case .bridgeUpdate = presentedRootSheet,
+           case .bridgeUpdate = desiredRoute,
+           presentedRootSheet?.id != desiredRoute.id {
+            presentedRootSheet = desiredRoute
+            return
+        }
+
+        guard presentedRootSheet == nil else {
             return
         }
 
