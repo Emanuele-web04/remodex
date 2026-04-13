@@ -24,7 +24,7 @@ extension Package {
             return "\(storeProduct.localizedPriceString) / \(subscriptionPeriod.durationTitle)"
         }
 
-        return "Unlocks Pro"
+        return "\(storeProduct.localizedPriceString) one-time"
     }
 }
 

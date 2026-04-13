@@ -117,6 +117,7 @@ extension CodexService {
                     allowAvailableBridgeUpdatePrompt: self?.isAppInForeground ?? false
                 )
                 self?.startGPTLoginSyncIfNeeded()
+                await self?.syncBridgeKeepMacAwakePreferenceIfNeeded()
             }
         } catch {
             let shouldResetSavedSession = recordTrustedReconnectFailureIfNeeded(
@@ -179,6 +180,34 @@ extension CodexService {
         cancelTrustedSessionResolve()
 
         failAllPendingRequests(with: CodexServiceError.disconnected)
+    }
+
+    func setKeepMacAwakeWhileBridgeRunsPreference(_ enabled: Bool) {
+        keepMacAwakeWhileBridgeRuns = enabled
+        defaults.set(enabled, forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
+    }
+
+    func updateBridgeKeepMacAwakePreference(_ enabled: Bool) async {
+        setKeepMacAwakeWhileBridgeRunsPreference(enabled)
+        await syncBridgeKeepMacAwakePreferenceIfNeeded(showFailureInUI: true)
+    }
+
+    func syncBridgeKeepMacAwakePreferenceIfNeeded(showFailureInUI: Bool = false) async {
+        guard isConnected else {
+            return
+        }
+
+        let handoffService = DesktopHandoffService(codex: self)
+
+        do {
+            try await handoffService.updateBridgeKeepMacAwakePreference(
+                enabled: keepMacAwakeWhileBridgeRuns
+            )
+        } catch {
+            if showFailureInUI {
+                lastErrorMessage = error.localizedDescription
+            }
+        }
     }
 
     // Clears the remembered relay pairing when the remote Mac session is gone for good.

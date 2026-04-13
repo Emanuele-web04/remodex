@@ -59,6 +59,18 @@ struct SettingsView: View {
         )
     }
 
+    private var keepMacAwakeWhileBridgeRunsBinding: Binding<Bool> {
+        Binding(
+            get: { codex.keepMacAwakeWhileBridgeRuns },
+            set: { nextValue in
+                codex.setKeepMacAwakeWhileBridgeRunsPreference(nextValue)
+                Task { @MainActor in
+                    await codex.syncBridgeKeepMacAwakePreferenceIfNeeded(showFailureInUI: true)
+                }
+            }
+        )
+    }
+
     // MARK: - Runtime defaults
 
     @ViewBuilder private var runtimeDefaultsSection: some View {
@@ -160,6 +172,23 @@ struct SettingsView: View {
                 Text(error)
                     .font(AppFont.caption())
                     .foregroundStyle(.red)
+            }
+
+            Divider()
+
+            Toggle("Keep Mac reachable", isOn: keepMacAwakeWhileBridgeRunsBinding)
+                .tint(settingsAccentColor)
+
+            Text(codex.keepMacAwakeWhileBridgeRuns
+                 ? "Uses macOS caffeinate while the bridge is running so your Mac stays reachable even if the display turns off. Best while charging."
+                 : "Your Mac can go back to sleeping normally when the bridge is idle.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
+            if !codex.isConnected {
+                Text("Saved on this iPhone. It will sync to your Mac the next time the bridge reconnects.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
             }
 
             if codex.isConnected {
@@ -293,11 +322,11 @@ private struct SettingsSubscriptionCard: View {
             }
 
             if subscriptions.hasProAccess {
-                Text("Your Pro access is active. You can still restore purchases or manage your subscription from Apple.")
+                Text("Your Pro access is active. You can still restore purchases or manage the purchase from Apple.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             } else {
-                Text("Open the custom paywall to choose a monthly or yearly plan.")
+                Text("Open the custom paywall to choose a monthly, yearly, or lifetime plan.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             }
@@ -556,11 +585,30 @@ private struct SettingsGPTAccountCard: View {
     @State private var isShowingMacLoginInfo = false
 
     var body: some View {
-        SettingsCard(title: "ChatGPT") {
-            SettingsButton("Info") {
+        SettingsCard(title: "ChatGPT voice mode") {
+            Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 isShowingMacLoginInfo = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .font(AppFont.subheadline(weight: .medium))
+                    Text("Info")
+                        .font(AppFont.subheadline(weight: .medium))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(.primary)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
             }
+            .buttonStyle(.plain)
         }
         .sheet(isPresented: $isShowingMacLoginInfo) {
             GPTVoiceSetupSheet()

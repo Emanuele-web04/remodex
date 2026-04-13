@@ -319,6 +319,7 @@ final class CodexService {
     var pendingApprovals: [CodexApprovalRequest] = []
     var lastRawMessage: String?
     var lastErrorMessage: String?
+    var keepMacAwakeWhileBridgeRuns = true
     var runtimeDebugLogEntries: [String] = []
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     // Per-thread queued drafts for client-side turn queueing while a run is active.
@@ -549,6 +550,7 @@ final class CodexService {
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
     static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
+    static let keepMacAwakeWhileBridgeRunsDefaultsKey = "codex.keepMacAwakeWhileBridgeRuns"
 
     init(
         encoder: JSONEncoder = JSONEncoder(),
@@ -597,6 +599,12 @@ final class CodexService {
         let savedReasoning = defaults.string(forKey: Self.selectedReasoningEffortDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedReasoningEffort = (savedReasoning?.isEmpty == false) ? savedReasoning : nil
+
+        if defaults.object(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey) != nil {
+            self.keepMacAwakeWhileBridgeRuns = defaults.bool(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
+        } else {
+            self.keepMacAwakeWhileBridgeRuns = true
+        }
 
         if let savedThreadRuntimeOverrides = defaults.data(forKey: Self.threadRuntimeOverridesDefaultsKey),
            let decodedThreadRuntimeOverrides = try? decoder.decode(
@@ -790,6 +798,37 @@ final class CodexService {
 
     var hasReconnectCandidate: Bool {
         hasSavedRelaySession || hasTrustedMacReconnectCandidate
+    }
+
+    // Chooses the best relay base URL for display-wake recovery, even when only the trusted Mac record remains.
+    var preferredWakeRelayURL: String? {
+        guard !isConnected,
+              secureConnectionState != .rePairRequired else {
+            return nil
+        }
+
+        let candidates = [
+            normalizedRelayURL,
+            preferredTrustedMacRecord?.relayURL?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+        ]
+
+        for relayURL in candidates {
+            if let relayURL {
+                return relayURL
+            }
+        }
+
+        return nil
+    }
+
+    // Treat any remembered reconnect candidate as wake-capable; the actual wake path will still validate and fail loudly if needed.
+    var canWakePreferredMacDisplay: Bool {
+        guard !isConnected,
+              secureConnectionState != .rePairRequired else {
+            return false
+        }
+
+        return hasReconnectCandidate
     }
 
     // Separates transport readiness from post-connect hydration so the UI can explain delays honestly.

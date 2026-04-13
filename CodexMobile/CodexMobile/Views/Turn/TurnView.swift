@@ -10,13 +10,13 @@ import UIKit
 
 struct TurnView: View {
     let thread: CodexThread
+    let isWakingMacDisplayRecovery: Bool
 
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.wakeMacDisplayAction) private var wakeMacDisplayAction
-    @Environment(\.isWakingMacDisplayRecovery) private var isWakingMacDisplayRecovery
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
@@ -480,14 +480,7 @@ struct TurnView: View {
     }
 
     private var canWakeSavedMacDisplay: Bool {
-        guard !codex.isConnected,
-              codex.hasSavedRelaySession,
-              let relayURL = codex.normalizedRelayURL,
-              let url = URL(string: relayURL) else {
-            return false
-        }
-
-        return codex.prefersDirectRelayTransport(for: url)
+        codex.canWakePreferredMacDisplay
     }
 
     // Matches the root fallback gate so the turn card only offers wake after the silent attempt already ran.
@@ -1859,7 +1852,10 @@ private struct RuntimeDebugLogSheet: View {
 
 #Preview {
     NavigationStack {
-        TurnView(thread: CodexThread(id: "thread_preview", title: "Preview"))
+        TurnView(
+            thread: CodexThread(id: "thread_preview", title: "Preview"),
+            isWakingMacDisplayRecovery: false
+        )
             .environment(CodexService())
     }
 }

@@ -132,13 +132,12 @@ struct TurnComposerView: View {
                             onPasteImageData(imageDataItems)
                         }
                     )
-                    .frame(height: composerInputHeight)
+                    .frame(height: max(composerInputHeight, 36))
                 }
-                .frame(minHeight: composerInputHeight + 8, alignment: .topLeading)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding + 4)
-                .padding(.bottom, 14)
+                .padding(.bottom, 10)
                 .contentShape(Rectangle())
                 .onTapGesture {
                     guard !isComposerInteractionLocked else { return }

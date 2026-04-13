@@ -6,7 +6,7 @@
 
 const WebSocket = require("ws");
 const { randomBytes } = require("crypto");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const os = require("os");
 const { promisify } = require("util");
 const {
@@ -18,6 +18,7 @@ const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
 const { handleDesktopRequest } = require("./desktop-handler");
+const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
@@ -58,6 +59,10 @@ function startBridge({
   onBridgeStatus = null,
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
+  config.keepMacAwakeEnabled = config.keepMacAwakeEnabled !== false;
+  const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
+    enabled: config.keepMacAwakeEnabled,
+  });
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
   if (!relayBaseUrl) {
     console.error("[remodex] No relay URL configured.");
@@ -316,6 +321,7 @@ function startBridge({
       logConnectionStatus("disconnected");
       shutdown(codex, () => socket, () => {
         isShuttingDown = true;
+        bridgeWakeAssertion.stop();
         clearReconnectTimer();
         clearRelayWatchdog();
         clearBridgeStatusHeartbeat();
@@ -447,6 +453,7 @@ function startBridge({
       lastError: "",
     });
     isShuttingDown = true;
+    bridgeWakeAssertion.stop();
     clearReconnectTimer();
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
@@ -460,12 +467,14 @@ function startBridge({
 
   process.on("SIGINT", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
+    bridgeWakeAssertion.stop();
     clearReconnectTimer();
     clearRelayWatchdog();
     clearBridgeStatusHeartbeat();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
+    bridgeWakeAssertion.stop();
     clearReconnectTimer();
     clearRelayWatchdog();
     clearBridgeStatusHeartbeat();
@@ -494,6 +503,8 @@ function startBridge({
     if (handleDesktopRequest(rawMessage, sendApplicationResponse, {
       bundleId: config.codexBundleId,
       appPath: config.codexAppPath,
+      readBridgePreferences,
+      updateBridgePreferences,
     })) {
       return;
     }
@@ -1057,6 +1068,126 @@ function startBridge({
       registration: buildMacRegistration(nextDeviceState, pairingSession),
     }));
   }
+
+  function readBridgePreferences() {
+    return {
+      success: true,
+      preferences: {
+        keepMacAwake: config.keepMacAwakeEnabled !== false,
+      },
+      applied: bridgeWakeAssertion.active,
+    };
+  }
+
+  function updateBridgePreferences(preferences = {}) {
+    const nextKeepMacAwakeEnabled = preferences.keepMacAwake !== false;
+    config.keepMacAwakeEnabled = nextKeepMacAwakeEnabled;
+    bridgeWakeAssertion.setEnabled?.(nextKeepMacAwakeEnabled);
+
+    try {
+      persistBridgePreferences({
+        keepMacAwakeEnabled: nextKeepMacAwakeEnabled,
+      });
+    } catch (error) {
+      const nextError = new Error("Could not save the bridge preference on this Mac.");
+      nextError.errorCode = "bridge_preferences_persist_failed";
+      nextError.userMessage = nextError.message;
+      nextError.cause = error;
+      throw nextError;
+    }
+
+    return readBridgePreferences();
+  }
+}
+
+// Holds a single macOS idle-sleep assertion for as long as the bridge process stays alive.
+function createMacOSBridgeWakeAssertion({
+  platform = process.platform,
+  pid = process.pid,
+  spawnImpl = spawn,
+  consoleImpl = console,
+  enabled = true,
+} = {}) {
+  if (platform !== "darwin") {
+    return {
+      active: false,
+      enabled: false,
+      setEnabled() {
+        return { active: false, enabled: false };
+      },
+      stop() {},
+    };
+  }
+
+  let desiredEnabled = Boolean(enabled);
+  let child = null;
+
+  function stop() {
+    if (!child || child.killed || typeof child.kill !== "function") {
+      child = null;
+      return;
+    }
+
+    try {
+      child.kill();
+    } catch {}
+    child = null;
+  }
+
+  function start() {
+    if (!desiredEnabled || child) {
+      return;
+    }
+
+    try {
+      const nextChild = spawnImpl("/usr/bin/caffeinate", ["-i", "-w", String(pid)], {
+        stdio: "ignore",
+      });
+
+      nextChild.on?.("error", (error) => {
+        consoleImpl.warn(`[remodex] Failed to hold the Mac awake while the bridge is active: ${error.message}`);
+      });
+      nextChild.on?.("exit", () => {
+        if (child === nextChild) {
+          child = null;
+        }
+      });
+      nextChild.unref?.();
+      child = nextChild;
+    } catch (error) {
+      consoleImpl.warn(
+        `[remodex] Failed to start the bridge wake assertion: ${(error && error.message) || "unknown error"}`
+      );
+      child = null;
+    }
+  }
+
+  function setEnabled(nextEnabled) {
+    desiredEnabled = Boolean(nextEnabled);
+    if (desiredEnabled) {
+      start();
+    } else {
+      stop();
+    }
+
+    return {
+      active: Boolean(child && !child.killed),
+      enabled: desiredEnabled,
+    };
+  }
+
+  start();
+
+  return {
+    get active() {
+      return Boolean(child && !child.killed);
+    },
+    get enabled() {
+      return desiredEnabled;
+    },
+    setEnabled,
+    stop,
+  };
 }
 
 // Registers the canonical Mac identity and the one trusted iPhone allowed for auto-resolve.
@@ -1408,9 +1539,26 @@ function buildHeartbeatBridgeStatus(
   };
 }
 
+function persistBridgePreferences(
+  {
+    keepMacAwakeEnabled,
+  },
+  {
+    readDaemonConfigImpl = readDaemonConfig,
+    writeDaemonConfigImpl = writeDaemonConfig,
+  } = {}
+) {
+  writeDaemonConfigImpl({
+    ...(readDaemonConfigImpl() || {}),
+    keepMacAwakeEnabled,
+  });
+}
+
 module.exports = {
   buildHeartbeatBridgeStatus,
+  createMacOSBridgeWakeAssertion,
   hasRelayConnectionGoneStale,
+  persistBridgePreferences,
   sanitizeThreadHistoryImagesForRelay,
   startBridge,
 };

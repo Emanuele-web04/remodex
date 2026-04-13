@@ -14,6 +14,8 @@ struct RevenueCatPaywallPreviewPlan: Identifiable, Equatable {
     let periodLabel: String
     let termsDescription: String
     let isBestValue: Bool
+    let callToActionTitle: String
+    let footerDescription: String
 }
 
 // MARK: - Feature data
@@ -143,7 +145,7 @@ struct RevenueCatPaywallView: View {
     // MARK: - Header (logo + title + subtitle)
 
     private var header: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             Image("AppLogo")
                 .resizable()
                 .scaledToFit()
@@ -199,7 +201,7 @@ struct RevenueCatPaywallView: View {
     // MARK: - Bottom section (plans + CTA + links)
 
     private var bottomSection: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 7) {
             planSelection
 
             // CTA
@@ -215,8 +217,7 @@ struct RevenueCatPaywallView: View {
                             ProgressView()
                                 .tint(colorScheme == .dark ? .black : .white)
                         } else {
-                       
-                            Text("Unlock Remodex Pro")
+                            Text(selectedCallToActionTitle)
                                 .font(AppFont.body(weight: .semibold))
                         }
                     }
@@ -232,7 +233,7 @@ struct RevenueCatPaywallView: View {
 
             // Footer
             VStack(spacing: 4) {
-                Text("Recurring Billing. Cancel anytime.")
+                Text(selectedFooterDescription)
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
@@ -292,10 +293,10 @@ struct RevenueCatPaywallView: View {
         }
     }
 
-    // MARK: - Plan selection (side-by-side cards like Khrona)
+    // MARK: - Plan selection
 
     private var planSelection: some View {
-        HStack(spacing: 10) {
+        VStack(spacing: 10) {
             if isLoading && displayedPlans.isEmpty {
                 ProgressView()
                     .frame(maxWidth: .infinity)
@@ -317,11 +318,11 @@ struct RevenueCatPaywallView: View {
             }
             HapticFeedback.shared.triggerImpactFeedback()
         } label: {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 6) {
                 // Top row: radio + badge
                 HStack {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 20))
+                        .font(.system(size: 17))
                         .foregroundStyle(isSelected ? (colorScheme == .dark ? .black : .white) : .secondary.opacity(0.4))
 
                     Spacer()
@@ -330,8 +331,8 @@ struct RevenueCatPaywallView: View {
                         Text("37% OFF")
                             .font(AppFont.caption2(weight: .semibold))
                             .foregroundStyle(isSelected ? accentForeground.opacity(0.9) : accent)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
                             .background(
                                 RoundedRectangle(cornerRadius: 8)
                                     .fill(isSelected ? accentForeground.opacity(0.2) : accent.opacity(0.12))
@@ -345,22 +346,31 @@ struct RevenueCatPaywallView: View {
                     }
                 }
 
-                Spacer(minLength: 0)
+                // Bottom: title + pricing details
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(plan.title)
+                            .font(AppFont.subheadline(weight: .semibold))
+                    }
 
-                // Bottom: title + price
-                HStack(alignment: .center, spacing: 4) {
-                    Text(plan.title)
-                        .font(AppFont.subheadline(weight: .semibold))
-Spacer()
-                    Text(plan.price)
-                        .font(AppFont.caption(weight: .medium))
-                        .opacity(0.75)
+                    Spacer()
+
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(plan.price)
+                            .font(AppFont.subheadline(weight: .semibold))
+                            .opacity(0.92)
+
+                        if let inlinePeriod = inlinePeriodLabel(for: plan) {
+                            Text(inlinePeriod)
+                                .font(AppFont.caption())
+                                .opacity(isSelected ? 0.82 : 0.68)
+                        }
+                    }
                 }
             }
-            .padding(14)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 100)
-            
             .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
                     .fill(isSelected ? accent : Color(.systemBackground))
@@ -388,6 +398,7 @@ Spacer()
             return previewPlans
         }
 
+        // Maps RevenueCat packages into UI-facing plan cards without assuming every offer renews.
         return subscriptions.packageOptions.map { option in
             RevenueCatPaywallPreviewPlan(
                 id: option.id,
@@ -395,7 +406,9 @@ Spacer()
                 price: option.price,
                 periodLabel: option.periodLabel,
                 termsDescription: option.termsDescription,
-                isBestValue: option.package.packageType == .annual
+                isBestValue: option.package.packageType == .annual,
+                callToActionTitle: option.callToActionTitle,
+                footerDescription: option.footerDescription
             )
         }
     }
@@ -432,6 +445,27 @@ Spacer()
         isPreviewMode ? previewIsLoading : subscriptions.isLoading
     }
 
+    private var selectedCallToActionTitle: String {
+        selectedPlan?.callToActionTitle ?? "Unlock Remodex Pro"
+    }
+
+    private var selectedFooterDescription: String {
+        selectedPlan?.footerDescription ?? "Recurring billing. Cancel anytime."
+    }
+
+    // Keeps the pricing line compact by showing cadence inline with the main amount.
+    private func inlinePeriodLabel(for plan: RevenueCatPaywallPreviewPlan) -> String? {
+        if !plan.periodLabel.isEmpty {
+            return "/\(plan.periodLabel)"
+        }
+
+        if plan.termsDescription.localizedCaseInsensitiveContains("one-time") {
+            return "one-time"
+        }
+
+        return nil
+    }
+
     private func seedDefaultSelectionIfNeeded() {
         guard selectedPackageID == nil else {
             return
@@ -455,7 +489,9 @@ Spacer()
                 price: "$3.99",
                 periodLabel: "month",
                 termsDescription: "$3.99 / month",
-                isBestValue: false
+                isBestValue: false,
+                callToActionTitle: "Unlock Remodex Pro",
+                footerDescription: "Recurring billing. Cancel anytime."
             ),
             RevenueCatPaywallPreviewPlan(
                 id: "yearly",
@@ -463,7 +499,58 @@ Spacer()
                 price: "$29.99",
                 periodLabel: "year",
                 termsDescription: "$29.99 for 1 year",
-                isBestValue: true
+                isBestValue: true,
+                callToActionTitle: "Unlock Remodex Pro",
+                footerDescription: "Recurring billing. Cancel anytime."
+            ),
+            RevenueCatPaywallPreviewPlan(
+                id: "lifetime",
+                title: "Lifetime",
+                price: "$69.99",
+                periodLabel: "",
+                termsDescription: "$69.99 one-time",
+                isBestValue: false,
+                callToActionTitle: "Unlock Lifetime",
+                footerDescription: "One-time purchase. No renewal required."
+            ),
+        ],
+        previewLatestPurchaseDate: Date().addingTimeInterval(-86_400 * 12)
+    )
+    .environment(SubscriptionService())
+}
+
+#Preview("Vertical Plans") {
+    RevenueCatPaywallView(
+        previewPlans: [
+            RevenueCatPaywallPreviewPlan(
+                id: "monthly",
+                title: "Monthly",
+                price: "$3.99",
+                periodLabel: "month",
+                termsDescription: "$3.99 / month",
+                isBestValue: false,
+                callToActionTitle: "Unlock Remodex Pro",
+                footerDescription: "Recurring billing. Cancel anytime."
+            ),
+            RevenueCatPaywallPreviewPlan(
+                id: "yearly",
+                title: "Annual",
+                price: "$29.99",
+                periodLabel: "year",
+                termsDescription: "$29.99 for 1 year",
+                isBestValue: true,
+                callToActionTitle: "Unlock Remodex Pro",
+                footerDescription: "Recurring billing. Cancel anytime."
+            ),
+            RevenueCatPaywallPreviewPlan(
+                id: "lifetime",
+                title: "Lifetime",
+                price: "$69.99",
+                periodLabel: "",
+                termsDescription: "$69.99 one-time",
+                isBestValue: false,
+                callToActionTitle: "Unlock Lifetime",
+                footerDescription: "One-time purchase. No renewal required."
             ),
         ],
         previewLatestPurchaseDate: Date().addingTimeInterval(-86_400 * 12)

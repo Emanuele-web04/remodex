@@ -19,8 +19,22 @@ struct SubscriptionPackageOption: Identifiable {
     let id: String
     let package: Package
 
+    // Keeps lifetime / recurring distinctions close to the raw RevenueCat package.
+    var isLifetime: Bool {
+        package.packageType == .lifetime || package.storeProduct.subscriptionPeriod == nil
+    }
+
     var title: String {
-        package.storeProduct.localizedTitle
+        switch package.packageType {
+        case .monthly:
+            return "Monthly"
+        case .annual:
+            return "Annual"
+        case .lifetime:
+            return "Lifetime"
+        default:
+            return package.storeProduct.localizedTitle
+        }
     }
 
     var price: String {
@@ -33,6 +47,14 @@ struct SubscriptionPackageOption: Identifiable {
 
     var termsDescription: String {
         package.termsDescription()
+    }
+
+    var callToActionTitle: String {
+        isLifetime ? "Unlock Lifetime" : "Unlock Remodex Pro"
+    }
+
+    var footerDescription: String {
+        isLifetime ? "One-time purchase. No renewal required." : "Recurring billing. Cancel anytime."
     }
 }
 
@@ -343,8 +365,10 @@ private extension SubscriptionService {
             return 0
         case .annual:
             return 1
-        default:
+        case .lifetime:
             return 2
+        default:
+            return 3
         }
     }
 

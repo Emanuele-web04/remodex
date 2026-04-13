@@ -8,7 +8,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   buildHeartbeatBridgeStatus,
+  createMacOSBridgeWakeAssertion,
   hasRelayConnectionGoneStale,
+  persistBridgePreferences,
   sanitizeThreadHistoryImagesForRelay,
 } = require("../src/bridge");
 
@@ -140,6 +142,115 @@ test("sanitizeThreadHistoryImagesForRelay leaves unrelated RPC payloads unchange
     sanitizeThreadHistoryImagesForRelay(rawMessage, "turn/start"),
     rawMessage
   );
+});
+
+test("createMacOSBridgeWakeAssertion spawns a macOS caffeinate idle-sleep assertion tied to the bridge pid", () => {
+  const spawnCalls = [];
+  const fakeChild = {
+    killed: false,
+    on() {},
+    unref() {},
+    kill() {
+      this.killed = true;
+    },
+  };
+
+  const assertion = createMacOSBridgeWakeAssertion({
+    platform: "darwin",
+    pid: 4242,
+    spawnImpl(command, args, options) {
+      spawnCalls.push({ command, args, options });
+      return fakeChild;
+    },
+  });
+
+  assert.equal(assertion.active, true);
+  assert.deepEqual(spawnCalls, [{
+    command: "/usr/bin/caffeinate",
+    args: ["-i", "-w", "4242"],
+    options: { stdio: "ignore" },
+  }]);
+
+  assertion.stop();
+  assert.equal(fakeChild.killed, true);
+});
+
+test("createMacOSBridgeWakeAssertion can toggle the caffeinate assertion on and off live", () => {
+  const spawnCalls = [];
+  const children = [];
+
+  const assertion = createMacOSBridgeWakeAssertion({
+    platform: "darwin",
+    pid: 9001,
+    enabled: false,
+    spawnImpl(command, args, options) {
+      const child = {
+        killed: false,
+        on() {},
+        unref() {},
+        kill() {
+          this.killed = true;
+        },
+      };
+      children.push(child);
+      spawnCalls.push({ command, args, options });
+      return child;
+    },
+  });
+
+  assert.equal(assertion.active, false);
+  assert.equal(assertion.enabled, false);
+  assert.deepEqual(spawnCalls, []);
+
+  assertion.setEnabled(true);
+  assert.equal(assertion.enabled, true);
+  assert.equal(assertion.active, true);
+  assert.equal(spawnCalls.length, 1);
+
+  assertion.setEnabled(false);
+  assert.equal(assertion.enabled, false);
+  assert.equal(assertion.active, false);
+  assert.equal(children[0].killed, true);
+});
+
+test("createMacOSBridgeWakeAssertion is a no-op outside macOS", () => {
+  let didSpawn = false;
+  const assertion = createMacOSBridgeWakeAssertion({
+    platform: "linux",
+    spawnImpl() {
+      didSpawn = true;
+      throw new Error("should not spawn");
+    },
+  });
+
+  assert.equal(assertion.active, false);
+  assertion.stop();
+  assert.equal(didSpawn, false);
+});
+
+test("persistBridgePreferences only saves the daemon preference field", () => {
+  const writes = [];
+
+  persistBridgePreferences(
+    { keepMacAwakeEnabled: false },
+    {
+      readDaemonConfigImpl() {
+        return {
+          relayUrl: "ws://127.0.0.1:9000/relay",
+          refreshEnabled: true,
+        };
+      },
+      writeDaemonConfigImpl(config) {
+        writes.push(config);
+      },
+    }
+  );
+
+  assert.deepEqual(writes, [{
+    relayUrl: "ws://127.0.0.1:9000/relay",
+    refreshEnabled: true,
+    keepMacAwakeEnabled: false,
+  }]);
 });
 
 test("sanitizeThreadHistoryImagesForRelay strips bulky compaction replacement history", () => {

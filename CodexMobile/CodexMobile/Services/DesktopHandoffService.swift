@@ -79,7 +79,7 @@ final class DesktopHandoffService {
             return
         }
 
-        guard let reconnectURL = savedReconnectURL else {
+        guard let reconnectURL = try await preferredReconnectURLForWake() else {
             throw DesktopHandoffError.bridgeError(
                 code: "saved_pair_required",
                 message: "Reconnect to your Mac or scan a new QR code first."
@@ -97,6 +97,31 @@ final class DesktopHandoffService {
             )
         }
         try await sendWakeDisplayRequest(using: codex)
+    }
+
+    func updateBridgeKeepMacAwakePreference(enabled: Bool) async throws {
+        do {
+            let response = try await codex.sendRequest(
+                method: "desktop/preferences/update",
+                params: .object([
+                    "keepMacAwake": .bool(enabled),
+                ])
+            )
+            guard let resultObject = response.result?.objectValue,
+                  resultObject["success"]?.boolValue == true else {
+                throw DesktopHandoffError.invalidResponse
+            }
+        } catch let error as CodexServiceError {
+            switch error {
+            case .disconnected:
+                throw DesktopHandoffError.disconnected
+            case .rpcError(let rpcError):
+                let errorCode = rpcError.data?.objectValue?["errorCode"]?.stringValue
+                throw DesktopHandoffError.bridgeError(code: errorCode, message: rpcError.message)
+            default:
+                throw DesktopHandoffError.bridgeError(code: nil, message: error.errorDescription)
+            }
+        }
     }
 
     // Reuses the existing JSON-RPC bridge channel so display wake follows the same secure pairing path.
@@ -129,6 +154,32 @@ final class DesktopHandoffService {
 
         return "\(relayURL)/\(sessionId)"
     }
+
+    // Prefers a freshly resolved trusted session so display wake still works when the saved live session is gone.
+    private func preferredReconnectURLForWake() async throws -> String? {
+        if codex.hasTrustedMacReconnectCandidate {
+            do {
+                let resolved = try await codex.resolveTrustedMacSession()
+                guard let relayURL = codex.normalizedRelayURL else {
+                    return nil
+                }
+                return "\(relayURL)/\(resolved.sessionId)"
+            } catch let error as CodexTrustedSessionResolveError {
+                switch error {
+                case .unsupportedRelay, .network, .noTrustedMac:
+                    if let savedReconnectURL {
+                        return savedReconnectURL
+                    }
+                case .macOffline, .rePairRequired, .invalidResponse:
+                    break
+                }
+
+                throw DesktopHandoffError.bridgeError(code: nil, message: error.localizedDescription)
+            }
+        }
+
+        return savedReconnectURL
+    }
 }
 
 private extension DesktopHandoffError {
@@ -144,6 +195,12 @@ private extension DesktopHandoffError {
             return fallback ?? "Could not wake your Mac display right now."
         case "saved_pair_required":
             return fallback ?? "Reconnect to your Mac or scan a new QR code first."
+        case "unsupported_bridge_preferences":
+            return fallback ?? "Update the Remodex bridge on your Mac to sync this setting."
+        case "invalid_bridge_preferences":
+            return fallback ?? "The Mac bridge rejected this setting update."
+        case "bridge_preferences_persist_failed":
+            return fallback ?? "The Mac bridge could not save this setting."
         default:
             return fallback ?? "Could not continue this chat on your Mac."
         }

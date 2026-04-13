@@ -33,7 +33,6 @@ struct ContentView: View {
     @State private var isPreparingManualScanner = false
     @State private var isWakingSavedMacDisplay = false
     @State private var hasAttemptedAutomaticWakeSavedMacDisplay = false
-    @State private var shouldShowWakeSavedMacDisplayButton = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
     @State private var sidebarPrewarmTask: Task<Void, Never>?
     @State private var sidebarGestureDebugSequence = 0
@@ -52,6 +51,11 @@ struct ContentView: View {
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
 
     var body: some View {
+        rootContentWithBannerOverlay
+    }
+
+    // Splits lifecycle wiring from presentation modifiers so SwiftUI does not have to type-check one giant body chain.
+    private var rootContentWithLifecycleObservers: some View {
         rootContent
             // Only resume saved-pairing recovery after onboarding is done and the manual scanner is not in control.
             .task {
@@ -158,26 +162,14 @@ struct ContentView: View {
             .onChange(of: codex.threadCompletionBanner) { _, banner in
                 scheduleThreadCompletionBannerDismiss(for: banner)
             }
+    }
+
+    // Keeps sheets and alerts out of the lifecycle chain so the compiler can reason about each stage separately.
+    private var rootContentWithPresentations: some View {
+        rootContentWithLifecycleObservers
             // Presents actionable recovery when the saved bridge package is too old/new for this app build.
-            .sheet(item: bridgeUpdatePromptBinding, onDismiss: {
-                codex.bridgeUpdatePrompt = nil
-                isRetryingBridgeUpdate = false
-            }) { prompt in
-                BridgeUpdateSheet(
-                    prompt: prompt,
-                    isRetrying: isRetryingBridgeUpdate,
-                    onRetry: {
-                        retryBridgeConnectionAfterUpdate()
-                    },
-                    onScanNewQR: {
-                        presentManualScannerForBridgeRecovery()
-                    },
-                    onDismiss: {
-                        codex.bridgeUpdatePrompt = nil
-                    }
-                )
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+            .sheet(item: bridgeUpdatePromptBinding, onDismiss: dismissBridgeUpdatePrompt) { prompt in
+                bridgeUpdateSheet(prompt: prompt)
             }
             .alert(
                 "Chat Deleted",
@@ -196,15 +188,12 @@ struct ContentView: View {
             } message: { _ in
                 Text("This chat is no longer available. Start a new chat instead?")
             }
-            .alert("Pairing Error", isPresented: Binding(
-                get: { manualPairingErrorMessage != nil },
-                set: { if !$0 { manualPairingErrorMessage = nil } }
-            )) {
+            .alert("Pairing Error", isPresented: manualPairingErrorAlertIsPresented) {
                 Button("OK", role: .cancel) {
                     manualPairingErrorMessage = nil
                 }
             } message: {
-                Text(manualPairingErrorMessage ?? "Could not resolve that pairing code.")
+                Text(manualPairingErrorAlertMessage)
             }
             .alert("Enter Pairing Code", isPresented: $isShowingManualPairingEntry) {
                 TextField("AB23CD34EF", text: $manualPairingCode)
@@ -221,6 +210,10 @@ struct ContentView: View {
             } message: {
                 Text("Paste the pairing code shown in the terminal on your Mac or in your phone shell.")
             }
+    }
+
+    private var rootContentWithBannerOverlay: some View {
+        rootContentWithPresentations
             .overlay(alignment: .top) {
                 if let banner = codex.threadCompletionBanner {
                     ThreadCompletionBannerView(
@@ -370,7 +363,10 @@ struct ContentView: View {
     @ViewBuilder
     private var mainContent: some View {
         if let thread = selectedThread {
-            TurnView(thread: thread)
+            TurnView(
+                thread: thread,
+                isWakingMacDisplayRecovery: isWakingSavedMacDisplay
+            )
                 .id(thread.id)
                 .environment(\.reconnectAction, {
                     Task {
@@ -378,7 +374,6 @@ struct ContentView: View {
                     }
                 })
                 .environment(\.wakeMacDisplayAction, wakeMacDisplayRecoveryAction)
-                .environment(\.isWakingMacDisplayRecovery, isWakingSavedMacDisplay)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         hamburgerButton
@@ -445,26 +440,32 @@ struct ContentView: View {
         .accessibilityLabel("Menu")
     }
 
-    // Offers a one-tap display wake only for saved local-style relays where the Mac may still be alive.
+    private var manualPairingErrorAlertIsPresented: Binding<Bool> {
+        Binding(
+            get: { manualPairingErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    manualPairingErrorMessage = nil
+                }
+            }
+        )
+    }
+
+    private var manualPairingErrorAlertMessage: String {
+        manualPairingErrorMessage ?? "Could not resolve that pairing code."
+    }
+
+    // Offers a one-tap display wake for the best local-style relay we still know about, even if only the trusted record remains.
     private var canWakeSavedMacDisplay: Bool {
-        guard homeConnectionPhase == .offline,
-              !codex.isConnected,
-              codex.secureConnectionState != .rePairRequired,
-              codex.hasSavedRelaySession,
-              let relayURL = codex.normalizedRelayURL,
-              let url = URL(string: relayURL) else {
-            return false
-        }
-
-        return codex.prefersDirectRelayTransport(for: url)
+        homeConnectionPhase == .offline && codex.canWakePreferredMacDisplay
     }
 
-    // Unlocks the visible wake CTA only after the silent auto-wake fallback already had one chance.
+    // Keep the wake CTA visible whenever the pairing still knows enough to try a display pulse.
     private var shouldOfferWakeSavedMacDisplayAction: Bool {
-        canWakeSavedMacDisplay && shouldShowWakeSavedMacDisplayButton
+        canWakeSavedMacDisplay
     }
 
-    // Keeps the wake fallback automatic exactly once per offline cycle before escalating to the button.
+    // Keeps the silent wake fallback automatic exactly once per offline cycle before the user taps manually again.
     private var shouldAttemptAutomaticWakeSavedMacDisplay: Bool {
         scenePhase == .active
             && hasSeenOnboarding
@@ -472,7 +473,6 @@ struct ContentView: View {
             && !isShowingManualPairingEntry
             && codex.shouldAutoReconnectOnForeground
             && canWakeSavedMacDisplay
-            && !shouldShowWakeSavedMacDisplayButton
             && !hasAttemptedAutomaticWakeSavedMacDisplay
             && !isWakingSavedMacDisplay
     }
@@ -494,7 +494,6 @@ struct ContentView: View {
         }
 
         hasAttemptedAutomaticWakeSavedMacDisplay = true
-        shouldShowWakeSavedMacDisplayButton = false
         await performSavedMacDisplayWakeAttempt()
     }
 
@@ -514,7 +513,6 @@ struct ContentView: View {
     // Resets the once-per-cycle wake gate after a fresh connection, pairing change, or app background.
     private func resetSavedMacWakeRecoveryState() {
         hasAttemptedAutomaticWakeSavedMacDisplay = false
-        shouldShowWakeSavedMacDisplayButton = false
     }
 
     // Uses a temporary bridge request to wake display sleep, then unlocks the manual button only if that fails.
@@ -524,7 +522,7 @@ struct ContentView: View {
         }
     }
 
-    // Sends one wake pulse over the saved pairing path and leaves the manual CTA hidden unless recovery still fails.
+    // Sends one wake pulse over the best remembered pairing path without hiding the manual wake affordance.
     private func performSavedMacDisplayWakeAttempt() async {
         guard !isWakingSavedMacDisplay else { return }
         isWakingSavedMacDisplay = true
@@ -536,14 +534,10 @@ struct ContentView: View {
             await viewModel.stopAutoReconnectForManualRetry(codex: codex)
             let handoffService = DesktopHandoffService(codex: codex)
             try await handoffService.wakeDisplay()
-            shouldShowWakeSavedMacDisplayButton = false
             if codex.lastErrorMessage == wakingSavedMacDisplayStatusMessage {
                 codex.lastErrorMessage = nil
             }
         } catch {
-            if canWakeSavedMacDisplay {
-                shouldShowWakeSavedMacDisplayButton = true
-            }
             codex.lastErrorMessage = error.localizedDescription
         }
     }
@@ -872,6 +866,29 @@ struct ContentView: View {
                 }
             }
         )
+    }
+
+    private func dismissBridgeUpdatePrompt() {
+        codex.bridgeUpdatePrompt = nil
+        isRetryingBridgeUpdate = false
+    }
+
+    private func bridgeUpdateSheet(prompt: CodexBridgeUpdatePrompt) -> some View {
+        BridgeUpdateSheet(
+            prompt: prompt,
+            isRetrying: isRetryingBridgeUpdate,
+            onRetry: {
+                retryBridgeConnectionAfterUpdate()
+            },
+            onScanNewQR: {
+                presentManualScannerForBridgeRecovery()
+            },
+            onDismiss: {
+                codex.bridgeUpdatePrompt = nil
+            }
+        )
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 
     // Re-tries the saved relay session after the user updates the Mac package.

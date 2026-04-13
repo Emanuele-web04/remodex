@@ -41,7 +41,8 @@ struct OnboardingView: View {
                         icon: "link",
                         title: "Install the Bridge",
                         description: "A lightweight relay that securely connects your Mac to your iPhone.",
-                        command: "npm install -g remodex@latest"
+                        command: "npm install -g remodex@latest",
+                        commandCaption: "Remodex uses macOS caffeinate by default while the bridge is running so your Mac stays reachable even if the display turns off. You can change this later in Settings."
                     )
                     .tag(3)
 
