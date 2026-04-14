@@ -105,6 +105,15 @@ final class GitActionsService {
         return GitCommitResult(from: json)
     }
 
+    func generateCommitMessage(model: String?) async throws -> GitGeneratedCommitMessageResult {
+        var params: [String: JSONValue] = [:]
+        if let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["model"] = .string(model)
+        }
+        let json = try await request(method: "git/generateCommitMessage", params: params)
+        return GitGeneratedCommitMessageResult(from: json)
+    }
+
     func push() async throws -> GitPushResult {
         let json = try await request(method: "git/push")
         let result = GitPushResult(from: json)
@@ -200,6 +209,21 @@ final class GitActionsService {
     func remoteUrl() async throws -> GitRemoteUrlResult {
         let json = try await request(method: "git/remoteUrl")
         return GitRemoteUrlResult(from: json)
+    }
+
+    func generatePullRequestDraft(
+        model: String?,
+        baseBranch: String?
+    ) async throws -> GitPullRequestDraftResult {
+        var params: [String: JSONValue] = [:]
+        if let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["model"] = .string(model)
+        }
+        if let baseBranch, !baseBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["baseBranch"] = .string(baseBranch)
+        }
+        let json = try await request(method: "git/generatePullRequestDraft", params: params)
+        return GitPullRequestDraftResult(from: json)
     }
 
     func branchesWithStatus() async throws -> GitBranchesWithStatusResult {

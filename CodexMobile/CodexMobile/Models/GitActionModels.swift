@@ -125,6 +125,18 @@ struct GitCommitResult: Sendable {
     }
 }
 
+struct GitGeneratedCommitMessageResult: Sendable {
+    let subject: String
+    let body: String
+    let fullMessage: String
+
+    init(from json: [String: JSONValue]) {
+        self.subject = json["subject"]?.stringValue ?? ""
+        self.body = json["body"]?.stringValue ?? ""
+        self.fullMessage = json["fullMessage"]?.stringValue ?? ""
+    }
+}
+
 struct GitPushResult: Sendable {
     let branch: String
     let remote: String?
@@ -266,6 +278,16 @@ struct GitRemoteUrlResult: Sendable {
     init(from json: [String: JSONValue]) {
         self.url = json["url"]?.stringValue ?? ""
         self.ownerRepo = json["ownerRepo"]?.stringValue
+    }
+}
+
+struct GitPullRequestDraftResult: Sendable {
+    let title: String
+    let body: String
+
+    init(from json: [String: JSONValue]) {
+        self.title = json["title"]?.stringValue ?? ""
+        self.body = json["body"]?.stringValue ?? ""
     }
 }
 

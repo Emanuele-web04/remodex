@@ -342,6 +342,7 @@ final class CodexService {
     var syncRealtimeEnabled = true
     var availableModels: [CodexModelOption] = []
     var selectedModelId: String?
+    var selectedGitWriterModelId: String?
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
     // Per-chat runtime overrides let the composer diverge from app-wide defaults.
@@ -550,6 +551,7 @@ final class CodexService {
     let remoteNotificationRegistrar: CodexRemoteNotificationRegistering
 
     static let selectedModelIdDefaultsKey = "codex.selectedModelId"
+    static let selectedGitWriterModelIdDefaultsKey = "codex.selectedGitWriterModelId"
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
@@ -605,6 +607,10 @@ final class CodexService {
         let savedModelId = defaults.string(forKey: Self.selectedModelIdDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedModelId = (savedModelId?.isEmpty == false) ? savedModelId : nil
+
+        let savedGitWriterModelId = defaults.string(forKey: Self.selectedGitWriterModelIdDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.selectedGitWriterModelId = (savedGitWriterModelId?.isEmpty == false) ? savedGitWriterModelId : nil
 
         let savedReasoning = defaults.string(forKey: Self.selectedReasoningEffortDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
