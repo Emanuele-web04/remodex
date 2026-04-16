@@ -539,6 +539,11 @@ function readBridgeConfig({
     defaultRelayUrl,
     env
   );
+  const advertisedRelayUrl = readFirstDefinedEnv(
+    ["REMODEX_ADVERTISED_RELAY", "PHODEX_ADVERTISED_RELAY"],
+    relayUrl,
+    env
+  );
   const defaultPushServiceUrl = sourceCheckout || explicitRelayUrl
     ? ""
     : privateDefaults.pushServiceUrl;
@@ -561,6 +566,7 @@ function readBridgeConfig({
   const defaultRefreshEnabled = false;
   return {
     relayUrl,
+    advertisedRelayUrl,
     pushServiceUrl: readFirstDefinedEnv(
       ["REMODEX_PUSH_SERVICE_URL"],
       defaultPushServiceUrl,

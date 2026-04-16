@@ -64,6 +64,7 @@ function startBridge({
     enabled: config.keepMacAwakeEnabled,
   });
   const relayBaseUrl = config.relayUrl.replace(/\/+$/, "");
+  const advertisedRelayBaseUrl = (config.advertisedRelayUrl || config.relayUrl).replace(/\/+$/, "");
   if (!relayBaseUrl) {
     console.error("[remodex] No relay URL configured.");
     console.error("[remodex] In a source checkout, run ./run-local-remodex.sh or set REMODEX_RELAY.");
@@ -144,7 +145,7 @@ function startBridge({
   };
   const secureTransport = createBridgeSecureTransport({
     sessionId,
-    relayUrl: relayBaseUrl,
+    relayUrl: advertisedRelayBaseUrl,
     deviceState,
     onTrustedPhoneUpdate(nextDeviceState) {
       deviceState = nextDeviceState;
