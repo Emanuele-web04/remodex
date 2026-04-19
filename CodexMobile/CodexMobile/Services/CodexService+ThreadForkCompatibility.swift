@@ -1,5 +1,5 @@
 // FILE: CodexService+ThreadForkCompatibility.swift
-// Purpose: Isolates bridge-compatibility fallbacks and upgrade prompts used only by native thread forking.
+// Purpose: Isolates bridge-compatibility upgrade prompts used by native thread forking.
 // Layer: Service
 // Exports: CodexService thread-fork compatibility helpers
 // Depends on: Foundation
@@ -7,45 +7,6 @@
 import Foundation
 
 extension CodexService {
-    // Falls back to a minimal `thread/fork(threadId)` when older runtimes reject newer override fields.
-    func consumeUnsupportedThreadForkOverrides(
-        _ error: Error,
-        usesMinimalForkParams: inout Bool
-    ) -> Bool {
-        guard !usesMinimalForkParams,
-              shouldRetryThreadForkWithoutOverrides(error) else {
-            return false
-        }
-
-        usesMinimalForkParams = true
-        return true
-    }
-
-    func shouldRetryThreadForkWithoutOverrides(_ error: Error) -> Bool {
-        guard let serviceError = error as? CodexServiceError,
-              case .rpcError(let rpcError) = serviceError else {
-            return false
-        }
-
-        guard rpcError.code == -32600 || rpcError.code == -32602 || rpcError.code == -32000 else {
-            return false
-        }
-
-        let message = rpcError.message.lowercased()
-        let mentionsUnknownField = message.contains("unknown field")
-            || message.contains("unexpected field")
-            || message.contains("unrecognized field")
-        let mentionsInvalidNamedField = (message.contains("invalid param") || message.contains("invalid params"))
-            && (message.contains("field") || message.contains("parameter") || message.contains("param"))
-        let mentionsForkOverride = message.contains("cwd")
-            || message.contains("modelprovider")
-            || message.contains("model provider")
-            || message.contains("model")
-            || message.contains("sandbox")
-
-        return (mentionsUnknownField || mentionsInvalidNamedField) && mentionsForkOverride
-    }
-
     // Learns that this runtime does not expose native thread forking and suppresses `/fork` for the session.
     func consumeUnsupportedThreadFork(_ error: Error) -> Bool {
         guard shouldTreatAsUnsupportedThreadFork(error) else {

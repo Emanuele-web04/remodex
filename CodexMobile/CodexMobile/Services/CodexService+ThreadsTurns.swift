@@ -7,25 +7,59 @@
 import Foundation
 
 extension CodexService {
-    // Keeps sidebar/project loading focused on recent conversations without hiding
-    // other active project groups when the latest chats all belong to one repo.
-    var recentThreadListLimit: Int { 40 }
+    // Keeps sidebar/project loading focused on recent live conversations while
+    // retaining a smaller archived slice for restart/recovery flows.
+    var recentActiveThreadListLimit: Int { 70 }
+    var recentArchivedThreadListLimit: Int { 10 }
 
     // Encodes manual approval replies using the app-server decision object shape.
     func approvalDecisionResult(_ decision: String) -> JSONValue {
         .object(["decision": .string(decision)])
     }
 
+    // Returns the next pending approval for a specific thread, falling back to thread-less requests.
+    func pendingApproval(for threadId: String? = nil) -> CodexApprovalRequest? {
+        guard let normalizedThreadID = normalizedApprovalThreadIdentifier(threadId) else {
+            return pendingApprovals.first
+        }
+
+        return pendingApprovals.first(where: { $0.threadId == normalizedThreadID })
+            ?? pendingApprovals.first(where: { $0.threadId == nil })
+    }
+
+    // Preserves arrival order while replacing retried copies of the same request id.
+    func enqueuePendingApproval(_ request: CodexApprovalRequest) {
+        if let existingIndex = pendingApprovals.firstIndex(where: { $0.id == request.id }) {
+            pendingApprovals[existingIndex] = request
+            return
+        }
+
+        pendingApprovals.append(request)
+    }
+
+    // Removes the exact resolved approval request when the server confirms it is gone.
+    @discardableResult
+    func removePendingApproval(requestID: JSONValue) -> CodexApprovalRequest? {
+        let requestKey = idKey(from: requestID)
+        return removePendingApproval(id: requestKey)
+    }
+
+    // Clears all volatile approval prompts on disconnect or server switch.
+    func clearPendingApprovals() {
+        pendingApprovals.removeAll()
+    }
+
     func listThreads(limit: Int? = nil) async throws {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
-        let effectiveLimit = limit ?? recentThreadListLimit
-        let activeThreads = try await fetchServerThreads(limit: effectiveLimit)
+        let activeLimit = limit ?? recentActiveThreadListLimit
+        let archivedLimit = limit ?? recentArchivedThreadListLimit
+        let activeThreads = try await fetchServerThreads(limit: activeLimit)
 
         var archivedThreads: [CodexThread] = []
         do {
-            archivedThreads = try await fetchServerThreads(limit: effectiveLimit, archived: true)
+            archivedThreads = try await fetchServerThreads(limit: archivedLimit, archived: true)
         } catch {
             debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
         }
@@ -102,8 +136,15 @@ extension CodexService {
                 if let runtimeOverride, !runtimeOverride.isEmpty {
                     applyThreadRuntimeOverride(runtimeOverride, to: thread.id)
                 }
-                upsertThread(thread)
+                // Mark the fresh thread as resumed before publishing it so the first
+                // render can skip the transient loading state while the empty composer
+                // is already the right answer.
                 resumedThreadIDs.insert(thread.id)
+                upsertThread(thread, treatAsServerState: true)
+                if let normalizedProjectPath = thread.normalizedProjectPath,
+                   CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
+                    rememberAssociatedManagedWorktreePath(normalizedProjectPath, for: thread.id)
+                }
                 activeThreadId = thread.id
                 return thread
             } catch {
@@ -132,7 +173,8 @@ extension CodexService {
         skillMentions: [CodexTurnSkillMention] = [],
         fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
-        collaborationMode: CodexCollaborationModeKind? = nil
+        collaborationMode: CodexCollaborationModeKind? = nil,
+        preservePlanSessionState: Bool = false
     ) async throws {
         let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedInput.isEmpty || !attachments.isEmpty else {
@@ -140,6 +182,11 @@ extension CodexService {
         }
 
         let initialThreadId = try await resolveThreadID(threadId)
+        preparePlanSessionForStart(
+            threadId: initialThreadId,
+            collaborationMode: collaborationMode,
+            preserveExisting: preservePlanSessionState
+        )
 
         do {
             try await ensureThreadResumed(threadId: initialThreadId)
@@ -148,6 +195,7 @@ extension CodexService {
                 handleMissingThread(initialThreadId)
 
                 let continuationThread = try await createContinuationThread(from: initialThreadId)
+                migratePlanSessionState(from: initialThreadId, to: continuationThread.id)
                 try await ensureThreadResumed(threadId: continuationThread.id)
                 try await sendTurnStart(
                     trimmedInput,
@@ -188,6 +236,7 @@ extension CodexService {
                 handleMissingThread(initialThreadId)
 
                 let continuationThread = try await createContinuationThread(from: initialThreadId)
+                migratePlanSessionState(from: initialThreadId, to: continuationThread.id)
                 try await sendTurnStart(
                     trimmedInput,
                     attachments: attachments,
@@ -399,8 +448,9 @@ extension CodexService {
     }
 
     // Accepts the latest pending approval request.
-    func approvePendingRequest(forSession: Bool = false) async throws {
-        guard let request = pendingApproval else {
+    func approvePendingRequest(_ request: CodexApprovalRequest, forSession: Bool = false) async throws {
+        let requestKey = request.id
+        guard pendingApprovals.contains(where: { $0.id == requestKey }) else {
             throw CodexServiceError.noPendingApproval
         }
 
@@ -410,17 +460,36 @@ extension CodexService {
         let decision = (forSession && isCommandApproval) ? "acceptForSession" : "accept"
 
         try await sendResponse(id: request.requestID, result: approvalDecisionResult(decision))
-        pendingApproval = nil
+        removePendingApproval(requestID: request.requestID)
+    }
+
+    // Accepts the next pending approval request, optionally scoped to a thread.
+    func approvePendingRequest(forThread threadId: String? = nil, forSession: Bool = false) async throws {
+        guard let request = pendingApproval(for: threadId) else {
+            throw CodexServiceError.noPendingApproval
+        }
+
+        try await approvePendingRequest(request, forSession: forSession)
     }
 
     // Declines the latest pending approval request.
-    func declinePendingRequest() async throws {
-        guard let request = pendingApproval else {
+    func declinePendingRequest(_ request: CodexApprovalRequest) async throws {
+        let requestKey = request.id
+        guard pendingApprovals.contains(where: { $0.id == requestKey }) else {
             throw CodexServiceError.noPendingApproval
         }
 
         try await sendResponse(id: request.requestID, result: approvalDecisionResult("decline"))
-        pendingApproval = nil
+        removePendingApproval(requestID: request.requestID)
+    }
+
+    // Declines the next pending approval request, optionally scoped to a thread.
+    func declinePendingRequest(forThread threadId: String? = nil) async throws {
+        guard let request = pendingApproval(for: threadId) else {
+            throw CodexServiceError.noPendingApproval
+        }
+
+        try await declinePendingRequest(request)
     }
 
     // Responds to item/tool/requestUserInput using the exact app-server answer envelope.
@@ -449,6 +518,132 @@ extension CodexService {
         return .object([
             "answers": .object(answersObject),
         ])
+    }
+
+    // Interrupts the active plan turn, only tearing down local prompt/session state once it is safe.
+    func cancelStructuredPlanSession(
+        requestID _: JSONValue,
+        turnId: String?,
+        threadId: String
+    ) async throws {
+        do {
+            try await interruptTurn(turnId: turnId, threadId: threadId)
+            removeAllStructuredUserInputPrompts(threadId: threadId)
+            resetPlanSessionState(for: threadId)
+        } catch let error as CodexServiceError {
+            if case .invalidInput = error {
+                removeAllStructuredUserInputPrompts(threadId: threadId)
+                resetPlanSessionState(for: threadId)
+                return
+            }
+            throw error
+        }
+    }
+
+    // Falls back to a normal plan-mode user reply when the runtime asked clarifying
+    // questions in plain text instead of emitting `item/tool/requestUserInput`.
+    func submitInferredPlanQuestionnaireResponse(
+        threadId: String,
+        questions: [CodexStructuredUserInputQuestion],
+        answersByQuestionID: [String: [String]]
+    ) async throws {
+        let userInput = inferredPlanQuestionnaireResponseText(
+            questions: questions,
+            answersByQuestionID: answersByQuestionID
+        )
+        guard !userInput.isEmpty else {
+            throw CodexServiceError.invalidInput("Questionnaire answers cannot be empty")
+        }
+
+        let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
+        if shouldCommitInferredPlanQuestionnaireFallback(for: normalizedThreadID) {
+            markCompatibilityPlanFallback(for: normalizedThreadID)
+        }
+
+        var expectedTurnID = activeTurnID(for: normalizedThreadID)
+        if expectedTurnID == nil {
+            do {
+                expectedTurnID = try await resolveInFlightTurnID(threadId: normalizedThreadID)
+            } catch {
+                if let serviceError = error as? CodexServiceError,
+                   case .invalidInput(_) = serviceError {
+                    expectedTurnID = nil
+                } else {
+                    throw error
+                }
+            }
+        }
+
+        if let expectedTurnID {
+            try await steerTurn(
+                userInput: userInput,
+                threadId: normalizedThreadID,
+                expectedTurnId: expectedTurnID,
+                shouldAppendUserMessage: true,
+                collaborationMode: .plan
+            )
+            return
+        }
+
+        try await startTurn(
+            userInput: userInput,
+            threadId: normalizedThreadID,
+            shouldAppendUserMessage: true,
+            collaborationMode: .plan,
+            preservePlanSessionState: true
+        )
+    }
+
+    func inferredPlanQuestionnaireResponseText(
+        questions: [CodexStructuredUserInputQuestion],
+        answersByQuestionID: [String: [String]]
+    ) -> String {
+        let sections = questions.enumerated().compactMap { index, question -> String? in
+            let answers = (answersByQuestionID[question.id] ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard !answers.isEmpty else {
+                return nil
+            }
+
+            let prompt = question.trimmedPrompt
+            if answers.count == 1 {
+                return "\(index + 1). \(prompt)\n\(answers[0])"
+            }
+
+            let answerLines = answers.map { "- \($0)" }.joined(separator: "\n")
+            return "\(index + 1). \(prompt)\n\(answerLines)"
+        }
+
+        guard !sections.isEmpty else {
+            return ""
+        }
+
+        return """
+        Answers:
+
+        \(sections.joined(separator: "\n\n"))
+        """
+    }
+}
+
+private extension CodexService {
+    @discardableResult
+    func removePendingApproval(id requestID: String) -> CodexApprovalRequest? {
+        guard let exactIndex = pendingApprovals.firstIndex(where: { $0.id == requestID }) else {
+            return nil
+        }
+
+        return pendingApprovals.remove(at: exactIndex)
+    }
+
+    func normalizedApprovalThreadIdentifier(_ rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -602,63 +797,129 @@ extension CodexService {
             return nil
         }
 
+        if force {
+            forcedResumeEscalationThreadIDs.insert(threadId)
+        }
         if !force, resumedThreadIDs.contains(threadId) {
             return thread(for: threadId)
         }
+        let requestedSignature = CodexThreadResumeRequestSignature(
+            projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
+                ?? thread(for: threadId)?.gitWorkingDirectory,
+            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn()
+        )
+        let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
+        if let existingTask = threadResumeTaskByThreadID[threadId] {
+            if threadResumeRequestSignatureByThreadID[threadId] == requestedSignature {
+                return try await existingTask.value
+            }
 
-        var params: RPCObject = [
-            "threadId": .string(threadId),
-        ]
-        let resolvedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
-            ?? thread(for: threadId)?.gitWorkingDirectory
-        if let workingDirectory = resolvedProjectPath {
-            params["cwd"] = .string(workingDirectory)
+            _ = try await existingTask.value
+            return try await ensureThreadResumed(
+                threadId: threadId,
+                force: force,
+                preferredProjectPath: preferredProjectPath,
+                modelIdentifierOverride: modelIdentifierOverride
+            )
         }
-        if let modelIdentifier = modelIdentifierOverride ?? runtimeModelIdentifierForTurn() {
-            params["model"] = .string(modelIdentifier)
-        }
-        let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
 
-        guard let resultObject = response.result?.objectValue else {
-            resumedThreadIDs.insert(threadId)
-            return nil
-        }
-
-        var resumedThread: CodexThread?
-        if let threadValue = resultObject["thread"],
-           var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
-            decodedThread.syncState = .live
-            upsertThread(decodedThread)
-            resumedThread = decodedThread
-
-            if let threadObject = threadValue.objectValue {
-                let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
-                registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
-                if !historyMessages.isEmpty {
-                    let existingMessages = messagesByThread[threadId] ?? []
-                    let activeThreadIDs = Set(activeTurnIdByThread.keys)
-                    let runningIDs = runningThreadIDs
-                    let merged = await Task.detached {
-                        Self.mergeHistoryMessages(existingMessages, historyMessages, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
-                    }.value
-                    // Forced resumes are used when reopening a running thread, so merge the
-                    // latest snapshot even mid-run and let mergeHistoryMessages preserve
-                    // existing streaming rows instead of waiting for the final block.
-                    if (force || !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty)
-                        && merged != existingMessages {
-                        messagesByThread[threadId] = merged
-                        persistMessages()
-                        updateCurrentOutput(for: threadId)
-                    }
+        let task = Task<CodexThread?, Error> { @MainActor in
+            defer {
+                // Ignore stale refreshes so an older task cannot clear newer state.
+                if isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) {
+                    threadResumeTaskByThreadID.removeValue(forKey: threadId)
+                    threadResumeRequestSignatureByThreadID.removeValue(forKey: threadId)
+                    forcedResumeEscalationThreadIDs.remove(threadId)
                 }
             }
-        } else if let index = threadIndex(for: threadId) {
-            threads[index].syncState = .live
+
+            var params: RPCObject = [
+                "threadId": .string(threadId),
+            ]
+            let resolvedProjectPath = requestedSignature.projectPath
+            if let workingDirectory = resolvedProjectPath {
+                params["cwd"] = .string(workingDirectory)
+            }
+            if let modelIdentifier = requestedSignature.modelIdentifier {
+                params["model"] = .string(modelIdentifier)
+            }
+            let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            guard !Task.isCancelled,
+                  isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
+                throw CancellationError()
+            }
+
+            guard let resultObject = response.result?.objectValue else {
+                resumedThreadIDs.insert(threadId)
+                return nil
+            }
+
+            var resumedThread: CodexThread?
+            if let threadValue = resultObject["thread"],
+               var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
+                decodedThread.syncState = .live
+                upsertThread(decodedThread, treatAsServerState: true)
+                resumedThread = decodedThread
+
+                if let threadObject = threadValue.objectValue {
+                    let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+                    registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
+                    if !historyMessages.isEmpty {
+                        let existingMessages = messagesByThread[threadId] ?? []
+                        let activeThreadIDs = Set(activeTurnIdByThread.keys)
+                        let runningIDs = runningThreadIDs
+                        let usedRecentWindow = threadHasActiveOrRunningTurn(threadId)
+                            && Self.shouldPreferRecentHistoryWindow(
+                                existingCount: existingMessages.count,
+                                historyCount: historyMessages.count
+                            )
+                        if usedRecentWindow {
+                            markThreadNeedingCanonicalHistoryReconcile(threadId)
+                        }
+                        let merged = try await mergeHistoryMessagesOffMainActor(
+                            existing: existingMessages,
+                            history: historyMessages,
+                            activeThreadIDs: activeThreadIDs,
+                            runningThreadIDs: runningIDs,
+                            preferRecentWindow: usedRecentWindow
+                        )
+                        guard !Task.isCancelled,
+                              isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
+                            throw CancellationError()
+                        }
+                        let shouldForceMerge = force || forcedResumeEscalationThreadIDs.contains(threadId)
+                        // Forced resumes are used when reopening a running thread, so merge the
+                        // latest snapshot even mid-run and let mergeHistoryMessages preserve
+                        // existing streaming rows instead of waiting for the final block.
+                        if (shouldForceMerge || !threadHasActiveOrRunningTurn(threadId) || existingMessages.isEmpty)
+                            && merged != existingMessages {
+                            messagesByThread[threadId] = merged
+                            persistMessages()
+                            updateCurrentOutput(for: threadId)
+                        }
+                        if usedRecentWindow, !threadHasActiveOrRunningTurn(threadId) {
+                            scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
+                        } else if !threadHasActiveOrRunningTurn(threadId) {
+                            markThreadCanonicalHistoryReconciled(threadId)
+                        }
+                    }
+                }
+            } else if let index = threadIndex(for: threadId) {
+                threads[index].syncState = .live
+            }
+
+            guard !Task.isCancelled,
+                  isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
+                throw CancellationError()
+            }
+            hydratedThreadIDs.insert(threadId)
+            resumedThreadIDs.insert(threadId)
+            return resumedThread
         }
 
-        hydratedThreadIDs.insert(threadId)
-        resumedThreadIDs.insert(threadId)
-        return resumedThread
+        threadResumeTaskByThreadID[threadId] = task
+        threadResumeRequestSignatureByThreadID[threadId] = requestedSignature
+        return try await task.value
     }
 
     func isThreadMissingOnServer(_ threadId: String) async -> Bool {
@@ -685,39 +946,59 @@ extension CodexService {
             return false
         }
 
-        do {
-            let snapshot = try await readThreadTurnStateSnapshot(threadId: normalizedThreadID)
-
-            if let runningTurnID = snapshot.interruptibleTurnID {
-                markThreadAsRunning(normalizedThreadID)
-                setProtectedRunningFallback(false, for: normalizedThreadID)
-                setActiveTurnID(runningTurnID, for: normalizedThreadID)
-                threadIdByTurnID[runningTurnID] = normalizedThreadID
-                activeTurnId = runningTurnID
-                return true
-            }
-
-            if snapshot.hasInterruptibleTurnWithoutID {
-                markThreadAsRunning(normalizedThreadID)
-                setProtectedRunningFallback(true, for: normalizedThreadID)
-            } else {
-                clearRunningState(for: normalizedThreadID)
-            }
-
-            if let existingTurnID = activeTurnID(for: normalizedThreadID) {
-                setActiveTurnID(nil, for: normalizedThreadID)
-                if threadIdByTurnID[existingTurnID] == normalizedThreadID {
-                    threadIdByTurnID.removeValue(forKey: existingTurnID)
-                }
-                if activeTurnId == existingTurnID {
-                    activeTurnId = nil
-                }
-            }
-            return true
-        } catch {
-            debugSyncLog("in-flight turn refresh failed thread=\(normalizedThreadID): \(error.localizedDescription)")
-            return false
+        let refreshGeneration = currentPerThreadRefreshGeneration(for: normalizedThreadID)
+        if let existingTask = turnStateRefreshTaskByThreadID[normalizedThreadID] {
+            return await existingTask.value
         }
+
+        let task = Task<Bool, Never> { @MainActor in
+            defer {
+                if isPerThreadRefreshCurrent(for: normalizedThreadID, generation: refreshGeneration) {
+                    turnStateRefreshTaskByThreadID.removeValue(forKey: normalizedThreadID)
+                }
+            }
+
+            do {
+                let snapshot = try await readThreadTurnStateSnapshot(threadId: normalizedThreadID)
+                guard !Task.isCancelled,
+                      isPerThreadRefreshCurrent(for: normalizedThreadID, generation: refreshGeneration) else {
+                    return false
+                }
+
+                if let runningTurnID = snapshot.interruptibleTurnID {
+                    markThreadAsRunning(normalizedThreadID)
+                    setProtectedRunningFallback(false, for: normalizedThreadID)
+                    setActiveTurnID(runningTurnID, for: normalizedThreadID)
+                    threadIdByTurnID[runningTurnID] = normalizedThreadID
+                    activeTurnId = runningTurnID
+                    return true
+                }
+
+                if snapshot.hasInterruptibleTurnWithoutID {
+                    markThreadAsRunning(normalizedThreadID)
+                    setProtectedRunningFallback(true, for: normalizedThreadID)
+                } else {
+                    clearRunningState(for: normalizedThreadID)
+                }
+
+                if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                    setActiveTurnID(nil, for: normalizedThreadID)
+                    if threadIdByTurnID[existingTurnID] == normalizedThreadID {
+                        threadIdByTurnID.removeValue(forKey: existingTurnID)
+                    }
+                    if activeTurnId == existingTurnID {
+                        activeTurnId = nil
+                    }
+                }
+                return true
+            } catch {
+                debugSyncLog("in-flight turn refresh failed thread=\(normalizedThreadID): \(error.localizedDescription)")
+                return false
+            }
+        }
+
+        turnStateRefreshTaskByThreadID[normalizedThreadID] = task
+        return await task.value
     }
 
     func sendTurnStart(
@@ -746,6 +1027,12 @@ extension CodexService {
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
         var includesServiceTier = runtimeServiceTierForTurn(threadId: threadId) != nil
+
+        if collaborationMode != nil, effectiveCollaborationMode == nil {
+            debugRuntimeLog(
+                "turn/start dropping collaborationMode requested=\(collaborationMode?.rawValue ?? "") thread=\(threadId) supportsTurnCollaborationMode=\(supportsTurnCollaborationMode)"
+            )
+        }
 
         while true {
             do {
@@ -795,6 +1082,10 @@ extension CodexService {
                    shouldRetryTurnStartWithoutCollaborationMode(error) {
                     // Remember the runtime limitation so future plan-mode sends skip the rejected field.
                     supportsTurnCollaborationMode = false
+                    clearPlanSessionIfRuntimeDowngraded(
+                        threadId: threadId,
+                        collaborationMode: effectiveCollaborationMode
+                    )
                     effectiveCollaborationMode = nil
                     didDowngradePlanModeForRuntime = true
                     continue
@@ -826,6 +1117,10 @@ extension CodexService {
         collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
+        preparePlanSessionForSteer(
+            threadId: normalizedThreadID,
+            collaborationMode: collaborationMode
+        )
         let pendingMessageId = shouldAppendUserMessage
             ? appendUserMessage(
                 threadId: normalizedThreadID,
@@ -855,6 +1150,12 @@ extension CodexService {
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var currentExpectedTurnID = initialTurnID
         var didRetryWithRefreshedTurnID = false
+
+        if collaborationMode != nil, effectiveCollaborationMode == nil {
+            debugRuntimeLog(
+                "turn/steer dropping collaborationMode requested=\(collaborationMode?.rawValue ?? "") thread=\(normalizedThreadID) supportsTurnCollaborationMode=\(supportsTurnCollaborationMode)"
+            )
+        }
 
         while true {
             var params: RPCObject = [
@@ -911,6 +1212,10 @@ extension CodexService {
                    shouldRetryTurnStartWithoutCollaborationMode(error) {
                     // Keep steer compatible with runtimes that only support plain turns.
                     supportsTurnCollaborationMode = false
+                    clearPlanSessionIfRuntimeDowngraded(
+                        threadId: normalizedThreadID,
+                        collaborationMode: effectiveCollaborationMode
+                    )
                     effectiveCollaborationMode = nil
                     continue
                 }
@@ -1088,6 +1393,17 @@ extension CodexService {
                 "Plan mode requires an available model before starting a plan turn."
             )
         }
+        let developerInstructionsValue: JSONValue = {
+            guard mode == .plan,
+                  let threadId,
+                  currentPlanSessionSource(for: threadId) == .compatibilityFallback,
+                  let instructions = developerInstructions(for: mode)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !instructions.isEmpty else {
+                return .null
+            }
+            return .string(instructions)
+        }()
 
         return .object([
             "mode": .string(mode.rawValue),
@@ -1096,9 +1412,202 @@ extension CodexService {
                 "reasoning_effort": selectedReasoningEffortForSelectedModel(
                     threadId: threadId
                 ).map(JSONValue.string) ?? .null,
-                "developer_instructions": .null,
+                // Stay native-first by default, but allow a compatibility override after fallback.
+                "developer_instructions": developerInstructionsValue,
             ]),
         ])
+    }
+
+    func implementProposedPlan(
+        threadId: String,
+        proposedPlan: CodexProposedPlan
+    ) async throws {
+        let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
+        let planBody = proposedPlan.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !planBody.isEmpty else {
+            throw CodexServiceError.invalidInput("Proposed plan cannot be empty")
+        }
+
+        // The approved plan is already part of the thread history, so keep the
+        // handoff prompt minimal instead of replaying the full plan body.
+        let userInput = "Implement plan."
+
+        var expectedTurnID = activeTurnID(for: normalizedThreadID)
+        if expectedTurnID == nil {
+            do {
+                expectedTurnID = try await resolveInFlightTurnID(threadId: normalizedThreadID)
+            } catch {
+                if let serviceError = error as? CodexServiceError,
+                   case .invalidInput(_) = serviceError {
+                    expectedTurnID = nil
+                } else {
+                    throw error
+                }
+            }
+        }
+
+        if let expectedTurnID {
+            try await steerTurn(
+                userInput: userInput,
+                threadId: normalizedThreadID,
+                expectedTurnId: expectedTurnID,
+                shouldAppendUserMessage: true,
+                collaborationMode: nil
+            )
+            return
+        }
+
+        try await startTurn(
+            userInput: userInput,
+            threadId: normalizedThreadID,
+            shouldAppendUserMessage: true,
+            collaborationMode: nil
+        )
+    }
+
+    func currentPlanSessionSource(for threadId: String) -> CodexPlanSessionSource? {
+        planSessionSourceByThread[threadId]
+    }
+
+    func allowsInferredPlanQuestionnaireFallback(for threadId: String) -> Bool {
+        currentPlanSessionSource(for: threadId) == .compatibilityFallback
+    }
+
+    // Plain-text questionnaire recovery belongs only to explicit compatibility mode.
+    func allowsAssistantPlanFallbackRecovery(for threadId: String) -> Bool {
+        currentPlanSessionSource(for: threadId) == .compatibilityFallback
+    }
+
+    // Native/requested plan threads should rely on official requestUserInput events,
+    // not on heuristics over assistant prose.
+    func allowsAssistantPlanFallbackRecovery(for threadId: String, turnId: String?) -> Bool {
+        let _ = turnId
+        return currentPlanSessionSource(for: threadId) == .compatibilityFallback
+    }
+
+    func markRequestedPlanSession(for threadId: String) {
+        planSessionSourceByThread[threadId] = .requested
+    }
+
+    func migratePlanSessionState(from sourceThreadId: String, to destinationThreadId: String) {
+        guard sourceThreadId != destinationThreadId,
+              let source = planSessionSourceByThread.removeValue(forKey: sourceThreadId) else {
+            return
+        }
+        planSessionSourceByThread[destinationThreadId] = source
+    }
+
+    func markNativePlanSession(for threadId: String) {
+        planSessionSourceByThread[threadId] = preferredNativePlanSessionSource()
+    }
+
+    func markCompatibilityPlanFallback(for threadId: String) {
+        planSessionSourceByThread[threadId] = .compatibilityFallback
+    }
+
+    func resetPlanSessionState(for threadId: String) {
+        planSessionSourceByThread.removeValue(forKey: threadId)
+    }
+
+    func reconcileNativePlanSessionSources(
+        previousTransportMode: CodexRuntimeTransportMode,
+        nextTransportMode: CodexRuntimeTransportMode
+    ) {
+        guard previousTransportMode != nextTransportMode else {
+            return
+        }
+
+        let preferredSource = preferredNativePlanSessionSource()
+        for (threadId, source) in planSessionSourceByThread where source.isNative {
+            planSessionSourceByThread[threadId] = preferredSource
+        }
+    }
+
+    private func preferredNativePlanSessionSource() -> CodexPlanSessionSource {
+        switch codexTransportMode {
+        case .websocket:
+            return .nativeDesktopEndpoint
+        case .spawn, .unknown:
+            return .nativeAppServer
+        }
+    }
+
+    private func shouldCommitInferredPlanQuestionnaireFallback(for threadId: String) -> Bool {
+        currentPlanSessionSource(for: threadId) == .compatibilityFallback
+    }
+
+    func developerInstructions(for mode: CodexCollaborationModeKind) -> String? {
+        switch mode {
+        case .plan:
+            Self.compatibilityPlanModeDeveloperInstructions
+        case .default:
+            nil
+        }
+    }
+
+    private static let compatibilityPlanModeDeveloperInstructions = """
+    You are in plan mode.
+
+    Strongly prefer the native structured question flow when you need clarification:
+    - use request_user_input instead of writing a numbered questionnaire in plain text
+    - keep the conversation in a one-question-at-a-time flow when possible
+    - ask one material question at a time when possible
+    - keep each tool prompt short and decision-oriented
+    - Never write multiple-choice questions as plain assistant text.
+
+    When you reach a final implementation proposal, wrap it in exactly one <proposed_plan> block with Markdown inside.
+    """
+
+    private func preparePlanSessionForStart(
+        threadId: String,
+        collaborationMode: CodexCollaborationModeKind?,
+        preserveExisting: Bool
+    ) {
+        guard !preserveExisting else {
+            return
+        }
+
+        if collaborationMode == .plan,
+           currentPlanSessionSource(for: threadId) != nil {
+            return
+        }
+
+        if shouldTrackRequestedPlanSession(for: collaborationMode) {
+            resetPlanSessionState(for: threadId)
+            markRequestedPlanSession(for: threadId)
+        } else {
+            resetPlanSessionState(for: threadId)
+        }
+    }
+
+    private func preparePlanSessionForSteer(
+        threadId: String,
+        collaborationMode: CodexCollaborationModeKind?
+    ) {
+        if shouldTrackRequestedPlanSession(for: collaborationMode) {
+            if currentPlanSessionSource(for: threadId) == nil {
+                markRequestedPlanSession(for: threadId)
+            }
+        } else {
+            resetPlanSessionState(for: threadId)
+        }
+    }
+
+    private func clearPlanSessionIfRuntimeDowngraded(
+        threadId: String,
+        collaborationMode: CodexCollaborationModeKind?
+    ) {
+        guard collaborationMode == .plan else {
+            return
+        }
+
+        resetPlanSessionState(for: threadId)
+    }
+
+    private func shouldTrackRequestedPlanSession(
+        for collaborationMode: CodexCollaborationModeKind?
+    ) -> Bool {
+        collaborationMode == .plan && supportsTurnCollaborationMode
     }
 
     // Applies common failure bookkeeping for turn/start primary and fallback attempts.

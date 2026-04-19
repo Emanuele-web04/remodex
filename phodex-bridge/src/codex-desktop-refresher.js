@@ -2,11 +2,12 @@
 // Purpose: Debounced Mac desktop refresh controller for Codex.app after phone-authored conversation changes.
 // Layer: CLI helper
 // Exports: CodexDesktopRefresher, readBridgeConfig
-// Depends on: child_process, path, ./rollout-watch
+// Depends on: child_process, path, ./rollout-watch, ./daemon-state
 
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { readDaemonConfig } = require("./daemon-state");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 
 const DEFAULT_BUNDLE_ID = "com.openai.codex";
@@ -522,6 +523,7 @@ function readBridgeConfig({
   runtimeRoot = path.resolve(__dirname, ".."),
   fsImpl = fs,
 } = {}) {
+  const daemonConfig = readDaemonConfig({ env, fsImpl }) || {};
   const privateDefaults = readPrivatePackageDefaults({ runtimeRoot, fsImpl });
   const sourceCheckout = isSourceCheckout(runtimeRoot, fsImpl);
   const defaultRelayUrl = sourceCheckout
@@ -551,6 +553,10 @@ function readBridgeConfig({
     env
   );
   const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
+  const explicitKeepMacAwakeEnabled = readOptionalBooleanEnv(["REMODEX_KEEP_MAC_AWAKE"], env);
+  const persistedKeepMacAwakeEnabled = typeof daemonConfig.keepMacAwakeEnabled === "boolean"
+    ? daemonConfig.keepMacAwakeEnabled
+    : null;
   // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
   const defaultRefreshEnabled = false;
   return {
@@ -571,6 +577,9 @@ function readBridgeConfig({
       readFirstDefinedEnv(["REMODEX_REFRESH_DEBOUNCE_MS"], String(DEFAULT_DEBOUNCE_MS), env),
       DEFAULT_DEBOUNCE_MS
     ),
+    keepMacAwakeEnabled: explicitKeepMacAwakeEnabled == null
+      ? (persistedKeepMacAwakeEnabled == null ? true : persistedKeepMacAwakeEnabled)
+      : explicitKeepMacAwakeEnabled,
     codexEndpoint,
     refreshCommand,
     codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),

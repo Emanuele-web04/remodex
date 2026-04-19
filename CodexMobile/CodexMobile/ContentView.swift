@@ -7,40 +7,91 @@
 import SwiftUI
 import UIKit
 
+private enum RootSheetRoute: Identifiable, Equatable {
+    case bridgeUpdate(CodexBridgeUpdatePrompt)
+    case whatsNew(version: String)
+
+    var id: String {
+        switch self {
+        case .bridgeUpdate(let prompt):
+            return "bridge-update-\(prompt.id.uuidString)"
+        case .whatsNew(let version):
+            return "whats-new-\(version)"
+        }
+    }
+}
+
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     @State private var viewModel = ContentViewModel()
     @State private var isSidebarOpen = false
     @State private var sidebarDragOffset: CGFloat = 0
+    @State private var isSidebarPrewarmed = false
     @State private var selectedThread: CodexThread?
     @State private var navigationPath = NavigationPath()
     @State private var showSettings = false
     @State private var isShowingManualScanner = false
     @State private var hasDismissedAutomaticScanner = false
     @State private var scannerCanReturnToOnboarding = false
+    @State private var isShowingManualPairingEntry = false
+    @State private var manualPairingCode = ""
+    @State private var manualPairingErrorMessage: String?
+    @State private var isResolvingManualPairingCode = false
     @State private var isSearchActive = false
     @State private var isRetryingBridgeUpdate = false
     @State private var isPreparingManualScanner = false
+    @State private var isWakingSavedMacDisplay = false
+    @State private var hasAttemptedAutomaticWakeSavedMacDisplay = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
+    @State private var whatsNewPresentationTask: Task<Void, Never>?
+    @State private var sidebarPrewarmTask: Task<Void, Never>?
+    @State private var presentedRootSheet: RootSheetRoute?
+    @State private var isWhatsNewPresentationReady = false
+    @State private var sidebarGestureDebugSequence = 0
+    @State private var activeSidebarGestureDebugID: Int?
+    @State private var lastSidebarGestureLogBucket: Int?
+    @State private var sidebarGestureAutoCommitted = false
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
+    @AppStorage("codex.whatsNew.lastPresentedVersion") private var lastPresentedWhatsNewVersion = ""
 
     private let sidebarWidth: CGFloat = 330
     // Lets the drawer gesture start a bit inside the content instead of only on the bezel edge.
     private let sidebarOpenActivationWidth: CGFloat = 80
+    private let sidebarPrewarmDelayNanoseconds: UInt64 = 700_000_000
+    private let whatsNewPresentationDelayNanoseconds: UInt64 = 30_000_000_000
+    private let sidebarGestureLogBucketWidth: CGFloat = 40
+    private let sidebarSwipeCommitDistance: CGFloat = 30
+    private let wakingSavedMacDisplayStatusMessage = "Trying to wake your Mac display..."
+    private let whatsNewReleaseVersion = "1.1"
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
 
     var body: some View {
+        rootContentWithBannerOverlay
+    }
+
+    // Splits lifecycle wiring from presentation modifiers so SwiftUI does not have to type-check one giant body chain.
+    private var rootContentWithLifecycleObservers: some View {
         rootContent
             // Only resume saved-pairing recovery after onboarding is done and the manual scanner is not in control.
             .task {
                 guard hasSeenOnboarding, !isShowingManualScanner else {
+                    debugSidebarLog("launch task skipped onboardingSeen=\(hasSeenOnboarding) manualScanner=\(isShowingManualScanner)")
                     return
                 }
+                debugSidebarLog("launch task autoConnect begin connected=\(codex.isConnected) threadCount=\(codex.threads.count)")
                 await viewModel.attemptAutoConnectOnLaunchIfNeeded(codex: codex)
+                scheduleSidebarPrewarmIfNeeded()
+            }
+            .task(id: whatsNewPresentationScheduleFingerprint) {
+                await scheduleWhatsNewPresentationIfNeeded()
+            }
+            .task(id: rootSheetPresentationFingerprint) {
+                syncRootSheetPresentationIfNeeded()
             }
             .onChange(of: showSettings) { _, show in
                 if show {
@@ -49,19 +100,29 @@ struct ContentView: View {
                 }
             }
             .onChange(of: isSidebarOpen) { wasOpen, isOpen in
+                debugSidebarLog(
+                    "open-state changed wasOpen=\(wasOpen) isOpen=\(isOpen) prewarmed=\(isSidebarPrewarmed) "
+                        + "dragOffset=\(Int(sidebarDragOffset)) threadCount=\(codex.threads.count)"
+                )
                 guard !wasOpen, isOpen else {
                     return
                 }
-                if viewModel.shouldRequestSidebarFreshSync(isConnected: codex.isConnected) {
+                if !isSidebarPrewarmed,
+                   viewModel.shouldRequestSidebarFreshSync(isConnected: codex.isConnected) {
+                    debugSidebarLog("sidebar open triggers immediate sync activeThread=\(codex.activeThreadId ?? "nil")")
                     codex.requestImmediateSync(threadId: codex.activeThreadId)
+                } else {
+                    debugSidebarLog("sidebar open skips immediate sync prewarmed=\(isSidebarPrewarmed) connected=\(codex.isConnected)")
                 }
             }
             .onChange(of: navigationPath) { _, _ in
+                debugSidebarLog("navigation path changed count=\(navigationPath.count) sidebarOpen=\(isSidebarOpen)")
                 if isSidebarOpen {
                     closeSidebar()
                 }
             }
             .onChange(of: selectedThread) { previousThread, thread in
+                debugSidebarLog("selectedThread changed from=\(previousThread?.id ?? "nil") to=\(thread?.id ?? "nil")")
                 codex.handleDisplayedThreadChange(
                     from: previousThread?.id,
                     to: thread?.id
@@ -69,6 +130,7 @@ struct ContentView: View {
                 codex.activeThreadId = thread?.id
             }
             .onChange(of: codex.activeThreadId) { _, activeThreadId in
+                debugSidebarLog("activeThreadId changed to=\(activeThreadId ?? "nil")")
                 guard let activeThreadId,
                       let matchingThread = codex.threads.first(where: { $0.id == activeThreadId }),
                       selectedThread?.id != matchingThread.id else {
@@ -77,9 +139,12 @@ struct ContentView: View {
                 selectedThread = matchingThread
             }
             .onChange(of: codex.threads) { _, threads in
+                debugSidebarLog("threads changed count=\(threads.count) sidebarOpen=\(isSidebarOpen) prewarmed=\(isSidebarPrewarmed)")
                 syncSelectedThread(with: threads)
+                scheduleSidebarPrewarmIfNeeded()
             }
             .onChange(of: scenePhase) { _, phase in
+                debugSidebarLog("scenePhase changed phase=\(String(describing: phase))")
                 codex.setForegroundState(phase != .background)
                 if phase == .active {
                     Task {
@@ -90,49 +155,53 @@ struct ContentView: View {
                             return
                         }
 
-                        await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
+                        await attemptSavedMacReconnectRecoveryIfNeeded()
                         await subscriptionRefresh
+                        scheduleSidebarPrewarmIfNeeded()
                     }
+                } else if phase == .background {
+                    resetSavedMacWakeRecoveryState()
+                    teardownSidebarPrewarm()
                 }
             }
             .onChange(of: codex.shouldAutoReconnectOnForeground) { _, shouldReconnect in
-                guard shouldReconnect, scenePhase == .active, hasSeenOnboarding, !isShowingManualScanner else {
+                guard shouldReconnect else {
                     return
                 }
                 Task {
-                    await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
+                    await attemptSavedMacReconnectRecoveryIfNeeded()
                 }
             }
             .onChange(of: codex.isConnected) { wasConnected, isNowConnected in
+                debugSidebarLog("connection changed wasConnected=\(wasConnected) isConnected=\(isNowConnected)")
                 if !wasConnected, isNowConnected {
+                    resetSavedMacWakeRecoveryState()
                     Task {
                         await codex.requestNotificationPermissionOnFirstLaunchIfNeeded()
                     }
+                    scheduleSidebarPrewarmIfNeeded()
                 }
+            }
+            .onChange(of: codex.normalizedRelaySessionId) { _, _ in
+                resetSavedMacWakeRecoveryState()
             }
             .onChange(of: codex.threadCompletionBanner) { _, banner in
                 scheduleThreadCompletionBannerDismiss(for: banner)
             }
-            // Presents actionable recovery when the saved bridge package is too old/new for this app build.
-            .sheet(item: bridgeUpdatePromptBinding, onDismiss: {
-                codex.bridgeUpdatePrompt = nil
-                isRetryingBridgeUpdate = false
-            }) { prompt in
-                BridgeUpdateSheet(
-                    prompt: prompt,
-                    isRetrying: isRetryingBridgeUpdate,
-                    onRetry: {
-                        retryBridgeConnectionAfterUpdate()
-                    },
-                    onScanNewQR: {
-                        presentManualScannerForBridgeRecovery()
-                    },
-                    onDismiss: {
-                        codex.bridgeUpdatePrompt = nil
-                    }
-                )
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
+    }
+
+    // Keeps sheets and alerts out of the lifecycle chain so the compiler can reason about each stage separately.
+    private var rootContentWithPresentations: some View {
+        rootContentWithLifecycleObservers
+            // Presents exactly one root-owned sheet at a time so onboarding, paywall, updates,
+            // and delayed announcements cannot race each other into stacked presentations.
+            .sheet(item: presentedRootSheetBinding) { route in
+                switch route {
+                case .bridgeUpdate(let prompt):
+                    bridgeUpdateSheet(prompt: prompt)
+                case .whatsNew(let version):
+                    whatsNewSheet(version: version)
+                }
             }
             .alert(
                 "Chat Deleted",
@@ -151,6 +220,32 @@ struct ContentView: View {
             } message: { _ in
                 Text("This chat is no longer available. Start a new chat instead?")
             }
+            .alert("Pairing Error", isPresented: manualPairingErrorAlertIsPresented) {
+                Button("OK", role: .cancel) {
+                    manualPairingErrorMessage = nil
+                }
+            } message: {
+                Text(manualPairingErrorAlertMessage)
+            }
+            .alert("Enter Pairing Code", isPresented: $isShowingManualPairingEntry) {
+                TextField("AB23CD34EF", text: $manualPairingCode)
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+
+                Button(isResolvingManualPairingCode ? "Connecting..." : "Enter") {
+                    submitManualPairingCode()
+                }
+
+                Button("Cancel", role: .cancel) {
+                    manualPairingCode = ""
+                }
+            } message: {
+                Text("Paste the pairing code shown in the terminal on your Mac or in your phone shell.")
+            }
+    }
+
+    private var rootContentWithBannerOverlay: some View {
+        rootContentWithPresentations
             .overlay(alignment: .top) {
                 if let banner = codex.threadCompletionBanner {
                     ThreadCompletionBannerView(
@@ -176,9 +271,9 @@ struct ContentView: View {
             OnboardingView {
                 finishOnboardingAndShowScanner()
             }
-        } else if subscriptions.bootstrapState == .failed {
+        } else if subscriptions.bootstrapState == .failed && !subscriptions.hasAppAccess {
             SubscriptionBootstrapFailureView()
-        } else if subscriptions.bootstrapState != .ready || !subscriptions.hasProAccess {
+        } else if !subscriptions.hasAppAccess {
             SubscriptionGateView()
         } else if shouldShowQRScanner {
             qrScannerBody
@@ -224,33 +319,58 @@ struct ContentView: View {
         )
     }
 
-    private var effectiveSidebarWidth: CGFloat {
-        isSearchActive ? UIScreen.main.bounds.width : sidebarWidth
+    // Expands the drawer to the full container width on compact layouts so the sidebar
+    // can comfortably host longer titles, paths, and search results.
+    private var shouldUseFullWidthSidebar: Bool {
+        horizontalSizeClass == .compact || isSearchActive
+    }
+
+    private func effectiveSidebarWidth(for availableWidth: CGFloat) -> CGFloat {
+        shouldUseFullWidthSidebar ? availableWidth : min(sidebarWidth, availableWidth)
     }
 
     private var mainAppBody: some View {
-        ZStack(alignment: .leading) {
-            if sidebarVisible {
-                SidebarView(
-                    selectedThread: $selectedThread,
-                    showSettings: $showSettings,
-                    isSearchActive: $isSearchActive,
-                    onClose: { closeSidebar() }
+        GeometryReader { proxy in
+            let currentSidebarWidth = effectiveSidebarWidth(for: proxy.size.width)
+            let currentSidebarRevealWidth = sidebarRevealWidth(for: currentSidebarWidth)
+
+            ZStack(alignment: .leading) {
+                if sidebarVisible || isSidebarPrewarmed {
+                    SidebarView(
+                        selectedThread: $selectedThread,
+                        showSettings: $showSettings,
+                        isSearchActive: $isSearchActive,
+                        showsInlineCloseButton: shouldUseFullWidthSidebar,
+                        isVisible: sidebarVisible,
+                        onClose: { closeSidebar() },
+                        onOpenThread: { thread in
+                            openThreadFromSidebar(thread)
+                        }
+                    )
+                    .frame(width: currentSidebarWidth)
+                    .animation(.easeInOut(duration: 0.25), value: shouldUseFullWidthSidebar)
+                }
+
+                ZStack(alignment: .leading) {
+                    mainNavigationLayer
+                        .frame(width: proxy.size.width, alignment: .leading)
+
+                    if sidebarVisible {
+                        (colorScheme == .dark ? Color.white : Color.black)
+                            .opacity(contentDimOpacity(for: currentSidebarWidth))
+                            .frame(width: proxy.size.width)
+                            .ignoresSafeArea()
+                            .allowsHitTesting(isSidebarOpen)
+                            .onTapGesture { closeSidebar() }
+                    }
+                }
+                .frame(width: proxy.size.width, alignment: .leading)
+                .clipShape(
+                    HorizontalRevealViewportShape(
+                        verticalOverflow: max(proxy.size.height, 400)
+                    )
                 )
-                .frame(width: effectiveSidebarWidth)
-                .animation(.easeInOut(duration: 0.25), value: isSearchActive)
-            }
-
-            mainNavigationLayer
-                .offset(x: contentOffset)
-
-            if sidebarVisible {
-                (colorScheme == .dark ? Color.white : Color.black)
-                    .opacity(contentDimOpacity)
-                    .ignoresSafeArea()
-                    .offset(x: contentOffset)
-                    .allowsHitTesting(isSidebarOpen)
-                    .onTapGesture { closeSidebar() }
+                .offset(x: currentSidebarRevealWidth)
             }
         }
         .simultaneousGesture(edgeDragGesture)
@@ -275,13 +395,17 @@ struct ContentView: View {
     @ViewBuilder
     private var mainContent: some View {
         if let thread = selectedThread {
-            TurnView(thread: thread)
+            TurnView(
+                thread: thread,
+                isWakingMacDisplayRecovery: isWakingSavedMacDisplay
+            )
                 .id(thread.id)
                 .environment(\.reconnectAction, {
                     Task {
                         await viewModel.toggleConnection(codex: codex)
                     }
                 })
+                .environment(\.wakeMacDisplayAction, wakeMacDisplayRecoveryAction)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         hamburgerButton
@@ -306,22 +430,23 @@ struct ContentView: View {
                 }
             ) {
                 if homeConnectionPhase == .connecting || (codex.hasReconnectCandidate && !codex.isConnected) {
-                    Button("Scan New QR Code") {
-                        presentManualScannerAfterStoppingReconnect()
-                    }
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .buttonStyle(.plain)
-                    .disabled(isPreparingManualScanner)
-
-                    if codex.hasReconnectCandidate {
-                        Button("Forget Pair") {
-                            codex.forgetReconnectCandidate()
+                    if shouldOfferWakeSavedMacDisplayAction {
+                        Button(isWakingSavedMacDisplay ? "Waking Mac Screen..." : "Wake Mac Screen") {
+                            wakeSavedMacDisplay()
                         }
                         .font(AppFont.subheadline(weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
                         .buttonStyle(.plain)
+                        .disabled(isPreparingManualScanner || isWakingSavedMacDisplay)
                     }
+
+                    if codex.hasReconnectCandidate {
+                        reconnectSecondaryActions
+                    }
+                }
+            } footer: {
+                if codex.hasReconnectCandidate && !codex.isConnected {
+                    reconnectFooterAction
                 }
             }
             .toolbar {
@@ -347,64 +472,207 @@ struct ContentView: View {
         .accessibilityLabel("Menu")
     }
 
+    private var manualPairingErrorAlertIsPresented: Binding<Bool> {
+        Binding(
+            get: { manualPairingErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented {
+                    manualPairingErrorMessage = nil
+                }
+            }
+        )
+    }
+
+    private var manualPairingErrorAlertMessage: String {
+        manualPairingErrorMessage ?? "Could not resolve that pairing code."
+    }
+
+    // Offers a one-tap display wake for the best local-style relay we still know about, even if only the trusted record remains.
+    private var canWakeSavedMacDisplay: Bool {
+        homeConnectionPhase == .offline && codex.canWakePreferredMacDisplay
+    }
+
+    // Keep the wake CTA visible whenever the pairing still knows enough to try a display pulse.
+    private var shouldOfferWakeSavedMacDisplayAction: Bool {
+        canWakeSavedMacDisplay
+    }
+
+    // Keeps the silent wake fallback automatic exactly once per offline cycle before the user taps manually again.
+    private var shouldAttemptAutomaticWakeSavedMacDisplay: Bool {
+        scenePhase == .active
+            && hasSeenOnboarding
+            && !isShowingManualScanner
+            && !isShowingManualPairingEntry
+            && codex.shouldAutoReconnectOnForeground
+            && canWakeSavedMacDisplay
+            && !hasAttemptedAutomaticWakeSavedMacDisplay
+            && !isWakingSavedMacDisplay
+    }
+
+    private var wakeMacDisplayRecoveryAction: (() -> Void)? {
+        guard shouldOfferWakeSavedMacDisplayAction else {
+            return nil
+        }
+
+        return {
+            wakeSavedMacDisplay()
+        }
+    }
+
+    // Gives the saved local Mac one silent wake attempt before exposing the manual wake affordance.
+    private func attemptAutomaticWakeSavedMacDisplayIfNeeded() async {
+        guard shouldAttemptAutomaticWakeSavedMacDisplay else {
+            return
+        }
+
+        hasAttemptedAutomaticWakeSavedMacDisplay = true
+        await performSavedMacDisplayWakeAttempt()
+    }
+
+    // Keeps foreground reconnect and the one-shot wake fallback in the same guarded path.
+    private func attemptSavedMacReconnectRecoveryIfNeeded() async {
+        guard scenePhase == .active,
+              hasSeenOnboarding,
+              !isShowingManualScanner,
+              !isShowingManualPairingEntry else {
+            return
+        }
+
+        await attemptAutomaticWakeSavedMacDisplayIfNeeded()
+        await viewModel.attemptAutoReconnectOnForegroundIfNeeded(codex: codex)
+    }
+
+    // Resets the once-per-cycle wake gate after a fresh connection, pairing change, or app background.
+    private func resetSavedMacWakeRecoveryState() {
+        hasAttemptedAutomaticWakeSavedMacDisplay = false
+    }
+
+    // Uses a temporary bridge request to wake display sleep, then unlocks the manual button only if that fails.
+    private func wakeSavedMacDisplay() {
+        Task { @MainActor in
+            await performSavedMacDisplayWakeAttempt()
+        }
+    }
+
+    // Sends one wake pulse over the best remembered pairing path without hiding the manual wake affordance.
+    private func performSavedMacDisplayWakeAttempt() async {
+        guard !isWakingSavedMacDisplay else { return }
+        isWakingSavedMacDisplay = true
+        codex.lastErrorMessage = wakingSavedMacDisplayStatusMessage
+
+        defer { isWakingSavedMacDisplay = false }
+
+        do {
+            await viewModel.stopAutoReconnectForManualRetry(codex: codex)
+            let handoffService = DesktopHandoffService(codex: codex)
+            try await handoffService.wakeDisplay()
+            if codex.lastErrorMessage == wakingSavedMacDisplayStatusMessage {
+                codex.lastErrorMessage = nil
+            }
+        } catch {
+            codex.lastErrorMessage = error.localizedDescription
+        }
+    }
+
     // MARK: - Sidebar Geometry
 
     private var sidebarVisible: Bool {
         isSidebarOpen || sidebarDragOffset > 0
     }
 
-    private var contentOffset: CGFloat {
+    private var sidebarRevealWidth: CGFloat {
+        sidebarRevealWidth(for: fallbackSidebarWidth)
+    }
+
+    private var fallbackSidebarWidth: CGFloat {
+        effectiveSidebarWidth(for: UIScreen.main.bounds.width)
+    }
+
+    private func sidebarRevealWidth(for targetWidth: CGFloat) -> CGFloat {
         if isSidebarOpen {
-            return max(0, effectiveSidebarWidth + sidebarDragOffset)
+            return max(0, targetWidth + sidebarDragOffset)
         } else {
             return max(0, sidebarDragOffset)
         }
     }
 
-    private var contentDimOpacity: Double {
-        let progress = min(1, contentOffset / effectiveSidebarWidth)
+    private func contentDimOpacity(for targetWidth: CGFloat) -> Double {
+        guard targetWidth > 0 else { return 0 }
+        let progress = min(1, sidebarRevealWidth(for: targetWidth) / targetWidth)
         return 0.08 * progress
     }
 
     // MARK: - Gestures
 
     private var edgeDragGesture: some Gesture {
-        DragGesture(minimumDistance: 15)
+        DragGesture(minimumDistance: 15, coordinateSpace: .global)
             .onChanged { value in
                 guard navigationPath.isEmpty else { return }
+                guard !sidebarGestureAutoCommitted else { return }
 
                 if !isSidebarOpen {
                     guard value.startLocation.x < sidebarOpenActivationWidth,
                           isOpeningSidebarGesture(value) else { return }
-                    sidebarDragOffset = max(0, value.translation.width)
+                    beginSidebarGestureDebugIfNeeded(kind: "open", startX: value.startLocation.x)
+                    logSidebarGestureProgressIfNeeded(translation: value.translation.width)
+                    guard value.translation.width >= sidebarSwipeCommitDistance else { return }
+                    sidebarGestureAutoCommitted = true
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) auto-commit kind=open "
+                            + "translation=\(Int(value.translation.width)) commit=\(Int(sidebarSwipeCommitDistance))"
+                    )
+                    finishGesture(open: true)
                 } else {
                     guard isClosingSidebarGesture(value) else { return }
-                    sidebarDragOffset = min(0, value.translation.width)
+                    beginSidebarGestureDebugIfNeeded(kind: "close", startX: value.startLocation.x)
+                    logSidebarGestureProgressIfNeeded(translation: -value.translation.width)
+                    guard -value.translation.width >= sidebarSwipeCommitDistance else { return }
+                    sidebarGestureAutoCommitted = true
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) auto-commit kind=close "
+                            + "translation=\(Int(-value.translation.width)) commit=\(Int(sidebarSwipeCommitDistance))"
+                    )
+                    finishGesture(open: false)
                 }
             }
             .onEnded { value in
                 guard navigationPath.isEmpty else { return }
-
-                let currentWidth = effectiveSidebarWidth
-                let threshold = currentWidth * 0.4
+                if sidebarGestureAutoCommitted {
+                    sidebarGestureAutoCommitted = false
+                    return
+                }
 
                 if !isSidebarOpen {
                     guard value.startLocation.x < sidebarOpenActivationWidth,
                           isOpeningSidebarGesture(value) else {
+                        debugSidebarLog("gesture cancelled before open")
                         sidebarDragOffset = 0
+                        sidebarGestureAutoCommitted = false
+                        resetSidebarGestureDebug()
                         return
                     }
-                    let shouldOpen = value.translation.width > threshold
-                        || value.predictedEndTranslation.width > currentWidth * 0.5
-                    finishGesture(open: shouldOpen)
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) end kind=open "
+                            + "translation=\(Int(value.translation.width)) predicted=\(Int(value.predictedEndTranslation.width)) "
+                            + "commit=\(Int(sidebarSwipeCommitDistance)) decision=snap-close"
+                    )
+                    sidebarDragOffset = 0
+                    resetSidebarGestureDebug()
                 } else {
                     guard isClosingSidebarGesture(value) else {
+                        debugSidebarLog("gesture cancelled before close")
                         sidebarDragOffset = 0
+                        sidebarGestureAutoCommitted = false
+                        resetSidebarGestureDebug()
                         return
                     }
-                    let shouldClose = -value.translation.width > threshold
-                        || -value.predictedEndTranslation.width > currentWidth * 0.5
-                    finishGesture(open: !shouldClose)
+                    debugSidebarLog(
+                        "gesture #\(activeSidebarGestureDebugID ?? 0) end kind=close "
+                            + "translation=\(Int(-value.translation.width)) predicted=\(Int(-value.predictedEndTranslation.width)) "
+                            + "commit=\(Int(sidebarSwipeCommitDistance)) decision=snap-open"
+                    )
+                    sidebarDragOffset = 0
+                    resetSidebarGestureDebug()
                 }
             }
     }
@@ -433,6 +701,17 @@ struct ContentView: View {
     private func closeSidebar() {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
         setSidebar(open: false)
+    }
+
+    private func openThreadFromSidebar(_ thread: CodexThread) {
+        if isSidebarOpen || sidebarDragOffset > 0 {
+            closeSidebar()
+        }
+
+        selectedThread = thread
+        codex.activeThreadId = thread.id
+        codex.markThreadAsViewed(thread.id)
+        codex.requestImmediateActiveThreadSync(threadId: thread.id)
     }
 
     // Keeps first-run installs in the scanner by default, while still letting users back out later.
@@ -497,11 +776,16 @@ struct ContentView: View {
 
     private func finishGesture(open: Bool) {
         HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        debugSidebarLog("finishGesture open=\(open)")
         setSidebar(open: open)
     }
 
     // Forces UIKit-backed inputs like the composer text view to resign before the drawer settles open.
     private func setSidebar(open: Bool) {
+        debugSidebarLog(
+            "setSidebar open=\(open) prewarmed=\(isSidebarPrewarmed) "
+                + "visible=\(sidebarVisible) revealWidth=\(Int(sidebarRevealWidth))"
+        )
         if open {
             dismissActiveKeyboard()
         }
@@ -509,6 +793,88 @@ struct ContentView: View {
             isSidebarOpen = open
             sidebarDragOffset = 0
         }
+        sidebarGestureAutoCommitted = false
+        resetSidebarGestureDebug()
+    }
+
+    // Warms the sidebar view tree offscreen after launch/reconnect so the first drawer gesture
+    // doesn't pay the full mount/grouping cost in the animation frame budget.
+    private func scheduleSidebarPrewarmIfNeeded() {
+        guard scenePhase == .active,
+              hasSeenOnboarding,
+              subscriptions.hasAppAccess,
+              !isShowingManualScanner,
+              !isSidebarPrewarmed,
+              sidebarPrewarmTask == nil,
+              (codex.isConnected || !codex.threads.isEmpty) else {
+            debugSidebarLog(
+                "prewarm skipped phase=\(String(describing: scenePhase)) onboarding=\(hasSeenOnboarding) "
+                    + "appAccess=\(subscriptions.hasAppAccess) scanner=\(isShowingManualScanner) "
+                    + "prewarmed=\(isSidebarPrewarmed) taskActive=\(sidebarPrewarmTask != nil) "
+                    + "connected=\(codex.isConnected) threadCount=\(codex.threads.count)"
+            )
+            return
+        }
+
+        debugSidebarLog("prewarm scheduled delayMs=\(sidebarPrewarmDelayNanoseconds / 1_000_000)")
+        sidebarPrewarmTask = Task { @MainActor in
+            defer { sidebarPrewarmTask = nil }
+            try? await Task.sleep(nanoseconds: sidebarPrewarmDelayNanoseconds)
+            guard !Task.isCancelled,
+                  scenePhase == .active,
+                  hasSeenOnboarding,
+                  subscriptions.hasAppAccess,
+                  !isShowingManualScanner,
+                  !isSidebarOpen,
+                  sidebarDragOffset == 0,
+                  (codex.isConnected || !codex.threads.isEmpty) else {
+                debugSidebarLog("prewarm cancelled before completion")
+                return
+            }
+            isSidebarPrewarmed = true
+            debugSidebarLog("prewarm completed threadCount=\(codex.threads.count)")
+        }
+    }
+
+    private func teardownSidebarPrewarm() {
+        debugSidebarLog("prewarm teardown requested sidebarOpen=\(isSidebarOpen) dragOffset=\(Int(sidebarDragOffset))")
+        sidebarPrewarmTask?.cancel()
+        sidebarPrewarmTask = nil
+        if !isSidebarOpen, sidebarDragOffset == 0 {
+            isSidebarPrewarmed = false
+            debugSidebarLog("prewarm cleared")
+        }
+    }
+
+    private func beginSidebarGestureDebugIfNeeded(kind: String, startX: CGFloat) {
+        guard activeSidebarGestureDebugID == nil else { return }
+        sidebarGestureDebugSequence += 1
+        activeSidebarGestureDebugID = sidebarGestureDebugSequence
+        lastSidebarGestureLogBucket = nil
+        debugSidebarLog(
+            "gesture #\(sidebarGestureDebugSequence) begin kind=\(kind) "
+                + "startX=\(Int(startX)) sidebarOpen=\(isSidebarOpen) prewarmed=\(isSidebarPrewarmed)"
+        )
+    }
+
+    private func logSidebarGestureProgressIfNeeded(translation: CGFloat) {
+        guard let gestureID = activeSidebarGestureDebugID else { return }
+        let bucket = max(0, Int(translation / sidebarGestureLogBucketWidth))
+        guard bucket != lastSidebarGestureLogBucket else { return }
+        lastSidebarGestureLogBucket = bucket
+        debugSidebarLog(
+            "gesture #\(gestureID) progress translation=\(Int(translation)) "
+                + "bucket=\(bucket) revealWidth=\(Int(sidebarRevealWidth))"
+        )
+    }
+
+    private func resetSidebarGestureDebug() {
+        activeSidebarGestureDebugID = nil
+        lastSidebarGestureLogBucket = nil
+    }
+
+    private func debugSidebarLog(_ message: String) {
+        print("[SidebarDebug] \(message)")
     }
 
     // Uses the responder chain instead of per-view bindings so mixed SwiftUI/UIKit inputs all close together.
@@ -516,10 +882,22 @@ struct ContentView: View {
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
     }
 
-    private var bridgeUpdatePromptBinding: Binding<CodexBridgeUpdatePrompt?> {
+    // Keeps SwiftUI's sheet binding in sync with the route we last chose to present.
+    private var presentedRootSheetBinding: Binding<RootSheetRoute?> {
         Binding(
-            get: { codex.bridgeUpdatePrompt },
-            set: { codex.bridgeUpdatePrompt = $0 }
+            get: { presentedRootSheet },
+            set: { nextValue in
+                guard nextValue?.id != presentedRootSheet?.id else {
+                    presentedRootSheet = nextValue
+                    return
+                }
+
+                if nextValue == nil {
+                    dismissPresentedRootSheet()
+                } else {
+                    presentedRootSheet = nextValue
+                }
+            }
         )
     }
 
@@ -532,6 +910,191 @@ struct ContentView: View {
                 }
             }
         )
+    }
+
+    // Serializes root-owned sheets under one priority list instead of letting each feature present itself.
+    private func syncRootSheetPresentationIfNeeded() {
+        if case .bridgeUpdate = presentedRootSheet,
+           codex.bridgeUpdatePrompt == nil {
+            dismissPresentedRootSheet()
+            return
+        }
+
+        guard let desiredRoute = desiredRootSheetRoute else {
+            return
+        }
+
+        // Let bridge recovery take over immediately without marking What's New as already seen.
+        if case .whatsNew = presentedRootSheet,
+           case .bridgeUpdate = desiredRoute {
+            presentedRootSheet = desiredRoute
+            return
+        }
+
+        // Refresh an already-visible bridge sheet when the prompt changes underneath it.
+        if case .bridgeUpdate = presentedRootSheet,
+           case .bridgeUpdate = desiredRoute,
+           presentedRootSheet?.id != desiredRoute.id {
+            presentedRootSheet = desiredRoute
+            return
+        }
+
+        guard presentedRootSheet == nil else {
+            return
+        }
+
+        presentedRootSheet = desiredRoute
+    }
+
+    private var desiredRootSheetRoute: RootSheetRoute? {
+        guard canPresentDeferredRootSheet else {
+            return nil
+        }
+
+        if let prompt = codex.bridgeUpdatePrompt {
+            return .bridgeUpdate(prompt)
+        }
+
+        if let whatsNewVersion = pendingWhatsNewVersion {
+            return .whatsNew(version: whatsNewVersion)
+        }
+
+        return nil
+    }
+
+    // Blocks lower-priority sheets while onboarding, pairing, paywall, or root alerts own the screen.
+    private var canPresentDeferredRootSheet: Bool {
+        scenePhase == .active
+            && hasSeenOnboarding
+            && subscriptions.hasAppAccess
+            && !isShowingManualScanner
+            && !shouldShowQRScanner
+            && !isShowingManualPairingEntry
+            && manualPairingErrorMessage == nil
+            && codex.missingNotificationThreadPrompt == nil
+    }
+
+    // Shows What's New only once per version and only after the root has been calm for a while.
+    private var pendingWhatsNewVersion: String? {
+        guard isWhatsNewPresentationReady,
+              lastPresentedWhatsNewVersion != whatsNewReleaseVersion else {
+            return nil
+        }
+
+        return whatsNewReleaseVersion
+    }
+
+    private var whatsNewPresentationScheduleFingerprint: String {
+        [
+            String(scenePhase == .active),
+            String(hasSeenOnboarding),
+            String(subscriptions.hasAppAccess),
+            String(isShowingManualScanner),
+            String(shouldShowQRScanner),
+            String(isShowingManualPairingEntry),
+            String(manualPairingErrorMessage != nil),
+            String(codex.missingNotificationThreadPrompt != nil),
+            String(codex.bridgeUpdatePrompt != nil),
+            whatsNewReleaseVersion,
+            lastPresentedWhatsNewVersion,
+        ].joined(separator: "|")
+    }
+
+    private var rootSheetPresentationFingerprint: String {
+        [
+            String(canPresentDeferredRootSheet),
+            codex.bridgeUpdatePrompt?.id.uuidString ?? "nil",
+            pendingWhatsNewVersion ?? "nil",
+            presentedRootSheet?.id ?? "nil",
+        ].joined(separator: "|")
+    }
+
+    private func scheduleWhatsNewPresentationIfNeeded() async {
+        whatsNewPresentationTask?.cancel()
+        whatsNewPresentationTask = nil
+        isWhatsNewPresentationReady = false
+
+        guard shouldScheduleWhatsNewPresentation else {
+            return
+        }
+
+        let task = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: whatsNewPresentationDelayNanoseconds)
+            guard !Task.isCancelled,
+                  shouldScheduleWhatsNewPresentation else {
+                return
+            }
+
+            isWhatsNewPresentationReady = true
+            syncRootSheetPresentationIfNeeded()
+        }
+
+        whatsNewPresentationTask = task
+    }
+
+    private var shouldScheduleWhatsNewPresentation: Bool {
+        canPresentDeferredRootSheet
+            && codex.bridgeUpdatePrompt == nil
+            && pendingWhatsNewVersion == nil
+    }
+
+    private func handleDismissedRootSheet(_ route: RootSheetRoute) {
+        switch route {
+        case .bridgeUpdate:
+            dismissBridgeUpdatePrompt()
+        case .whatsNew(let version):
+            dismissWhatsNewSheet(version: version)
+        }
+
+        syncRootSheetPresentationIfNeeded()
+    }
+
+    private func dismissPresentedRootSheet() {
+        guard let dismissedRoute = presentedRootSheet else {
+            return
+        }
+
+        presentedRootSheet = nil
+        handleDismissedRootSheet(dismissedRoute)
+    }
+
+    private func dismissBridgeUpdatePrompt() {
+        codex.bridgeUpdatePrompt = nil
+        isRetryingBridgeUpdate = false
+    }
+
+    private func dismissWhatsNewSheet(version: String) {
+        lastPresentedWhatsNewVersion = version
+        isWhatsNewPresentationReady = false
+    }
+
+    private func bridgeUpdateSheet(prompt: CodexBridgeUpdatePrompt) -> some View {
+        BridgeUpdateSheet(
+            prompt: prompt,
+            isRetrying: isRetryingBridgeUpdate,
+            onRetry: {
+                retryBridgeConnectionAfterUpdate()
+            },
+            onScanNewQR: {
+                presentManualScannerForBridgeRecovery()
+            },
+            onDismiss: {
+                dismissPresentedRootSheet()
+            }
+        )
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func whatsNewSheet(version: String) -> some View {
+        WhatsNewSheet(
+            version: version,
+            onDismiss: {
+                dismissPresentedRootSheet()
+            }
+        )
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
     }
 
     // Re-tries the saved relay session after the user updates the Mac package.
@@ -552,12 +1115,21 @@ struct ContentView: View {
 
     // Switches the user back to the QR path when the old relay session is no longer useful.
     private func presentManualScannerForBridgeRecovery() {
-        codex.bridgeUpdatePrompt = nil
-        isRetryingBridgeUpdate = false
-        presentManualScannerAfterStoppingReconnect()
+        guard !isShowingManualScanner else {
+            return
+        }
+
+        hasDismissedAutomaticScanner = false
+        scannerCanReturnToOnboarding = false
+        isShowingManualScanner = true
+        dismissPresentedRootSheet()
+
+        Task {
+            await viewModel.stopAutoReconnectForManualScan(codex: codex)
+        }
     }
 
-    // Shows the QR scanner immediately and tears down any stale reconnect in the background.
+    // Shows pairing recovery immediately and tears down any stale reconnect in the background.
     private func presentManualScannerAfterStoppingReconnect() {
         guard !isShowingManualScanner else {
             return
@@ -602,6 +1174,98 @@ struct ContentView: View {
         }
     }
 
+    // Keeps QR and code recovery as one quiet secondary row under the main reconnect CTA.
+    private var reconnectSecondaryActions: some View {
+        HStack(spacing: 10) {
+            secondaryReconnectActionButton("New QR Code") {
+                presentManualScannerAfterStoppingReconnect()
+            }
+            .disabled(isPreparingManualScanner)
+
+            secondaryReconnectActionButton("Pair with Code") {
+                presentManualPairingEntryAfterStoppingReconnect()
+            }
+            .disabled(isPreparingManualScanner || isResolvingManualPairingCode)
+        }
+    }
+
+    // Keeps the destructive saved-pair action visually separate from the reconnect controls.
+    private var reconnectFooterAction: some View {
+        Button("Forget Pair") {
+            codex.forgetReconnectCandidate()
+        }
+        .font(AppFont.caption(weight: .semibold))
+        .foregroundStyle(.secondary)
+        .buttonStyle(.plain)
+    }
+
+    // Mirrors the reconnect button corner language in a lighter outline-only treatment.
+    private func secondaryReconnectActionButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(AppFont.subheadline(weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+        }
+        .foregroundStyle(.primary)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.14), lineWidth: 1)
+        )
+        .buttonStyle(.plain)
+    }
+
+    // Opens manual code entry directly from the home state so the scanner stays QR-only.
+    private func presentManualPairingEntryAfterStoppingReconnect() {
+        guard !isResolvingManualPairingCode else {
+            return
+        }
+
+        manualPairingErrorMessage = nil
+        let clipboardString = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !clipboardString.isEmpty {
+            manualPairingCode = clipboardString
+        }
+        isShowingManualPairingEntry = true
+
+        Task {
+            await viewModel.stopAutoReconnectForManualScan(codex: codex)
+        }
+    }
+
+    private func submitManualPairingCode() {
+        guard !isResolvingManualPairingCode else {
+            return
+        }
+
+        let pendingCode = manualPairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pendingCode.isEmpty else {
+            manualPairingErrorMessage = "Enter a valid pairing code."
+            return
+        }
+        isResolvingManualPairingCode = true
+        manualPairingErrorMessage = nil
+
+        Task { @MainActor in
+            defer { isResolvingManualPairingCode = false }
+
+            await viewModel.stopAutoReconnectForManualScan(codex: codex)
+
+            do {
+                let pairingPayload = try await codex.resolvePairingCode(pendingCode)
+                isShowingManualPairingEntry = false
+                manualPairingCode = ""
+                await viewModel.connectToRelay(
+                    pairingPayload: pairingPayload,
+                    codex: codex
+                )
+            } catch {
+                manualPairingErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func startNewThreadFromMissingNotificationAlert() async {
         do {
             let thread = try await codex.startThread()
@@ -640,12 +1304,7 @@ struct ContentView: View {
             return
         }
 
-        if isSidebarOpen {
-            closeSidebar()
-        }
-        selectedThread = thread
-        codex.activeThreadId = thread.id
-        codex.markThreadAsViewed(thread.id)
+        openThreadFromSidebar(thread)
     }
 
     private func dismissThreadCompletionBanner() {
@@ -679,7 +1338,7 @@ struct ContentView: View {
     }
 }
 
-private struct TwoLineHamburgerIcon: View {
+struct TwoLineHamburgerIcon: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             RoundedRectangle(cornerRadius: 1)
@@ -689,6 +1348,20 @@ private struct TwoLineHamburgerIcon: View {
                 .frame(width: 10, height: 2)
         }
         .frame(width: 20, height: 14, alignment: .leading)
+    }
+}
+
+private struct HorizontalRevealViewportShape: Shape {
+    let verticalOverflow: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let expandedRect = CGRect(
+            x: rect.minX,
+            y: rect.minY - verticalOverflow,
+            width: rect.width,
+            height: rect.height + (verticalOverflow * 2)
+        )
+        return Path(expandedRect)
     }
 }
 

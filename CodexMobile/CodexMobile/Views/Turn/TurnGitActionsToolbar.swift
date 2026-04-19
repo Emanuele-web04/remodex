@@ -63,7 +63,7 @@ struct TurnGitActionsToolbarButton: View {
     private var syncStatusColor: Color? {
         switch gitSyncState {
         case "behind_only", "diverged", "dirty_and_behind":
-            return Color.orange
+            return Color(.systemGray2)
         default:
             return nil
         }

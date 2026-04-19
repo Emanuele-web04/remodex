@@ -1,11 +1,12 @@
 // FILE: QRScannerView.swift
-// Purpose: AVFoundation camera-based QR scanner for relay session pairing.
+// Purpose: AVFoundation pairing screen dedicated to camera-based QR scans.
 // Layer: View
 // Exports: QRScannerView
 // Depends on: SwiftUI, AVFoundation
 
 import AVFoundation
 import SwiftUI
+import UIKit
 
 struct QRScannerView: View {
     let onBack: (() -> Void)?
@@ -50,6 +51,7 @@ struct QRScannerView: View {
             } else {
                 cameraPermissionView
             }
+
         }
         .safeAreaInset(edge: .top) {
             if let onBack {
@@ -64,7 +66,7 @@ struct QRScannerView: View {
         .task {
             await checkCameraPermission()
         }
-        .alert("Scan Error", isPresented: Binding(
+        .alert("Pairing Error", isPresented: Binding(
             get: { scannerError != nil },
             set: { if !$0 { scannerError = nil } }
         )) {
@@ -90,14 +92,23 @@ struct QRScannerView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                Text("Do these steps on your Mac")
-                    .font(AppFont.caption(weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                if let command = prompt.command, !command.isEmpty {
+                    Text("Do these steps on your Mac")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
 
-                bridgeUpdateStep(number: "1", title: "Update Remodex", detail: prompt.command, showsCopyButton: true)
-                bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
-                bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
-                bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
+                    bridgeUpdateStep(number: "1", title: "Update Remodex", detail: command, showsCopyButton: true)
+                    bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
+                    bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
+                    bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
+                } else {
+                    Text("Do these steps on your iPhone")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+
+                    bridgeUpdateStep(number: "1", title: "Update Remodex", detail: "Install the latest Remodex build on this iPhone.")
+                    bridgeUpdateStep(number: "2", title: "Come back here", detail: "Then retry the connection or scan a fresh QR code.")
+                }
             }
 
             Button("I Updated It") {
@@ -192,7 +203,7 @@ struct QRScannerView: View {
                 .stroke(Color.white.opacity(0.6), lineWidth: 2)
                 .frame(width: 250, height: 250)
 
-            Text("Scan QR code from Remodex CLI")
+            Text("Scan the Remodex QR code")
                 .font(AppFont.subheadline(weight: .medium))
                 .foregroundStyle(.white)
 
@@ -252,6 +263,9 @@ struct QRScannerView: View {
         switch validatePairingQRCode(code) {
         case .success(let payload):
             onScan(payload)
+        case .shortCode:
+            scannerError = "Use Pair with Code from the previous screen."
+            resetScanLock()
         case .scanError(let message):
             scannerError = message
             resetScanLock()

@@ -7,6 +7,9 @@
 import Foundation
 
 private let minimumBridgePackageUpdateCommand = "npm install -g remodex@latest"
+private let forcedBridgeUpgradeFromVersion = "1.3.7"
+private let forcedBridgeUpgradeTargetVersion = "1.3.8"
+private let forcedBridgeUpgradeCommand = "npm install -g remodex@1.3.8"
 
 enum CodexGPTAccountStatus: String, Codable, Sendable {
     case unknown
@@ -637,6 +640,17 @@ extension CodexService {
         allowMissingVersionPrompt: Bool,
         allowAvailableBridgeUpdatePrompt: Bool
     ) {
+        let previousTransportMode = codexTransportMode
+        codexTransportMode = decodeCodexTransportMode(
+            from: firstStringValue(
+                in: payloadObject,
+                keys: ["codexTransportMode", "codex_transport_mode", "transportMode", "transport_mode"]
+            )
+        )
+        reconcileNativePlanSessionSources(
+            previousTransportMode: previousTransportMode,
+            nextTransportMode: codexTransportMode
+        )
         bridgeInstalledVersion = firstStringValue(
             in: payloadObject,
             keys: ["bridgeVersion", "bridge_version", "bridgePackageVersion", "bridge_package_version"]
@@ -652,6 +666,15 @@ extension CodexService {
         if allowAvailableBridgeUpdatePrompt {
             evaluateAvailableBridgePackageVersionPromptIfNeeded()
         }
+    }
+
+    private func decodeCodexTransportMode(from rawValue: String?) -> CodexRuntimeTransportMode {
+        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !rawValue.isEmpty else {
+            return .unknown
+        }
+
+        return CodexRuntimeTransportMode(rawValue: rawValue) ?? .unknown
     }
 
     private func handleBridgeManagedAccountRefreshFailure() {
@@ -751,8 +774,21 @@ extension CodexService {
             return
         }
 
-        guard let installedVersion = normalizedBridgePackageVersion(bridgeInstalledVersion),
-              let latestVersion = normalizedBridgePackageVersion(latestBridgePackageVersion),
+        guard let installedVersion = normalizedBridgePackageVersion(bridgeInstalledVersion) else {
+            return
+        }
+
+        if installedVersion == forcedBridgeUpgradeFromVersion {
+            guard lastPresentedAvailableBridgePackageVersion != forcedBridgeUpgradeTargetVersion else {
+                return
+            }
+
+            lastPresentedAvailableBridgePackageVersion = forcedBridgeUpgradeTargetVersion
+            bridgeUpdatePrompt = forcedBridgePackageUpdatePrompt(currentVersion: installedVersion)
+            return
+        }
+
+        guard let latestVersion = normalizedBridgePackageVersion(latestBridgePackageVersion),
               installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending else {
             return
         }
@@ -786,6 +822,14 @@ extension CodexService {
             title: "A newer Remodex update is available on your Mac",
             message: "This Mac bridge is running Remodex \(currentVersion), and npm now has Remodex \(latestVersion). Update the package on your Mac when you're ready, then reconnect to start using the newer build.",
             command: minimumBridgePackageUpdateCommand
+        )
+    }
+
+    private func forcedBridgePackageUpdatePrompt(currentVersion: String) -> CodexBridgeUpdatePrompt {
+        CodexBridgeUpdatePrompt(
+            title: "Update Remodex on your Mac to reconnect",
+            message: "This Mac bridge is running Remodex \(currentVersion). Update the Remodex CLI on your Mac to \(forcedBridgeUpgradeTargetVersion), then reconnect.",
+            command: forcedBridgeUpgradeCommand
         )
     }
 

@@ -1,6 +1,6 @@
 {
   "name": "remodex",
-  "version": "1.3.7",
+  "version": "1.3.8",
   "description": "Local bridge between Codex and the Remodex mobile app. Run `remodex up` to start.",
   "main": "src/index.js",
   "bin": {
@@ -13,6 +13,7 @@
   "scripts": {
     "start": "node ./bin/remodex.js up",
     "test": "node --test ./test/*.test.js",
+    "postinstall": "node ./src/bootstrap-codex-cli.js",
     "prepack": "node ./scripts/prepare-private-defaults.js",
     "postpack": "node ./scripts/cleanup-private-defaults.js"
   },

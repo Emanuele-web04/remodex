@@ -53,11 +53,14 @@ function runMacOSBridgeService({ env = process.env } = {}) {
   startBridge({
     config,
     printPairingQr: false,
-    onPairingPayload(pairingPayload) {
-      writePairingSession(pairingPayload, { env });
+    onPairingSession(pairingSession) {
+      writePairingSession(pairingSession, { env });
     },
     onBridgeStatus(status) {
-      writeBridgeStatus(status, { env });
+      writeBridgeStatus(
+        mergeBridgeStatusForDaemon(status, readBridgeStatus({ env })),
+        { env }
+      );
     },
   });
 }
@@ -167,6 +170,7 @@ function getMacOSBridgeServiceStatus({
     installed: fsImpl.existsSync(resolveLaunchAgentPlistPath({ env })),
     launchdLoaded: launchd.loaded,
     launchdPid: launchd.pid,
+    daemonConfig: readDaemonConfig({ env, fsImpl }),
     bridgeStatus: readBridgeStatus({ env, fsImpl }),
     pairingSession: readPairingSession({ env, fsImpl }),
     stdoutLogPath: resolveBridgeStdoutLogPath({ env }),
@@ -197,7 +201,7 @@ function printMacOSBridgePairingQr({ pairingSession = null, env = process.env, f
     throw new Error("The macOS bridge service did not publish a pairing payload yet.");
   }
 
-  printQR(pairingPayload);
+  printQR(nextPairingSession);
 }
 
 // Persists a launch agent that always runs the Node CLI entrypoint in service mode.
@@ -441,9 +445,42 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function mergeBridgeStatusForDaemon(nextStatus, persistedStatus) {
+  if (!nextStatus || typeof nextStatus !== "object") {
+    return nextStatus;
+  }
+
+  const lastError = normalizeNonEmptyString(nextStatus.lastError);
+  if (lastError || nextStatus.connectionStatus === "connected") {
+    return nextStatus;
+  }
+
+  if (
+    nextStatus.codexLaunchState !== "starting"
+    || (nextStatus.connectionStatus !== "starting" && nextStatus.connectionStatus !== "connecting")
+  ) {
+    return nextStatus;
+  }
+
+  const persistedError = normalizeNonEmptyString(persistedStatus?.lastError);
+  if (!persistedError) {
+    return nextStatus;
+  }
+
+  return {
+    ...nextStatus,
+    lastError: persistedError,
+  };
+}
+
+function normalizeNonEmptyString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
 module.exports = {
   buildLaunchAgentPlist,
   getMacOSBridgeServiceStatus,
+  mergeBridgeStatusForDaemon,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
   resetMacOSBridgePairing,

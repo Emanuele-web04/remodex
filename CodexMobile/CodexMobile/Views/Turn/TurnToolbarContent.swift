@@ -18,6 +18,7 @@ struct TurnToolbarContent: ToolbarContent {
     let isHandingOffToMac: Bool
     let isStartingNewChat: Bool
     let canHandOffToWorktree: Bool
+    let worktreeHandoffTitle: String
     let isCreatingGitWorktree: Bool
     let repoDiffTotals: GitDiffTotals?
     let isLoadingRepoDiff: Bool
@@ -90,7 +91,7 @@ struct TurnToolbarContent: ToolbarContent {
                         onTapWorktreeHandoff?()
                     } label: {
                         CodexWorktreeMenuLabelRow(
-                            title: isCreatingGitWorktree ? "Creating worktree..." : "Hand off to worktree",
+                            title: isCreatingGitWorktree ? "Preparing worktree..." : worktreeHandoffTitle,
                             pointSize: 12,
                             weight: .regular
                         )
@@ -155,7 +156,7 @@ private struct TurnMacHandoffToolbarLabel: View {
                     .controlSize(.small)
                     .frame(width: 24, height: 24)
             } else {
-                ResizableThreadActionSymbol(systemName: "arrow.up", pointSize: 14)
+                ResizableThreadActionSymbol(systemName: "arrow.trianglehead.branch", pointSize: 14)
                     .foregroundStyle(.primary)
                     .frame(width: 24, height: 24)
             }

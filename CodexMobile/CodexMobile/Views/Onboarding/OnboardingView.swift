@@ -41,7 +41,8 @@ struct OnboardingView: View {
                         icon: "link",
                         title: "Install the Bridge",
                         description: "A lightweight relay that securely connects your Mac to your iPhone.",
-                        command: "npm install -g remodex@latest"
+                        command: "npm install -g remodex@latest",
+                        commandCaption: "Remodex uses macOS caffeinate by default while the bridge is running so your Mac stays reachable even if the display turns off. You can change this later in Settings."
                     )
                     .tag(3)
 
@@ -85,22 +86,11 @@ struct OnboardingView: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: currentPage)
 
             // CTA button
-            Button(action: handleContinue) {
-                HStack(spacing: 10) {
-                    if currentPage == pageCount - 1 {
-                        Image(systemName: "qrcode")
-                            .font(.system(size: 15, weight: .semibold))
-                    }
-
-                    Text(buttonTitle)
-                        .font(AppFont.body(weight: .semibold))
-                }
-                .foregroundStyle(.black)
-                .frame(maxWidth: .infinity)
-                .frame(height: 56)
-                .background(.white, in: Capsule())
-            }
-            .buttonStyle(.plain)
+            PrimaryCapsuleButton(
+                title: buttonTitle,
+                systemImage: currentPage == pageCount - 1 ? "qrcode" : nil,
+                action: handleContinue
+            )
 
             OpenSourceBadge(style: .light)
         }

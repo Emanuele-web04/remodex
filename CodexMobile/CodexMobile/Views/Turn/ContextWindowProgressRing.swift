@@ -91,8 +91,8 @@ struct ContextWindowProgressRing: View {
 
     private func ringColor(for usage: ContextWindowUsage) -> Color {
         switch usage.fractionUsed {
-        case 0.85...: return .red
-        case 0.65..<0.85: return .orange
+        case 0.85...: return .primary
+        case 0.65..<0.85: return .secondary
         default: return Color(.systemGray2)
         }
     }

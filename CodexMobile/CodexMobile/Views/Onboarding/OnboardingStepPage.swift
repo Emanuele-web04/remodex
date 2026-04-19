@@ -12,6 +12,7 @@ struct OnboardingStepPage: View {
     let title: String
     let description: String
     var command: String? = nil
+    var commandCaption: String? = nil
 
     private let accentGradient = LinearGradient(
         colors: [Color(.plan).opacity(0.35), Color(.plan).opacity(0.08)],
@@ -82,7 +83,16 @@ struct OnboardingStepPage: View {
                     }
 
                     if let command {
-                        OnboardingCommandCard(command: command)
+                        VStack(alignment: .leading, spacing: 10) {
+                            OnboardingCommandCard(command: command)
+
+                            if let commandCaption, !commandCaption.isEmpty {
+                                Text(commandCaption)
+                                    .font(AppFont.caption())
+                                    .foregroundStyle(.white.opacity(0.45))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, 28)
@@ -117,7 +127,8 @@ struct OnboardingStepPage: View {
             icon: "link",
             title: "Install the Bridge",
             description: "A lightweight relay that securely connects your Mac to your iPhone.",
-            command: "npm install -g remodex@latest"
+            command: "npm install -g remodex@latest",
+            commandCaption: "Remodex uses macOS caffeinate by default while the bridge is running so your Mac stays reachable even if the display turns off. You can change this later in Settings."
         )
     }
     .preferredColorScheme(.dark)

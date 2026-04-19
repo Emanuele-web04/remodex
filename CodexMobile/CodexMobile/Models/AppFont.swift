@@ -156,10 +156,11 @@ enum AppFont {
     ) -> UIFont {
         let selectedStyle = currentStyle
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
+        let metrics = UIFontMetrics(forTextStyle: fallbackTextStyle)
 
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize),
            let font = UIFont(name: faceName, size: adjustedSize) {
-            return font
+            return metrics.scaledFont(for: font)
         }
 
         return UIFont.preferredFont(forTextStyle: fallbackTextStyle)
@@ -220,15 +221,16 @@ enum AppFont {
         fallbackTextStyle: UIFont.TextStyle
     ) -> UIFont {
         let adjustedSize = max(size + monoSizeAdjustment(), 1)
+        let metrics = UIFontMetrics(forTextStyle: fallbackTextStyle)
 
         if let faceName = resolvedMonoFaceName(for: weight, size: adjustedSize),
            let font = UIFont(name: faceName, size: adjustedSize) {
-            return font
+            return metrics.scaledFont(for: font)
         }
 
         if let descriptor = UIFontDescriptor.preferredFontDescriptor(withTextStyle: fallbackTextStyle)
             .withDesign(.monospaced) {
-            return UIFont(descriptor: descriptor, size: size)
+            return UIFont(descriptor: descriptor, size: 0)
         }
 
         return UIFont.monospacedSystemFont(ofSize: size, weight: uiKitWeight(for: weight))
@@ -237,7 +239,7 @@ enum AppFont {
     private static func monoFont(size: CGFloat, weight: Font.Weight, style: Font.TextStyle) -> Font {
         let adjustedSize = max(size + monoSizeAdjustment(), 1)
         if let faceName = resolvedMonoFaceName(for: weight, size: adjustedSize) {
-            return .custom(faceName, size: adjustedSize)
+            return .custom(faceName, size: adjustedSize, relativeTo: style)
         }
 
         return .system(style, design: .monospaced, weight: weight)
@@ -270,7 +272,7 @@ enum AppFont {
 
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize) {
-            return .custom(faceName, size: adjustedSize)
+            return .custom(faceName, size: adjustedSize, relativeTo: style)
         }
 
         return .system(style, design: systemDesign, weight: weight)

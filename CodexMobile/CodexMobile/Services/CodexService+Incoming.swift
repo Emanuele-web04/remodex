@@ -110,10 +110,14 @@ extension CodexService {
 
     // Handles server-initiated RPC requests like approval prompts.
     func handleServerRequest(method: String, requestID: JSONValue, params: JSONValue?) {
-        if method == "item/tool/requestUserInput" {
+        if method == "item/tool/requestUserInput" || method == "tool/requestUserInput" {
+            let paramsObject = params?.objectValue
+            debugRuntimeLog(
+                "rpc request \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+            )
             handleStructuredUserInputRequest(
                 requestID: requestID,
-                paramsObject: params?.objectValue
+                paramsObject: paramsObject
             )
             return
         }
@@ -144,13 +148,13 @@ extension CodexService {
                         )
                     } catch {
                         debugRuntimeLog("auto-approve failed method=\(method): \(error.localizedDescription)")
-                        pendingApproval = request
+                        enqueuePendingApproval(request)
                     }
                 }
                 return
             }
 
-            pendingApproval = request
+            enqueuePendingApproval(request)
             return
         }
 
@@ -169,6 +173,15 @@ extension CodexService {
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
+
+        switch method {
+        case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
+            debugRuntimeLog(
+                "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+            )
+        default:
+            break
+        }
 
         switch method {
         case "thread/started":
@@ -398,7 +411,7 @@ extension CodexService {
             return
         }
 
-        upsertThread(thread)
+        upsertThread(thread, treatAsServerState: true)
         if activeThreadId == nil {
             activeThreadId = thread.id
         }
@@ -1883,6 +1896,18 @@ extension CodexService {
             recordFallbackFileChangePatch(threadId: threadId, turnId: turnId, patch: patch)
         }
 
+        if kind == .plan {
+            upsertPlanMessage(
+                threadId: threadId,
+                turnId: turnId,
+                itemId: itemId,
+                text: body,
+                isStreaming: !isCompleted,
+                planPresentation: isCompleted ? .resultCompletedItem : .resultStreaming
+            )
+            return true
+        }
+
         if let itemId, !itemId.isEmpty {
             if isCompleted {
                 completeStreamingSystemItemMessage(
@@ -3022,5 +3047,27 @@ extension CodexService {
         }
 
         return ""
+    }
+
+    // Cleans up any server-owned request once app-server confirms the specific request id is resolved.
+    func handleServerRequestResolved(_ paramsObject: IncomingParamsObject?) {
+        guard let requestID = paramsObject?["requestId"] else {
+            return
+        }
+
+        let threadId = normalizedResolvedRequestThreadID(paramsObject?["threadId"]?.stringValue)
+        removeStructuredUserInputPrompt(requestID: requestID, threadIdHint: threadId)
+        removePendingApproval(requestID: requestID)
+    }
+}
+
+private extension CodexService {
+    func normalizedResolvedRequestThreadID(_ rawValue: String?) -> String? {
+        guard let rawValue else {
+            return nil
+        }
+
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }

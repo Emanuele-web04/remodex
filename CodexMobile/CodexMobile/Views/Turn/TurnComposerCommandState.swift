@@ -8,11 +8,12 @@ import Foundation
 
 enum TurnComposerSlashCommand: String, Identifiable, Equatable {
     case codeReview
+    case feedback
     case fork
     case status
     case subagents
 
-    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .fork, .status, .subagents]
+    static let allCommands: [TurnComposerSlashCommand] = [.codeReview, .feedback, .fork, .status, .subagents]
 
     var id: String { rawValue }
 
@@ -20,6 +21,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "Code Review"
+        case .feedback:
+            return "Feedback"
         case .fork:
             return "Fork"
         case .status:
@@ -33,6 +36,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "Run the reviewer on your local changes"
+        case .feedback:
+            return "Share feedback on Remodex with the developer"
         case .fork:
             return "Fork this thread into local or a new worktree"
         case .status:
@@ -46,6 +51,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "ladybug"
+        case .feedback:
+            return "envelope"
         case .fork:
             return "arrow.triangle.branch"
         case .status:
@@ -59,6 +66,8 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .codeReview:
             return "/review"
+        case .feedback:
+            return "/feedback"
         case .fork:
             return "/fork"
         case .status:
@@ -73,7 +82,7 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
         switch self {
         case .subagents:
             return "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results."
-        case .codeReview, .fork, .status:
+        case .codeReview, .feedback, .fork, .status:
             return nil
         }
     }
@@ -102,7 +111,7 @@ enum TurnComposerSlashCommand: String, Identifiable, Equatable {
             switch command {
             case .fork:
                 return supportsThreadFork && allowsForkCommand
-            case .codeReview, .status, .subagents:
+            case .codeReview, .feedback, .status, .subagents:
                 return true
             }
         }

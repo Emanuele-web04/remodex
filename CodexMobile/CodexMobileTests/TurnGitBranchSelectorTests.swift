@@ -41,4 +41,23 @@ final class TurnGitBranchSelectorTests: XCTestCase {
             )
         )
     }
+
+    func testSelectableDefaultBranchReturnsNilWhenDefaultIsNotLocal() {
+        XCTAssertNil(
+            remodexSelectableDefaultBranch(
+                defaultBranch: "main",
+                availableGitBranchTargets: ["remodex/feature-a"]
+            )
+        )
+    }
+
+    func testSelectableDefaultBranchReturnsDefaultWhenItIsLocal() {
+        XCTAssertEqual(
+            remodexSelectableDefaultBranch(
+                defaultBranch: "main",
+                availableGitBranchTargets: ["main", "remodex/feature-a"]
+            ),
+            "main"
+        )
+    }
 }

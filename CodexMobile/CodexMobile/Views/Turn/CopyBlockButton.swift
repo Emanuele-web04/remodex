@@ -64,6 +64,8 @@ struct CopyBlockButton: View {
         .foregroundStyle(.secondary)
         .padding(.vertical, 4)
         .padding(.horizontal, 6)
+        // Preserve the compact look while giving the copy affordance a reliable 44pt tap target.
+        .frame(minWidth: 44, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
     }
 

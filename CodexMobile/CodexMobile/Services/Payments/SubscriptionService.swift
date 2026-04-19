@@ -1,5 +1,5 @@
 // FILE: SubscriptionService.swift
-// Purpose: Owns RevenueCat customer state, offerings, and purchase/restore flows.
+// Purpose: Owns RevenueCat customer state, offerings, purchase/restore flows, and the local free-send gate.
 // Layer: Service
 // Exports: SubscriptionService, SubscriptionPackageOption
 // Depends on: Foundation, Observation, RevenueCat
@@ -19,8 +19,22 @@ struct SubscriptionPackageOption: Identifiable {
     let id: String
     let package: Package
 
+    // Keeps lifetime / recurring distinctions close to the raw RevenueCat package.
+    var isLifetime: Bool {
+        package.packageType == .lifetime || package.storeProduct.subscriptionPeriod == nil
+    }
+
     var title: String {
-        package.storeProduct.localizedTitle
+        switch package.packageType {
+        case .monthly:
+            return "Monthly"
+        case .annual:
+            return "Annual"
+        case .lifetime:
+            return "Lifetime"
+        default:
+            return package.storeProduct.localizedTitle
+        }
     }
 
     var price: String {
@@ -33,6 +47,14 @@ struct SubscriptionPackageOption: Identifiable {
 
     var termsDescription: String {
         package.termsDescription()
+    }
+
+    var callToActionTitle: String {
+        isLifetime ? "Unlock Lifetime" : "Unlock Remodex Pro"
+    }
+
+    var footerDescription: String {
+        isLifetime ? "One-time purchase. No renewal required." : "Recurring billing. Cancel anytime."
     }
 }
 
@@ -47,6 +69,8 @@ private struct CachedSubscriptionState: Codable, Equatable {
 @Observable
 final class SubscriptionService {
     private static let cachedStateDefaultsKey = "codex.subscription.cachedState"
+    private static let freeSendCountDefaultsKey = "codex.subscription.freeSendCount"
+    private static let freeSendLimit = 5
 
     private let defaults: UserDefaults
     // Keep the task handle nonisolated so `deinit` can cancel it under Swift 6 isolation rules.
@@ -59,6 +83,7 @@ final class SubscriptionService {
     private(set) var currentOffering: Offering?
     private(set) var packageOptions: [SubscriptionPackageOption] = []
     private(set) var hasProAccess = false
+    private(set) var freeSendCount = 0
     private(set) var latestPurchaseDate: Date?
     private(set) var willRenew = false
     private(set) var managementURL: URL?
@@ -75,6 +100,28 @@ final class SubscriptionService {
 
     deinit {
         customerInfoUpdatesTask?.cancel()
+    }
+
+    var remainingFreeSendAttempts: Int {
+        max(0, Self.freeSendLimit - freeSendCount)
+    }
+
+    var hasFreeSendAccess: Bool {
+        freeSendCount < Self.freeSendLimit
+    }
+
+    var hasAppAccess: Bool {
+        hasProAccess || hasFreeSendAccess
+    }
+
+    // Counts a valid send attempt for free users even if the turn later fails.
+    func consumeFreeSendAttemptIfNeeded() {
+        guard !hasProAccess, freeSendCount < Self.freeSendLimit else {
+            return
+        }
+
+        freeSendCount += 1
+        defaults.set(freeSendCount, forKey: Self.freeSendCountDefaultsKey)
     }
 
     // Bootstraps subscription state once at launch or from the recovery retry action.
@@ -266,6 +313,7 @@ private extension SubscriptionService {
 
     // Rehydrates the last known subscription snapshot so launch and foreground recovery are local-first.
     func restoreCachedStateIfAvailable() {
+        freeSendCount = defaults.integer(forKey: Self.freeSendCountDefaultsKey)
         guard let data = defaults.data(forKey: Self.cachedStateDefaultsKey),
               let cachedState = try? JSONDecoder().decode(CachedSubscriptionState.self, from: data) else {
             return
@@ -317,8 +365,10 @@ private extension SubscriptionService {
             return 0
         case .annual:
             return 1
-        default:
+        case .lifetime:
             return 2
+        default:
+            return 3
         }
     }
 

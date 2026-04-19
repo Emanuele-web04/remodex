@@ -79,7 +79,7 @@ struct ComposerBottomBar: View {
                         .font(AppFont.system(size: 12, weight: .bold))
                         .foregroundStyle(Color(.systemBackground))
                         .frame(width: 28, height: 28)
-                        .background(Color.orange, in: Circle())
+                        .background(Color(.systemGray2), in: Circle())
                 }
                 .accessibilityLabel("Resume queued messages")
             }
@@ -126,8 +126,8 @@ struct ComposerBottomBar: View {
             .disabled(isSendDisabled)
         }
         .padding(.horizontal, 16)
-        .padding(.bottom, 6)
-        .padding(.top, 6)
+        .padding(.bottom, 4)
+        .padding(.top, 2)
     }
 
     private var voiceButtonLabel: some View {
@@ -220,6 +220,7 @@ struct ComposerBottomBar: View {
                 leadingImageIsSystem: true
             )
         }
+        .fixedSize(horizontal: true, vertical: false)
         .tint(metaLabelColor)
     }
 
@@ -277,6 +278,8 @@ struct ComposerBottomBar: View {
                 leadingImageIsSystem: false
             )
         }
+        .fixedSize(horizontal: true, vertical: false)
+        .layoutPriority(1)
         .tint(metaLabelColor)
     }
 
@@ -308,7 +311,7 @@ struct ComposerBottomBar: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(
-            Capsule().fill(isQueuePaused ? Color.orange : Color.cyan)
+            Capsule().fill(isQueuePaused ? Color(.systemGray3) : Color(.systemGray4))
         )
     }
 
@@ -346,6 +349,9 @@ struct ComposerBottomBar: View {
         .padding(.vertical, metaVerticalPadding)
         .padding(.horizontal, 4)
         .foregroundStyle(metaLabelColor)
+        // Keep adjacent menus from borrowing each other's touch region when the
+        // phone composer gets tight while the keyboard is up.
+        .fixedSize(horizontal: true, vertical: false)
         .contentShape(Rectangle())
     }
 }

@@ -21,6 +21,7 @@ struct TurnComposerAutocompleteState {
     let isThreadRunning: Bool
     let showsGitBranchSelector: Bool
     let isLoadingGitBranchTargets: Bool
+    let availableGitBranchTargets: [String]
     let selectedGitBaseBranch: String
     let gitDefaultBranch: String
 }

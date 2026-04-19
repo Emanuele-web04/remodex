@@ -75,7 +75,9 @@ enum TurnFileChangeSummaryParser {
         var lineIndex = 0
         var currentPath: String?
         var orderedPaths: [String] = []
-        var totalsByPath: [String: TurnDiffLineTotals] = [:]
+        var seenPaths: Set<String> = []
+        var inlineTotalsByPath: [String: TurnDiffLineTotals] = [:]
+        var diffTotalsByPath: [String: TurnDiffLineTotals] = [:]
         var kindsByPath: [String: String] = [:]
         var actionsByPath: [String: TurnFileChangeAction] = [:]
         var pathsWithInlineTotals: Set<String> = []
@@ -94,8 +96,7 @@ enum TurnFileChangeSummaryParser {
             if let parsedPath = parsePathLine(trimmedLine) {
                 sawPathLine = true
                 currentPath = parsedPath
-                if totalsByPath[parsedPath] == nil {
-                    totalsByPath[parsedPath] = TurnDiffLineTotals()
+                if seenPaths.insert(parsedPath).inserted {
                     orderedPaths.append(parsedPath)
                 }
                 lineIndex += 1
@@ -117,8 +118,8 @@ enum TurnFileChangeSummaryParser {
                     sawInlineTotals = true
                     pathsWithNonZeroInlineTotals.insert(currentPath)
                 }
-                totalsByPath[currentPath, default: TurnDiffLineTotals()].additions += totals.additions
-                totalsByPath[currentPath, default: TurnDiffLineTotals()].deletions += totals.deletions
+                inlineTotalsByPath[currentPath, default: TurnDiffLineTotals()].additions += totals.additions
+                inlineTotalsByPath[currentPath, default: TurnDiffLineTotals()].deletions += totals.deletions
                 pathsWithInlineTotals.insert(currentPath)
                 lineIndex += 1
                 continue
@@ -126,8 +127,7 @@ enum TurnFileChangeSummaryParser {
 
             if let inlineEntry = parseInlineFileEntry(from: trimmedLine) {
                 currentPath = inlineEntry.path
-                if totalsByPath[inlineEntry.path] == nil {
-                    totalsByPath[inlineEntry.path] = TurnDiffLineTotals()
+                if seenPaths.insert(inlineEntry.path).inserted {
                     orderedPaths.append(inlineEntry.path)
                 }
                 if let inlineTotals = inlineEntry.inlineTotals {
@@ -135,8 +135,8 @@ enum TurnFileChangeSummaryParser {
                         sawInlineTotals = true
                         pathsWithNonZeroInlineTotals.insert(inlineEntry.path)
                     }
-                    totalsByPath[inlineEntry.path, default: TurnDiffLineTotals()].additions += inlineTotals.additions
-                    totalsByPath[inlineEntry.path, default: TurnDiffLineTotals()].deletions += inlineTotals.deletions
+                    inlineTotalsByPath[inlineEntry.path, default: TurnDiffLineTotals()].additions += inlineTotals.additions
+                    inlineTotalsByPath[inlineEntry.path, default: TurnDiffLineTotals()].deletions += inlineTotals.deletions
                     pathsWithInlineTotals.insert(inlineEntry.path)
                 }
                 if let action = inlineEntry.action {
@@ -164,20 +164,16 @@ enum TurnFileChangeSummaryParser {
                     sawDiffFence = true
                     let resolvedPath = currentPath ?? parsePathFromDiff(lines: codeLines)
                     if let resolvedPath, !resolvedPath.isEmpty {
-                        if totalsByPath[resolvedPath] == nil {
-                            totalsByPath[resolvedPath] = TurnDiffLineTotals()
+                        if seenPaths.insert(resolvedPath).inserted {
                             orderedPaths.append(resolvedPath)
                         }
 
-                        if !pathsWithInlineTotals.contains(resolvedPath) {
-                            let delta = countDiffLines(in: codeLines)
-                            totalsByPath[resolvedPath, default: TurnDiffLineTotals()].additions += delta.additions
-                            totalsByPath[resolvedPath, default: TurnDiffLineTotals()].deletions += delta.deletions
-                            if delta.additions > 0 || delta.deletions > 0 {
-                                pathsWithDiffBodyEvidence.insert(resolvedPath)
-                            }
-                        } else if let delta = parseDiffBodyEvidence(in: codeLines),
-                                  delta.additions > 0 || delta.deletions > 0 {
+                        let delta = countDiffLines(in: codeLines)
+                        diffTotalsByPath[resolvedPath, default: TurnDiffLineTotals()].additions += delta.additions
+                        diffTotalsByPath[resolvedPath, default: TurnDiffLineTotals()].deletions += delta.deletions
+
+                        if let evidence = parseDiffBodyEvidence(in: codeLines),
+                           evidence.additions > 0 || evidence.deletions > 0 {
                             pathsWithDiffBodyEvidence.insert(resolvedPath)
                         }
                     }
@@ -201,7 +197,9 @@ enum TurnFileChangeSummaryParser {
         guard hasStrongFileChangeSignal else { return nil }
 
         let entries = orderedPaths.compactMap { path -> TurnFileChangeSummaryEntry? in
-            let totals = totalsByPath[path, default: TurnDiffLineTotals()]
+            let totals = pathsWithInlineTotals.contains(path)
+                ? inlineTotalsByPath[path, default: TurnDiffLineTotals()]
+                : diffTotalsByPath[path, default: TurnDiffLineTotals()]
             let inferredAction: TurnFileChangeAction?
             if let explicitAction = actionsByPath[path] {
                 inferredAction = explicitAction

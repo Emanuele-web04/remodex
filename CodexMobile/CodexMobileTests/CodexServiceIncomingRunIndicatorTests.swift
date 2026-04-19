@@ -196,6 +196,17 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertNil(service.latestTurnTerminalState(for: threadID))
     }
 
+    func testProtectedRunningFallbackAloneStillKeepsTimelineRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.protectedRunningFallbackThreadIDs.insert(threadID)
+        service.refreshThreadTimelineState(for: threadID)
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.timelineState(for: threadID).renderSnapshot.isThreadRunning)
+    }
+
     func testStreamingFallbackMarksRunningWithoutActiveTurnMapping() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -619,7 +630,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(service.shouldAutoReconnectOnForeground)
     }
 
-    func testRepeatedTrustedReconnectDisconnectsPreserveSavedReconnectCandidate() {
+    func testTrustedReconnectReceiveErrorDoesNotAdvanceFailureBudgetByItself() {
         let service = makeService()
         let macDeviceID = "mac-\(UUID().uuidString)"
         let macPublicKey = "public-key-\(UUID().uuidString)"
@@ -640,17 +651,14 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             service.handleReceiveError(NWError.posix(.ECONNABORTED))
         }
 
-        XCTAssertEqual(service.trustedReconnectFailureCount, 3)
-        XCTAssertFalse(service.shouldAutoReconnectOnForeground)
-        XCTAssertEqual(service.connectionRecoveryState, .idle)
-        XCTAssertEqual(service.secureConnectionState, .liveSessionUnresolved)
+        XCTAssertEqual(service.trustedReconnectFailureCount, 0)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
+        XCTAssertEqual(service.secureConnectionState, .trustedMac)
         XCTAssertNotNil(service.relaySessionId)
         XCTAssertNotNil(service.relayUrl)
         XCTAssertEqual(service.relayMacDeviceId, macDeviceID)
-        XCTAssertEqual(
-            service.lastErrorMessage,
-            "Secure reconnect could not be restored from the saved session. Try reconnecting again."
-        )
+        XCTAssertNil(service.lastErrorMessage)
         XCTAssertTrue(service.hasSavedRelaySession)
         XCTAssertTrue(service.hasTrustedMacReconnectCandidate)
     }
@@ -820,6 +828,62 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         })
     }
 
+    func testSuccessfulTurnCompletionFinalizesIncompletePlanSteps() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "explanation": .string("Finish the work in safe slices."),
+                "plan": .array([
+                    .object([
+                        "step": .string("Inspect"),
+                        "status": .string("completed"),
+                    ]),
+                    .object([
+                        "step": .string("Implement"),
+                        "status": .string("in_progress"),
+                    ]),
+                    .object([
+                        "step": .string("Verify"),
+                        "status": .string("pending"),
+                    ]),
+                ]),
+            ])
+        )
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("plan"),
+                    "content": .array([
+                        .object([
+                            "type": .string("text"),
+                            "text": .string("1. Inspect\n2. Implement\n3. Verify"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertFalse(planMessages[0].isStreaming)
+        XCTAssertEqual(planMessages[0].planState?.steps.map(\.status), [.completed, .completed, .completed])
+        XCTAssertFalse(planMessages[0].shouldDisplayPinnedPlanAccessory)
+    }
+
     func testLegacyAgentDeltaParsesTopLevelTurnIdAndMessageId() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -901,6 +965,134 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(assistantMessages[0].itemId, "message-1")
         XCTAssertEqual(assistantMessages[0].text, "Testo finale")
         XCTAssertFalse(assistantMessages[0].isStreaming)
+    }
+
+    func testLateLegacyAgentCompletionWithoutMessageIdUpdatesClosedSingleAssistantBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "codex/event/agent_message_content_delta",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("agent_message_content_delta"),
+                    "message_id": .string("message-1"),
+                    "delta": .string("Testo parziale"),
+                ]),
+            ])
+        )
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+
+        service.handleNotification(
+            method: "codex/event/agent_message",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("agent_message"),
+                    "message": .string("Testo finale"),
+                ]),
+            ])
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages[0].turnId, turnID)
+        XCTAssertEqual(assistantMessages[0].itemId, "message-1")
+        XCTAssertEqual(assistantMessages[0].text, "Testo finale")
+        XCTAssertFalse(assistantMessages[0].isStreaming)
+    }
+
+    func testLateLegacyAgentCompletionWithoutMessageIdIsIgnoredForClosedMultiAssistantTurn() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "codex/event/agent_message_content_delta",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("agent_message_content_delta"),
+                    "message_id": .string("message-1"),
+                    "delta": .string("Primo blocco"),
+                ]),
+            ])
+        )
+        service.handleNotification(
+            method: "codex/event/agent_message_content_delta",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("agent_message_content_delta"),
+                    "message_id": .string("message-2"),
+                    "delta": .string("Secondo blocco"),
+                ]),
+            ])
+        )
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+
+        service.handleNotification(
+            method: "codex/event/agent_message",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("agent_message"),
+                    "message": .string("Risposta finale ambigua"),
+                ]),
+            ])
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 2)
+        XCTAssertEqual(assistantMessages[0].text, "Primo blocco")
+        XCTAssertEqual(assistantMessages[1].text, "Secondo blocco")
+    }
+
+    func testLateLegacyAgentCompletionWithoutMessageIdDoesNotRegressClosedSingleAssistantBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "codex/event/agent_message_content_delta",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("agent_message_content_delta"),
+                    "message_id": .string("message-1"),
+                    "delta": .string("Testo finale completo"),
+                ]),
+            ])
+        )
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+
+        service.handleNotification(
+            method: "codex/event/agent_message",
+            params: .object([
+                "conversationId": .string(threadID),
+                "id": .string(turnID),
+                "msg": .object([
+                    "type": .string("agent_message"),
+                    "message": .string("Testo finale"),
+                ]),
+            ])
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages[0].text, "Testo finale completo")
+        XCTAssertEqual(assistantMessages[0].itemId, "message-1")
     }
 
     private func sendTurnStarted(service: CodexService, threadID: String, turnID: String) {

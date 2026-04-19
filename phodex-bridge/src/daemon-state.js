@@ -54,11 +54,14 @@ function readDaemonConfig(options = {}) {
   return readJsonFile(resolveDaemonConfigPath(options), options);
 }
 
-// Persists the pairing payload so foreground CLI commands can render the QR locally.
-function writePairingSession(pairingPayload, { now = () => Date.now(), ...options } = {}) {
+// Persists the pairing payload plus any short recovery code so foreground CLI commands can render pairing locally.
+function writePairingSession(pairingSessionOrPayload, { now = () => Date.now(), ...options } = {}) {
+  const pairingSession = pairingSessionOrPayload?.pairingPayload
+    ? pairingSessionOrPayload
+    : { pairingPayload: pairingSessionOrPayload };
   writeJsonFile(resolvePairingSessionPath(options), {
     createdAt: new Date(now()).toISOString(),
-    pairingPayload,
+    ...pairingSession,
   }, options);
 }
 

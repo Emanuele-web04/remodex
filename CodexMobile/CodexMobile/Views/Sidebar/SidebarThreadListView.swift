@@ -163,7 +163,9 @@ struct SidebarThreadListView: View {
     }
 
     private func projectHeader(_ group: SidebarThreadGroup) -> some View {
-        HStack(spacing: 12) {
+        let isExpanded = expandedProjectGroupIDs.contains(group.id)
+
+        return HStack(spacing: 12) {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 toggleProjectGroupExpansion(group.id)
@@ -197,18 +199,26 @@ struct SidebarThreadListView: View {
                 }
             }
 
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback()
-                onCreateThreadInProjectGroup(group)
-            } label: {
-                Image(systemName: "plus")
-                    .font(AppFont.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(width: 30, height: 30)
-                    .background(Color.primary.opacity(0.08), in: Circle())
+            HStack(spacing: 8) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(AppFont.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14, height: 14)
+                    .animation(.easeInOut(duration: 0.2), value: isExpanded)
+
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    onCreateThreadInProjectGroup(group)
+                } label: {
+                    Image(systemName: "plus")
+                        .font(AppFont.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 30, height: 30)
+                        .background(Color.primary.opacity(0.08), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(!isConnected || isCreatingThread)
             }
-            .buttonStyle(.plain)
-            .disabled(!isConnected || isCreatingThread)
         }
         .padding(.horizontal, 16)
         .padding(.top, 18)
@@ -478,7 +488,7 @@ struct SidebarThreadListView: View {
 }
 
 enum SidebarProjectThreadPreviewState {
-    static let collapsedRootThreadLimit = 10
+    static let collapsedRootThreadLimit = 6
 
     // Caps each project section to the latest root conversations until the user expands it.
     static func visibleRootThreads(

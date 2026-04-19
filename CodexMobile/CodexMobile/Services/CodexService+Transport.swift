@@ -75,6 +75,13 @@ extension CodexService {
             includeJSONRPC: false
         )
 
+        if method == "turn/start",
+           let collaborationMode = params?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue {
+            debugRuntimeLog(
+                "rpc send turn/start collaborationMode=\(collaborationMode) thread=\(params?.objectValue?["threadId"]?.stringValue ?? "")"
+            )
+        }
+
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[requestKey] = continuation
 
@@ -245,7 +252,10 @@ extension CodexService {
                     if !data.isEmpty {
                         self.manualWebSocketReadBuffer.append(data)
                         do {
-                            try await self.drainManualWebSocketFrames(on: connection)
+                            let didHandleClose = try await self.drainManualWebSocketFrames(on: connection)
+                            if didHandleClose {
+                                return
+                            }
                         } catch {
                             self.handleReceiveError(error)
                             return
@@ -709,7 +719,9 @@ extension CodexService {
         }
     }
 
-    func drainManualWebSocketFrames(on connection: NWConnection) async throws {
+    // Preserves relay close semantics on the raw TCP websocket path so `.local` reconnects
+    // reuse the same retry / re-pair policy as the higher-level websocket transports.
+    func drainManualWebSocketFrames(on connection: NWConnection) async throws -> Bool {
         while let frame = parseManualWebSocketFrame(from: &manualWebSocketReadBuffer) {
             switch frame.opcode {
             case 0x1:
@@ -718,7 +730,11 @@ extension CodexService {
                     processIncomingWireText(text)
                 }
             case 0x8:
-                throw CodexServiceError.disconnected
+                handleReceiveError(
+                    CodexServiceError.disconnected,
+                    relayCloseCode: relayCloseCode(fromManualWebSocketClosePayload: frame.payload)
+                )
+                return true
             case 0x9:
                 try await sendManualWebSocketFrame(opcode: 0xA, payload: frame.payload, on: connection)
             case 0xA:
@@ -727,6 +743,8 @@ extension CodexService {
                 break
             }
         }
+
+        return false
     }
 
     func parseManualWebSocketFrame(from buffer: inout Data) -> (opcode: UInt8, payload: Data)? {
@@ -775,6 +793,23 @@ extension CodexService {
         }
 
         return (opcode: opcode, payload: payload)
+    }
+
+    // Pulls relay-owned custom close codes out of raw websocket close payloads on the direct transport.
+    func relayCloseCode(fromManualWebSocketClosePayload payload: Data) -> NWProtocolWebSocket.CloseCode? {
+        guard payload.count >= 2 else {
+            return nil
+        }
+
+        let rawValue = (UInt16(payload[payload.startIndex]) << 8) | UInt16(payload[payload.startIndex + 1])
+        if rawValue >= 4000 {
+            return .privateCode(rawValue)
+        }
+        if rawValue >= 3000 {
+            return .applicationCode(rawValue)
+        }
+
+        return nil
     }
 
     func sendManualWebSocketFrame(opcode: UInt8, payload: Data, on connection: NWConnection) async throws {

@@ -96,6 +96,55 @@ final class ContentViewModelReconnectTests: XCTestCase {
         XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 2, message: "Reconnecting..."))
     }
 
+    func testManualReconnectReResolvesReconnectURLBetweenRetryAttempts() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let relayURL = "wss://relay.local/relay"
+        var resolveAttempts = 0
+        var attemptedURLs: [String] = []
+
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 14, count: 32).base64EncodedString(),
+            lastPairedAt: Date(),
+            relayURL: relayURL
+        )
+        service.lastTrustedMacDeviceId = macDeviceID
+        service.relaySessionId = "saved-session"
+        service.relayUrl = relayURL
+        service.relayMacDeviceId = macDeviceID
+        viewModel.reconnectSleepOverride = { _ in }
+        service.trustedSessionResolverOverride = {
+            resolveAttempts += 1
+            if resolveAttempts == 1 {
+                throw CodexTrustedSessionResolveError.macOffline("Your trusted Mac is offline right now.")
+            }
+            return CodexTrustedSessionResolveResponse(
+                ok: true,
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: Data(repeating: 15, count: 32).base64EncodedString(),
+                displayName: "My Mac",
+                sessionId: "live-session"
+            )
+        }
+        viewModel.connectOverride = { _, serverURL in
+            attemptedURLs.append(serverURL)
+            if attemptedURLs.count == 1 {
+                throw CodexServiceError.invalidInput("WebSocket closed during connect (4002)")
+            }
+        }
+
+        await viewModel.toggleConnection(codex: service)
+
+        XCTAssertEqual(resolveAttempts, 2)
+        XCTAssertEqual(
+            attemptedURLs,
+            ["\(relayURL)/saved-session", "\(relayURL)/live-session"]
+        )
+        XCTAssertFalse(viewModel.isAttemptingManualReconnect)
+    }
+
     func testManualReconnectCancelsStuckTrustedSessionResolve() async {
         let service = makeService()
         let viewModel = ContentViewModel()

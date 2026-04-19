@@ -225,6 +225,101 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(projection.messages.map(\.id), ["thinking-1", "tool-1"])
     }
 
+    func testTimelineRenderProjectionGroupsLongContiguousToolRuns() {
+        let now = Date()
+        let toolMessages = (1...7).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: index.isMultiple(of: 2) ? .toolActivity : .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1",
+                itemID: "item-\(index)",
+                isStreaming: index == 7
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(messages: toolMessages)
+        XCTAssertEqual(items.count, 1)
+
+        guard case .toolBurst(let group) = items[0] else {
+            return XCTFail("Expected one grouped tool burst")
+        }
+
+        XCTAssertEqual(group.messages.map(\.id), toolMessages.map(\.id))
+        XCTAssertEqual(group.hiddenCount, 2)
+        XCTAssertEqual(group.pinnedMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5"])
+        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-6", "tool-7"])
+    }
+
+    func testTimelineRenderProjectionKeepsShortToolRunsExpanded() {
+        let now = Date()
+        let toolMessages = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(Double(index)),
+                turnID: "turn-1",
+                itemID: "item-\(index)"
+            )
+        }
+
+        let items = TurnTimelineRenderProjection.project(messages: toolMessages)
+        XCTAssertEqual(items.count, 5)
+
+        let messageIDs = items.compactMap { item -> String? in
+            if case .message(let message) = item {
+                return message.id
+            }
+            return nil
+        }
+
+        XCTAssertEqual(messageIDs, toolMessages.map(\.id))
+    }
+
+    func testTimelineRenderProjectionSplitsToolRunsAcrossStableTurnIDs() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "tool-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool 1",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "item-1"
+            ),
+            makeMessage(
+                id: "tool-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Tool 2",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                itemID: "item-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+        XCTAssertEqual(items.count, 2)
+
+        let messageIDs = items.compactMap { item -> String? in
+            if case .message(let message) = item {
+                return message.id
+            }
+            return nil
+        }
+
+        XCTAssertEqual(messageIDs, ["tool-1", "tool-2"])
+    }
+
     func testRemoveDuplicateAssistantMessagesByTurnAndText() {
         let now = Date()
         let messages = [
@@ -284,6 +379,119 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         let deduped = TurnTimelineReducer.removeDuplicateAssistantMessages(in: messages)
         XCTAssertEqual(deduped.map(\.id), ["assistant-1", "assistant-3"])
+    }
+
+    func testRemoveDuplicateUserMessagesCollapsesPendingPhoneRowWithConfirmedEcho() {
+        let now = Date()
+        var pending = makeMessage(
+            id: "user-pending",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now
+        )
+        pending.deliveryState = .pending
+
+        let confirmed = makeMessage(
+            id: "user-confirmed",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(1),
+            turnID: "turn-1"
+        )
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [pending, confirmed])
+
+        XCTAssertEqual(deduped.count, 1)
+        XCTAssertEqual(deduped[0].id, "user-pending")
+        XCTAssertEqual(deduped[0].deliveryState, .confirmed)
+        XCTAssertEqual(deduped[0].turnId, "turn-1")
+    }
+
+    func testRemoveDuplicateUserMessagesKeepsRepeatedConfirmedPrompts() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                text: "Fix this",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                text: "Fix this",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2"
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2"])
+    }
+
+    func testRemoveDuplicateUserMessagesKeepsPromptsWithDifferentFileMentions() {
+        let now = Date()
+        var first = makeMessage(
+            id: "user-1",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now
+        )
+        first.deliveryState = .pending
+        first.fileMentions = ["Sources/App.swift"]
+
+        var second = makeMessage(
+            id: "user-2",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(1),
+            turnID: "turn-1"
+        )
+        second.deliveryState = .confirmed
+        second.fileMentions = ["Sources/Other.swift"]
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [first, second])
+        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2"])
+    }
+
+    func testRemoveDuplicateUserMessagesDoesNotGuessBetweenTwoIdenticalPendingRows() {
+        let now = Date()
+        var first = makeMessage(
+            id: "user-1",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now
+        )
+        first.deliveryState = .pending
+
+        var second = makeMessage(
+            id: "user-2",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(0.2)
+        )
+        second.deliveryState = .pending
+
+        let confirmed = makeMessage(
+            id: "user-3",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(0.4),
+            turnID: "turn-1"
+        )
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [first, second, confirmed])
+        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2", "user-3"])
     }
 
     func testRemoveDuplicateAssistantMessagesKeepsDistinctItemsInSameTurn() {
@@ -544,6 +752,86 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
         XCTAssertEqual(deduped.map(\.id), ["diff-2"])
+    }
+
+    func testRemoveDuplicateFileChangeMessagesDedupesSingleFileRowsAcrossPathRepresentations() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Edited TurnToolbarContent.swift +2 -13",
+                createdAt: now,
+                turnID: nil,
+                itemID: nil,
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnToolbarContent.swift
+                Kind: update
+                Totals: +2 -13
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "turn-diff-1",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["diff-2"])
+    }
+
+    func testRemoveDuplicateFileChangeMessagesKeepsDistinctDirectoryScopedSnapshots() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/FeatureA/TurnToolbarContent.swift
+                Kind: update
+                Totals: +2 -13
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "diff-a",
+                isStreaming: false
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/FeatureB/TurnToolbarContent.swift
+                Kind: update
+                Totals: +2 -13
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "diff-b",
+                isStreaming: false
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateFileChangeMessages(in: messages)
+        XCTAssertEqual(deduped.map(\.id), ["diff-1", "diff-2"])
     }
 
     func testRemoveDuplicateFileChangeMessagesKeepsNewestSnapshotForSamePaths() {
@@ -865,6 +1153,89 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testEnforceIntraTurnOrderKeepsSteerUserNearBottomOfInterleavedTurn() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Initial prompt",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "thinking-1",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning block A",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "First response",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-steer",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Steer follow-up",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "thinking-2",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning block B",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "item-2",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-2",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Second response",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "item-2",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "thinking-1",
+            "assistant-1",
+            "user-steer",
+            "thinking-2",
+            "assistant-2",
+        ])
+    }
+
     func testEnforceIntraTurnOrderPreservesPartialInterleavedFlow() {
         let now = Date()
         var order = 0
@@ -985,6 +1356,65 @@ final class TurnTimelineReducerTests: XCTestCase {
             "thinking-1",
             "assistant-1",
             "tool-1",
+        ])
+    }
+
+    func testEnforceIntraTurnOrderPreservesSteerPromptAfterAssistantWithinSameTurn() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Initial request",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "First pass",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Actually check the failing tests first",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-2",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Refocusing on failures",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "item-2",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "assistant-1",
+            "user-2",
+            "assistant-2",
         ])
     }
 
@@ -1202,6 +1632,523 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
 
         XCTAssertEqual(blockInfo, [nil])
+    }
+
+    func testAssistantBlockInfoDeduplicatesEquivalentSingleFileDiffSnapshots() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+         struct TurnMessageComponents {}
+        +let assistantCopyText = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-absolute",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: /Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-relative",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(
+            blockInfo[2]?.blockDiffEntries?.first?.path,
+            "CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift"
+        )
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 0)
+    }
+
+    func testAssistantBlockInfoMergesDifferentSnapshotsForSameFile() {
+        let now = Date()
+        let firstDiff = """
+        @@ -1,3 +1,4 @@
+        struct TurnMessageComponents {}
+        +let firstChange = true
+        """
+        let secondDiff = """
+        @@ -10,3 +10,4 @@
+         struct TurnDiffSheet {}
+        +let secondChange = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(firstDiff)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: /Users/emanueledipietro/Developer/Remodex/CodexMobile/CodexMobile/Views/Turn/TurnMessageComponents.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(secondDiff)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 2)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 0)
+    }
+
+    func testAssistantBlockInfoPrefersLatestSummaryTotalsAfterDiffChunk() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+        +let diffBackedFile = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "summary-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 3)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffText?.contains("```diff"), true)
+    }
+
+    func testAssistantBlockInfoPrefersInlineTotalsOverSameMessageDiffCounts() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+        +let diffBackedFile = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-with-inline-totals",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+
+                ```diff
+                \(diffCode)
+                ```
+
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.additions, 3)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.deletions, 1)
+        XCTAssertEqual(blockInfo[1]?.blockDiffText?.contains("```diff"), true)
+    }
+
+    func testAssistantBlockInfoKeepsRepeatedSameFileChunksAtFinalTotals() {
+        let now = Date()
+        let firstDiff = """
+        @@ -1,3 +1,4 @@
+        +let firstChange = true
+        """
+        let secondDiff = """
+        @@ -10,3 +10,4 @@
+        +let secondChange = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-with-repeated-path",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+
+                ```diff
+                \(firstDiff)
+                ```
+
+                Path: Sources/App.swift
+
+                ```diff
+                \(secondDiff)
+                ```
+
+                Totals: +2 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.additions, 2)
+        XCTAssertEqual(blockInfo[1]?.blockDiffEntries?.first?.deletions, 0)
+        XCTAssertEqual(blockInfo[1]?.blockDiffText?.contains("firstChange"), true)
+        XCTAssertEqual(blockInfo[1]?.blockDiffText?.contains("secondChange"), true)
+    }
+
+    func testAssistantBlockInfoKeepsSummaryOnlyFileWhenSiblingHasDiffChunk() {
+        let now = Date()
+        let diffCode = """
+        @@ -1,3 +1,4 @@
+        +let diffBackedFile = true
+        """
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-with-code",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +1 -0
+
+                ```diff
+                \(diffCode)
+                ```
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "summary-only",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Composer.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 2)
+        XCTAssertEqual(
+            blockInfo[2]?.blockDiffEntries?.map(\.path),
+            ["Sources/App.swift", "Sources/Composer.swift"]
+        )
+    }
+
+    func testAssistantBlockInfoKeepsSummaryOnlyEntriesWithoutDiffFencesSeparated() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Composer.swift
+                Kind: update
+                Totals: +3 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 2)
+        XCTAssertEqual(
+            blockInfo[2]?.blockDiffEntries?.map(\.path),
+            ["Sources/App.swift", "Sources/Composer.swift"]
+        )
+    }
+
+    func testAssistantBlockInfoDoesNotDoubleCountIdenticalSummaryOnlySnapshots() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Completed response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-1",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "diff-2",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: /Users/emanueledipietro/Developer/Remodex/Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            latestTurnTerminalState: .completed,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.count, 1)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.path, "Sources/App.swift")
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.additions, 2)
+        XCTAssertEqual(blockInfo[2]?.blockDiffEntries?.first?.deletions, 1)
     }
 
     func testScrollTrackerPausesAutomaticScrollingDuringUserDrag() {

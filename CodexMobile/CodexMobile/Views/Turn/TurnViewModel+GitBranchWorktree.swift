@@ -5,6 +5,158 @@
 
 import Foundation
 
+// Captures the repo state needed to build stable git-branch alerts without reading mutable view-model state mid-flow.
+private struct GitBranchAlertState {
+    let currentBranch: String
+    let defaultBranch: String
+    let isDirty: Bool
+    let localOnlyCommitCount: Int
+    let dirtyFiles: [GitChangedFile]
+
+    private var onDefaultBranch: Bool {
+        !currentBranch.isEmpty && currentBranch == defaultBranch
+    }
+
+    func alert(for operation: TurnViewModel.GitBranchUserOperation) -> TurnGitSyncAlert? {
+        switch operation {
+        case .create(let branchName):
+            if isDirty {
+                return TurnGitSyncAlert(
+                    title: "Bring local changes to '\(branchName)'?",
+                    message: newBranchDirtyAlertMessage(branchName: branchName),
+                    buttons: [
+                        TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                        TurnGitSyncAlertButton(
+                            title: "Carry to New Branch",
+                            role: nil,
+                            action: .continueGitBranchOperation
+                        ),
+                        TurnGitSyncAlertButton(
+                            title: "Commit, Create & Switch",
+                            role: nil,
+                            action: .commitAndContinueGitBranchOperation
+                        )
+                    ]
+                )
+            }
+
+            if onDefaultBranch && localOnlyCommitCount > 0 {
+                let commitLabel = localOnlyCommitCount == 1 ? "1 local commit" : "\(localOnlyCommitCount) local commits"
+                var message = "\(defaultBranch) already has \(commitLabel) that are not on the remote. Creating '\(branchName)' now starts the new branch from the current HEAD, but those commits stay in \(defaultBranch)'s history."
+                if isDirty {
+                    message += " Uncommitted changes also stay in this working copy and will follow onto the new branch after checkout."
+                }
+                return TurnGitSyncAlert(
+                    title: "Local commits stay on \(defaultBranch)",
+                    message: message,
+                    buttons: [
+                        TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                        TurnGitSyncAlertButton(title: "Create Anyway", role: nil, action: .continueGitBranchOperation)
+                    ]
+                )
+            }
+
+            return nil
+
+        case .createWorktree(let branchName, let baseBranch, let changeTransfer):
+            return worktreeAlert(
+                titleNoun: "'\(branchName)'",
+                worktreeNoun: "the new worktree",
+                baseBranch: baseBranch,
+                changeTransfer: changeTransfer,
+                createMessage: "Creating '\(branchName)' can %@ local changes only from the current branch. Switch the base branch to '\(currentBranch)' or clean up local changes before creating the worktree."
+            )
+
+        case .createManagedWorktree(let baseBranch, let changeTransfer):
+            return worktreeAlert(
+                titleNoun: "a managed worktree",
+                worktreeNoun: "the managed worktree",
+                baseBranch: baseBranch,
+                changeTransfer: changeTransfer,
+                createMessage: "Creating a managed worktree can %@ local changes only from the current branch. Switch the base branch to '\(currentBranch)' or clean up local changes before creating the worktree."
+            )
+
+        case .switchTo(let branchName):
+            _ = branchName
+            return nil
+        }
+    }
+
+    // Reuses the same branch/base-branch warnings for standard and managed worktree creation.
+    private func worktreeAlert(
+        titleNoun: String,
+        worktreeNoun: String,
+        baseBranch: String,
+        changeTransfer: GitWorktreeChangeTransferMode,
+        createMessage: String
+    ) -> TurnGitSyncAlert? {
+        if isDirty && changeTransfer != .none && currentBranch != baseBranch {
+            let transferVerb = changeTransfer.transferVerb ?? "move"
+            return TurnGitSyncAlert(
+                title: "\(transferVerb.capitalized) local changes from the current branch",
+                message: createMessage.replacingOccurrences(of: "%@", with: transferVerb),
+                action: .dismissOnly
+            )
+        }
+
+        if onDefaultBranch && currentBranch == baseBranch && localOnlyCommitCount > 0 {
+            let commitLabel = localOnlyCommitCount == 1 ? "1 local commit" : "\(localOnlyCommitCount) local commits"
+            let dirtySuffix: String
+            if isDirty, changeTransfer == .move {
+                dirtySuffix = " Local changes will move into \(worktreeNoun); ignored files stay here."
+            } else if isDirty, changeTransfer == .copy {
+                dirtySuffix = " Local changes will also be copied into \(worktreeNoun); ignored files stay here."
+            } else {
+                dirtySuffix = ""
+            }
+            return TurnGitSyncAlert(
+                title: "Local commits stay on \(defaultBranch)",
+                message: "\(defaultBranch) already has \(commitLabel) that are not on the remote. Creating \(titleNoun) from \(baseBranch) starts from the current HEAD, but those commits stay in \(defaultBranch)'s history too.\(dirtySuffix)",
+                buttons: [
+                    TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
+                    TurnGitSyncAlertButton(title: "Create Anyway", role: nil, action: .continueGitBranchOperation)
+                ]
+            )
+        }
+
+        return nil
+    }
+
+    private func dirtyBranchAlertMessage(intro: String) -> String {
+        guard !dirtyFiles.isEmpty else {
+            return intro
+        }
+
+        let previewFiles = dirtyFiles.prefix(3).map(\.path)
+        let fileLines = previewFiles.map { "• \($0)" }.joined(separator: "\n")
+        let remainingCount = dirtyFiles.count - previewFiles.count
+        let overflowLine = remainingCount > 0 ? "\n• +\(remainingCount) more files" : ""
+
+        return "\(intro)\n\nFiles with local changes:\n\(fileLines)\(overflowLine)"
+    }
+
+    private func newBranchDirtyAlertMessage(branchName: String) -> String {
+        let sourceBranch = currentBranch.isEmpty ? "the current branch" : currentBranch
+        var intro = "You're creating '\(branchName)' from \(sourceBranch). Carry your local changes onto the new branch, or commit first and then create + switch."
+
+        if !defaultBranch.isEmpty,
+           sourceBranch == defaultBranch,
+           localOnlyCommitCount > 0 {
+            let commitLabel = localOnlyCommitCount == 1 ? "1 local commit" : "\(localOnlyCommitCount) local commits"
+            intro = "\(defaultBranch) already has \(commitLabel) that are not on the remote. Those commits stay on \(defaultBranch)'s history. " + intro
+        }
+
+        return dirtyBranchAlertMessage(intro: intro)
+    }
+}
+
+// Packages the deferred operation and its callbacks so alert-confirmed actions can resume from one place.
+private struct PendingGitBranchOperationState {
+    let operation: TurnViewModel.GitBranchUserOperation?
+    let worktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?
+    let managedWorktreeOpenHandler: ((GitCreateManagedWorktreeResult) -> Void)?
+}
+
 extension TurnViewModel {
     func refreshGitBranchTargets(codex: CodexService, workingDirectory: String?, threadID: String) {
         guard !isLoadingGitBranchTargets else { return }
@@ -45,8 +197,7 @@ extension TurnViewModel {
 
         let operation = GitBranchUserOperation.create(branchName)
         if let alert = gitBranchAlert(for: operation) {
-            pendingGitBranchOperation = operation
-            gitSyncAlert = alert
+            enqueuePendingGitBranchOperation(operation, alert: alert)
             return
         }
 
@@ -198,14 +349,52 @@ extension TurnViewModel {
             changeTransfer: changeTransfer
         )
         if let alert = gitBranchAlert(for: operation) {
-            pendingGitBranchOperation = operation
-            pendingGitWorktreeOpenHandler = onOpenWorktree
-            gitSyncAlert = alert
+            enqueuePendingGitBranchOperation(
+                operation,
+                alert: alert,
+                pendingWorktreeOpenHandler: onOpenWorktree
+            )
             return
         }
 
         createGitWorktree(
             named: branchName,
+            fromBaseBranch: baseBranch,
+            changeTransfer: changeTransfer,
+            codex: codex,
+            workingDirectory: workingDirectory,
+            threadID: threadID,
+            activeTurnID: activeTurnID,
+            onOpenWorktree: onOpenWorktree
+        )
+    }
+
+    func requestCreateManagedGitWorktree(
+        fromBaseBranch rawBaseBranch: String,
+        changeTransfer: GitWorktreeChangeTransferMode = .move,
+        codex: CodexService,
+        workingDirectory: String?,
+        threadID: String,
+        activeTurnID: String?,
+        onOpenWorktree: @escaping (GitCreateManagedWorktreeResult) -> Void
+    ) {
+        let baseBranch = rawBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseBranch.isEmpty else { return }
+
+        let operation = GitBranchUserOperation.createManagedWorktree(
+            baseBranch: baseBranch,
+            changeTransfer: changeTransfer
+        )
+        if let alert = gitBranchAlert(for: operation) {
+            enqueuePendingGitBranchOperation(
+                operation,
+                alert: alert,
+                pendingManagedGitWorktreeOpenHandler: onOpenWorktree
+            )
+            return
+        }
+
+        createManagedGitWorktree(
             fromBaseBranch: baseBranch,
             changeTransfer: changeTransfer,
             codex: codex,
@@ -328,6 +517,58 @@ extension TurnViewModel {
         }
     }
 
+    // Creates a detached managed worktree, then lets the caller route into the resulting thread.
+    func createManagedGitWorktree(
+        fromBaseBranch rawBaseBranch: String,
+        changeTransfer: GitWorktreeChangeTransferMode = .move,
+        codex: CodexService,
+        workingDirectory: String?,
+        threadID: String,
+        activeTurnID: String?,
+        onOpenWorktree: @escaping (GitCreateManagedWorktreeResult) -> Void
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard activeTurnID == nil,
+                  !codex.runningThreadIDs.contains(threadID),
+                  !self.isRunningGitAction,
+                  !self.isSwitchingGitBranch,
+                  !self.isCreatingGitWorktree else { return }
+
+            let baseBranch = rawBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !baseBranch.isEmpty else { return }
+
+            self.isCreatingGitWorktree = true
+            defer { self.isCreatingGitWorktree = false }
+
+            let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
+            do {
+                let result = try await gitService.createManagedWorktree(
+                    baseBranch: baseBranch,
+                    changeTransfer: changeTransfer
+                )
+                let resolvedWorktreePath = result.worktreePath.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !resolvedWorktreePath.isEmpty else {
+                    throw GitActionsError.invalidResponse
+                }
+
+                onOpenWorktree(result)
+            } catch let error as GitActionsError {
+                gitSyncAlert = TurnGitSyncAlert(
+                    title: "Worktree Creation Failed",
+                    message: error.errorDescription ?? "Could not create worktree.",
+                    action: .dismissOnly
+                )
+            } catch {
+                gitSyncAlert = TurnGitSyncAlert(
+                    title: "Worktree Creation Failed",
+                    message: error.localizedDescription,
+                    action: .dismissOnly
+                )
+            }
+        }
+    }
+
     func worktreePathForCheckedOutElsewhereBranch(_ branch: String) -> String? {
         let trimmedBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedBranch.isEmpty,
@@ -385,9 +626,7 @@ extension TurnViewModel {
     }
 
     func dismissGitSyncAlert() {
-        gitSyncAlert = nil
-        pendingGitBranchOperation = nil
-        pendingGitWorktreeOpenHandler = nil
+        clearPendingGitBranchOperationState()
     }
 
     func confirmGitSyncAlertAction(
@@ -397,11 +636,8 @@ extension TurnViewModel {
         threadID: String,
         activeTurnID: String?
     ) {
-        let pendingBranchOperation = pendingGitBranchOperation
-        let pendingWorktreeOpenHandler = pendingGitWorktreeOpenHandler
-        gitSyncAlert = nil
-        pendingGitBranchOperation = nil
-        pendingGitWorktreeOpenHandler = nil
+        let pendingOperationState = capturePendingGitBranchOperationState()
+        clearPendingGitBranchOperationState()
 
         switch alertAction {
         case .dismissOnly:
@@ -433,15 +669,14 @@ extension TurnViewModel {
             }
         case .continueGitBranchOperation:
             continueGitBranchOperation(
-                pendingBranchOperation,
-                pendingWorktreeOpenHandler: pendingWorktreeOpenHandler,
+                pendingOperationState,
                 codex: codex,
                 workingDirectory: workingDirectory,
                 threadID: threadID,
                 activeTurnID: activeTurnID
             )
         case .commitAndContinueGitBranchOperation:
-            guard let pendingBranchOperation else { return }
+            guard pendingOperationState.operation != nil else { return }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 guard activeTurnID == nil,
@@ -461,8 +696,7 @@ extension TurnViewModel {
                     }
 
                     continueGitBranchOperation(
-                        pendingBranchOperation,
-                        pendingWorktreeOpenHandler: pendingWorktreeOpenHandler,
+                        pendingOperationState,
                         codex: codex,
                         workingDirectory: workingDirectory,
                         threadID: threadID,
@@ -506,99 +740,14 @@ extension TurnViewModel {
     }
 
     func gitBranchAlert(for operation: GitBranchUserOperation) -> TurnGitSyncAlert? {
-        let currentBranch = currentGitBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-        let defaultBranch = gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isDirty = gitRepoSync?.isDirty ?? false
-        let localOnlyCommitCount = gitRepoSync?.localOnlyCommitCount ?? 0
-        let onDefaultBranch = !currentBranch.isEmpty && currentBranch == defaultBranch
-
-        switch operation {
-        case .create(let branchName):
-            if isDirty {
-                return TurnGitSyncAlert(
-                    title: "Bring local changes to '\(branchName)'?",
-                    message: newBranchDirtyAlertMessage(
-                        branchName: branchName,
-                        currentBranch: currentBranch,
-                        defaultBranch: defaultBranch,
-                        localOnlyCommitCount: localOnlyCommitCount
-                    ),
-                    buttons: [
-                        TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
-                        TurnGitSyncAlertButton(
-                            title: "Carry to New Branch",
-                            role: nil,
-                            action: .continueGitBranchOperation
-                        ),
-                        TurnGitSyncAlertButton(
-                            title: "Commit, Create & Switch",
-                            role: nil,
-                            action: .commitAndContinueGitBranchOperation
-                        )
-                    ]
-                )
-            }
-
-            if onDefaultBranch && localOnlyCommitCount > 0 {
-                let commitLabel = localOnlyCommitCount == 1 ? "1 local commit" : "\(localOnlyCommitCount) local commits"
-                var message = "\(defaultBranch) already has \(commitLabel) that are not on the remote. Creating '\(branchName)' now starts the new branch from the current HEAD, but those commits stay in \(defaultBranch)'s history."
-                if isDirty {
-                    message += " Uncommitted changes also stay in this working copy and will follow onto the new branch after checkout."
-                }
-                return TurnGitSyncAlert(
-                    title: "Local commits stay on \(defaultBranch)",
-                    message: message,
-                    buttons: [
-                        TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
-                        TurnGitSyncAlertButton(title: "Create Anyway", role: nil, action: .continueGitBranchOperation)
-                    ]
-                )
-            }
-
-            return nil
-
-        case .createWorktree(let branchName, let baseBranch, let changeTransfer):
-            if isDirty && currentBranch != baseBranch {
-                let transferVerb = changeTransfer == .move ? "move" : "copy"
-                return TurnGitSyncAlert(
-                    title: "\(transferVerb.capitalized) local changes from the current branch",
-                    message: "Creating '\(branchName)' can \(transferVerb) tracked local changes only from the current branch. Switch the base branch to '\(currentBranch)' or clean up local changes before creating the worktree.",
-                    action: .dismissOnly
-                )
-            }
-
-            if onDefaultBranch && currentBranch == baseBranch && localOnlyCommitCount > 0 {
-                let commitLabel = localOnlyCommitCount == 1 ? "1 local commit" : "\(localOnlyCommitCount) local commits"
-                let dirtySuffix = isDirty
-                    ? (changeTransfer == .move
-                        ? " Tracked local changes will move into the new worktree; ignored files stay here."
-                        : " Tracked local changes will also be copied into the new worktree; ignored files stay here.")
-                    : ""
-                return TurnGitSyncAlert(
-                    title: "Local commits stay on \(defaultBranch)",
-                    message: "\(defaultBranch) already has \(commitLabel) that are not on the remote. Creating the new worktree branch '\(branchName)' from \(baseBranch) starts from the current HEAD, but those commits stay in \(defaultBranch)'s history too.\(dirtySuffix)",
-                    buttons: [
-                        TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
-                        TurnGitSyncAlertButton(title: "Create Anyway", role: nil, action: .continueGitBranchOperation)
-                    ]
-                )
-            }
-
-            return nil
-
-        case .switchTo(let branchName):
-            guard isDirty else { return nil }
-            return TurnGitSyncAlert(
-                title: "Commit changes before switching branch?",
-                message: dirtyBranchAlertMessage(
-                    intro: "These local changes can block checkout or be hard to reason about after the switch. Commit them on \(currentBranch.isEmpty ? "the current branch" : currentBranch) first, then switch to '\(branchName)'."
-                ),
-                buttons: [
-                    TurnGitSyncAlertButton(title: "Cancel", role: .cancel, action: .dismissOnly),
-                    TurnGitSyncAlertButton(title: "Commit & Switch", role: nil, action: .commitAndContinueGitBranchOperation)
-                ]
-            )
-        }
+        let alertState = GitBranchAlertState(
+            currentBranch: currentGitBranch.trimmingCharacters(in: .whitespacesAndNewlines),
+            defaultBranch: gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines),
+            isDirty: gitRepoSync?.isDirty ?? false,
+            localOnlyCommitCount: gitRepoSync?.localOnlyCommitCount ?? 0,
+            dirtyFiles: gitRepoSync?.files ?? []
+        )
+        return alertState.alert(for: operation)
     }
 }
 
@@ -643,28 +792,30 @@ private extension TurnViewModel {
         if let defaultBranch = result.defaultBranch, !defaultBranch.isEmpty {
             gitDefaultBranch = defaultBranch
             let currentSelectedBaseBranch = selectedGitBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+            let localDefaultBranch = remodexSelectableDefaultBranch(
+                defaultBranch: defaultBranch,
+                availableGitBranchTargets: result.branches
+            ) ?? ""
             let isValidSelectedBaseBranch = currentSelectedBaseBranch.isEmpty
-                || currentSelectedBaseBranch == defaultBranch
                 || result.branches.contains(currentSelectedBaseBranch)
 
             if !isValidSelectedBaseBranch {
-                selectedGitBaseBranch = defaultBranch
+                selectedGitBaseBranch = localDefaultBranch
             } else if currentSelectedBaseBranch.isEmpty {
-                selectedGitBaseBranch = defaultBranch
+                selectedGitBaseBranch = localDefaultBranch
             }
         }
     }
 
     // Runs the deferred branch/worktree action after an alert-confirmed preflight step.
     func continueGitBranchOperation(
-        _ pendingBranchOperation: GitBranchUserOperation?,
-        pendingWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?,
+        _ pendingOperationState: PendingGitBranchOperationState,
         codex: CodexService,
         workingDirectory: String?,
         threadID: String,
         activeTurnID: String?
     ) {
-        guard let pendingBranchOperation else { return }
+        guard let pendingBranchOperation = pendingOperationState.operation else { return }
 
         switch pendingBranchOperation {
         case .create(let branchName):
@@ -684,7 +835,7 @@ private extension TurnViewModel {
                 activeTurnID: activeTurnID
             )
         case .createWorktree(let branchName, let baseBranch, let changeTransfer):
-            guard let pendingWorktreeOpenHandler else { return }
+            guard let pendingWorktreeOpenHandler = pendingOperationState.worktreeOpenHandler else { return }
             createGitWorktree(
                 named: branchName,
                 fromBaseBranch: baseBranch,
@@ -695,41 +846,18 @@ private extension TurnViewModel {
                 activeTurnID: activeTurnID,
                 onOpenWorktree: pendingWorktreeOpenHandler
             )
+        case .createManagedWorktree(let baseBranch, let changeTransfer):
+            guard let pendingManagedGitWorktreeOpenHandler = pendingOperationState.managedWorktreeOpenHandler else { return }
+            createManagedGitWorktree(
+                fromBaseBranch: baseBranch,
+                changeTransfer: changeTransfer,
+                codex: codex,
+                workingDirectory: workingDirectory,
+                threadID: threadID,
+                activeTurnID: activeTurnID,
+                onOpenWorktree: pendingManagedGitWorktreeOpenHandler
+            )
         }
-    }
-
-    // Summarizes the current dirty files so branch-switch alerts can explain what is at risk.
-    func dirtyBranchAlertMessage(intro: String) -> String {
-        guard let gitRepoSync, !gitRepoSync.files.isEmpty else {
-            return intro
-        }
-
-        let previewFiles = gitRepoSync.files.prefix(3).map(\.path)
-        let fileLines = previewFiles.map { "• \($0)" }.joined(separator: "\n")
-        let remainingCount = gitRepoSync.files.count - previewFiles.count
-        let overflowLine = remainingCount > 0 ? "\n• +\(remainingCount) more files" : ""
-
-        return "\(intro)\n\nFiles with local changes:\n\(fileLines)\(overflowLine)"
-    }
-
-    // Explains the two safe branch-creation options in mobile-friendly language before we mutate Git state.
-    func newBranchDirtyAlertMessage(
-        branchName: String,
-        currentBranch: String,
-        defaultBranch: String,
-        localOnlyCommitCount: Int
-    ) -> String {
-        let sourceBranch = currentBranch.isEmpty ? "the current branch" : currentBranch
-        var intro = "You're creating '\(branchName)' from \(sourceBranch). Carry your tracked changes onto the new branch, or commit first and then create + switch."
-
-        if !defaultBranch.isEmpty,
-           sourceBranch == defaultBranch,
-           localOnlyCommitCount > 0 {
-            let commitLabel = localOnlyCommitCount == 1 ? "1 local commit" : "\(localOnlyCommitCount) local commits"
-            intro = "\(defaultBranch) already has \(commitLabel) that are not on the remote. Those commits stay on \(defaultBranch)'s history. " + intro
-        }
-
-        return dirtyBranchAlertMessage(intro: intro)
     }
 
     func trackingRemoteName(from trackingBranch: String?) -> String? {
@@ -743,5 +871,33 @@ private extension TurnViewModel {
         }
 
         return trimmed.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init)
+    }
+
+    // Queues the pending branch/worktree operation so alert-confirmed actions can resume the exact same request.
+    func enqueuePendingGitBranchOperation(
+        _ operation: GitBranchUserOperation,
+        alert: TurnGitSyncAlert,
+        pendingWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)? = nil,
+        pendingManagedGitWorktreeOpenHandler: ((GitCreateManagedWorktreeResult) -> Void)? = nil
+    ) {
+        pendingGitBranchOperation = operation
+        self.pendingGitWorktreeOpenHandler = pendingWorktreeOpenHandler
+        self.pendingManagedGitWorktreeOpenHandler = pendingManagedGitWorktreeOpenHandler
+        gitSyncAlert = alert
+    }
+
+    func capturePendingGitBranchOperationState() -> PendingGitBranchOperationState {
+        PendingGitBranchOperationState(
+            operation: pendingGitBranchOperation,
+            worktreeOpenHandler: pendingGitWorktreeOpenHandler,
+            managedWorktreeOpenHandler: pendingManagedGitWorktreeOpenHandler
+        )
+    }
+
+    func clearPendingGitBranchOperationState() {
+        gitSyncAlert = nil
+        pendingGitBranchOperation = nil
+        pendingGitWorktreeOpenHandler = nil
+        pendingManagedGitWorktreeOpenHandler = nil
     }
 }

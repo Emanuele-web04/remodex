@@ -7,7 +7,63 @@
 import Foundation
 import UIKit
 
+private enum RunningThreadHistoryCatchupPolicy {
+    // Running-thread reopen only needs the latest transcript tail to catch up the UI.
+    static let recentMergeWindow = 160
+    static let cancellationCheckInterval = 32
+}
+
 extension CodexService {
+    nonisolated static func shouldPreferRecentHistoryWindow(
+        existingCount: Int,
+        historyCount: Int,
+        windowSize: Int = RunningThreadHistoryCatchupPolicy.recentMergeWindow
+    ) -> Bool {
+        let normalizedWindowSize = max(1, windowSize)
+        guard existingCount > normalizedWindowSize,
+              historyCount > normalizedWindowSize else {
+            return false
+        }
+
+        // Only trust the local prefix when it is already deep enough to cover the
+        // server prefix we are about to skip. Otherwise fall back to canonical merge.
+        return existingCount >= (historyCount - normalizedWindowSize)
+    }
+
+    // Runs history reconciliation off the main actor and cancels the worker if the caller goes away.
+    func mergeHistoryMessagesOffMainActor(
+        existing: [CodexMessage],
+        history: [CodexMessage],
+        activeThreadIDs: Set<String>,
+        runningThreadIDs: Set<String>,
+        preferRecentWindow: Bool
+    ) async throws -> [CodexMessage] {
+        let mergeTask = Task.detached(priority: .userInitiated) { () throws -> [CodexMessage] in
+            if preferRecentWindow {
+                return try Self.mergeRecentHistoryWindow(
+                    existing,
+                    history,
+                    activeThreadIDs: activeThreadIDs,
+                    runningThreadIDs: runningThreadIDs,
+                    windowSize: RunningThreadHistoryCatchupPolicy.recentMergeWindow
+                )
+            }
+
+            return try Self.mergeHistoryMessages(
+                existing,
+                history,
+                activeThreadIDs: activeThreadIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+        }
+
+        return try await withTaskCancellationHandler {
+            try await mergeTask.value
+        } onCancel: {
+            mergeTask.cancel()
+        }
+    }
+
     // Decodes thread/read(includeTurns=true) payload into chronological message timeline.
     func decodeMessagesFromThreadRead(threadId: String, threadObject: [String: JSONValue]) -> [CodexMessage] {
         let baseDate = decodeHistoryBaseDate(from: threadObject)
@@ -20,6 +76,7 @@ extension CodexService {
             guard let turnObject = turnValue.objectValue else { continue }
             let turnID = turnObject["id"]?.stringValue
             let turnTimestamp = decodeHistoryTimestamp(from: turnObject)
+            let turnCompleted = isCompletedHistoryTurn(turnObject)
             let items = turnObject["items"]?.arrayValue ?? []
 
             for itemValue in items {
@@ -185,6 +242,7 @@ extension CodexService {
                     )
 
                 case "plan":
+                    let decodedPlanState = decodeHistoryPlanState(from: itemObject)
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
@@ -194,7 +252,10 @@ extension CodexService {
                         turnId: turnID,
                         itemId: itemID,
                         createdAt: timestamp,
-                        planState: decodeHistoryPlanState(from: itemObject)
+                        planState: finalizedHistoryPlanState(decodedPlanState, turnCompleted: turnCompleted),
+                        planPresentation: itemID == nil
+                            ? .progress
+                            : (turnCompleted ? .resultReady : .resultClosed)
                     )
 
                 case let collabType where collabType == "collabagenttoolcall"
@@ -350,6 +411,7 @@ extension CodexService {
                     payloadDataURL: payloadDataURL,
                     sourceURL: sourceURL
                 )
+                .sanitizedForStorage(preservingPayloadDataURL: false)
             )
         }
 
@@ -359,7 +421,7 @@ extension CodexService {
     func mergeHistoryMessages(_ existing: [CodexMessage], _ history: [CodexMessage]) -> [CodexMessage] {
         let activeThreadIDs = Set(activeTurnIdByThread.keys)
         let runningIDs = runningThreadIDs
-        return Self.mergeHistoryMessages(existing, history, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
+        return (try? Self.mergeHistoryMessages(existing, history, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)) ?? existing
     }
 
     nonisolated static func mergeHistoryMessages(
@@ -367,7 +429,7 @@ extension CodexService {
         _ history: [CodexMessage],
         activeThreadIDs: Set<String>,
         runningThreadIDs: Set<String>
-    ) -> [CodexMessage] {
+    ) throws -> [CodexMessage] {
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
             // so that the stable sort preserves server-provided chronology.
@@ -379,8 +441,19 @@ extension CodexService {
         }
 
         var merged = existing
+        let assistantHistoryCountByTurn = Dictionary(
+            grouping: history.filter { $0.role == .assistant }
+        ) { $0.turnId ?? "" }
+        .mapValues(\.count)
+        var processedHistoryMessages = 0
 
         for message in history {
+            processedHistoryMessages &+= 1
+            if processedHistoryMessages.isMultiple(of: RunningThreadHistoryCatchupPolicy.cancellationCheckInterval),
+               Task.isCancelled {
+                throw CancellationError()
+            }
+
             if message.role == .assistant,
                let turnId = message.turnId, !turnId.isEmpty,
                let index = merged.lastIndex(where: { candidate in
@@ -436,15 +509,47 @@ extension CodexService {
                 continue
             }
 
+            let threadIsStillActive = activeThreadIDs.contains(message.threadId)
+                || runningThreadIDs.contains(message.threadId)
+
+            // After a turn is fully closed, thread/read can return the same single assistant
+            // reply with canonical text or a different stable item id. Reconcile that row
+            // instead of appending a second final bubble.
+            if message.role == .assistant,
+               let turnId = message.turnId, !turnId.isEmpty,
+               !threadIsStillActive,
+               assistantHistoryCountByTurn[turnId] == 1 {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .assistant
+                        && candidate.turnId == turnId
+                        && !candidate.isStreaming
+                }
+
+                if candidateIndices.count == 1,
+                   let index = candidateIndices.last {
+                    if shouldReplaceClosedAssistantMessage(
+                        merged[index],
+                        with: message
+                    ) {
+                        merged[index] = reconcileExistingMessage(
+                            merged[index],
+                            with: message,
+                            activeThreadIDs: activeThreadIDs,
+                            runningThreadIDs: runningThreadIDs
+                        )
+                    }
+                    continue
+                }
+            }
+
             if message.role == .user,
                let turnId = message.turnId, !turnId.isEmpty,
-               let index = merged.lastIndex(where: { candidate in
-                   candidate.role == .user
-                       && candidate.deliveryState != .failed
-                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
-                       && attachmentSignature(for: candidate.attachments) == attachmentSignature(for: message.attachments)
-                       && (candidate.turnId == nil || candidate.turnId == turnId)
-               }) {
+               let index = uniqueUserHistoryMergeIndex(
+                   in: merged,
+                   message: message,
+                   turnId: turnId
+               ) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
@@ -566,12 +671,10 @@ extension CodexService {
             }
 
             if message.role == .user,
-               let pendingIndex = merged.lastIndex(where: { candidate in
-                   candidate.role == .user
-                       && candidate.deliveryState == .pending
-                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
-                       && attachmentSignature(for: candidate.attachments) == attachmentSignature(for: message.attachments)
-               }) {
+               let pendingIndex = uniquePendingUserHistoryMergeIndex(
+                   in: merged,
+                   message: message
+               ) {
                 merged[pendingIndex] = reconcileExistingMessage(merged[pendingIndex], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
@@ -581,6 +684,45 @@ extension CodexService {
 
         merged.sort(by: { $0.orderIndex < $1.orderIndex })
         return merged
+    }
+
+    // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
+    // does not repeatedly reconcile the entire chat while output is still streaming.
+    nonisolated static func mergeRecentHistoryWindow(
+        _ existing: [CodexMessage],
+        _ history: [CodexMessage],
+        activeThreadIDs: Set<String>,
+        runningThreadIDs: Set<String>,
+        windowSize: Int
+    ) throws -> [CodexMessage] {
+        let normalizedWindowSize = max(1, windowSize)
+        guard !existing.isEmpty,
+              shouldPreferRecentHistoryWindow(
+                existingCount: existing.count,
+                historyCount: history.count,
+                windowSize: normalizedWindowSize
+              ) else {
+            return try mergeHistoryMessages(
+                existing,
+                history,
+                activeThreadIDs: activeThreadIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+        }
+
+        let prefixCount = max(existing.count - normalizedWindowSize, 0)
+        let stablePrefix = Array(existing.prefix(prefixCount))
+        let recentExisting = Array(existing.suffix(normalizedWindowSize))
+        let recentHistory = Array(history.suffix(normalizedWindowSize))
+        let mergedTail = try mergeHistoryMessages(
+            recentExisting,
+            recentHistory,
+            activeThreadIDs: activeThreadIDs,
+            runningThreadIDs: runningThreadIDs
+        )
+        let boundaryOverlapKeys = Set(stablePrefix.suffix(32).map(Self.historyMessageKey))
+        let filteredTail = mergedTail.filter { !boundaryOverlapKeys.contains(historyMessageKey(for: $0)) }
+        return stablePrefix + filteredTail
     }
 
     func decodeHistoryTimestamp(from object: [String: JSONValue]) -> Date? {
@@ -825,12 +967,124 @@ extension CodexService {
         return incomingText
     }
 
+    // Closed-turn snapshots are only allowed to replace the visible assistant reply
+    // when they are clearly the same message and at least as complete.
+    nonisolated static func shouldReplaceClosedAssistantMessage(
+        _ localMessage: CodexMessage,
+        with serverMessage: CodexMessage
+    ) -> Bool {
+        let localText = normalizedMessageText(localMessage.text)
+        let serverText = normalizedMessageText(serverMessage.text)
+
+        guard !serverText.isEmpty else {
+            return false
+        }
+
+        if localText.isEmpty || localText == serverText {
+            return true
+        }
+
+        return serverText.count > localText.count && serverText.hasPrefix(localText)
+    }
+
     nonisolated static func attachmentSignature(for attachments: [CodexImageAttachment]) -> String {
         attachments
-            .map { attachment in
-                attachment.payloadDataURL ?? attachment.sourceURL ?? attachment.thumbnailBase64JPEG
-            }
+            .map(\.stableIdentityKey)
             .joined(separator: "|")
+    }
+
+    nonisolated static func fileMentionsSignature(for fileMentions: [String]) -> String {
+        fileMentions
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+            .sorted()
+            .joined(separator: "|")
+    }
+
+    nonisolated static func userMessageMetadataLooksCompatible(
+        localMessage: CodexMessage,
+        serverMessage: CodexMessage
+    ) -> Bool {
+        let localFileMentions = fileMentionsSignature(for: localMessage.fileMentions)
+        let serverFileMentions = fileMentionsSignature(for: serverMessage.fileMentions)
+        if !localFileMentions.isEmpty,
+           !serverFileMentions.isEmpty,
+           localFileMentions != serverFileMentions {
+            return false
+        }
+
+        let localAttachments = attachmentSignature(for: localMessage.attachments)
+        let serverAttachments = attachmentSignature(for: serverMessage.attachments)
+        if !localAttachments.isEmpty,
+           !serverAttachments.isEmpty,
+           localAttachments != serverAttachments {
+            return false
+        }
+
+        return true
+    }
+
+    nonisolated static func shouldReconcileUserHistoryMessage(
+        _ candidate: CodexMessage,
+        with message: CodexMessage,
+        turnId: String
+    ) -> Bool {
+        guard candidate.role == .user,
+              candidate.deliveryState != .failed,
+              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
+              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+            return false
+        }
+
+        let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+        return candidateTurnId == nil || candidateTurnId == turnId
+    }
+
+    nonisolated static func shouldReconcilePendingUserHistoryMessage(
+        _ candidate: CodexMessage,
+        with message: CodexMessage
+    ) -> Bool {
+        guard candidate.role == .user,
+              candidate.deliveryState == .pending,
+              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
+              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+            return false
+        }
+
+        return true
+    }
+
+    nonisolated static func uniqueUserHistoryMergeIndex(
+        in merged: [CodexMessage],
+        message: CodexMessage,
+        turnId: String
+    ) -> Int? {
+        // Keep intentionally repeated sends separate when more than one local row fits.
+        let matchingIndices = merged.indices.filter { index in
+            shouldReconcileUserHistoryMessage(merged[index], with: message, turnId: turnId)
+        }
+
+        guard matchingIndices.count == 1 else {
+            return nil
+        }
+
+        return matchingIndices[0]
+    }
+
+    nonisolated static func uniquePendingUserHistoryMergeIndex(
+        in merged: [CodexMessage],
+        message: CodexMessage
+    ) -> Int? {
+        // Pending rows are especially easy to confuse during phone-started turns.
+        let matchingIndices = merged.indices.filter { index in
+            shouldReconcilePendingUserHistoryMessage(merged[index], with: message)
+        }
+
+        guard matchingIndices.count == 1 else {
+            return nil
+        }
+
+        return matchingIndices[0]
     }
 
     func normalizedItemType(_ rawType: String) -> String {
@@ -894,6 +1148,7 @@ extension CodexService {
         createdAt: Date,
         attachments: [CodexImageAttachment] = [],
         planState: CodexPlanState? = nil,
+        planPresentation: CodexPlanPresentation? = nil,
         subagentAction: CodexSubagentAction? = nil
     ) {
         guard !text.isEmpty || !attachments.isEmpty || subagentAction != nil else {
@@ -913,6 +1168,8 @@ extension CodexService {
                 deliveryState: .confirmed,
                 attachments: attachments,
                 planState: planState,
+                planPresentation: planPresentation,
+                proposedPlan: role == .assistant ? CodexProposedPlanParser.parse(from: text) : nil,
                 subagentAction: subagentAction
             )
         )
@@ -1000,7 +1257,7 @@ extension CodexService {
             guard let stepObject = stepValue.objectValue,
                   let step = decodeHistoryNormalizedPlanText(stepObject["step"]),
                   let rawStatus = decodeHistoryNormalizedPlanText(stepObject["status"]),
-                  let status = CodexPlanStepStatus(rawValue: rawStatus) else {
+                  let status = CodexPlanStepStatus(wireValue: rawStatus) else {
                 return nil
             }
 
@@ -1012,6 +1269,40 @@ extension CodexService {
         }
 
         return CodexPlanState(explanation: explanation, steps: steps)
+    }
+
+    // Closed turns should not restore a stale "active" plan accessory from history.
+    func finalizedHistoryPlanState(_ planState: CodexPlanState?, turnCompleted: Bool) -> CodexPlanState? {
+        guard turnCompleted,
+              let planState,
+              !planState.steps.isEmpty,
+              planState.steps.contains(where: { $0.status != .completed }) else {
+            return planState
+        }
+
+        return CodexPlanState(
+            explanation: planState.explanation,
+            steps: planState.steps.map { step in
+                CodexPlanStep(id: step.id, step: step.step, status: .completed)
+            }
+        )
+    }
+
+    func isCompletedHistoryTurn(_ turnObject: [String: JSONValue]) -> Bool {
+        let statusObject = turnObject["status"]?.objectValue
+        let rawStatus = firstNonEmptyString([
+            turnObject["status"]?.stringValue,
+            statusObject?["type"]?.stringValue,
+            statusObject?["statusType"]?.stringValue,
+            statusObject?["status_type"]?.stringValue,
+            turnObject["result"]?.stringValue,
+        ]) ?? ""
+
+        guard let terminalState = threadTerminalState(from: normalizeThreadStatusType(rawStatus)) else {
+            return false
+        }
+
+        return terminalState == .completed
     }
 
     // Parses collabAgentToolCall payloads into a stable summary row the timeline can render.

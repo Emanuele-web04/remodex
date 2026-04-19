@@ -19,6 +19,7 @@ struct UsageStatusSummaryContent: View {
     }
 
     let contextWindowUsage: ContextWindowUsage?
+    let showsContextWindowSection: Bool
     let rateLimitBuckets: [CodexRateLimitBucket]
     let isLoadingRateLimits: Bool
     let rateLimitsErrorMessage: String?
@@ -28,6 +29,7 @@ struct UsageStatusSummaryContent: View {
 
     init(
         contextWindowUsage: ContextWindowUsage?,
+        showsContextWindowSection: Bool = true,
         rateLimitBuckets: [CodexRateLimitBucket],
         isLoadingRateLimits: Bool,
         rateLimitsErrorMessage: String?,
@@ -36,6 +38,7 @@ struct UsageStatusSummaryContent: View {
         refreshControl: UsageStatusRefreshControl? = nil
     ) {
         self.contextWindowUsage = contextWindowUsage
+        self.showsContextWindowSection = showsContextWindowSection
         self.rateLimitBuckets = rateLimitBuckets
         self.isLoadingRateLimits = isLoadingRateLimits
         self.rateLimitsErrorMessage = rateLimitsErrorMessage
@@ -50,7 +53,7 @@ struct UsageStatusSummaryContent: View {
                 refreshButton(refreshControl)
             }
 
-            if contextPlacement == .top {
+            if showsContextWindowSection && contextPlacement == .top {
                 contextSection
             }
 
@@ -60,7 +63,7 @@ struct UsageStatusSummaryContent: View {
 
             rateLimitsSection
 
-            if contextPlacement == .bottom {
+            if showsContextWindowSection && contextPlacement == .bottom {
                 Divider()
                 contextSection
             }
@@ -70,7 +73,7 @@ struct UsageStatusSummaryContent: View {
     // ─── Shared Sections ────────────────────────────────────────
 
     private var showsDividerBeforeRateLimits: Bool {
-        guard contextPlacement == .top else { return false }
+        guard showsContextWindowSection, contextPlacement == .top else { return false }
         return !rateLimitRows.isEmpty || isLoadingRateLimits || !(rateLimitsErrorMessage?.isEmpty ?? true)
     }
 

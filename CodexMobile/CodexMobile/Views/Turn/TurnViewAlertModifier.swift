@@ -8,13 +8,14 @@ import SwiftUI
 
 private struct TurnViewAlertModifier: ViewModifier {
     @Binding var alertApprovalRequest: CodexApprovalRequest?
+    @Binding var isApprovalAlertPresented: Bool
     @Binding var isShowingNothingToCommitAlert: Bool
     @Binding var gitSyncAlert: TurnGitSyncAlert?
     @Binding var isShowingMacHandoffConfirm: Bool
     @Binding var macHandoffErrorMessage: String?
 
-    let onDeclineApproval: () -> Void
-    let onApproveApproval: () -> Void
+    let onDeclineApproval: (CodexApprovalRequest) -> Void
+    let onApproveApproval: (CodexApprovalRequest) -> Void
     let onConfirmGitSyncAction: (TurnGitSyncAlertAction) -> Void
     let onDismissGitSyncAlert: () -> Void
     let onConfirmMacHandoff: () -> Void
@@ -23,16 +24,14 @@ private struct TurnViewAlertModifier: ViewModifier {
         content
             .alert(
                 "Approval request",
-                isPresented: approvalAlertIsPresented,
+                isPresented: $isApprovalAlertPresented,
                 presenting: alertApprovalRequest
-            ) { _ in
+            ) { request in
                 Button("Decline", role: .destructive) {
-                    alertApprovalRequest = nil
-                    onDeclineApproval()
+                    onDeclineApproval(request)
                 }
                 Button("Approve") {
-                    alertApprovalRequest = nil
-                    onApproveApproval()
+                    onApproveApproval(request)
                 }
             } message: { request in
                 Text(approvalAlertMessage(for: request))
@@ -79,17 +78,6 @@ private struct TurnViewAlertModifier: ViewModifier {
             } message: {
                 Text(macHandoffErrorMessage ?? "Could not continue this chat on your Mac.")
             }
-    }
-
-    private var approvalAlertIsPresented: Binding<Bool> {
-        Binding(
-            get: { alertApprovalRequest != nil },
-            set: { isPresented in
-                if !isPresented {
-                    alertApprovalRequest = nil
-                }
-            }
-        )
     }
 
     private var gitSyncAlertIsPresented: Binding<Bool> {
@@ -149,12 +137,13 @@ private struct TurnViewAlertModifier: ViewModifier {
 extension View {
     func turnViewAlerts(
         alertApprovalRequest: Binding<CodexApprovalRequest?>,
+        isApprovalAlertPresented: Binding<Bool>,
         isShowingNothingToCommitAlert: Binding<Bool>,
         gitSyncAlert: Binding<TurnGitSyncAlert?>,
         isShowingMacHandoffConfirm: Binding<Bool>,
         macHandoffErrorMessage: Binding<String?>,
-        onDeclineApproval: @escaping () -> Void,
-        onApproveApproval: @escaping () -> Void,
+        onDeclineApproval: @escaping (CodexApprovalRequest) -> Void,
+        onApproveApproval: @escaping (CodexApprovalRequest) -> Void,
         onConfirmGitSyncAction: @escaping (TurnGitSyncAlertAction) -> Void,
         onDismissGitSyncAlert: @escaping () -> Void,
         onConfirmMacHandoff: @escaping () -> Void
@@ -162,6 +151,7 @@ extension View {
         modifier(
             TurnViewAlertModifier(
                 alertApprovalRequest: alertApprovalRequest,
+                isApprovalAlertPresented: isApprovalAlertPresented,
                 isShowingNothingToCommitAlert: isShowingNothingToCommitAlert,
                 gitSyncAlert: gitSyncAlert,
                 isShowingMacHandoffConfirm: isShowingMacHandoffConfirm,

@@ -11,6 +11,7 @@ enum AppEnvironment {
     private static let revenueCatPublicAPIKeyInfoPlistKey = "REVENUECAT_PUBLIC_API_KEY"
     private static let revenueCatEntitlementNameInfoPlistKey = "REVENUECAT_ENTITLEMENT_NAME"
     private static let revenueCatDefaultOfferingIDInfoPlistKey = "REVENUECAT_DEFAULT_OFFERING_ID"
+    private static let supportEmailAddress = "emandipietro@gmail.com"
 
     // Open-source builds should provide an explicit relay instead of silently
     // pointing at a hosted service the user does not control.
@@ -46,6 +47,17 @@ enum AppEnvironment {
     static let termsOfUseURL = URL(
         string: "https://github.com/Emanuele-web04/remodex/blob/main/Legal/TERMS_OF_USE.md"
     )!
+
+    // Powers in-app feedback actions so every entry point targets the same inbox.
+    static var feedbackMailtoURL: URL {
+        var components = URLComponents()
+        components.scheme = "mailto"
+        components.path = supportEmailAddress
+        components.queryItems = [
+            URLQueryItem(name: "subject", value: "Share Feedback on Remodex with the Developer")
+        ]
+        return components.url!
+    }
 }
 
 private extension AppEnvironment {

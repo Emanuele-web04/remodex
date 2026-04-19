@@ -94,7 +94,7 @@ struct SubscriptionGateView: View {
                     .foregroundStyle(primaryTextColor)
                     .multilineTextAlignment(.center)
 
-                Text("Remodex is subscription-only. Unlock the app to connect your iPhone to Codex running on your Mac.")
+                Text("Unlock monthly, yearly, or lifetime access to connect your iPhone to Codex running on your Mac.")
                     .font(AppFont.caption())
                     .foregroundStyle(secondaryTextColor)
                     .multilineTextAlignment(.center)
@@ -205,12 +205,12 @@ struct SubscriptionGateView: View {
             HStack(spacing: 8) {
                 ProgressView()
                     .tint(accentColor)
-                Text("Loading pricing...")
-                    .font(AppFont.caption(weight: .medium))
-                    .foregroundStyle(primaryTextColor)
+            Text("Loading pricing...")
+                .font(AppFont.caption(weight: .medium))
+                .foregroundStyle(primaryTextColor)
             }
 
-            Text("Monthly and yearly plans will appear here in a moment.")
+            Text("Monthly, yearly, and lifetime plans will appear here in a moment.")
                 .font(AppFont.caption())
                 .foregroundStyle(secondaryTextColor)
 

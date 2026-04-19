@@ -1,7 +1,7 @@
 // FILE: GitActionModels.swift
 // Purpose: Data models for git operations executed via the phodex-bridge.
 // Layer: Model
-// Exports: GitDiffTotals, GitChangedFile, GitRepoSyncResult, GitRepoDiffResult, GitCommitResult, GitPushResult, GitBranchesResult, GitCreateBranchResult, GitCreateWorktreeResult, GitCheckoutResult, GitPullResult, GitResetResult, TurnGitActionKind, TurnGitSyncAlert, TurnGitSyncAlertButton, TurnGitSyncAlertAction
+// Exports: GitDiffTotals, GitChangedFile, GitRepoSyncResult, GitRepoDiffResult, GitCommitResult, GitPushResult, GitBranchesResult, GitCreateBranchResult, GitCreateWorktreeResult, GitCreateManagedWorktreeResult, GitManagedHandoffTransferResult, GitCheckoutResult, GitPullResult, GitResetResult, TurnGitActionKind, TurnGitSyncAlert, TurnGitSyncAlertButton, TurnGitSyncAlertAction
 // Depends on: JSONValue
 
 import Foundation
@@ -11,6 +11,18 @@ import Foundation
 enum GitWorktreeChangeTransferMode: String, Equatable, Sendable {
     case move
     case copy
+    case none
+
+    var transferVerb: String? {
+        switch self {
+        case .move:
+            return "move"
+        case .copy:
+            return "copy"
+        case .none:
+            return nil
+        }
+    }
 }
 
 struct GitDiffTotals: Equatable, Sendable {
@@ -172,6 +184,34 @@ struct GitCreateWorktreeResult: Sendable {
         self.branch = json["branch"]?.stringValue ?? ""
         self.worktreePath = json["worktreePath"]?.stringValue ?? ""
         self.alreadyExisted = json["alreadyExisted"]?.boolValue ?? false
+    }
+}
+
+struct GitCreateManagedWorktreeResult: Sendable {
+    let worktreePath: String
+    let alreadyExisted: Bool
+    let baseBranch: String
+    let headMode: String
+    let transferredChanges: Bool
+
+    init(from json: [String: JSONValue]) {
+        self.worktreePath = json["worktreePath"]?.stringValue ?? ""
+        self.alreadyExisted = json["alreadyExisted"]?.boolValue ?? false
+        self.baseBranch = json["baseBranch"]?.stringValue ?? ""
+        self.headMode = json["headMode"]?.stringValue ?? ""
+        self.transferredChanges = json["transferredChanges"]?.boolValue ?? false
+    }
+}
+
+struct GitManagedHandoffTransferResult: Sendable {
+    let success: Bool
+    let targetPath: String?
+    let transferredChanges: Bool
+
+    init(from json: [String: JSONValue]) {
+        self.success = json["success"]?.boolValue ?? false
+        self.targetPath = json["targetPath"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.transferredChanges = json["transferredChanges"]?.boolValue ?? false
     }
 }
 

@@ -8,6 +8,7 @@ import SwiftUI
 import UIKit
 
 struct TurnComposerInputTextView: UIViewRepresentable {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var text: String
     @Binding var isFocused: Bool
     let isEditable: Bool
@@ -18,7 +19,6 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
     private let minVisibleLines: CGFloat = 1
     private let maxVisibleLines: CGFloat = 4
-
     func makeUIView(context: Context) -> TurnComposerPasteInterceptingTextView {
         let textView = TurnComposerPasteInterceptingTextView(frame: .zero, textContainer: nil)
         textView.delegate = context.coordinator
@@ -27,6 +27,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         textView.textColor = UIColor.label
         textView.typingAttributes[.font] = composerUIFont()
         textView.typingAttributes[.foregroundColor] = UIColor.label
+        textView.adjustsFontForContentSizeCategory = true
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
@@ -68,6 +69,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         uiView.font = composerUIFont()
         uiView.typingAttributes[.font] = composerUIFont()
         uiView.typingAttributes[.foregroundColor] = UIColor.label
+        uiView.adjustsFontForContentSizeCategory = true
+        uiView.textContainerInset = .zero
         uiView.textContainer.widthTracksTextView = true
         // Preserve internal scrolling without letting composer drags dismiss the keyboard.
         uiView.keyboardDismissMode = .none
@@ -96,11 +99,9 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     // Keeps the composer aligned with the app's normal body sizing instead of
     // the smaller ad hoc size that made the input feel visually detached.
     private func composerUIFont() -> UIFont {
-        let composerFontSize: CGFloat = 15
-        if AppFont.currentStyle == .system {
-            return UIFont.systemFont(ofSize: composerFontSize)
-        }
-        return AppFont.uiFont(size: composerFontSize, textStyle: .body)
+        // Read the SwiftUI environment so UIKit gets refreshed when Dynamic Type changes.
+        let _ = dynamicTypeSize
+        return AppFont.uiFont(size: 15, textStyle: .body)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
@@ -159,6 +160,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
         fileprivate func updateHeight(for textView: UITextView) {
             textView.layoutIfNeeded()
+            textView.layoutManager.ensureLayout(for: textView.textContainer)
             let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
             let minHeight = lineHeight * minVisibleLines
             let maxHeight = lineHeight * maxVisibleLines
@@ -174,6 +176,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 measured = textView.sizeThatFits(fitSize).height
             }
             let clamped = min(max(measured, minHeight), maxHeight)
+            normalizeViewport(in: textView, shouldScroll: shouldScroll)
 
             if abs(dynamicHeight.wrappedValue - clamped) > 0.5 {
                 scheduleHeightCommit(clamped)
@@ -212,6 +215,41 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 let caretRect = textView.caretRect(for: selectionEnd).insetBy(dx: 0, dy: -8)
                 textView.scrollRectToVisible(caretRect, animated: false)
             }
+        }
+
+        // Resets/clamps the text viewport after Return inserts can nudge UITextView
+        // into a stale offset even when the full composer content still fits.
+        private func normalizeViewport(in textView: UITextView, shouldScroll: Bool) {
+            let adjustedInset = textView.adjustedContentInset
+            let minOffset = CGPoint(x: -adjustedInset.left, y: -adjustedInset.top)
+
+            guard shouldScroll else {
+                guard
+                    abs(textView.contentOffset.x - minOffset.x) > 0.5
+                        || abs(textView.contentOffset.y - minOffset.y) > 0.5
+                else {
+                    return
+                }
+                textView.setContentOffset(minOffset, animated: false)
+                return
+            }
+
+            let maxYOffset = max(
+                minOffset.y,
+                textView.contentSize.height - textView.bounds.height + adjustedInset.bottom
+            )
+            let clampedOffset = CGPoint(
+                x: minOffset.x,
+                y: min(max(textView.contentOffset.y, minOffset.y), maxYOffset)
+            )
+
+            guard
+                abs(textView.contentOffset.x - clampedOffset.x) > 0.5
+                    || abs(textView.contentOffset.y - clampedOffset.y) > 0.5
+            else {
+                return
+            }
+            textView.setContentOffset(clampedOffset, animated: false)
         }
 
         fileprivate func syncFocusIfNeeded(
@@ -262,6 +300,24 @@ final class TurnComposerPasteInterceptingTextView: UITextView {
     // Without this, SwiftUI uses the full text width as the ideal size.
     override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric, height: super.intrinsicContentSize.height)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+
+        guard !isScrollEnabled else { return }
+
+        let pinnedOffset = CGPoint(
+            x: -adjustedContentInset.left,
+            y: -adjustedContentInset.top
+        )
+        guard
+            abs(contentOffset.x - pinnedOffset.x) > 0.5
+                || abs(contentOffset.y - pinnedOffset.y) > 0.5
+        else {
+            return
+        }
+        contentOffset = pinnedOffset
     }
 
     // Adds the shared runtime controls directly into the text edit menu.

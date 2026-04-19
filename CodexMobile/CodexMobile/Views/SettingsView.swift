@@ -59,6 +59,18 @@ struct SettingsView: View {
         )
     }
 
+    private var keepMacAwakeWhileBridgeRunsBinding: Binding<Bool> {
+        Binding(
+            get: { codex.keepMacAwakeWhileBridgeRuns },
+            set: { nextValue in
+                codex.setKeepMacAwakeWhileBridgeRunsPreference(nextValue)
+                Task { @MainActor in
+                    await codex.syncBridgeKeepMacAwakePreferenceIfNeeded(showFailureInUI: true)
+                }
+            }
+        )
+    }
+
     // MARK: - Runtime defaults
 
     @ViewBuilder private var runtimeDefaultsSection: some View {
@@ -160,6 +172,23 @@ struct SettingsView: View {
                 Text(error)
                     .font(AppFont.caption())
                     .foregroundStyle(.red)
+            }
+
+            Divider()
+
+            Toggle("Keep Mac reachable", isOn: keepMacAwakeWhileBridgeRunsBinding)
+                .tint(settingsAccentColor)
+
+            Text(codex.keepMacAwakeWhileBridgeRuns
+                 ? "Uses macOS caffeinate while the bridge is running so your Mac stays reachable even if the display turns off. Best while charging."
+                 : "Your Mac can go back to sleeping normally when the bridge is idle.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+
+            if !codex.isConnected {
+                Text("Saved on this iPhone. It will sync to your Mac the next time the bridge reconnects.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
             }
 
             if codex.isConnected {
@@ -293,11 +322,11 @@ private struct SettingsSubscriptionCard: View {
             }
 
             if subscriptions.hasProAccess {
-                Text("Your Pro access is active. You can still restore purchases or manage your subscription from Apple.")
+                Text("Your Pro access is active. You can still restore purchases or manage the purchase from Apple.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             } else {
-                Text("Open the custom paywall to choose a monthly or yearly plan.")
+                Text("Open the custom paywall to choose a monthly, yearly, or lifetime plan.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
             }
@@ -395,23 +424,17 @@ private struct SettingsUsageCard: View {
     var body: some View {
         SettingsCard(title: "Usage") {
             UsageStatusSummaryContent(
-                contextWindowUsage: activeThreadContextWindowUsage,
+                contextWindowUsage: nil,
+                showsContextWindowSection: false,
                 rateLimitBuckets: codex.rateLimitBuckets,
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage,
-                contextPlacement: .bottom,
                 refreshControl: UsageStatusRefreshControl(
                     title: "Refresh",
                     isRefreshing: isRefreshing,
                     action: refreshStatus
                 )
             )
-
-            if activeThreadID == nil {
-                Text("Open a chat to populate the current thread context window here.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
         }
         .task {
             await refreshStatusIfNeeded()
@@ -422,24 +445,6 @@ private struct SettingsUsageCard: View {
                 await refreshStatusIfNeeded()
             }
         }
-        .onChange(of: activeThreadID) { _, _ in
-            Task {
-                await refreshStatusIfNeeded()
-            }
-        }
-    }
-
-    private var activeThreadID: String? {
-        let trimmed = codex.activeThreadId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let trimmed, !trimmed.isEmpty {
-            return trimmed
-        }
-        return nil
-    }
-
-    private var activeThreadContextWindowUsage: ContextWindowUsage? {
-        guard let activeThreadID else { return nil }
-        return codex.contextWindowUsageByThread[activeThreadID]
     }
 
     private func refreshStatus() {
@@ -457,7 +462,7 @@ private struct SettingsUsageCard: View {
 
     private func refreshStatusIfNeeded() async {
         guard !isRefreshing else { return }
-        guard codex.shouldAutoRefreshUsageStatus(threadId: activeThreadID) else { return }
+        guard codex.shouldAutoRefreshUsageStatus(threadId: nil) else { return }
 
         await MainActor.run {
             isRefreshing = true
@@ -468,9 +473,9 @@ private struct SettingsUsageCard: View {
         }
     }
 
-    // Loads account-wide windows globally and thread context from the active chat when available.
+    // Settings only needs the account-wide usage windows.
     private func refreshStatusData() async {
-        await codex.refreshUsageStatus(threadId: activeThreadID)
+        await codex.refreshUsageStatus(threadId: nil)
     }
 }
 
@@ -577,128 +582,36 @@ private struct SettingsNotificationsCard: View {
 }
 
 private struct SettingsGPTAccountCard: View {
-    @Environment(CodexService.self) private var codex
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var isLoggingOut = false
     @State private var isShowingMacLoginInfo = false
 
     var body: some View {
-        let snapshot = codex.gptAccountSnapshot
-
-        SettingsCard(title: "ChatGPT") {
-            HStack(spacing: 10) {
-                Image(systemName: statusIconName(for: snapshot))
-                    .foregroundStyle(statusIconColor(for: snapshot))
-                Text("Status")
-                Spacer()
-                SettingsStatusPill(label: snapshot.statusLabel)
-            }
-
-            if let detail = snapshot.detailText {
-                Text(detail)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-
-            if let hint = hintText(for: snapshot) {
-                Text(hint)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-
-            if let errorMessage = codex.gptAccountErrorMessage,
-               !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(errorMessage)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.red)
-            }
-
-            // Keeps the reauth state compact while preserving access to the Mac sign-in explainer.
-            if !snapshot.isAuthenticated {
-                HStack {
+        SettingsCard(title: "ChatGPT voice mode") {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                isShowingMacLoginInfo = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .font(AppFont.subheadline(weight: .medium))
+                    Text("Info")
+                        .font(AppFont.subheadline(weight: .medium))
                     Spacer()
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        isShowingMacLoginInfo = true
-                    } label: {
-                        Image(systemName: "info.circle")
-                            .font(AppFont.subheadline(weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("How ChatGPT voice sign-in works")
+                    Image(systemName: "chevron.right")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.tertiary)
                 }
+                .foregroundStyle(.primary)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                )
             }
-
-            if snapshot.canLogout {
-                SettingsButton("Log out", role: .destructive, isLoading: isLoggingOut) {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    logout()
-                }
-            }
-        }
-        .task {
-            await codex.refreshGPTAccountState()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            Task {
-                await codex.refreshGPTAccountState()
-            }
+            .buttonStyle(.plain)
         }
         .sheet(isPresented: $isShowingMacLoginInfo) {
             GPTVoiceSetupSheet()
-        }
-    }
-
-    private func hintText(for snapshot: CodexGPTAccountSnapshot) -> String? {
-        if snapshot.needsReauth { return "Voice on this bridge needs a fresh ChatGPT sign-in on your Mac." }
-        if snapshot.isAuthenticated && snapshot.isVoiceTokenReady { return nil }
-        if snapshot.isAuthenticated { return "Waiting for voice sync..." }
-        if snapshot.hasActiveLogin && codex.isConnected { return "Finish the ChatGPT sign-in flow in the browser on your Mac." }
-        if snapshot.hasActiveLogin { return "Reconnect to your bridge to finish sign-in on your Mac." }
-        if !codex.isConnected { return "Connect to your bridge first." }
-        return "ChatGPT voice uses the account already signed in on your Mac."
-    }
-
-    private func statusIconName(for snapshot: CodexGPTAccountSnapshot) -> String {
-        switch snapshot.status {
-        case .authenticated:
-            return snapshot.needsReauth ? "exclamationmark.triangle.fill" : "checkmark.shield.fill"
-        case .loginPending:
-            return "arrow.up.forward.app.fill"
-        case .expired:
-            return "exclamationmark.triangle.fill"
-        case .notLoggedIn, .unknown:
-            return "person.crop.circle.badge.plus"
-        case .unavailable:
-            return "wifi.slash"
-        }
-    }
-
-    private func statusIconColor(for snapshot: CodexGPTAccountSnapshot) -> Color {
-        switch snapshot.status {
-        case .authenticated:
-            return snapshot.needsReauth ? .orange : .green
-        case .loginPending:
-            return .orange
-        case .expired:
-            return .red
-        case .notLoggedIn, .unknown, .unavailable:
-            return .secondary
-        }
-    }
-
-    private func logout() {
-        guard !isLoggingOut else { return }
-        isLoggingOut = true
-        codex.gptAccountErrorMessage = nil
-
-        Task { @MainActor in
-            await codex.logoutGPTAccount()
-            await codex.refreshGPTAccountState()
-            isLoggingOut = false
         }
     }
 }

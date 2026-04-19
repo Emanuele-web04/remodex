@@ -157,6 +157,42 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
+    func testManualWebSocketClosePayloadPreservesRetryableRelayCode() {
+        let service = CodexService()
+        let closeCode = service.relayCloseCode(
+            fromManualWebSocketClosePayload: Data([0x0F, 0xA2])
+        )
+
+        XCTAssertEqual(service.relayCloseCodeRawValue(closeCode), 4002)
+    }
+
+    func testManualWebSocketCloseFrameUsesRetryableRelayRecovery() async throws {
+        let service = CodexService()
+        let connection = NWConnection(
+            host: NWEndpoint.Host("localhost"),
+            port: NWEndpoint.Port(rawValue: 80)!,
+            using: NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
+        )
+        service.relaySessionId = "session-\(UUID().uuidString)"
+        service.relayUrl = "ws://mac.local/relay"
+        service.isConnected = true
+        service.isInitialized = true
+        service.setForegroundState(true)
+        service.manualWebSocketReadBuffer = Data([0x88, 0x02, 0x0F, 0xA2])
+
+        let didHandleClose = try await service.drainManualWebSocketFrames(on: connection)
+
+        XCTAssertTrue(didHandleClose)
+        XCTAssertFalse(service.isConnected)
+        XCTAssertFalse(service.isInitialized)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
+        XCTAssertEqual(
+            service.lastErrorMessage,
+            "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
+        )
+    }
+
     func testLanAddressStillRequiresLocalNetworkAuthorization() {
         let service = CodexService()
         let url = URL(string: "ws://192.168.1.31:9000/relay/session")!

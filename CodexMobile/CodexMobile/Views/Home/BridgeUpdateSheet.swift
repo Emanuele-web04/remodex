@@ -29,50 +29,59 @@ struct BridgeUpdateSheet: View {
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Run this on your Mac")
-                        .font(AppFont.caption(weight: .semibold))
-                        .foregroundStyle(.secondary)
+                    if let command = prompt.command, !command.isEmpty {
+                        Text("Run this on your Mac")
+                            .font(AppFont.caption(weight: .semibold))
+                            .foregroundStyle(.secondary)
 
-                    HStack(spacing: 12) {
-                        Text(prompt.command)
-                            .font(AppFont.mono(.subheadline))
-                            .foregroundStyle(.primary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: 12) {
+                            Text(command)
+                                .font(AppFont.mono(.subheadline))
+                                .foregroundStyle(.primary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
 
-                        Button {
-                            UIPasteboard.general.string = prompt.command
-                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                didCopyCommand = true
-                            }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            Button {
+                                UIPasteboard.general.string = command
+                                HapticFeedback.shared.triggerImpactFeedback(style: .light)
                                 withAnimation(.easeInOut(duration: 0.2)) {
-                                    didCopyCommand = false
+                                    didCopyCommand = true
                                 }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        didCopyCommand = false
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: didCopyCommand ? "checkmark" : "doc.on.doc")
+                                        .font(.system(size: 13, weight: .semibold))
+                                    Text(didCopyCommand ? "Copied" : "Copy")
+                                        .font(AppFont.caption(weight: .semibold))
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(Color(.secondarySystemFill), in: Capsule())
                             }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: didCopyCommand ? "checkmark" : "doc.on.doc")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text(didCopyCommand ? "Copied" : "Copy")
-                                    .font(AppFont.caption(weight: .semibold))
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .background(Color(.secondarySystemFill), in: Capsule())
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Copy bridge update command")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Copy bridge update command")
+                        .padding(14)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color(.tertiarySystemFill).opacity(0.75))
+                        )
+                    } else {
+                        Text("Install the latest Remodex build on this iPhone, then come back here and reconnect.")
+                            .font(AppFont.body())
+                            .foregroundStyle(.secondary)
                     }
-                    .padding(14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .fill(Color(.tertiarySystemFill).opacity(0.75))
-                    )
                 }
 
-                Text("After the package finishes updating, restart the bridge on your Mac and come back here.")
+                Text(prompt.command == nil
+                    ? "After the app finishes updating on your iPhone, reconnect to the Mac bridge."
+                    : "After the package finishes updating, restart the bridge on your Mac and come back here."
+                )
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 

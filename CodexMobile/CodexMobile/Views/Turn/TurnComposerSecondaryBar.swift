@@ -110,7 +110,7 @@ struct TurnComposerSecondaryBar: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .adaptiveGlass(.regular, in: Capsule())
-            .foregroundStyle(selectedAccessMode == .fullAccess ? .orange : branchLabelColor)
+            .foregroundStyle(branchLabelColor)
             .contentShape(Capsule())
         }
         .tint(branchLabelColor)
@@ -134,8 +134,8 @@ struct TurnComposerSecondaryBar: View {
                 } label: {
                     CodexWorktreeMenuLabelRow(
                         title: isCreatingGitWorktree
-                            ? "Creating worktree..."
-                            : isEmptyThread ? "New worktree" : "Hand off to worktree",
+                            ? "Preparing worktree..."
+                            : isWorktreeProject ? "Hand off to Local" : isEmptyThread ? "New worktree" : "Hand off to Worktree",
                         pointSize: 12,
                         weight: .regular
                     )

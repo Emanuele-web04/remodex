@@ -19,7 +19,8 @@ enum TurnTimelineReducer {
         let reordered = enforceIntraTurnOrder(in: visibleMessages)
         let collapsedThinking = collapseThinkingMessages(in: reordered)
         let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
-        let dedupedFileChanges = removeDuplicateFileChangeMessages(in: withoutCommandThinkingEchoes)
+        let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandThinkingEchoes)
+        let dedupedFileChanges = removeDuplicateFileChangeMessages(in: dedupedUsers)
         let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
         let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
         return TurnTimelineProjection(messages: dedupedAssistant)
@@ -45,7 +46,8 @@ enum TurnTimelineReducer {
     //
     // Multi-item turns (thinking/tool activity → response → more activity → response) are
     // detected by checking whether activity arrives on BOTH sides of an assistant row. When
-    // detected, only user messages are floated to the top; the interleaved flow is preserved.
+    // detected, only the original turn-opening user can be floated forward. Later user
+    // steer prompts must stay in-place so they do not jump above already-rendered output.
     static func enforceIntraTurnOrder(in messages: [CodexMessage]) -> [CodexMessage] {
         // Collect indices belonging to each turnId (may be scattered across the array).
         var indicesByTurn: [String: [Int]] = [:]
@@ -62,13 +64,32 @@ enum TurnTimelineReducer {
             let turnMessages = indices.map { result[$0] }
 
             let sorted: [CodexMessage]
-            if hasInterleavedAssistantActivityFlow(turnMessages) {
-                // Multi-item turn: only ensure user messages precede all others.
-                // Preserve the interleaved activity → response → activity → response order.
+            if hasInterleavedUserFlow(turnMessages) {
+                // Steer can append a later user row into the still-active turn before the
+                // assistant emits another distinct item. Preserve chronology so that user
+                // prompt stays visible near the tail instead of jumping to the turn start.
+                sorted = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+            } else if hasInterleavedAssistantActivityFlow(turnMessages) {
+                // Multi-item turn: keep the streamed interleaving intact. If the turn has
+                // only one user prompt, we can still float that original opener forward.
+                // Once a second user row exists, treat it as an in-turn steer and preserve
+                // full chronological order so it stays near the bottom of the active run.
+                let userCount = turnMessages.reduce(into: 0) { partialResult, message in
+                    if message.role == .user {
+                        partialResult += 1
+                    }
+                }
+                let openingUserID = userCount == 1
+                    ? turnMessages
+                        .filter { $0.role == .user }
+                        .min(by: { $0.orderIndex < $1.orderIndex })?
+                        .id
+                    : nil
+
                 sorted = turnMessages.sorted { a, b in
-                    let aIsUser = a.role == .user
-                    let bIsUser = b.role == .user
-                    if aIsUser != bIsUser { return aIsUser }
+                    let aIsOpeningUser = openingUserID != nil && a.id == openingUserID
+                    let bIsOpeningUser = openingUserID != nil && b.id == openingUserID
+                    if aIsOpeningUser != bIsOpeningUser { return aIsOpeningUser }
                     return a.orderIndex < b.orderIndex
                 }
             } else {
@@ -88,6 +109,25 @@ enum TurnTimelineReducer {
         }
 
         return result
+    }
+
+    // Detects steer-like flows where a later user prompt is appended inside the same turn.
+    // In those cases the original event order is authoritative for rendering.
+    private static func hasInterleavedUserFlow(_ turnMessages: [CodexMessage]) -> Bool {
+        let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+        var seenNonUser = false
+
+        for message in ordered {
+            if message.role == .user {
+                if seenNonUser {
+                    return true
+                }
+            } else {
+                seenNonUser = true
+            }
+        }
+
+        return false
     }
 
     // Detects multi-item turns where visible system activity appears on BOTH sides of an
@@ -419,6 +459,129 @@ enum TurnTimelineReducer {
         return command.isEmpty ? nil : command
     }
 
+    // Collapses optimistic phone-send rows with their confirmed runtime echoes so
+    // a locally-started turn does not render duplicate user prompts.
+    static func removeDuplicateUserMessages(in messages: [CodexMessage]) -> [CodexMessage] {
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for message in messages {
+            guard message.role == .user else {
+                result.append(message)
+                continue
+            }
+
+            // Only fold the phone-send echo when there is a single clear local source row.
+            let matchingIndices = result.indices.reversed().filter { index in
+                shouldMergeUserMessages(previous: result[index], incoming: message)
+            }
+            guard matchingIndices.count == 1,
+                  let previousIndex = matchingIndices.first else {
+                result.append(message)
+                continue
+            }
+
+            result[previousIndex] = mergedUserMessage(previous: result[previousIndex], incoming: message)
+        }
+
+        return result
+    }
+
+    private static func shouldMergeUserMessages(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        guard previous.role == .user,
+              incoming.role == .user,
+              previous.threadId == incoming.threadId,
+              normalizedMessageText(previous.text) == normalizedMessageText(incoming.text),
+              userMessageMetadataLooksCompatible(previous: previous, incoming: incoming) else {
+            return false
+        }
+
+        let previousTurnId = normalizedIdentifier(previous.turnId)
+        let incomingTurnId = normalizedIdentifier(incoming.turnId)
+        if let previousTurnId, let incomingTurnId {
+            return previousTurnId == incomingTurnId
+                && previous.deliveryState == .pending
+                && incoming.deliveryState == .confirmed
+                && abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= 12
+        }
+
+        // Allow only the phone-send upgrade path: optimistic local row without turnId
+        // becoming the confirmed runtime echo once the turn exists.
+        let isPendingToConfirmedUpgrade = previous.deliveryState == .pending
+            && incoming.deliveryState == .confirmed
+        let isTurnBindingUpgrade = previousTurnId == nil && incomingTurnId != nil
+        guard isPendingToConfirmedUpgrade || isTurnBindingUpgrade else {
+            return false
+        }
+
+        return abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= 12
+    }
+
+    private static func mergedUserMessage(previous: CodexMessage, incoming: CodexMessage) -> CodexMessage {
+        var merged = previous
+
+        if merged.deliveryState == .pending || incoming.deliveryState == .confirmed {
+            merged.deliveryState = incoming.deliveryState
+        }
+        if merged.turnId == nil {
+            merged.turnId = incoming.turnId
+        }
+        if merged.itemId == nil {
+            merged.itemId = incoming.itemId
+        }
+        if merged.fileMentions.isEmpty && !incoming.fileMentions.isEmpty {
+            merged.fileMentions = incoming.fileMentions
+        }
+        if merged.attachments.isEmpty && !incoming.attachments.isEmpty {
+            merged.attachments = incoming.attachments
+        }
+
+        let incomingText = incoming.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !incomingText.isEmpty {
+            merged.text = incoming.text
+        }
+
+        return merged
+    }
+
+    private static func normalizedMessageText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func attachmentSignature(for message: CodexMessage) -> String {
+        message.attachments
+            .map(\.stableIdentityKey)
+            .joined(separator: "|")
+    }
+
+    private static func fileMentionsSignature(for fileMentions: [String]) -> String {
+        fileMentions
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+            .sorted()
+            .joined(separator: "|")
+    }
+
+    private static func userMessageMetadataLooksCompatible(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        let previousFileMentions = fileMentionsSignature(for: previous.fileMentions)
+        let incomingFileMentions = fileMentionsSignature(for: incoming.fileMentions)
+        if !previousFileMentions.isEmpty,
+           !incomingFileMentions.isEmpty,
+           previousFileMentions != incomingFileMentions {
+            return false
+        }
+
+        let previousAttachments = attachmentSignature(for: previous)
+        let incomingAttachments = attachmentSignature(for: incoming)
+        if !previousAttachments.isEmpty,
+           !incomingAttachments.isEmpty,
+           previousAttachments != incomingAttachments {
+            return false
+        }
+
+        return true
+    }
+
     // Hides duplicated assistant rows caused by mixed completion/history payloads.
     static func removeDuplicateAssistantMessages(in messages: [CodexMessage]) -> [CodexMessage] {
         var seenKeys: Set<String> = []
@@ -618,15 +781,23 @@ enum TurnTimelineReducer {
 
         let turnId = normalizedIdentifier(message.turnId)
         let key = duplicateFileChangeKey(for: message)
+        let entries = TurnFileChangeSummaryParser.parse(from: message.text)?.entries ?? []
 
         let paths = Set(
-            TurnFileChangeSummaryParser.parse(from: message.text)?
-                .entries
-                .map(\.path) ?? []
+            entries.map(\.path)
         )
+        let singleEntryDescriptor: FileChangeSingleEntryDescriptor? = {
+            guard entries.count == 1, let entry = entries.first else { return nil }
+            return FileChangeSingleEntryDescriptor(
+                path: entry.path,
+                additions: entry.additions,
+                deletions: entry.deletions,
+                action: entry.action
+            )
+        }()
 
         // Need at least a key or paths to participate in dedup.
-        guard key != nil || !paths.isEmpty else {
+        guard key != nil || !paths.isEmpty || singleEntryDescriptor != nil else {
             return nil
         }
 
@@ -634,6 +805,7 @@ enum TurnTimelineReducer {
             turnId: turnId,
             key: key,
             paths: paths,
+            singleEntryDescriptor: singleEntryDescriptor,
             isStreaming: message.isStreaming
         )
     }
@@ -660,6 +832,13 @@ enum TurnTimelineReducer {
             return true
         }
 
+        if let newerSingle = newer.singleEntryDescriptor,
+           let olderSingle = older.singleEntryDescriptor,
+           (older.isStreaming || older.turnId == nil),
+           singleFileChangeLooksLikePathUpgrade(newer: newerSingle, older: olderSingle) {
+            return true
+        }
+
         guard !newer.paths.isEmpty, !older.paths.isEmpty else {
             return false
         }
@@ -680,11 +859,50 @@ enum TurnTimelineReducer {
 
         return false
     }
+
+    private static func singleFileChangeLooksLikePathUpgrade(
+        newer: FileChangeSingleEntryDescriptor,
+        older: FileChangeSingleEntryDescriptor
+    ) -> Bool {
+        guard newer.additions == older.additions,
+              newer.deletions == older.deletions,
+              newer.action == older.action else {
+            return false
+        }
+
+        let newerPath = normalizedFileChangePath(newer.path)
+        let olderPath = normalizedFileChangePath(older.path)
+        guard !newerPath.isEmpty, !olderPath.isEmpty, newerPath != olderPath else {
+            return false
+        }
+
+        let newerHasDirectory = newerPath.contains("/")
+        let olderHasDirectory = olderPath.contains("/")
+        guard newerHasDirectory != olderHasDirectory else {
+            return false
+        }
+
+        let longerPath = newerPath.count >= olderPath.count ? newerPath : olderPath
+        let shorterPath = newerPath.count >= olderPath.count ? olderPath : newerPath
+        return longerPath.hasSuffix("/" + shorterPath)
+    }
+
+    private static func normalizedFileChangePath(_ path: String) -> String {
+        path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
 }
 
 private struct FileChangeDedupSignature: Equatable {
     let turnId: String?
     let key: String?
     let paths: Set<String>
+    let singleEntryDescriptor: FileChangeSingleEntryDescriptor?
     let isStreaming: Bool
+}
+
+private struct FileChangeSingleEntryDescriptor: Equatable {
+    let path: String
+    let additions: Int
+    let deletions: Int
+    let action: TurnFileChangeAction?
 }

@@ -5,6 +5,7 @@
 // Depends on: SwiftUI, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, FileMentionChip, TurnComposerInputTextView, TurnComposerSecondaryBar
 
 import SwiftUI
+import UIKit
 
 struct TurnComposerView: View {
     @Binding var input: String
@@ -114,7 +115,7 @@ struct TurnComposerView: View {
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
                         Text("Ask anything... @files, $skills, /commands")
-                            .font(AppFont.system(size: 15))
+                            .font(AppFont.body())
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
                     }
@@ -131,12 +132,17 @@ struct TurnComposerView: View {
                             onPasteImageData(imageDataItems)
                         }
                     )
-                    .frame(height: composerInputHeight)
+                    .frame(height: max(composerInputHeight, 34))
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding + 4)
-                .padding(.bottom, 14)
+                .padding(.bottom, 8)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !isComposerInteractionLocked else { return }
+                    isInputFocused.wrappedValue = true
+                }
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)
@@ -280,6 +286,7 @@ private struct TurnComposerAutocompletePanels: View {
                     isThreadRunning: state.isThreadRunning,
                     showsGitBranchSelector: state.showsGitBranchSelector,
                     isLoadingGitBranchTargets: state.isLoadingGitBranchTargets,
+                    availableGitBranchTargets: state.availableGitBranchTargets,
                     selectedGitBaseBranch: state.selectedGitBaseBranch,
                     gitDefaultBranch: state.gitDefaultBranch,
                     onSelectCommand: onSelectSlashCommand,
@@ -473,6 +480,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     isThreadRunning: true,
                     showsGitBranchSelector: false,
                     isLoadingGitBranchTargets: false,
+                    availableGitBranchTargets: [],
                     selectedGitBaseBranch: "",
                     gitDefaultBranch: "main"
                 ),

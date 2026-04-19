@@ -129,24 +129,18 @@ test("voice/transcribe retries once after a 401 response", async () => {
   assert.equal(responses[0].result?.text, "second try works");
 });
 
-test("voice/transcribe keeps OpenAI API requests on the official API endpoint for API-key auth", async () => {
+test("voice/transcribe rejects API-key auth because voice remains ChatGPT-only", async () => {
   const responses = [];
-  const fetchCalls = [];
+  let fetchCalled = false;
   const handler = createVoiceHandler({
     sendCodexRequest: async () => ({
       authMethod: "apiKey",
       authToken: "sk-test",
       requiresOpenaiAuth: false,
     }),
-    fetchImpl: async (url, options) => {
-      fetchCalls.push({ url, options });
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return { text: "api key path" };
-        },
-      };
+    fetchImpl: async () => {
+      fetchCalled = true;
+      throw new Error("fetch should not run for API-key auth");
     },
   });
 
@@ -165,8 +159,9 @@ test("voice/transcribe keeps OpenAI API requests on the official API endpoint fo
 
   await tick();
 
-  assert.equal(fetchCalls[0].url, "https://api.openai.com/v1/audio/transcriptions");
-  assert.equal(responses[0].result?.text, "api key path");
+  assert.equal(fetchCalled, false);
+  assert.equal(responses[0].error?.data?.errorCode, "not_chatgpt");
+  assert.match(responses[0].error?.message || "", /requires a ChatGPT account/);
 });
 
 test("voice/transcribe returns a user-facing auth error when Mac auth is missing", async () => {
@@ -250,6 +245,42 @@ test("voice/transcribe rejects malformed or non-WAV audio before contacting the 
     assert.equal(responses[0].error?.data?.errorCode, "invalid_audio");
     assert.match(responses[0].error?.message || "", testCase.message);
   }
+});
+
+test("voice/transcribe rejects clips longer than two minutes before contacting the provider", async () => {
+  const responses = [];
+  let authRequests = 0;
+  let fetchCalls = 0;
+  const handler = createVoiceHandler({
+    sendCodexRequest: async () => {
+      authRequests += 1;
+      throw new Error("auth should not be requested for overlong audio");
+    },
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error("fetch should not run for overlong audio");
+    },
+  });
+
+  handler.handleVoiceRequest(JSON.stringify({
+    id: "voice-too-long",
+    method: "voice/transcribe",
+    params: {
+      mimeType: "audio/wav",
+      audioBase64: makeTestWavBase64(),
+      sampleRateHz: 24_000,
+      durationMs: 120_100,
+    },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  });
+
+  await tick();
+
+  assert.equal(authRequests, 0);
+  assert.equal(fetchCalls, 0);
+  assert.equal(responses[0].error?.data?.errorCode, "duration_too_long");
+  assert.match(responses[0].error?.message || "", /120 seconds/);
 });
 
 // ─── resolveVoiceAuth tests ─────────────────────────────────
