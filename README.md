@@ -369,7 +369,7 @@ Privacy notes:
 
 - The transport layer can still see connection metadata and the plaintext secure control messages used to set up the encrypted session, including session IDs, device IDs, public keys, nonces, and handshake result codes.
 - The transport layer does not see decrypted application payloads after the secure handshake succeeds.
-- A fresh QR scan can replace the previously trusted iPhone automatically. Use `remodex reset-pairing` only when you intentionally want to wipe the remembered pairing state yourself.
+- A fresh QR scan can add another trusted iPhone without evicting older trusted devices automatically. Use `remodex reset-pairing` only when you intentionally want to wipe the remembered pairing state yourself.
 - On-device message history is also encrypted at rest on iPhone using a Keychain-backed AES key.
 
 ## Git Integration

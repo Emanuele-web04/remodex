@@ -7,6 +7,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  buildMacRegistration,
   buildHeartbeatBridgeStatus,
   createMacOSBridgeWakeAssertion,
   hasRelayConnectionGoneStale,
@@ -142,6 +143,30 @@ test("sanitizeThreadHistoryImagesForRelay leaves unrelated RPC payloads unchange
     sanitizeThreadHistoryImagesForRelay(rawMessage, "turn/start"),
     rawMessage
   );
+});
+
+test("buildMacRegistration keeps the legacy trusted-phone fields on the newest pairing", () => {
+  const registration = buildMacRegistration({
+    macDeviceId: "mac-device-id",
+    macIdentityPublicKey: "mac-public-key",
+    trustedPhones: {
+      "phone-1": "phone-public-key-1",
+      "phone-2": "phone-public-key-2",
+    },
+  });
+
+  assert.deepEqual(registration.trustedPhones, [
+    {
+      deviceId: "phone-1",
+      publicKey: "phone-public-key-1",
+    },
+    {
+      deviceId: "phone-2",
+      publicKey: "phone-public-key-2",
+    },
+  ]);
+  assert.equal(registration.trustedPhoneDeviceId, "phone-2");
+  assert.equal(registration.trustedPhonePublicKey, "phone-public-key-2");
 });
 
 test("createMacOSBridgeWakeAssertion spawns a macOS caffeinate idle-sleep assertion tied to the bridge pid", () => {

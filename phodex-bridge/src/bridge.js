@@ -1190,7 +1190,7 @@ function createMacOSBridgeWakeAssertion({
   };
 }
 
-// Registers the canonical Mac identity and the one trusted iPhone allowed for auto-resolve.
+// Registers the canonical Mac identity, pairing metadata, and trusted iPhones allowed for auto-resolve.
 function buildMacRegistrationHeaders(deviceState, pairingSession) {
   const registration = buildMacRegistration(deviceState, pairingSession);
   const headers = {
@@ -1201,6 +1201,9 @@ function buildMacRegistrationHeaders(deviceState, pairingSession) {
     "x-pairing-version": registration.pairingVersion ? String(registration.pairingVersion) : "",
     "x-pairing-expires-at": registration.pairingExpiresAt ? String(registration.pairingExpiresAt) : "",
   };
+  if (registration.trustedPhones.length > 0) {
+    headers["x-trusted-phones"] = JSON.stringify(registration.trustedPhones);
+  }
   if (registration.trustedPhoneDeviceId && registration.trustedPhonePublicKey) {
     headers["x-trusted-phone-device-id"] = registration.trustedPhoneDeviceId;
     headers["x-trusted-phone-public-key"] = registration.trustedPhonePublicKey;
@@ -1209,13 +1212,21 @@ function buildMacRegistrationHeaders(deviceState, pairingSession) {
 }
 
 function buildMacRegistration(deviceState, pairingSession) {
-  const trustedPhoneEntry = Object.entries(deviceState?.trustedPhones || {})[0] || null;
+  const trustedPhones = Object.entries(deviceState?.trustedPhones || {})
+    .map(([deviceId, publicKey]) => ({
+      deviceId: normalizeNonEmptyString(deviceId),
+      publicKey: normalizeNonEmptyString(publicKey),
+    }))
+    .filter(phone => phone.deviceId && phone.publicKey);
+  // Keep the legacy single-phone fields pointed at the newest pairing.
+  const primaryTrustedPhone = trustedPhones[trustedPhones.length - 1] || null;
   return {
     macDeviceId: normalizeNonEmptyString(deviceState?.macDeviceId),
     macIdentityPublicKey: normalizeNonEmptyString(deviceState?.macIdentityPublicKey),
     displayName: normalizeNonEmptyString(os.hostname()),
-    trustedPhoneDeviceId: normalizeNonEmptyString(trustedPhoneEntry?.[0]),
-    trustedPhonePublicKey: normalizeNonEmptyString(trustedPhoneEntry?.[1]),
+    trustedPhones,
+    trustedPhoneDeviceId: normalizeNonEmptyString(primaryTrustedPhone?.deviceId),
+    trustedPhonePublicKey: normalizeNonEmptyString(primaryTrustedPhone?.publicKey),
     pairingCode: normalizeNonEmptyString(pairingSession?.pairingCode),
     pairingVersion: Number.isInteger(pairingSession?.pairingPayload?.v) ? pairingSession.pairingPayload.v : 0,
     pairingExpiresAt: Number.isFinite(pairingSession?.pairingPayload?.expiresAt)
@@ -1556,6 +1567,8 @@ function persistBridgePreferences(
 
 module.exports = {
   buildHeartbeatBridgeStatus,
+  buildMacRegistration,
+  buildMacRegistrationHeaders,
   createMacOSBridgeWakeAssertion,
   hasRelayConnectionGoneStale,
   persistBridgePreferences,

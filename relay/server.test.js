@@ -200,6 +200,57 @@ test("trusted session resolve returns the current live session for a trusted iph
   });
 });
 
+test("trusted session resolve accepts any phone advertised in the trusted phone list", async () => {
+  const phoneIdentityA = makePhoneIdentity();
+  const phoneIdentityB = makePhoneIdentity();
+
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/live-session-multi-header`, {
+      headers: {
+        "x-role": "mac",
+        "x-mac-device-id": "mac-multi-header",
+        "x-mac-identity-public-key": "mac-public-key-multi-header",
+        "x-machine-name": "Multi-Header-Mac",
+        "x-trusted-phones": JSON.stringify([
+          {
+            deviceId: phoneIdentityA.phoneDeviceId,
+            publicKey: phoneIdentityA.phoneIdentityPublicKey,
+          },
+          {
+            deviceId: phoneIdentityB.phoneDeviceId,
+            publicKey: phoneIdentityB.phoneIdentityPublicKey,
+          },
+        ]),
+      },
+    });
+    await onceOpen(mac);
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/trusted/session/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(makeTrustedResolveBody({
+        macDeviceId: "mac-multi-header",
+        phoneIdentity: phoneIdentityB,
+        nonce: "nonce-multi-header",
+        timestamp: Date.now(),
+      })),
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      macDeviceId: "mac-multi-header",
+      macIdentityPublicKey: "mac-public-key-multi-header",
+      displayName: "Multi-Header-Mac",
+      sessionId: "live-session-multi-header",
+    });
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+  });
+});
+
 test("pairing code resolve returns bootstrap metadata for a live mac session", async () => {
   await withServer(async ({ port }) => {
     const expiresAt = Date.now() + 60_000;
@@ -408,6 +459,61 @@ test("trusted session resolve starts working immediately after a mac updates its
     const body = await response.json();
     assert.equal(body.displayName, "Updated-Mac");
     assert.equal(body.sessionId, "live-session-4");
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+  });
+});
+
+test("trusted session resolve accepts any phone from an updated trusted phone list registration", async () => {
+  const phoneIdentityA = makePhoneIdentity();
+  const phoneIdentityB = makePhoneIdentity();
+
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/live-session-multi-update`, {
+      headers: {
+        "x-role": "mac",
+        "x-mac-device-id": "mac-multi-update",
+        "x-mac-identity-public-key": "mac-public-key-multi-update",
+      },
+    });
+    await onceOpen(mac);
+
+    mac.send(JSON.stringify({
+      kind: "relayMacRegistration",
+      registration: {
+        macDeviceId: "mac-multi-update",
+        macIdentityPublicKey: "mac-public-key-multi-update",
+        displayName: "Updated-Multi-Mac",
+        trustedPhones: [
+          {
+            deviceId: phoneIdentityA.phoneDeviceId,
+            publicKey: phoneIdentityA.phoneIdentityPublicKey,
+          },
+          {
+            deviceId: phoneIdentityB.phoneDeviceId,
+            publicKey: phoneIdentityB.phoneIdentityPublicKey,
+          },
+        ],
+      },
+    }));
+
+    const response = await fetch(`http://127.0.0.1:${port}/v1/trusted/session/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(makeTrustedResolveBody({
+        macDeviceId: "mac-multi-update",
+        phoneIdentity: phoneIdentityB,
+        nonce: "nonce-multi-update",
+        timestamp: Date.now(),
+      })),
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.displayName, "Updated-Multi-Mac");
+    assert.equal(body.sessionId, "live-session-multi-update");
 
     const macClosed = onceClosed(mac);
     mac.close();
