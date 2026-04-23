@@ -362,6 +362,7 @@ struct ContentView: View {
                     )
                     .frame(width: currentSidebarWidth)
                     .animation(.easeInOut(duration: 0.25), value: shouldUseFullWidthSidebar)
+                    .simultaneousGesture(sidebarContentCloseGesture, including: .subviews)
                 }
 
                 ZStack(alignment: .leading) {
@@ -707,6 +708,60 @@ struct ContentView: View {
             }
     }
 
+    private var sidebarContentCloseGesture: some Gesture {
+        DragGesture(minimumDistance: 15, coordinateSpace: .global)
+            .onChanged { value in
+                guard !sidebarGestureAutoCommitted else { return }
+                guard let action = sidebarCloseSwipeAction(for: value) else { return }
+
+                let translation = RootNavigationSwipePolicy.progressTranslation(
+                    for: action,
+                    translationWidth: value.translation.width
+                )
+
+                beginSidebarGestureDebugIfNeeded(kind: action.debugKind, startX: value.startLocation.x)
+                logSidebarGestureProgressIfNeeded(translation: translation)
+                guard RootNavigationSwipePolicy.isCommitReached(
+                    for: action,
+                    translationWidth: value.translation.width,
+                    commitDistance: sidebarSwipeCommitDistance
+                ) else { return }
+
+                sidebarGestureAutoCommitted = true
+                debugSidebarLog(
+                    "gesture #\(activeSidebarGestureDebugID ?? 0) auto-commit kind=\(action.debugKind) "
+                        + "translation=\(Int(translation)) commit=\(Int(sidebarSwipeCommitDistance)) source=sidebar"
+                )
+                finishGesture(action)
+            }
+            .onEnded { value in
+                if sidebarGestureAutoCommitted {
+                    sidebarGestureAutoCommitted = false
+                    return
+                }
+
+                guard let action = sidebarCloseSwipeAction(for: value) else {
+                    return
+                }
+
+                let translation = RootNavigationSwipePolicy.progressTranslation(
+                    for: action,
+                    translationWidth: value.translation.width
+                )
+                let predictedTranslation = RootNavigationSwipePolicy.progressTranslation(
+                    for: action,
+                    translationWidth: value.predictedEndTranslation.width
+                )
+
+                debugSidebarLog(
+                    "gesture #\(activeSidebarGestureDebugID ?? 0) end kind=\(action.debugKind) "
+                        + "translation=\(Int(translation)) predicted=\(Int(predictedTranslation)) "
+                        + "commit=\(Int(sidebarSwipeCommitDistance)) decision=cancel source=sidebar"
+                )
+                resetSidebarGestureDebug()
+            }
+    }
+
     // MARK: - Sidebar Actions
 
     private func toggleSidebar() {
@@ -966,6 +1021,28 @@ struct ContentView: View {
             isSidebarOpen: isSidebarOpen,
             navigationDepth: navigationPath.count
         )
+    }
+
+    private func sidebarCloseSwipeAction(
+        for value: DragGesture.Value
+    ) -> RootNavigationSwipeAction? {
+        guard isSidebarOpen else {
+            return nil
+        }
+
+        let action = RootNavigationSwipePolicy.action(
+            startLocationX: value.startLocation.x,
+            translationWidth: value.translation.width,
+            translationHeight: value.translation.height,
+            isSidebarOpen: true,
+            navigationDepth: navigationPath.count
+        )
+
+        guard action == .closeSidebar else {
+            return nil
+        }
+
+        return action
     }
 
     // Uses the responder chain instead of per-view bindings so mixed SwiftUI/UIKit inputs all close together.
