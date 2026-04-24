@@ -58,6 +58,7 @@ struct ContentView: View {
     @State private var sidebarGestureAutoCommitted = false
     @State private var sidebarSelectionSuppressedUntil: Date?
     @State private var isOpeningNewChatFromSidebar = false
+    @State private var areSidebarInteractionsSuppressed = false
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
     @AppStorage("codex.whatsNew.lastPresentedVersion") private var lastPresentedWhatsNewVersion = ""
 
@@ -350,6 +351,7 @@ struct ContentView: View {
                         selectedThread: $selectedThread,
                         showSettings: $showSettings,
                         isSearchActive: $isSearchActive,
+                        interactionsEnabled: !areSidebarInteractionsSuppressed,
                         showsInlineCloseButton: shouldUseFullWidthSidebar,
                         isVisible: sidebarVisible,
                         onClose: { closeSidebar() },
@@ -665,7 +667,7 @@ struct ContentView: View {
                 sidebarGestureAutoCommitted = true
                 debugSidebarLog(
                     "gesture #\(activeSidebarGestureDebugID ?? 0) auto-commit kind=\(action.debugKind) "
-                        + "translation=\(Int(translation)) commit=\(Int(sidebarSwipeCommitDistance))"
+                        + "translation=\(Int(translation)) commit=\(Int(sidebarSwipeCommitDistance)) source=root"
                 )
                 finishGesture(action)
             }
@@ -677,7 +679,7 @@ struct ContentView: View {
 
                 guard let action = navigationSwipeAction(for: value) else {
                     if activeSidebarGestureDebugID != nil {
-                        debugSidebarLog("gesture cancelled before commit")
+                        debugSidebarLog("gesture cancelled before commit source=root")
                     }
                     sidebarDragOffset = 0
                     sidebarGestureAutoCommitted = false
@@ -701,7 +703,7 @@ struct ContentView: View {
                 debugSidebarLog(
                     "gesture #\(activeSidebarGestureDebugID ?? 0) end kind=\(action.debugKind) "
                         + "translation=\(Int(translation)) predicted=\(Int(predictedTranslation)) "
-                        + "commit=\(Int(sidebarSwipeCommitDistance)) decision=cancel"
+                        + "commit=\(Int(sidebarSwipeCommitDistance)) decision=cancel source=root"
                 )
                 sidebarDragOffset = 0
                 resetSidebarGestureDebug()
@@ -740,9 +742,7 @@ struct ContentView: View {
                     return
                 }
 
-                guard let action = sidebarCloseSwipeAction(for: value) else {
-                    return
-                }
+                guard let action = sidebarCloseSwipeAction(for: value) else { return }
 
                 let translation = RootNavigationSwipePolicy.progressTranslation(
                     for: action,
@@ -894,6 +894,7 @@ struct ContentView: View {
         case .openSidebar:
             setSidebar(open: true)
         case .closeSidebar:
+            areSidebarInteractionsSuppressed = true
             setSidebar(open: false)
         case .navigateBack:
             dismissActiveKeyboard()
@@ -913,7 +914,9 @@ struct ContentView: View {
             "setSidebar open=\(open) prewarmed=\(isSidebarPrewarmed) "
                 + "visible=\(sidebarVisible) revealWidth=\(Int(sidebarRevealWidth))"
         )
-        if !open {
+        if open {
+            areSidebarInteractionsSuppressed = false
+        } else {
             isSearchActive = false
         }
         dismissActiveKeyboard()

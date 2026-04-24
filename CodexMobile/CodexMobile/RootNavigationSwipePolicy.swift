@@ -1,5 +1,5 @@
 // FILE: RootNavigationSwipePolicy.swift
-// Purpose: Chooses whether a full-width horizontal swipe should open the sidebar, close it, or navigate back.
+// Purpose: Centralizes route-aware horizontal swipe decisions for sidebar open/close and back navigation.
 // Layer: View Support
 // Exports: RootNavigationSwipeAction, RootNavigationSwipePolicy
 // Depends on: CoreGraphics
@@ -50,8 +50,8 @@ struct RootNavigationSwipePolicy {
         }
 
         if navigationDepth > 0 {
-            // Let UIKit keep owning the bezel-edge back swipe so the custom full-width
-            // gesture only extends the interaction into the middle of the screen.
+            // Keep UIKit's bezel-edge back swipe intact and extend the same
+            // gesture into the middle of the screen ourselves.
             guard startLocationX > systemBackEdgeWidth else {
                 return nil
             }
