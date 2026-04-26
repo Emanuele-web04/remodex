@@ -2098,6 +2098,7 @@ final class TurnViewModel {
             defer { self.runningGitAction = nil }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
+            let gitWriterModel = codex.gitWriterModelIdentifier()
 
             do {
                 switch action {
@@ -2120,7 +2121,8 @@ final class TurnViewModel {
                     }
 
                 case .commit:
-                    let result = try await gitService.commit(message: nil)
+                    let draft = try await gitService.generateCommitMessage(model: gitWriterModel)
+                    let result = try await gitService.commit(message: draft.fullMessage)
                     let statusAfter = try? await gitService.status()
                     if let statusAfter { applyGitRepoSync(statusAfter) }
                     _ = result // commit succeeded
@@ -2135,7 +2137,8 @@ final class TurnViewModel {
                     )
 
                 case .commitAndPush:
-                    _ = try await gitService.commit(message: nil)
+                    let draft = try await gitService.generateCommitMessage(model: gitWriterModel)
+                    _ = try await gitService.commit(message: draft.fullMessage)
                     let pushResult = try await gitService.push()
                     handleSuccessfulPush(
                         pushResult,
@@ -2163,7 +2166,17 @@ final class TurnViewModel {
                             message: "Could not determine the repository default branch."
                         )
                     }
-                    let prURL = buildPRURL(ownerRepo: ownerRepo, branch: branch, base: base)
+                    let draft = try await gitService.generatePullRequestDraft(
+                        model: gitWriterModel,
+                        baseBranch: base
+                    )
+                    let prURL = remodexBuildPullRequestURL(
+                        ownerRepo: ownerRepo,
+                        branch: branch,
+                        base: base,
+                        title: draft.title,
+                        body: draft.body
+                    )
                     if let url = URL(string: prURL) {
                         await UIApplication.shared.open(url)
                     }
@@ -2219,8 +2232,10 @@ final class TurnViewModel {
             }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
+            let gitWriterModel = codex.gitWriterModelIdentifier()
             do {
-                _ = try await gitService.commit(message: nil)
+                let draft = try await gitService.generateCommitMessage(model: gitWriterModel)
+                _ = try await gitService.commit(message: draft.fullMessage)
                 inlineCommitAndPushPhase = .pushing
                 let pushResult = try await gitService.push()
                 handleSuccessfulPush(
@@ -2255,11 +2270,31 @@ final class TurnViewModel {
         return try await gitService.remoteUrl()
     }
 
-    private func buildPRURL(ownerRepo: String, branch: String, base: String) -> String {
-        let encodedBranch = branch.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? branch
-        let encodedBase = base.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? base
-        return "https://github.com/\(ownerRepo)/compare/\(encodedBase)...\(encodedBranch)?expand=1"
+}
+
+func remodexBuildPullRequestURL(
+    ownerRepo: String,
+    branch: String,
+    base: String,
+    title: String,
+    body: String
+) -> String {
+    let encodedBranch = branch.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? branch
+    let encodedBase = base.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? base
+    var components = URLComponents(
+        string: "https://github.com/\(ownerRepo)/compare/\(encodedBase)...\(encodedBranch)"
+    )
+    components?.queryItems = [
+        URLQueryItem(name: "quick_pull", value: "1"),
+        URLQueryItem(name: "title", value: title),
+        URLQueryItem(name: "body", value: body),
+    ]
+    guard let urlString = components?.url?.absoluteString else {
+        let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        return "https://github.com/\(ownerRepo)/compare/\(encodedBase)...\(encodedBranch)?quick_pull=1&title=\(encodedTitle)&body=\(encodedBody)"
     }
+    return urlString
 }
 
 struct TurnComposerMentionedFile: Identifiable, Equatable {
