@@ -199,6 +199,73 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(history[0].turnId, turnID)
     }
 
+    func testHistoryDecodesNumericStringMicrosecondTimestamps() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let expectedDate = Date(timeIntervalSince1970: 1_710_000_000)
+        let microseconds = "1710000000000000"
+
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string(microseconds),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("assistant-item"),
+                                "type": .string("assistantMessage"),
+                                "createdAt": .string(microseconds),
+                                "message": .string("Hello"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history[0].createdAt.timeIntervalSince1970, expectedDate.timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testMergeHistoryMessagesReplacesOptimisticCreatedAtWithTrustworthyServerTimestamp() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let localDate = Date(timeIntervalSince1970: 1_720_000_000)
+        let serverDate = Date(timeIntervalSince1970: 1_710_000_000)
+
+        let existing = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Hello",
+                createdAt: localDate,
+                turnId: turnID,
+                itemId: "assistant-item",
+                isStreaming: false
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Hello",
+                createdAt: serverDate,
+                turnId: turnID,
+                itemId: "assistant-item",
+                isStreaming: false
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].createdAt.timeIntervalSince1970, serverDate.timeIntervalSince1970, accuracy: 0.001)
+    }
+
     func testLateActivityLineAfterTurnCompletionDoesNotReopenToolActivityStream() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -1188,6 +1255,103 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(assistantRows.count, 1)
         XCTAssertEqual(assistantRows[0].text, "Testo finale completo")
         XCTAssertEqual(assistantRows[0].itemId, "local-message")
+    }
+
+    func testHistoryMergeKeepsDistinctAssistantItemsInSameTurnWhenHistoryIDsArriveLater() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+
+        let existing = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Prima risposta",
+                createdAt: now,
+                turnId: turnID,
+                itemId: nil,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Seconda risposta",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "message-2",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Terza risposta",
+                createdAt: now.addingTimeInterval(2),
+                turnId: turnID,
+                itemId: "message-3",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.count, 3)
+        XCTAssertEqual(assistantRows.map(\.text), ["Prima risposta", "Seconda risposta", "Terza risposta"])
+        XCTAssertEqual(assistantRows.map(\.itemId), [nil, "message-2", "message-3"])
+    }
+
+    func testHistoryMergeDoesNotCollapseRepeatedAssistantTextAcrossDistinctItemsInSameTurn() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+
+        let existing = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Ok",
+                createdAt: now,
+                turnId: turnID,
+                itemId: "message-1",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Ok",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "message-2",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "Ok",
+                createdAt: now.addingTimeInterval(2),
+                turnId: turnID,
+                itemId: "message-3",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.count, 3)
+        XCTAssertEqual(assistantRows.map(\.itemId), ["message-1", "message-2", "message-3"])
     }
 
     func testThreadReadRestoresNestedReviewModeMessages() {

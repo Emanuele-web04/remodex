@@ -312,3 +312,81 @@ test("sanitizeThreadHistoryImagesForRelay strips bulky compaction replacement hi
     type: "contextCompaction",
   });
 });
+
+test("sanitizeThreadHistoryImagesForRelay trims oversized history down to the newest turn tail", () => {
+  const largeText = "A".repeat(4 * 1024 * 1024);
+  const rawMessage = JSON.stringify({
+    id: "req-thread-tail",
+    result: {
+      thread: {
+        id: "thread-large-history",
+        turns: [
+          {
+            id: "turn-old",
+            items: [
+              {
+                id: "item-old",
+                type: "assistant_message",
+                text: largeText,
+              },
+            ],
+          },
+          {
+            id: "turn-new",
+            items: [
+              {
+                id: "item-new",
+                type: "assistant_message",
+                text: "latest reply",
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+
+  assert.equal(sanitized.result.thread.historyTailTruncatedForRelay, true);
+  assert.deepEqual(
+    sanitized.result.thread.turns.map((turn) => turn.id),
+    ["turn-new"]
+  );
+});
+
+test("sanitizeThreadHistoryImagesForRelay truncates the newest oversized text item to its tail", () => {
+  const largeText = `header\n${"B".repeat(4 * 1024 * 1024)}`;
+  const rawMessage = JSON.stringify({
+    id: "req-thread-text-tail",
+    result: {
+      thread: {
+        id: "thread-large-item",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "item-1",
+                type: "assistant_message",
+                text: largeText,
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  const item = sanitized.result.thread.turns[0].items[0];
+
+  assert.equal(sanitized.result.thread.historyTailTruncatedForRelay, true);
+  assert.equal(item.relayTextTailTruncated, true);
+  assert.equal(item.text.startsWith("…\n"), true);
+  assert.equal(item.text.includes("header"), false);
+});

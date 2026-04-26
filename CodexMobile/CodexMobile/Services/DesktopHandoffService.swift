@@ -1,5 +1,5 @@
 // FILE: DesktopHandoffService.swift
-// Purpose: Sends explicit "continue on Mac" and display-wake requests over the existing bridge connection.
+// Purpose: Sends explicit desktop-app handoff and display-wake requests over the existing bridge connection.
 // Layer: Service
 // Exports: DesktopHandoffService, DesktopHandoffError
 // Depends on: CodexService
@@ -14,9 +14,9 @@ enum DesktopHandoffError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .disconnected:
-            return "Not connected to your Mac."
+            return "Not connected to your paired computer."
         case .invalidResponse:
-            return "The Mac app did not return a valid response."
+            return "The desktop app did not return a valid response."
         case .bridgeError(let code, let message):
             return userMessage(for: code, fallback: message)
         }
@@ -40,7 +40,7 @@ final class DesktopHandoffService {
         self.savedPairConnector = savedPairConnector
     }
 
-    func continueOnMac(threadId: String) async throws {
+    func continueOnDesktopApp(threadId: String) async throws {
         let trimmedThreadID = threadId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedThreadID.isEmpty else {
             throw DesktopHandoffError.bridgeError(
@@ -72,7 +72,7 @@ final class DesktopHandoffService {
         }
     }
 
-    // Sends a short user-activity pulse so a saved local Mac can wake its display before reconnecting.
+    // Sends a short user-activity pulse so a saved local computer can wake its display before reconnecting.
     func wakeDisplay() async throws {
         if codex.isConnected {
             try await sendWakeDisplayRequest(using: codex)
@@ -82,7 +82,7 @@ final class DesktopHandoffService {
         guard let reconnectURL = try await preferredReconnectURLForWake() else {
             throw DesktopHandoffError.bridgeError(
                 code: "saved_pair_required",
-                message: "Reconnect to your Mac or scan a new QR code first."
+                message: "Reconnect to your paired computer or scan a new QR code first."
             )
         }
 
@@ -188,21 +188,21 @@ private extension DesktopHandoffError {
         case "missing_thread_id":
             return "This chat does not have a valid thread id yet."
         case "unsupported_platform":
-            return "Mac handoff works only when the bridge is running on macOS."
+            return "Desktop app handoff works only when the bridge is running on macOS."
         case "handoff_failed":
-            return fallback ?? "Could not relaunch Codex.app on your Mac."
+            return fallback ?? "Could not relaunch Codex.app on this computer."
         case "wake_display_failed":
-            return fallback ?? "Could not wake your Mac display right now."
+            return fallback ?? "Could not wake this computer's display right now."
         case "saved_pair_required":
-            return fallback ?? "Reconnect to your Mac or scan a new QR code first."
+            return fallback ?? "Reconnect to your paired computer or scan a new QR code first."
         case "unsupported_bridge_preferences":
-            return fallback ?? "Update the Remodex bridge on your Mac to sync this setting."
+            return fallback ?? "Update the Remodex bridge on your computer to sync this setting."
         case "invalid_bridge_preferences":
-            return fallback ?? "The Mac bridge rejected this setting update."
+            return fallback ?? "The computer bridge rejected this setting update."
         case "bridge_preferences_persist_failed":
-            return fallback ?? "The Mac bridge could not save this setting."
+            return fallback ?? "The computer bridge could not save this setting."
         default:
-            return fallback ?? "Could not continue this chat on your Mac."
+            return fallback ?? "Could not continue this chat on the desktop app."
         }
     }
 }

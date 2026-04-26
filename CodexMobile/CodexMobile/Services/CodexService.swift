@@ -301,6 +301,7 @@ final class CodexService {
     var threads: [CodexThread] = [] {
         didSet {
             rebuildThreadLookupCaches()
+            refreshPinnedThreadSnapshots()
         }
     }
     var isConnected = false
@@ -329,7 +330,7 @@ final class CodexService {
     var pendingApprovals: [CodexApprovalRequest] = []
     var lastRawMessage: String?
     var lastErrorMessage: String?
-    var keepMacAwakeWhileBridgeRuns = true
+    var keepMacAwakeWhileBridgeRuns = false
     var runtimeDebugLogEntries: [String] = []
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     // Per-thread queued drafts for client-side turn queueing while a run is active.
@@ -420,12 +421,18 @@ final class CodexService {
     // Keeps the trusted-session HTTP lookup cancellable so manual retry can preempt a stuck resolve.
     @ObservationIgnored var trustedSessionResolveTask: Task<CodexTrustedSessionResolveResponse, Error>?
     @ObservationIgnored var trustedSessionResolveTaskID: UUID?
-    var streamingAssistantMessageByTurnID: [String: String] = [:]
-    var streamingSystemMessageByItemID: [String: String] = [:]
+    @ObservationIgnored var streamingAssistantMessageByTurnID: [String: String] = [:]
+    @ObservationIgnored var streamingSystemMessageByItemID: [String: String] = [:]
     /// Rich metadata for command execution tool calls, keyed by itemId.
     var commandExecutionDetailsByItemID: [String: CommandExecutionDetails] = [:]
     // Debounces disk writes while streaming to keep UI responsive.
-    var messagePersistenceDebounceTask: Task<Void, Never>?
+    @ObservationIgnored var messagePersistenceDebounceTask: Task<Void, Never>?
+    // Coalesces high-frequency assistant deltas before they mutate observed timeline state.
+    @ObservationIgnored var pendingAssistantDeltaByStreamID: [String: String] = [:]
+    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?)] = [:]
+    @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
+    @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
+    let assistantDeltaBatchIntervalNanoseconds: UInt64 = 40_000_000
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -484,6 +491,30 @@ final class CodexService {
     var connectedServerIdentity: String?
     // Tracks whether the bridge is proxying a real Codex endpoint or a spawned local app-server.
     var codexTransportMode: CodexRuntimeTransportMode = .unknown
+    var bridgeHostPlatform: CodexBridgeHostPlatform {
+        if let hostPlatform = gptAccountSnapshot.hostPlatform {
+            return hostPlatform
+        }
+        return preferredTrustedMacRecord == nil ? .unknown : .macOS
+    }
+    var bridgeHostCapabilities: CodexBridgeHostCapabilities {
+        if let hostCapabilities = gptAccountSnapshot.hostCapabilities {
+            return hostCapabilities
+        }
+        return preferredTrustedMacRecord == nil ? CodexBridgeHostCapabilities() : .legacyMacOS
+    }
+    var supportsDesktopAppHandoff: Bool {
+        bridgeHostCapabilities.desktopHandoff
+    }
+    var supportsDisplayWake: Bool {
+        bridgeHostCapabilities.displayWake
+    }
+    var supportsKeepAwakeWhileBridgeRuns: Bool {
+        bridgeHostCapabilities.keepAwake
+    }
+    var hostComputerLabel: String {
+        bridgeHostPlatform.displayName
+    }
     // Remembers whether the current plan flow is staying native or has fallen back to inferred UI.
     var planSessionSourceByThread: [String: CodexPlanSessionSource] = [:] {
         didSet {
@@ -531,6 +562,9 @@ final class CodexService {
     @ObservationIgnored var renamedThreadNameByThreadID: [String: String] = [:]
     @ObservationIgnored var associatedManagedWorktreePathByThreadID: [String: String] = [:]
     @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
+    var pinnedThreadIDs: [String] = []
+    @ObservationIgnored var pinnedThreadSnapshotsByRootID: [String: [CodexThread]] = [:]
+    @ObservationIgnored var snapshotOnlyPinnedThreadIDs: Set<String> = []
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
     // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
     @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]
@@ -558,6 +592,8 @@ final class CodexService {
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
+    static let pinnedThreadIDsDefaultsKey = "codex.pinnedThreadIDs"
+    static let pinnedThreadSnapshotsDefaultsKey = "codex.pinnedThreadSnapshots"
     static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
     static let keepMacAwakeWhileBridgeRunsDefaultsKey = "codex.keepMacAwakeWhileBridgeRuns"
@@ -613,7 +649,7 @@ final class CodexService {
         if defaults.object(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey) != nil {
             self.keepMacAwakeWhileBridgeRuns = defaults.bool(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
         } else {
-            self.keepMacAwakeWhileBridgeRuns = true
+            self.keepMacAwakeWhileBridgeRuns = false
         }
 
         if let savedThreadRuntimeOverrides = defaults.data(forKey: Self.threadRuntimeOverridesDefaultsKey),
@@ -648,6 +684,20 @@ final class CodexService {
             self.renamedThreadNameByThreadID = decodedRenamedThreadNames
         } else {
             self.renamedThreadNameByThreadID = [:]
+        }
+
+        if let savedPinnedThreadIDs = defaults.data(forKey: Self.pinnedThreadIDsDefaultsKey),
+           let decodedPinnedThreadIDs = try? decoder.decode([String].self, from: savedPinnedThreadIDs) {
+            self.pinnedThreadIDs = decodedPinnedThreadIDs
+        } else {
+            self.pinnedThreadIDs = []
+        }
+
+        if let savedPinnedThreadSnapshots = defaults.data(forKey: Self.pinnedThreadSnapshotsDefaultsKey),
+           let decodedPinnedThreadSnapshots = try? decoder.decode([String: [CodexThread]].self, from: savedPinnedThreadSnapshots) {
+            self.pinnedThreadSnapshotsByRootID = decodedPinnedThreadSnapshots
+        } else {
+            self.pinnedThreadSnapshotsByRootID = [:]
         }
 
         if let savedAssociatedManagedWorktreePaths = defaults.data(forKey: Self.associatedManagedWorktreePathsDefaultsKey),
@@ -693,6 +743,8 @@ final class CodexService {
                 email: nil,
                 displayName: nil,
                 planType: nil,
+                hostPlatform: self.gptAccountSnapshot.hostPlatform,
+                hostCapabilities: self.gptAccountSnapshot.hostCapabilities,
                 loginInFlight: true,
                 needsReauth: false,
                 expiresAt: pendingLogin.expiresAt,

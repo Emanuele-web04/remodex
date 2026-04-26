@@ -7,6 +7,61 @@
 
 import Foundation
 
+enum CodexTimestampParser {
+    private static let iso8601Formatters: [ISO8601DateFormatter] = {
+        let withFractions = ISO8601DateFormatter()
+        withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+
+        return [withFractions, standard]
+    }()
+
+    static func parseString(_ value: String?) -> Date? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+
+        if let numeric = Double(trimmed) {
+            return decodeUnixTimestamp(numeric)
+        }
+
+        for formatter in iso8601Formatters {
+            if let date = formatter.date(from: trimmed) {
+                return date
+            }
+        }
+
+        return nil
+    }
+
+    // Accepts second, millisecond, microsecond, and nanosecond Unix timestamps.
+    static func decodeUnixTimestamp(_ rawValue: Double) -> Date {
+        let absoluteValue = abs(rawValue)
+        let secondsValue: Double
+
+        switch absoluteValue {
+        case 1_000_000_000_000_000_000...:
+            secondsValue = rawValue / 1_000_000_000
+        case 1_000_000_000_000_000...:
+            secondsValue = rawValue / 1_000_000
+        case 10_000_000_000...:
+            secondsValue = rawValue / 1_000
+        default:
+            secondsValue = rawValue
+        }
+
+        return Date(timeIntervalSince1970: secondsValue)
+    }
+
+    // Filters out placeholder dates so local optimistic timestamps are not replaced by epoch fallbacks.
+    static func isTrustworthyServerDate(_ date: Date) -> Bool {
+        date.timeIntervalSince1970 >= 946_684_800 // 2000-01-01T00:00:00Z
+    }
+}
+
 enum CodexThreadSyncState: String, Codable, Hashable, Sendable {
     case live
     case archivedLocal
@@ -368,33 +423,23 @@ extension CodexThread {
 
     // --- Date parsing ---------------------------------------------------------
 
-    private static let iso8601Formatters: [ISO8601DateFormatter] = {
-        let withFractions = ISO8601DateFormatter()
-        withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        let standard = ISO8601DateFormatter()
-        standard.formatOptions = [.withInternetDateTime]
-
-        return [withFractions, standard]
-    }()
-
     private static func decodeDateIfPresent(
         from container: KeyedDecodingContainer<CodingKeys>,
         keys: [CodingKeys]
     ) throws -> Date? {
         for key in keys {
             if let stringValue = try? container.decodeIfPresent(String.self, forKey: key) {
-                if let parsedDate = parseISO8601(stringValue) {
+                if let parsedDate = CodexTimestampParser.parseString(stringValue) {
                     return parsedDate
                 }
             }
 
             if let doubleValue = try? container.decodeIfPresent(Double.self, forKey: key) {
-                return decodeUnixTimestamp(doubleValue)
+                return CodexTimestampParser.decodeUnixTimestamp(doubleValue)
             }
 
             if let intValue = try? container.decodeIfPresent(Int64.self, forKey: key) {
-                return decodeUnixTimestamp(Double(intValue))
+                return CodexTimestampParser.decodeUnixTimestamp(Double(intValue))
             }
 
             // Keep native Date decoding as a final fallback for unexpected formats.
@@ -405,23 +450,6 @@ extension CodexThread {
 
         return nil
     }
-
-    private static func parseISO8601(_ value: String) -> Date? {
-        for formatter in iso8601Formatters {
-            if let date = formatter.date(from: value) {
-                return date
-            }
-        }
-
-        return nil
-    }
-
-    // Supports both seconds and milliseconds timestamps.
-    private static func decodeUnixTimestamp(_ rawValue: Double) -> Date {
-        let secondsValue = rawValue > 10_000_000_000 ? rawValue / 1000 : rawValue
-        return Date(timeIntervalSince1970: secondsValue)
-    }
-
     private static func decodeStringIfPresent(
         from container: KeyedDecodingContainer<CodingKeys>,
         keys: [CodingKeys]

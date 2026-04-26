@@ -52,6 +52,8 @@ const RELAY_WATCHDOG_STALE_AFTER_MS = 25_000;
 const BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS = 5_000;
 const STALE_RELAY_STATUS_MESSAGE = "Relay heartbeat stalled; reconnect pending.";
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
+const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 3 * 1024 * 1024;
+const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -59,7 +61,7 @@ function startBridge({
   onBridgeStatus = null,
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
-  config.keepMacAwakeEnabled = config.keepMacAwakeEnabled !== false;
+  config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
   const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
     enabled: config.keepMacAwakeEnabled,
   });
@@ -602,6 +604,7 @@ function startBridge({
         ? bridgeVersionInfoResult.value
         : null,
       transportMode: codex.mode,
+      hostPlatform: process.platform,
     });
   }
 
@@ -1391,10 +1394,11 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
   });
 
   if (!didSanitize) {
-    return rawMessage;
+    const trimmedPayload = trimThreadPayloadForRelay(parsed, thread);
+    return trimmedPayload == null ? rawMessage : trimmedPayload;
   }
 
-  return JSON.stringify({
+  const sanitizedPayload = JSON.stringify({
     ...parsed,
     result: {
       ...parsed.result,
@@ -1404,6 +1408,8 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
       },
     },
   });
+
+  return trimThreadPayloadForRelay(parseBridgeJSON(sanitizedPayload), null) ?? sanitizedPayload;
 }
 
 // Drops huge replacement-history blobs from compaction items because the phone only needs
@@ -1495,6 +1501,206 @@ function parseBridgeJSON(value) {
   } catch {
     return null;
   }
+}
+
+function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
+  const thread = explicitThread ?? parsed?.result?.thread;
+  if (!parsed || !thread || typeof thread !== "object" || !Array.isArray(thread.turns)) {
+    return null;
+  }
+
+  let workingThread = thread;
+  let encoded = encodeRelayThreadPayload(parsed, workingThread);
+  if (encoded == null) {
+    return null;
+  }
+
+  if (Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+    return explicitThread === undefined ? null : encoded;
+  }
+
+  const turns = thread.turns;
+  let trimmedTurns = turns.slice();
+  while (trimmedTurns.length > 1) {
+    trimmedTurns = trimmedTurns.slice(1);
+    const candidateThread = {
+      ...thread,
+      turns: trimmedTurns,
+      historyTailTruncatedForRelay: true,
+    };
+    encoded = encodeRelayThreadPayload(parsed, candidateThread);
+    if (encoded != null && Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+      return encoded;
+    }
+    workingThread = candidateThread;
+  }
+
+  const newestTurn = trimmedTurns[0];
+  if (!newestTurn || typeof newestTurn !== "object" || !Array.isArray(newestTurn.items)) {
+    return encodeRelayThreadPayload(parsed, workingThread);
+  }
+
+  let trimmedItems = newestTurn.items.slice();
+  while (trimmedItems.length > 1) {
+    trimmedItems = trimmedItems.slice(1);
+    const candidateThread = {
+      ...thread,
+      turns: [{
+        ...newestTurn,
+        items: trimmedItems,
+      }],
+      historyTailTruncatedForRelay: true,
+    };
+    encoded = encodeRelayThreadPayload(parsed, candidateThread);
+    if (encoded != null && Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+      return encoded;
+    }
+    workingThread = candidateThread;
+  }
+
+  const mostRecentItem = trimmedItems[0];
+  if (!mostRecentItem || typeof mostRecentItem !== "object") {
+    return encodeRelayThreadPayload(parsed, workingThread);
+  }
+
+  const truncatedItem = truncateHistoryItemTextForRelay(
+    mostRecentItem,
+    RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS
+  );
+  let candidateThread = {
+    ...thread,
+    turns: [{
+      ...newestTurn,
+      items: [truncatedItem],
+    }],
+    historyTailTruncatedForRelay: true,
+  };
+  encoded = encodeRelayThreadPayload(parsed, candidateThread);
+  if (encoded != null && Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+    return encoded;
+  }
+
+  candidateThread = {
+    ...thread,
+    turns: [{
+      ...newestTurn,
+      items: [compactHistoryItemForRelay(mostRecentItem, RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS)],
+    }],
+    historyTailTruncatedForRelay: true,
+  };
+  return encodeRelayThreadPayload(parsed, candidateThread);
+}
+
+function encodeRelayThreadPayload(parsed, thread) {
+  try {
+    return JSON.stringify({
+      ...parsed,
+      result: {
+        ...parsed.result,
+        thread,
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+function truncateHistoryItemTextForRelay(item, maxChars) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return item;
+  }
+
+  let didChange = false;
+  let nextItem = item;
+  const textKeys = ["text", "message", "summary", "output", "outputText", "output_text"];
+
+  for (const key of textKeys) {
+    if (typeof item[key] === "string" && item[key].length > maxChars) {
+      nextItem = {
+        ...nextItem,
+        [key]: truncateRelayTextTail(item[key], maxChars),
+      };
+      didChange = true;
+    }
+  }
+
+  if (Array.isArray(item.content)) {
+    const nextContent = item.content.map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return entry;
+      }
+
+      const truncatedEntry = truncateHistoryItemTextForRelay(entry, maxChars);
+      if (truncatedEntry !== entry) {
+        didChange = true;
+      }
+      return truncatedEntry;
+    });
+
+    if (didChange) {
+      nextItem = {
+        ...nextItem,
+        content: nextContent,
+      };
+    }
+  }
+
+  return didChange
+    ? {
+      ...nextItem,
+      relayTextTailTruncated: true,
+    }
+    : item;
+}
+
+function compactHistoryItemForRelay(item, maxChars) {
+  const compactItem = {
+    id: typeof item?.id === "string" ? item.id : undefined,
+    type: typeof item?.type === "string" ? item.type : "relay_truncated_item",
+    role: typeof item?.role === "string" ? item.role : undefined,
+    itemId: typeof item?.itemId === "string" ? item.itemId : undefined,
+    relayPayloadTruncated: true,
+  };
+  const tailText = firstRelayTextTail(item, maxChars);
+  if (tailText) {
+    compactItem.text = tailText;
+  }
+
+  return Object.fromEntries(
+    Object.entries(compactItem).filter(([, value]) => value !== undefined)
+  );
+}
+
+function firstRelayTextTail(value, maxChars) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+
+  for (const key of ["text", "message", "summary", "output", "outputText", "output_text"]) {
+    if (typeof value[key] === "string" && value[key].trim()) {
+      return truncateRelayTextTail(value[key], maxChars);
+    }
+  }
+
+  if (Array.isArray(value.content)) {
+    for (const entry of value.content) {
+      const tail = firstRelayTextTail(entry, maxChars);
+      if (tail) {
+        return tail;
+      }
+    }
+  }
+
+  return "";
+}
+
+function truncateRelayTextTail(value, maxChars) {
+  if (typeof value !== "string" || value.length <= maxChars) {
+    return value;
+  }
+
+  const tail = value.slice(-maxChars).trimStart();
+  return `…\n${tail}`;
 }
 
 // Treats silent relay sockets as stale so the daemon can self-heal after sleep/wake.

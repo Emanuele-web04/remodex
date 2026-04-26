@@ -11,11 +11,14 @@ struct SidebarThreadRowView: View {
     let runBadgeState: CodexThreadRunBadgeState?
     let timingLabel: String?
     let diffTotals: TurnSessionDiffTotals?
+    let isPinned: Bool
+    let pinnedProjectLabel: String?
     let childSubagentCount: Int
     let isSubagentExpanded: Bool
     let onToggleSubagents: (() -> Void)?
     let onTap: () -> Void
     var onRename: ((String) -> Void)? = nil
+    var onPinToggle: (() -> Void)? = nil
     var onArchiveToggle: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
 
@@ -52,13 +55,27 @@ struct SidebarThreadRowView: View {
 
                 // Keep trailing metadata inside the main stack so long titles truncate before it.
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(thread.displayTitle)
-                        .font(AppFont.body())
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .foregroundStyle(.primary)
+                    HStack(spacing: 6) {
+                        if isPinned && !thread.isSubagent {
+                            Image(systemName: "pin.fill")
+                                .font(AppFont.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
 
-                    if thread.syncState == .archivedLocal {
+                        Text(thread.displayTitle)
+                            .font(AppFont.body())
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .foregroundStyle(.primary)
+                    }
+
+                    if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
+                        Text(pinnedProjectLabel)
+                            .font(AppFont.footnote())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } else if thread.syncState == .archivedLocal {
                         Text("Stored locally")
                             .font(AppFont.footnote())
                             .foregroundStyle(.tertiary)
@@ -227,6 +244,18 @@ struct SidebarThreadRowView: View {
                 Label(
                     thread.syncState == .archivedLocal ? "Unarchive" : "Archive",
                     systemImage: thread.syncState == .archivedLocal ? "tray.and.arrow.up" : "archivebox"
+                )
+            }
+        }
+
+        if let onPinToggle, thread.syncState != .archivedLocal, !thread.isSubagent {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                onPinToggle()
+            } label: {
+                Label(
+                    isPinned ? "Unpin" : "Pin",
+                    systemImage: isPinned ? "pin.slash" : "pin"
                 )
             }
         }

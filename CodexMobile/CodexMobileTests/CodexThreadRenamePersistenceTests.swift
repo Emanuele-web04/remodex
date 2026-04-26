@@ -188,4 +188,113 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
 
         XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Phone Rename")
     }
+
+    func testPinPersistsAcrossServiceReload() {
+        let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [
+            CodexThread(
+                id: "thread-1",
+                title: "Pinned Thread",
+                cwd: "/tmp/remodex"
+            ),
+        ]
+        service.pinThread("thread-1")
+
+        let reloadedService = CodexService(defaults: defaults)
+
+        XCTAssertEqual(reloadedService.pinnedThreadIDs, ["thread-1"])
+        XCTAssertTrue(reloadedService.isThreadPinned("thread-1"))
+    }
+
+    func testDeletingThreadClearsPersistedPin() {
+        let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [
+            CodexThread(
+                id: "thread-1",
+                title: "Conversation",
+                cwd: "/tmp/remodex"
+            ),
+        ]
+
+        service.pinThread("thread-1")
+        service.deleteThread("thread-1")
+
+        let reloadedService = CodexService(defaults: defaults)
+
+        XCTAssertEqual(reloadedService.pinnedThreadIDs, [])
+        XCTAssertFalse(reloadedService.isThreadPinned("thread-1"))
+    }
+
+    func testPinnedSnapshotRehydratesThreadWhenFreshServiceHasNoServerThreadsYet() {
+        let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [
+            CodexThread(
+                id: "thread-1",
+                title: "Pinned Thread",
+                preview: "Saved locally",
+                updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                cwd: "/tmp/remodex"
+            ),
+        ]
+        service.pinThread("thread-1")
+
+        let reloadedService = CodexService(defaults: defaults)
+        reloadedService.reconcileLocalThreadsWithServer([], serverArchivedThreads: [])
+
+        XCTAssertEqual(reloadedService.pinnedThreadIDs, ["thread-1"])
+        XCTAssertEqual(reloadedService.threads.map(\.id), ["thread-1"])
+        XCTAssertEqual(reloadedService.thread(for: "thread-1")?.displayTitle, "Pinned Thread")
+    }
+
+    func testArchivingPinnedChildDoesNotClearPinnedRoot() {
+        let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [
+            CodexThread(
+                id: "root-thread",
+                title: "Root Thread",
+                cwd: "/tmp/remodex"
+            ),
+            CodexThread(
+                id: "child-thread",
+                title: "Child Thread",
+                cwd: "/tmp/remodex",
+                parentThreadId: "root-thread"
+            ),
+        ]
+        service.pinThread("root-thread")
+
+        service.archiveThread("child-thread")
+
+        XCTAssertEqual(service.pinnedThreadIDs, ["root-thread"])
+        XCTAssertTrue(service.isThreadPinned("root-thread"))
+        XCTAssertTrue(service.thread(for: "child-thread")?.syncState == .archivedLocal)
+    }
 }

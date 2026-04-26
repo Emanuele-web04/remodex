@@ -291,25 +291,34 @@ extension CodexService {
 
     func decodeHistoryBaseDate(from threadObject: [String: JSONValue]) -> Date {
         if let rawCreatedAt = threadObject["createdAt"]?.doubleValue {
-            return decodeUnixTimestamp(rawCreatedAt)
+            return CodexTimestampParser.decodeUnixTimestamp(rawCreatedAt)
         }
         if let rawCreatedAt = threadObject["created_at"]?.doubleValue {
-            return decodeUnixTimestamp(rawCreatedAt)
+            return CodexTimestampParser.decodeUnixTimestamp(rawCreatedAt)
         }
 
         if let rawUpdatedAt = threadObject["updatedAt"]?.doubleValue {
-            return decodeUnixTimestamp(rawUpdatedAt)
+            return CodexTimestampParser.decodeUnixTimestamp(rawUpdatedAt)
         }
         if let rawUpdatedAt = threadObject["updated_at"]?.doubleValue {
-            return decodeUnixTimestamp(rawUpdatedAt)
+            return CodexTimestampParser.decodeUnixTimestamp(rawUpdatedAt)
         }
 
         if let rawCreatedAt = threadObject["createdAt"]?.stringValue,
-           let parsed = parseHistoryDateString(rawCreatedAt) {
+           let parsed = CodexTimestampParser.parseString(rawCreatedAt) {
             return parsed
         }
         if let rawCreatedAt = threadObject["created_at"]?.stringValue,
-           let parsed = parseHistoryDateString(rawCreatedAt) {
+           let parsed = CodexTimestampParser.parseString(rawCreatedAt) {
+            return parsed
+        }
+
+        if let rawUpdatedAt = threadObject["updatedAt"]?.stringValue,
+           let parsed = CodexTimestampParser.parseString(rawUpdatedAt) {
+            return parsed
+        }
+        if let rawUpdatedAt = threadObject["updated_at"]?.stringValue,
+           let parsed = CodexTimestampParser.parseString(rawUpdatedAt) {
             return parsed
         }
 
@@ -318,8 +327,7 @@ extension CodexService {
     }
 
     func decodeUnixTimestamp(_ rawValue: Double) -> Date {
-        let secondsValue = rawValue > 10_000_000_000 ? rawValue / 1000 : rawValue
-        return Date(timeIntervalSince1970: secondsValue)
+        CodexTimestampParser.decodeUnixTimestamp(rawValue)
     }
 
     func decodeItemText(from itemObject: [String: JSONValue]) -> String {
@@ -456,39 +464,11 @@ extension CodexService {
 
             if message.role == .assistant,
                let turnId = message.turnId, !turnId.isEmpty,
-               let index = merged.lastIndex(where: { candidate in
-                   candidate.role == .assistant
-                       && candidate.turnId == turnId
-                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
-               }) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
-                continue
-            }
-
-            // Fallback: match assistant by turnId alone when text-based matching missed
-            // (e.g. history arrives while streaming is in progress, or itemId mismatch).
-            if message.role == .assistant,
-               let turnId = message.turnId, !turnId.isEmpty,
-               let incomingItemId = normalizedHistoryIdentifier(message.itemId),
-               let index = merged.lastIndex(where: { candidate in
-                   candidate.role == .assistant
-                       && candidate.turnId == turnId
-                       && (normalizedHistoryIdentifier(candidate.itemId) == nil
-                           || normalizedHistoryIdentifier(candidate.itemId) == incomingItemId)
-               }) {
-                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
-                continue
-            }
-
-            // Legacy fallback for servers that still omit assistant item ids in history snapshots.
-            if message.role == .assistant,
-               let turnId = message.turnId, !turnId.isEmpty,
-               normalizedHistoryIdentifier(message.itemId) == nil,
-               let index = merged.lastIndex(where: { candidate in
-                   candidate.role == .assistant
-                       && candidate.turnId == turnId
-                       && normalizedHistoryIdentifier(candidate.itemId) == nil
-               }) {
+               let index = uniqueAssistantHistoryTextMergeIndex(
+                   in: merged,
+                   message: message,
+                   turnId: turnId
+               ) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
@@ -737,16 +717,13 @@ extension CodexService {
 
         for key in numericKeys {
             if let value = object[key]?.doubleValue {
-                return decodeUnixTimestamp(value)
+                return CodexTimestampParser.decodeUnixTimestamp(value)
             }
             if let value = object[key]?.intValue {
-                return decodeUnixTimestamp(Double(value))
+                return CodexTimestampParser.decodeUnixTimestamp(Double(value))
             }
             if let value = object[key]?.stringValue {
-                if let numeric = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                    return decodeUnixTimestamp(numeric)
-                }
-                if let parsed = parseHistoryDateString(value) {
+                if let parsed = CodexTimestampParser.parseString(value) {
                     return parsed
                 }
             }
@@ -756,18 +733,7 @@ extension CodexService {
     }
 
     func parseHistoryDateString(_ value: String) -> Date? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: trimmed) {
-            return date
-        }
-
-        let fallbackFormatter = ISO8601DateFormatter()
-        fallbackFormatter.formatOptions = [.withInternetDateTime]
-        return fallbackFormatter.date(from: trimmed)
+        CodexTimestampParser.parseString(value)
     }
 
     func reconcileExistingMessage(_ localMessage: CodexMessage, with serverMessage: CodexMessage) -> CodexMessage {
@@ -793,6 +759,11 @@ extension CodexService {
 
         if value.deliveryState == .pending {
             value.deliveryState = .confirmed
+        }
+
+        if CodexTimestampParser.isTrustworthyServerDate(serverMessage.createdAt),
+           abs(value.createdAt.timeIntervalSince(serverMessage.createdAt)) > 0.5 {
+            value.createdAt = serverMessage.createdAt
         }
 
         if value.turnId == nil {
@@ -872,6 +843,39 @@ extension CodexService {
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // History can revisit an assistant turn multiple times while local rows still
+    // have provisional identity. Only reconcile by text when the candidate is unique.
+    nonisolated static func uniqueAssistantHistoryTextMergeIndex(
+        in messages: [CodexMessage],
+        message: CodexMessage,
+        turnId: String
+    ) -> Int? {
+        let normalizedText = normalizedMessageText(message.text)
+        guard !normalizedText.isEmpty else {
+            return nil
+        }
+
+        let candidates = messages.indices.filter { index in
+            let candidate = messages[index]
+            return candidate.role == .assistant
+                && candidate.turnId == turnId
+                && normalizedMessageText(candidate.text) == normalizedText
+        }
+
+        guard candidates.count == 1,
+              let index = candidates.last else {
+            return nil
+        }
+
+        let localItemId = normalizedHistoryIdentifier(messages[index].itemId)
+        let incomingItemId = normalizedHistoryIdentifier(message.itemId)
+        if let localItemId, let incomingItemId, localItemId != incomingItemId {
+            return nil
+        }
+
+        return index
     }
 
     nonisolated static func shouldReconcileToolActivityRow(

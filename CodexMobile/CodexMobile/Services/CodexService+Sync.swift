@@ -252,6 +252,11 @@ extension CodexService {
             merged[localThread.id] = localThread
         }
 
+        snapshotOnlyPinnedThreadIDs = injectPinnedSnapshotThreads(
+            into: &merged,
+            deletedThreadIDs: persistedDeletedIDs
+        )
+
         threads = sortThreads(Array(merged.values))
         assistantRevertStateCacheByThread.removeAll()
         refreshBusyRepoRootsAndDependentTimelineStates()
@@ -442,6 +447,9 @@ extension CodexService {
 
         if isArchived {
             addLocallyArchivedThreadID(threadId)
+            if pinnedThreadIDs.contains(threadId) {
+                unpinThread(threadId)
+            }
         } else {
             removeLocallyArchivedThreadID(threadId)
         }
@@ -501,6 +509,9 @@ extension CodexService {
         if activeThreadId == threadId { activeThreadId = nil }
 
         removeLocallyArchivedThreadID(threadId)
+        if pinnedThreadIDs.contains(threadId) {
+            unpinThread(threadId)
+        }
         if persistAsDeleted {
             addLocallyDeletedThreadID(threadId)
         }
@@ -774,10 +785,12 @@ extension CodexService {
     func syncActiveThreadState(threadId: String) async {
         var wasRunning = threadHasActiveOrRunningTurn(threadId)
         var didRunMirroredCatchup = false
+        let shouldPreferDeferredClosedHydration = shouldDeferHeavyDisplayHydration(threadId: threadId)
+            || threadsNeedingCanonicalHistoryReconcile.contains(threadId)
 
         // Long closed chats already have usable local rows. Avoid forcing a full thread/read
         // every sync tick after selection, which can reproduce the same open-chat crash.
-        if !wasRunning, shouldDeferHeavyDisplayHydration(threadId: threadId) {
+        if !wasRunning, shouldPreferDeferredClosedHydration {
             let outcome = await catchUpRunningThreadIfNeeded(
                 threadId: threadId,
                 shouldForceResume: false
@@ -788,9 +801,14 @@ extension CodexService {
                 didRefreshTurnState: outcome.didRefreshTurnState
             )
             if shouldTrustClosedState {
-                guard threadsNeedingCanonicalHistoryReconcile.contains(threadId) else {
-                    return
+                // Keep deferred-hydration chats on the lightweight foreground path.
+                if threadsNeedingCanonicalHistoryReconcile.contains(threadId) {
+                    scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
+                } else if !threadsWithSatisfiedDeferredHistoryHydration.contains(threadId),
+                          hasLargePersistedTranscript(threadId: threadId) {
+                    markThreadNeedingCanonicalHistoryReconcile(threadId)
                 }
+                return
             }
         }
 

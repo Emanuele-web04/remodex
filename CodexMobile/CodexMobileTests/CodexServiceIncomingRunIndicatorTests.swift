@@ -723,6 +723,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-2", delta: "Second")
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
 
         let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
         XCTAssertEqual(assistantMessages.count, 2)
@@ -742,9 +743,11 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
         _ = service.timelineState(for: threadID)
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
         let firstSnapshot = service.timelineState(for: threadID).renderSnapshot
 
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
         let secondSnapshot = service.timelineState(for: threadID).renderSnapshot
 
         XCTAssertEqual(firstSnapshot.messages.count, 1)
@@ -764,6 +767,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
 
         XCTAssertEqual(service.currentOutput, "First chunk")
     }
@@ -777,6 +781,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " chunk")
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
 
         XCTAssertEqual(service.currentOutput, "First chunk")
         XCTAssertEqual(service.timelineState(for: threadID).renderSnapshot.messages.first?.text, "First chunk")
@@ -793,6 +798,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: "First")
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-2", delta: "Second")
         service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: "item-1", delta: " tail")
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
 
         XCTAssertEqual(service.currentOutput, "Second")
     }

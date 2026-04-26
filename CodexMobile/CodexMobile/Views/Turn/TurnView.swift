@@ -54,7 +54,11 @@ struct TurnView: View {
         let gitWorkingDirectory = resolvedThread.gitWorkingDirectory
         let isThreadRunning = renderSnapshot.isThreadRunning
         let isEmptyThread = renderSnapshot.messages.isEmpty
-        let threadDisplayPhase = codex.threadDisplayPhase(threadId: thread.id)
+        let threadDisplayPhase = codex.threadDisplayPhase(
+            threadId: thread.id,
+            hasVisibleMessages: !renderSnapshot.messages.isEmpty,
+            isThreadRunning: isThreadRunning
+        )
         // Keep the service-owned loading vs empty-state decision intact while
         // history hydration catches up for previously active conversations.
         let resolvedEmptyConversationState = resolvedEmptyState(for: threadDisplayPhase)
@@ -78,7 +82,7 @@ struct TurnView: View {
             gitWorkingDirectory: gitWorkingDirectory
         )
         let disabledGitActions: Set<TurnGitActionKind> = viewModel.canCreatePullRequest ? [] : [.createPR]
-        let onTapMacHandoff: (() -> Void)? = codex.isConnected ? {
+        let onTapMacHandoff: (() -> Void)? = codex.isConnected && codex.supportsDesktopAppHandoff ? {
             isShowingMacHandoffConfirm = true
         } : nil
         let onTapWorktreeHandoff: (() -> Void)? = showsGitControls ? {
@@ -409,7 +413,7 @@ struct TurnView: View {
                 viewModel.dismissGitSyncAlert()
             },
             onConfirmMacHandoff: {
-                continueOnMac()
+                continueOnDesktopApp()
             }
         )
         .alert(
@@ -564,7 +568,7 @@ struct TurnView: View {
         }
     }
 
-    private func continueOnMac() {
+    private func continueOnDesktopApp() {
         guard !isHandingOffToMac else { return }
         isHandingOffToMac = true
 
@@ -573,7 +577,7 @@ struct TurnView: View {
 
             do {
                 let handoffService = DesktopHandoffService(codex: codex)
-                try await handoffService.continueOnMac(threadId: thread.id)
+                try await handoffService.continueOnDesktopApp(threadId: thread.id)
             } catch {
                 macHandoffErrorMessage = error.localizedDescription
             }
@@ -1509,7 +1513,7 @@ struct TurnView: View {
                 snapshot: ConnectionRecoverySnapshot(
                     title: "Voice Mode",
                     summary: "Reconnect to your Mac to use voice mode.",
-                    detail: "Keep the Remodex bridge running on your Mac, then try the microphone again.",
+                    detail: "Keep the Remodex bridge running on your paired computer, then try the microphone again.",
                     status: .interrupted,
                     trailingStyle: .action("Reconnect")
                 ),
@@ -1520,7 +1524,7 @@ struct TurnView: View {
                 snapshot: ConnectionRecoverySnapshot(
                     title: "Voice Mode",
                     summary: "This bridge session does not support voice mode yet.",
-                    detail: "Restart Remodex on your Mac, then reconnect this iPhone. If it still happens, update Remodex on your Mac and pair again.",
+                    detail: "Restart Remodex on your computer, then reconnect this iPhone. If it still happens, update Remodex on your computer and pair again.",
                     status: .actionRequired,
                     trailingStyle: .action("Reconnect")
                 ),
@@ -1530,8 +1534,8 @@ struct TurnView: View {
             return VoiceRecoveryPresentation(
                 snapshot: ConnectionRecoverySnapshot(
                     title: "Voice Mode",
-                    summary: "Sign in to ChatGPT on your Mac to use voice mode.",
-                    detail: "Open ChatGPT on the paired Mac, sign in there, then come back here and try again.",
+                    summary: "Sign in to ChatGPT on your computer to use voice mode.",
+                    detail: "Open ChatGPT on the paired computer, sign in there, then come back here and try again.",
                     status: .actionRequired,
                     trailingStyle: .action("How To Fix")
                 ),
@@ -1541,8 +1545,8 @@ struct TurnView: View {
             return VoiceRecoveryPresentation(
                 snapshot: ConnectionRecoverySnapshot(
                     title: "Voice Mode",
-                    summary: "ChatGPT voice needs a fresh sign-in on your Mac.",
-                    detail: "Open ChatGPT on the paired Mac, sign in again there, then retry voice mode here.",
+                    summary: "ChatGPT voice needs a fresh sign-in on your computer.",
+                    detail: "Open ChatGPT on the paired computer, sign in again there, then retry voice mode here.",
                     status: .actionRequired,
                     trailingStyle: .action("How To Fix")
                 ),
@@ -1563,8 +1567,8 @@ struct TurnView: View {
             return VoiceRecoveryPresentation(
                 snapshot: ConnectionRecoverySnapshot(
                     title: "Voice Mode",
-                    summary: "Voice mode needs a ChatGPT session on your Mac.",
-                    detail: "API-key-only auth is not enough here. Sign in to ChatGPT on the paired Mac, then try again.",
+                    summary: "Voice mode needs a ChatGPT session on your computer.",
+                    detail: "API-key-only auth is not enough here. Sign in to ChatGPT on the paired computer, then try again.",
                     status: .actionRequired,
                     trailingStyle: .action("How To Fix")
                 ),

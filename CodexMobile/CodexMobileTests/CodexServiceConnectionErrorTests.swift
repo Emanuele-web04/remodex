@@ -11,6 +11,16 @@ import UIKit
 
 @MainActor
 final class CodexServiceConnectionErrorTests: XCTestCase {
+    func testKeepMacAwakePreferenceDefaultsToDisabled() {
+        let suiteName = "CodexServiceConnectionErrorTests.keepMacAwake.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+
+        XCTAssertFalse(service.keepMacAwakeWhileBridgeRuns)
+    }
+
     func testBenignBackgroundAbortIsSuppressedFromUserFacingErrors() {
         let service = CodexService()
         let error = NWError.posix(.ECONNABORTED)

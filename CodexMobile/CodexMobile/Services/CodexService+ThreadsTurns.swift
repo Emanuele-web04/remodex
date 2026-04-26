@@ -1452,7 +1452,9 @@ extension CodexService {
                 threadId: normalizedThreadID,
                 expectedTurnId: expectedTurnID,
                 shouldAppendUserMessage: true,
-                collaborationMode: nil
+                // Exiting plan mode needs to be explicit for runtimes that keep the
+                // current collaboration mode when turn/steer omits the field.
+                collaborationMode: .default
             )
             return
         }
@@ -1461,7 +1463,7 @@ extension CodexService {
             userInput: userInput,
             threadId: normalizedThreadID,
             shouldAppendUserMessage: true,
-            collaborationMode: nil
+            collaborationMode: .default
         )
     }
 

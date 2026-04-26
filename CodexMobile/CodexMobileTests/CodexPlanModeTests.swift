@@ -406,6 +406,78 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertNil(service.currentPlanSessionSource(for: threadID))
     }
 
+    func testImplementProposedPlanSteerExplicitlyReturnsToDefaultMode() async throws {
+        let service = makeService()
+        service.supportsTurnCollaborationMode = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+
+        let threadID = "thread-plan"
+        let turnID = "turn-live"
+        service.markNativePlanSession(for: threadID)
+        service.setActiveTurnID(turnID, for: threadID)
+
+        var capturedTurnSteerParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "turn/steer")
+            capturedTurnSteerParams = params
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string(turnID)]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.implementProposedPlan(
+            threadId: threadID,
+            proposedPlan: CodexProposedPlan(body: "1. Ship it")
+        )
+
+        XCTAssertEqual(
+            capturedTurnSteerParams?
+                .objectValue?["collaborationMode"]?
+                .objectValue?["mode"]?
+                .stringValue,
+            CodexCollaborationModeKind.default.rawValue
+        )
+        XCTAssertNil(service.currentPlanSessionSource(for: threadID))
+    }
+
+    func testImplementProposedPlanStartExplicitlyReturnsToDefaultMode() async throws {
+        let service = makeService()
+        service.supportsTurnCollaborationMode = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+
+        let threadID = "thread-plan"
+        service.markNativePlanSession(for: threadID)
+
+        var capturedTurnStartParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "turn/start")
+            capturedTurnStartParams = params
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-implement")]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.implementProposedPlan(
+            threadId: threadID,
+            proposedPlan: CodexProposedPlan(body: "1. Ship it")
+        )
+
+        XCTAssertEqual(
+            capturedTurnStartParams?
+                .objectValue?["collaborationMode"]?
+                .objectValue?["mode"]?
+                .stringValue,
+            CodexCollaborationModeKind.default.rawValue
+        )
+        XCTAssertNil(service.currentPlanSessionSource(for: threadID))
+    }
+
     func testRuntimeSupportsPlanCollaborationModeUsesOfficialCollaborationModeListShape() async {
         let service = makeService()
 

@@ -337,6 +337,7 @@ private struct TurnTimelineRowsSection: View {
                 )
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -534,6 +535,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             onLoadEarlierMessages: handleLoadEarlierMessages
                         )
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, timelineHorizontalPadding)
                     .padding(.top, 12)
                     .padding(.bottom, 12)

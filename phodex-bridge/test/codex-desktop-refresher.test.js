@@ -113,7 +113,7 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
     },
   });
   assert.equal(macConfig.refreshEnabled, false);
-  assert.equal(macConfig.keepMacAwakeEnabled, true);
+  assert.equal(macConfig.keepMacAwakeEnabled, false);
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
   assert.equal(persistedKeepAwakeConfig.keepMacAwakeEnabled, false);

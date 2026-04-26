@@ -129,6 +129,7 @@ struct MarkdownTextView: View {
             renderedContent
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+                .clipped()
         } else {
             renderedContent
         }
@@ -668,6 +669,9 @@ struct MessageRow: View, Equatable {
     var subagentOpenAction: ((CodexSubagentThreadPresentation) -> Void)? = nil
     @State private var previewImage: PreviewImagePayload?
     @State private var selectableTextSheet: SelectableMessageTextSheetState?
+    @State private var throttledAssistantDisplayText: String?
+    @State private var pendingAssistantDisplayText: String?
+    @State private var assistantDisplayUpdateTask: Task<Void, Never>?
 
     static func == (lhs: MessageRow, rhs: MessageRow) -> Bool {
         lhs.message == rhs.message
@@ -682,7 +686,13 @@ struct MessageRow: View, Equatable {
 
     // Computed once per body evaluation and reused by all sub-views.
     private var displayText: String {
-        timelineDisplayText(for: message)
+        if message.role == .assistant,
+           message.isStreaming,
+           let throttledAssistantDisplayText {
+            return throttledAssistantDisplayText
+        }
+
+        return timelineDisplayText(for: message)
     }
 
     var body: some View {
@@ -713,6 +723,21 @@ struct MessageRow: View, Equatable {
         }
         .sheet(item: $selectableTextSheet) { sheet in
             SelectableMessageTextSheet(state: sheet)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .clipped()
+        .onAppear {
+            synchronizeAssistantDisplayText(immediate: true)
+        }
+        .onChange(of: message.text) { _, _ in
+            synchronizeAssistantDisplayText(immediate: !message.isStreaming)
+        }
+        .onChange(of: message.isStreaming) { _, isStreaming in
+            synchronizeAssistantDisplayText(immediate: !isStreaming)
+        }
+        .onDisappear {
+            assistantDisplayUpdateTask?.cancel()
+            assistantDisplayUpdateTask = nil
         }
     }
 
@@ -1353,6 +1378,46 @@ struct MessageRow: View, Equatable {
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")
             }
+        }
+    }
+
+    // Throttles only the assistant row's visible text during streaming so markdown/layout
+    // work stays local to that cell instead of firing on every token delta.
+    private func synchronizeAssistantDisplayText(immediate: Bool) {
+        guard message.role == .assistant else {
+            throttledAssistantDisplayText = nil
+            pendingAssistantDisplayText = nil
+            assistantDisplayUpdateTask?.cancel()
+            assistantDisplayUpdateTask = nil
+            return
+        }
+
+        let nextText = timelineDisplayText(for: message)
+        pendingAssistantDisplayText = nextText
+
+        guard message.isStreaming else {
+            assistantDisplayUpdateTask?.cancel()
+            assistantDisplayUpdateTask = nil
+            throttledAssistantDisplayText = nextText
+            return
+        }
+
+        if immediate {
+            assistantDisplayUpdateTask?.cancel()
+            assistantDisplayUpdateTask = nil
+            throttledAssistantDisplayText = nextText
+            return
+        }
+
+        if assistantDisplayUpdateTask != nil {
+            return
+        }
+
+        assistantDisplayUpdateTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 80_000_000)
+            guard !Task.isCancelled else { return }
+            throttledAssistantDisplayText = pendingAssistantDisplayText ?? nextText
+            assistantDisplayUpdateTask = nil
         }
     }
 }
