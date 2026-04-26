@@ -2110,7 +2110,7 @@ extension CodexService {
         }
 
         if sections.isEmpty {
-            return "Thinking..."
+            return ""
         }
 
         return sections.joined(separator: "\n\n")

@@ -432,7 +432,9 @@ final class CodexService {
     // Keeps the trusted-session HTTP lookup cancellable so manual retry can preempt a stuck resolve.
     @ObservationIgnored var trustedSessionResolveTask: Task<CodexTrustedSessionResolveResponse, Error>?
     @ObservationIgnored var trustedSessionResolveTaskID: UUID?
-    @ObservationIgnored var streamingAssistantMessageByTurnID: [String: String] = [:]
+    // Assistant streams keep turn fallback separate from item-specific identity to avoid cross-item overlap.
+    @ObservationIgnored var streamingAssistantFallbackMessageByTurnID: [String: String] = [:]
+    @ObservationIgnored var streamingAssistantMessageByItemKey: [String: String] = [:]
     @ObservationIgnored var streamingSystemMessageByItemID: [String: String] = [:]
     /// Rich metadata for command execution tool calls, keyed by itemId.
     var commandExecutionDetailsByItemID: [String: CommandExecutionDetails] = [:]

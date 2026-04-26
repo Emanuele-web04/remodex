@@ -15,13 +15,12 @@ import UIKit
 let enablesInlineMarkdownSelectionInTimeline = false
 
 // Normalizes streaming placeholders once so assistant rows do not render transient status text
-// like "Thinking..." as if it were final message content.
+// as if it were final message content.
 func timelineDisplayText(for message: CodexMessage) -> String {
     let trimmedText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
     if message.isStreaming {
         let placeholderTexts: Set<String> = [
             "...",
-            "Thinking...",
             "Applying file changes...",
             "Updating...",
             "Coordinating agents...",
@@ -1571,48 +1570,23 @@ private struct ThinkingSystemBlock: View {
             // even after stream completion whenever content was present.
             if isStreaming || !thinkingText.isEmpty {
                 if let activityPreview {
-                    VStack(alignment: .leading, spacing: 4) {
-                        thinkingTitle
-
-                        activityPreviewText(activityPreview)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
+                    activityPreviewText(activityPreview)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     .padding(.vertical, 2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 } else if thinkingText.isEmpty {
-                    thinkingTitle
-                        .padding(.vertical, 2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    EmptyView()
                 } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        thinkingTitle
-
-                        ThinkingDisclosureView(
-                            messageID: messageID,
-                            content: thinkingContent
-                        )
-                    }
+                    ThinkingDisclosureView(
+                        messageID: messageID,
+                        content: thinkingContent
+                    )
                     .padding(.vertical, 2)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
-    }
-
-    // MARK: - Inline helpers (no extra View structs)
-
-    private var thinkingTitle: some View {
-        Text("Thinking...")
-            .font(AppFont.caption(weight: .medium))
-            .foregroundStyle(.secondary.opacity(0.9))
-            .overlay {
-                if isStreaming {
-                    ShimmerMask()
-                }
-            }
-            .mask(Text("Thinking...")
-                .font(AppFont.caption(weight: .medium)))
     }
 
     private func activityPreviewText(_ preview: String) -> Text {
@@ -1949,7 +1923,6 @@ struct ThinkingSystemBlockDisclosurePreviewHost: View {
 @MainActor
 struct ThinkingSystemBlockRealResponsePreviewHost: View {
     private let rawThinkingText = """
-    Thinking...
     **Explored 1 file**
     Found the compact thinking block and isolated it into a dedicated view so the UI can be tuned in one place.
 

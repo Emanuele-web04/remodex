@@ -212,7 +212,7 @@ enum TurnTimelineReducer {
     }
 
     // Collapses repeated thinking placeholders/activity rows within one turn segment so
-    // tool cards can interleave without leaving stacked empty "Thinking..." rows behind.
+    // tool cards can interleave without leaving stacked empty thinking rows behind.
     static func collapseThinkingMessages(in messages: [CodexMessage]) -> [CodexMessage] {
         var result: [CodexMessage] = []
         result.reserveCapacity(messages.count)

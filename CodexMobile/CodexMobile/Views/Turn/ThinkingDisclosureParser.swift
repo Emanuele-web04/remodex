@@ -114,7 +114,7 @@ enum ThinkingDisclosureParser {
         return ThinkingDisclosureContent(sections: [], fallbackText: normalizedText)
     }
 
-    // Keeps the "Thinking..." label outside the body so the UI can render it once.
+    // Keeps transient thinking labels outside the body so the UI can render status once.
     static func normalizedThinkingContent(from rawText: String) -> String {
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
