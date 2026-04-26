@@ -1,5 +1,5 @@
 // FILE: GPTVoiceSetupSheet.swift
-// Purpose: Shows a compact info sheet that explains how Remodex voice uses the paired Mac's ChatGPT session.
+// Purpose: Shows a compact info sheet that explains how Remodex voice uses the paired computer's ChatGPT session.
 // Layer: View
 // Exports: GPTVoiceSetupSheet
 // Depends on: SwiftUI, AppFont
@@ -21,9 +21,9 @@ struct GPTVoiceSetupSheet: View {
                         )
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("GPT voice uses the ChatGPT session on your Mac")
+                        Text("GPT voice uses the ChatGPT session on your computer")
                             .font(AppFont.subheadline(weight: .semibold))
-                        Text("Remodex does not keep a separate GPT voice login on the iPhone. It uses the ChatGPT session already active on your paired Mac.")
+                        Text("Remodex does not keep a separate GPT voice login on the iPhone. It uses the ChatGPT session already active on your paired computer.")
                             .font(AppFont.caption())
                             .foregroundStyle(.secondary)
                     }
@@ -37,13 +37,13 @@ struct GPTVoiceSetupSheet: View {
                     )
                     infoStep(
                         number: "2",
-                        title: "The phone checks your paired Mac",
-                        detail: "Remodex asks the paired Mac bridge for the active ChatGPT session that is already connected there."
+                        title: "The phone checks your paired computer",
+                        detail: "Remodex asks the paired computer bridge for the active ChatGPT session that is already connected there."
                     )
                     infoStep(
                         number: "3",
                         title: "GPT transcribes the clip",
-                        detail: "The voice clip is sent with that Mac-backed GPT session so GPT can turn it into text."
+                        detail: "The voice clip is sent with that computer-backed GPT session so GPT can turn it into text."
                     )
                     infoStep(
                         number: "4",
@@ -52,7 +52,7 @@ struct GPTVoiceSetupSheet: View {
                     )
                 }
 
-                Text("In short: iPhone voice in, Mac ChatGPT session for auth, GPT transcript back to the iPhone.")
+                Text("In short: iPhone voice in, computer ChatGPT session for auth, GPT transcript back to the iPhone.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 

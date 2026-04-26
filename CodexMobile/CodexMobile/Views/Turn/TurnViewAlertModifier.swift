@@ -60,23 +60,23 @@ private struct TurnViewAlertModifier: ViewModifier {
             } message: { alert in
                 Text(alert.message)
             }
-            .alert("Hand off to Mac app", isPresented: $isShowingMacHandoffConfirm) {
+            .alert("Continue on Desktop App", isPresented: $isShowingMacHandoffConfirm) {
                 Button("Cancel", role: .cancel) {}
                 Button("Force Close & Continue") {
                     onConfirmMacHandoff()
                 }
             } message: {
-                Text("Remodex will force close and reopen Codex.app on your Mac. Any desktop runs in progress will be stopped, and unsaved draft text there may be lost before this chat is opened.")
+                Text("Remodex will force close and reopen Codex.app on this computer. Any desktop runs in progress will be stopped, and unsaved draft text there may be lost before this chat is opened.")
             }
             .alert(
-                "Couldn't hand off to Mac app",
+                "Couldn't continue on desktop app",
                 isPresented: macHandoffErrorIsPresented
             ) {
                 Button("OK", role: .cancel) {
                     macHandoffErrorMessage = nil
                 }
             } message: {
-                Text(macHandoffErrorMessage ?? "Could not continue this chat on your Mac.")
+                Text(macHandoffErrorMessage ?? "Could not continue this chat on the desktop app.")
             }
     }
 

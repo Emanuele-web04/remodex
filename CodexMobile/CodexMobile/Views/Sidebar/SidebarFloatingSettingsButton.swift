@@ -1,7 +1,7 @@
 // FILE: SidebarFloatingSettingsButton.swift
 // Purpose: Floating shortcut used to open sidebar settings.
 // Layer: View Component
-// Exports: SidebarFloatingSettingsButton, SidebarMacConnectionStatusView
+// Exports: SidebarFloatingSettingsButton, SidebarComputerConnectionStatusView
 
 import SwiftUI
 
@@ -26,13 +26,13 @@ struct SidebarFloatingSettingsButton: View {
     }
 }
 
-struct SidebarMacConnectionStatusView: View {
+struct SidebarComputerConnectionStatusView: View {
     let name: String
     let systemName: String?
     let isConnected: Bool
 
     var body: some View {
-        // Let the trusted-Mac label use the sidebar width instead of truncating
+        // Let the trusted-computer label use the sidebar width instead of truncating
         // inside a narrow fixed box while the center spacer absorbs the space.
         VStack(alignment: .trailing, spacing: 2) {
             Text(statusTitle)
@@ -50,6 +50,6 @@ struct SidebarMacConnectionStatusView: View {
     }
 
     private var statusTitle: String {
-        isConnected ? "Connected to Mac" : "Saved Mac"
+        isConnected ? "Connected to Computer" : "Saved Computer"
     }
 }

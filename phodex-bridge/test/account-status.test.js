@@ -14,6 +14,17 @@ const {
   redactAuthStatus,
 } = require("../src/account-status");
 
+const macHostMetadata = {
+  codexTransportMode: null,
+  hostPlatform: "macos",
+  hostCapabilities: {
+    desktopHandoff: true,
+    displayWake: true,
+    keepAwake: true,
+    hostBrowserLogin: true,
+  },
+};
+
 test("composeAccountStatus marks authenticated accounts and carries account metadata", () => {
   const status = composeAccountStatus({
     accountRead: {
@@ -46,6 +57,7 @@ test("composeAccountStatus marks authenticated accounts and carries account meta
     requiresOpenaiAuth: false,
     bridgeVersion: bridgePackageVersion,
     bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
   });
 });
 
@@ -80,6 +92,7 @@ test("composeAccountStatus keeps authenticated UI state when account/read still 
     requiresOpenaiAuth: false,
     bridgeVersion: bridgePackageVersion,
     bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
   });
 });
 
@@ -115,6 +128,7 @@ test("composeAccountStatus reports reauth when auth status explicitly requires C
     requiresOpenaiAuth: true,
     bridgeVersion: bridgePackageVersion,
     bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
   });
 });
 
@@ -145,6 +159,7 @@ test("redactAuthStatus strips token-bearing fields from the status snapshot", ()
     expiresAt: null,
     bridgeVersion: bridgePackageVersion,
     bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
   });
   assert.equal(Object.prototype.hasOwnProperty.call(status, "authToken"), false);
 });
@@ -177,6 +192,7 @@ test("composeAccountStatus keeps a fresh signed-out state distinct from reauth",
     requiresOpenaiAuth: true,
     bridgeVersion: bridgePackageVersion,
     bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
   });
 });
 
@@ -229,6 +245,7 @@ test("composeSanitizedAuthStatusFromSettledResults keeps the available auth snap
     expiresAt: null,
     bridgeVersion: bridgePackageVersion,
     bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
   });
 });
 
@@ -265,6 +282,7 @@ test("composeSanitizedAuthStatusFromSettledResults keeps authenticated UI state 
     expiresAt: null,
     bridgeVersion: bridgePackageVersion,
     bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
   });
 });
 

@@ -2121,8 +2121,12 @@ final class TurnViewModel {
                     }
 
                 case .commit:
-                    let draft = try await gitService.generateCommitMessage(model: gitWriterModel)
-                    let result = try await gitService.commit(message: draft.fullMessage)
+                    let result = try await gitService.commit(
+                        message: await generatedGitCommitMessageOrNil(
+                            gitService: gitService,
+                            model: gitWriterModel
+                        )
+                    )
                     let statusAfter = try? await gitService.status()
                     if let statusAfter { applyGitRepoSync(statusAfter) }
                     _ = result // commit succeeded
@@ -2137,8 +2141,12 @@ final class TurnViewModel {
                     )
 
                 case .commitAndPush:
-                    let draft = try await gitService.generateCommitMessage(model: gitWriterModel)
-                    _ = try await gitService.commit(message: draft.fullMessage)
+                    _ = try await gitService.commit(
+                        message: await generatedGitCommitMessageOrNil(
+                            gitService: gitService,
+                            model: gitWriterModel
+                        )
+                    )
                     let pushResult = try await gitService.push()
                     handleSuccessfulPush(
                         pushResult,
@@ -2166,7 +2174,8 @@ final class TurnViewModel {
                             message: "Could not determine the repository default branch."
                         )
                     }
-                    let draft = try await gitService.generatePullRequestDraft(
+                    let draft = await generatedPullRequestDraftOrNil(
+                        gitService: gitService,
                         model: gitWriterModel,
                         baseBranch: base
                     )
@@ -2174,8 +2183,8 @@ final class TurnViewModel {
                         ownerRepo: ownerRepo,
                         branch: branch,
                         base: base,
-                        title: draft.title,
-                        body: draft.body
+                        title: draft?.title ?? "",
+                        body: draft?.body ?? ""
                     )
                     if let url = URL(string: prURL) {
                         await UIApplication.shared.open(url)
@@ -2234,8 +2243,12 @@ final class TurnViewModel {
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
             let gitWriterModel = codex.gitWriterModelIdentifier()
             do {
-                let draft = try await gitService.generateCommitMessage(model: gitWriterModel)
-                _ = try await gitService.commit(message: draft.fullMessage)
+                _ = try await gitService.commit(
+                    message: await generatedGitCommitMessageOrNil(
+                        gitService: gitService,
+                        model: gitWriterModel
+                    )
+                )
                 inlineCommitAndPushPhase = .pushing
                 let pushResult = try await gitService.push()
                 handleSuccessfulPush(
@@ -2270,6 +2283,30 @@ final class TurnViewModel {
         return try await gitService.remoteUrl()
     }
 
+    // AI writing is a polish layer; Git actions must still work when the writer is unavailable.
+    private func generatedGitCommitMessageOrNil(
+        gitService: GitActionsService,
+        model: String?
+    ) async -> String? {
+        do {
+            return try await gitService.generateCommitMessage(model: model).fullMessage
+        } catch {
+            return nil
+        }
+    }
+
+    private func generatedPullRequestDraftOrNil(
+        gitService: GitActionsService,
+        model: String?,
+        baseBranch: String
+    ) async -> GitPullRequestDraftResult? {
+        do {
+            return try await gitService.generatePullRequestDraft(model: model, baseBranch: baseBranch)
+        } catch {
+            return nil
+        }
+    }
+
 }
 
 func remodexBuildPullRequestURL(
@@ -2281,17 +2318,23 @@ func remodexBuildPullRequestURL(
 ) -> String {
     let encodedBranch = branch.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? branch
     let encodedBase = base.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? base
+    let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedTitle.isEmpty || !trimmedBody.isEmpty else {
+        return "https://github.com/\(ownerRepo)/compare/\(encodedBase)...\(encodedBranch)?expand=1"
+    }
+
     var components = URLComponents(
         string: "https://github.com/\(ownerRepo)/compare/\(encodedBase)...\(encodedBranch)"
     )
     components?.queryItems = [
         URLQueryItem(name: "quick_pull", value: "1"),
-        URLQueryItem(name: "title", value: title),
-        URLQueryItem(name: "body", value: body),
+        URLQueryItem(name: "title", value: trimmedTitle),
+        URLQueryItem(name: "body", value: trimmedBody),
     ]
     guard let urlString = components?.url?.absoluteString else {
-        let encodedTitle = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let encodedTitle = trimmedTitle.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        let encodedBody = trimmedBody.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         return "https://github.com/\(ownerRepo)/compare/\(encodedBase)...\(encodedBranch)?quick_pull=1&title=\(encodedTitle)&body=\(encodedBody)"
     }
     return urlString

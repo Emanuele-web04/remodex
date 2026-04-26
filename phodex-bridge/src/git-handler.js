@@ -14,6 +14,7 @@ const { promisify } = require("util");
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_DRAFT_TIMEOUT_MS = 120_000;
+const GIT_DRAFT_PATCH_MAX_BYTES = 80_000;
 const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const DEFAULT_GIT_WRITER_MODEL = "gpt-5.4-mini";
 
@@ -865,7 +866,9 @@ async function buildCommitDraftContext(cwd) {
     .map((file) => file.path)
     .filter(Boolean);
   const untrackedPatch = await diffPatchForUntrackedFiles(cwd, untrackedPaths);
-  const patch = [trackedPatch.trim(), untrackedPatch.trim()].filter(Boolean).join("\n\n").trim();
+  const patch = truncateDraftPatch(
+    [trackedPatch.trim(), untrackedPatch.trim()].filter(Boolean).join("\n\n").trim()
+  );
 
   if (!patch) {
     throw gitError("nothing_to_commit", "Nothing to commit.");
@@ -895,7 +898,9 @@ async function buildPullRequestDraftContext(cwd, params) {
 
   const baseRef = await resolveExistingBranchRef(cwd, baseBranch);
   const mergeBase = (await git(cwd, "merge-base", "HEAD", baseRef)).trim();
-  const patch = (await git(cwd, "diff", "--binary", "--find-renames", `${mergeBase}..HEAD`)).trim();
+  const patch = truncateDraftPatch(
+    (await git(cwd, "diff", "--binary", "--find-renames", `${mergeBase}..HEAD`)).trim()
+  );
   const numstatOutput = await git(cwd, "diff", "--numstat", `${mergeBase}..HEAD`);
   const diff = parseNumstatTotals(numstatOutput);
   const commitList = (
@@ -969,6 +974,29 @@ function buildCommitDraftPrompt(context) {
     "```diff",
     context.patch,
     "```",
+  ].join("\n");
+}
+
+function truncateDraftPatch(patch) {
+  if (Buffer.byteLength(patch, "utf8") <= GIT_DRAFT_PATCH_MAX_BYTES) {
+    return patch;
+  }
+
+  let byteCount = 0;
+  const keptLines = [];
+  for (const line of patch.split("\n")) {
+    const lineBytes = Buffer.byteLength(`${line}\n`, "utf8");
+    if (byteCount + lineBytes > GIT_DRAFT_PATCH_MAX_BYTES) {
+      break;
+    }
+    keptLines.push(line);
+    byteCount += lineBytes;
+  }
+
+  return [
+    ...keptLines,
+    "",
+    `[Diff truncated for draft generation after ${GIT_DRAFT_PATCH_MAX_BYTES} bytes.]`,
   ].join("\n");
 }
 

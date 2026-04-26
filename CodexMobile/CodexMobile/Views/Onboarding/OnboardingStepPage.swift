@@ -128,7 +128,7 @@ struct OnboardingStepPage: View {
             title: "Install the Bridge",
             description: "A lightweight relay that securely connects your Mac to your iPhone.",
             command: "npm install -g remodex@latest",
-            commandCaption: "Remodex uses macOS caffeinate by default while the bridge is running so your Mac stays reachable even if the display turns off. You can change this later in Settings."
+            commandCaption: "Remodex can keep your Mac awake with macOS caffeinate while the bridge is running, but it starts disabled by default. You can enable it later in Settings if you want."
         )
     }
     .preferredColorScheme(.dark)
@@ -141,7 +141,7 @@ struct OnboardingStepPage: View {
             stepNumber: 3,
             icon: "qrcode.viewfinder",
             title: "Start Pairing",
-            description: "Run this on your Mac. A QR code will appear in your terminal — scan it next.",
+            description: "Run this on your computer. A QR code will appear in your terminal — scan it next.",
             command: "remodex up"
         )
     }

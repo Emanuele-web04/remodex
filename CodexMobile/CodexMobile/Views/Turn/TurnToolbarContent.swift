@@ -81,7 +81,7 @@ struct TurnToolbarContent: ToolbarContent {
                     } label: {
                         HStack(spacing: 10) {
                             ResizableThreadActionSymbol(systemName: "arrow.left.arrow.right", pointSize: 13)
-                            Text("Hand off to Mac")
+                            Text("Continue on Desktop App")
                         }
                     }
                     .disabled(!canTapMacHandoff)

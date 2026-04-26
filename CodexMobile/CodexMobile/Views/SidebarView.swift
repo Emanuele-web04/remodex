@@ -32,7 +32,6 @@ struct SidebarView: View {
     @State private var lastGroupedThreadsFingerprint: Int = 0
     @State private var lastDiffFingerprint: Int = 0
     @State private var lastBadgeFingerprint: Int = 0
-    @State private var sidebarDebugSequence = 0
 
     var body: some View {
         let diffTotalsByThreadID = cachedDiffTotals
@@ -78,6 +77,14 @@ struct SidebarView: View {
                 onRenameThread: { thread, newName in
                     codex.renameThread(thread.id, name: newName)
                 },
+                onPinToggleThread: { thread in
+                    if codex.isThreadPinned(thread.id) {
+                        codex.unpinThread(thread.id)
+                    } else {
+                        codex.pinThread(thread.id)
+                    }
+                    rebuildGroupedThreads()
+                },
                 onArchiveToggleThread: { thread in
                     if thread.syncState == .archivedLocal {
                         codex.unarchiveThread(thread.id)
@@ -100,7 +107,7 @@ struct SidebarView: View {
                 SidebarFloatingSettingsButton(colorScheme: colorScheme, action: openSettings)
                 Spacer(minLength: 0)
                 if let trustedPairPresentation = codex.trustedPairPresentation {
-                    SidebarMacConnectionStatusView(
+                    SidebarComputerConnectionStatusView(
                         name: trustedPairPresentation.name,
                         systemName: trustedPairPresentation.systemName,
                         isConnected: codex.isConnected
@@ -130,6 +137,10 @@ struct SidebarView: View {
         }
         .onChange(of: searchText) { _, _ in
             debugSidebarLog("search changed queryLength=\(searchText.count)")
+            rebuildGroupedThreads()
+        }
+        .onChange(of: codex.pinnedThreadIDs) { _, _ in
+            debugSidebarLog("pinned threads changed count=\(codex.pinnedThreadIDs.count)")
             rebuildGroupedThreads()
         }
         .onChange(of: diffFingerprint) { _, _ in
@@ -334,13 +345,15 @@ struct SidebarView: View {
         } else {
             source = codex.threads.filter {
                 $0.displayTitle.localizedCaseInsensitiveContains(query)
+                || ($0.preview?.localizedCaseInsensitiveContains(query) ?? false)
                 || $0.projectDisplayName.localizedCaseInsensitiveContains(query)
+                || ($0.normalizedProjectPath?.localizedCaseInsensitiveContains(query) ?? false)
             }
         }
         let fingerprint = groupingFingerprint(query: query, source: source)
         guard fingerprint != lastGroupedThreadsFingerprint else { return }
         lastGroupedThreadsFingerprint = fingerprint
-        groupedThreads = SidebarThreadGrouping.makeGroups(from: source)
+        groupedThreads = SidebarThreadGrouping.makeGroups(from: source, pinnedThreadIDs: codex.pinnedThreadIDs)
         debugSidebarLog(
             "rebuildGroupedThreads durationMs=\(Int(Date().timeIntervalSince(startedAt) * 1000)) "
                 + "queryLength=\(query.count) sourceCount=\(source.count) groupCount=\(groupedThreads.count)"
@@ -350,6 +363,7 @@ struct SidebarView: View {
     private func groupingFingerprint(query: String, source: [CodexThread]) -> Int {
         var hasher = Hasher()
         hasher.combine(query)
+        hasher.combine(codex.pinnedThreadIDs)
         for thread in source {
             hasher.combine(thread)
         }
@@ -359,7 +373,11 @@ struct SidebarView: View {
     // Cheap fingerprint: hashes thread IDs + message revisions (O(n) integer work, no message access).
     private var diffFingerprint: Int {
         var hasher = Hasher()
-        hasher.combine(codex.hasAnyRunningTurn)
+        let hasRunningTurn = codex.hasAnyRunningTurn
+        hasher.combine(hasRunningTurn)
+        guard !hasRunningTurn else {
+            return hasher.finalize()
+        }
         for thread in codex.threads {
             hasher.combine(thread.id)
             hasher.combine(codex.messageRevision(for: thread.id))
@@ -449,10 +467,17 @@ struct SidebarView: View {
         codex.isConnected && codex.isInitialized
     }
 
-    private func debugSidebarLog(_ message: String) {
-        sidebarDebugSequence += 1
-        print("[SidebarData] #\(sidebarDebugSequence) \(message)")
+    // Sidebar refresh and search events can fire during gestures; logs must not mutate view state.
+    private func debugSidebarLog(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        guard Self.isSidebarDebugLoggingEnabled else { return }
+        print("[SidebarData] \(message())")
+        #endif
     }
+}
+
+private extension SidebarView {
+    static var isSidebarDebugLoggingEnabled: Bool { false }
 }
 
 enum SidebarThreadsLoadingPresentation {

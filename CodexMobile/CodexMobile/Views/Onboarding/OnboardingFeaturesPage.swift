@@ -17,7 +17,7 @@ struct OnboardingFeaturesPage: View {
                         .font(AppFont.system(size: 28, weight: .bold))
                         .foregroundStyle(.white)
 
-                    Text("Everything runs on your Mac.\nYour phone is the remote.")
+                    Text("Everything runs on your computer.\nYour phone is the remote.")
                         .font(AppFont.subheadline())
                         .foregroundStyle(.white.opacity(0.45))
                         .multilineTextAlignment(.center)

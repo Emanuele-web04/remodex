@@ -70,7 +70,7 @@ extension CodexService {
         )
         guard serverHello.protocolVersion == codexSecureProtocolVersion else {
             presentBridgeUpdatePrompt(
-                message: "This bridge is using a different secure transport version. Update the Remodex package on your Mac and try again."
+                message: "This bridge is using a different secure transport version. Update the Remodex package on your computer and try again."
             )
             throw CodexSecureTransportError.incompatibleVersion(
                 "This bridge is using a different secure transport version. Update Remodex on the iPhone or Mac and try again."
@@ -426,9 +426,9 @@ extension CodexService {
         let errorResponse = try? JSONDecoder().decode(CodexRelayErrorResponse.self, from: data)
         switch errorResponse?.code {
         case "pairing_code_expired":
-            throw CodexSecureTransportError.invalidQR("This pairing code has expired. Generate a new one from the Mac bridge.")
+            throw CodexSecureTransportError.invalidQR("This pairing code has expired. Generate a new one from the computer bridge.")
         case "pairing_code_unavailable":
-            throw CodexSecureTransportError.invalidQR("That pairing code is not available right now. Make sure your Mac bridge is running and try again.")
+            throw CodexSecureTransportError.invalidQR("That pairing code is not available right now. Make sure your computer bridge is running and try again.")
         default:
             if httpResponse.statusCode == 404 {
                 throw CodexSecureTransportError.invalidQR("This relay does not support pairing codes yet. Scan the QR code instead.")
@@ -444,7 +444,7 @@ private extension CodexService {
     // Centralizes the bridge-update guidance so every mismatch shows the same Mac command.
     func presentBridgeUpdatePrompt(message: String) {
         bridgeUpdatePrompt = CodexBridgeUpdatePrompt(
-            title: "Update the Remodex package on your Mac",
+            title: "Update the Remodex package on your computer",
             message: message,
             command: "npm install -g remodex@latest"
         )
@@ -627,7 +627,7 @@ private extension CodexService {
             throw CodexTrustedSessionResolveError.noTrustedMac
         }
         guard let resolveURL = trustedSessionResolveURL(from: relayURL) else {
-            throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay URL is invalid.")
+            throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay URL is invalid.")
         }
 
         let nonce = UUID().uuidString
@@ -674,17 +674,17 @@ private extension CodexService {
                 || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) {
                 throw CancellationError()
             }
-            throw CodexTrustedSessionResolveError.network("Could not reach the trusted Mac relay. Check your connection and try again.")
+            throw CodexTrustedSessionResolveError.network("Could not reach the trusted computer relay. Check your connection and try again.")
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay returned an invalid response.")
+            throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay returned an invalid response.")
         }
 
         if (200..<300).contains(httpResponse.statusCode) {
             guard let resolved = try? JSONDecoder().decode(CodexTrustedSessionResolveResponse.self, from: data),
                   resolved.ok else {
-                throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay returned malformed session data.")
+                throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay returned malformed session data.")
             }
             applyResolvedTrustedSession(resolved, relayURL: relayURL)
             return resolved
@@ -694,11 +694,11 @@ private extension CodexService {
         switch errorResponse?.code {
         case "session_unavailable":
             secureConnectionState = .liveSessionUnresolved
-            throw CodexTrustedSessionResolveError.macOffline("Your trusted Mac is offline right now.")
+            throw CodexTrustedSessionResolveError.macOffline("Your trusted computer is offline right now.")
         case "phone_not_trusted", "invalid_signature":
             secureConnectionState = .rePairRequired
             throw CodexTrustedSessionResolveError.rePairRequired(
-                "This iPhone is no longer trusted by the Mac. Scan a new QR code to reconnect."
+                "This iPhone is no longer trusted by the paired computer. Scan a new QR code to reconnect."
             )
         case "resolve_request_replayed", "resolve_request_expired":
             throw CodexTrustedSessionResolveError.network(
@@ -710,7 +710,7 @@ private extension CodexService {
             }
             throw CodexTrustedSessionResolveError.network(
                 errorResponse?.error
-                ?? "The trusted Mac relay could not resolve the current bridge session."
+                ?? "The trusted computer relay could not resolve the current bridge session."
             )
         }
     }

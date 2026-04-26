@@ -1,5 +1,5 @@
 // FILE: BridgeUpdateSheet.swift
-// Purpose: Presents a guided recovery flow when the Mac bridge package needs an update.
+// Purpose: Presents a guided recovery flow when the computer bridge package needs an update.
 // Layer: View
 // Exports: BridgeUpdateSheet
 // Depends on: SwiftUI, UIKit, CodexBridgeUpdatePrompt
@@ -30,7 +30,7 @@ struct BridgeUpdateSheet: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     if let command = prompt.command, !command.isEmpty {
-                        Text("Run this on your Mac")
+                        Text("Run this on your computer")
                             .font(AppFont.caption(weight: .semibold))
                             .foregroundStyle(.secondary)
 
@@ -79,8 +79,8 @@ struct BridgeUpdateSheet: View {
                 }
 
                 Text(prompt.command == nil
-                    ? "After the app finishes updating on your iPhone, reconnect to the Mac bridge."
-                    : "After the package finishes updating, restart the bridge on your Mac and come back here."
+                    ? "After the app finishes updating on your iPhone, reconnect to the computer bridge."
+                    : "After the package finishes updating, restart the bridge on your computer and come back here."
                 )
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)

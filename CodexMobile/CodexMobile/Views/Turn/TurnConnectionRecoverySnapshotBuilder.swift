@@ -31,7 +31,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
             return ConnectionRecoverySnapshot(
                 summary: trimmedError?.isEmpty == false
                     ? trimmedError ?? ""
-                    : "Wake your Mac screen to keep this chat in sync.",
+                    : "Wake the computer screen to keep this chat in sync.",
                 status: .interrupted,
                 trailingStyle: .action("Wake Screen")
             )
@@ -41,7 +41,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
             return ConnectionRecoverySnapshot(
                 summary: trimmedError?.isEmpty == false
                     ? trimmedError ?? ""
-                    : "Trying to wake your Mac display.",
+                    : "Trying to wake the computer display.",
                 status: .reconnecting,
                 trailingStyle: .progress
             )
@@ -49,7 +49,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
 
         if isConnecting || shouldAutoReconnectOnForeground || isRetryingConnectionRecovery {
             return ConnectionRecoverySnapshot(
-                summary: "Trying to reconnect to your Mac.",
+                summary: "Trying to reconnect to your computer.",
                 status: .reconnecting,
                 trailingStyle: .progress
             )
@@ -58,7 +58,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
         return ConnectionRecoverySnapshot(
             summary: trimmedError?.isEmpty == false
                 ? trimmedError ?? ""
-                : "Reconnect to your Mac to keep this chat in sync.",
+                : "Reconnect to your computer to keep this chat in sync.",
             status: .interrupted,
             trailingStyle: .action("Reconnect")
         )

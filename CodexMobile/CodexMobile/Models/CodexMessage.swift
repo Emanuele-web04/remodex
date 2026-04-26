@@ -36,7 +36,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
     var kind: CodexMessageKind
     var text: String
     var fileMentions: [String]
-    let createdAt: Date
+    var createdAt: Date
     var turnId: String?
     var itemId: String?
     var isStreaming: Bool
@@ -237,4 +237,5 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
             proposedPlan: proposedPlan
         )
     }
+
 }

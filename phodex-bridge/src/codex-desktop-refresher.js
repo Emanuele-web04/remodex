@@ -578,7 +578,7 @@ function readBridgeConfig({
       DEFAULT_DEBOUNCE_MS
     ),
     keepMacAwakeEnabled: explicitKeepMacAwakeEnabled == null
-      ? (persistedKeepMacAwakeEnabled == null ? true : persistedKeepMacAwakeEnabled)
+      ? (persistedKeepMacAwakeEnabled == null ? false : persistedKeepMacAwakeEnabled)
       : explicitKeepMacAwakeEnabled,
     codexEndpoint,
     refreshCommand,

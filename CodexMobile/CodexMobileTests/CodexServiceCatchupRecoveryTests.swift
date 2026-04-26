@@ -115,6 +115,64 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         XCTAssertTrue(shouldRefresh)
     }
 
+    func testForegroundSyncKeepsDeferredLargeClosedChatOffForcedHistoryRead() async {
+        let service = makeService()
+        let threadID = "thread-large-closed"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.activeThreadId = threadID
+        service.upsertThread(CodexThread(id: threadID, title: "Large Closed"))
+        service.messagesByThread[threadID] = (0..<401).map { index in
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "message-\(index)"
+            )
+        }
+
+        var lightweightTurnRefreshCount = 0
+        var canonicalHistoryReadCount = 0
+        service.requestTransportOverride = { method, params in
+            switch method {
+            case "thread/read":
+                let includeTurns = params?.objectValue?["includeTurns"]?.boolValue ?? false
+                if includeTurns {
+                    canonicalHistoryReadCount += 1
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                } else {
+                    lightweightTurnRefreshCount += 1
+                }
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(threadID),
+                            "title": .string("Large Closed"),
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([:]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        let startedAt = Date()
+        await service.syncActiveThreadState(threadId: threadID)
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        XCTAssertEqual(lightweightTurnRefreshCount, 1)
+        XCTAssertLessThan(elapsed, 0.1)
+        XCTAssertTrue(service.threadsNeedingCanonicalHistoryReconcile.contains(threadID))
+        XCTAssertLessThanOrEqual(canonicalHistoryReadCount, 1)
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexServiceCatchupRecoveryTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
