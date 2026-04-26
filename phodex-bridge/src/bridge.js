@@ -1463,13 +1463,13 @@ function sanitizeInlineHistoryImageContentItem(contentItem) {
   }
 
   const normalizedType = normalizeRelayHistoryContentType(contentItem.type);
-  if (normalizedType !== "image" && normalizedType !== "localimage") {
+  if (!isRelayHistoryImageContentType(normalizedType)) {
     return contentItem;
   }
 
-  const hasInlineUrl = isInlineHistoryImageDataURL(contentItem.url)
-    || isInlineHistoryImageDataURL(contentItem.image_url)
-    || isInlineHistoryImageDataURL(contentItem.path);
+  const hasInlineUrl = hasInlineHistoryImageDataURL(contentItem.url)
+    || hasInlineHistoryImageDataURL(contentItem.image_url)
+    || hasInlineHistoryImageDataURL(contentItem.path);
   if (!hasInlineUrl) {
     return contentItem;
   }
@@ -1493,8 +1493,28 @@ function normalizeRelayHistoryContentType(value) {
     : "";
 }
 
-function isInlineHistoryImageDataURL(value) {
-  return typeof value === "string" && value.toLowerCase().startsWith("data:image");
+// Covers Codex history variants such as image, local_image, and input_image.
+function isRelayHistoryImageContentType(normalizedType) {
+  return normalizedType === "image"
+    || normalizedType === "localimage"
+    || normalizedType === "inputimage"
+    || normalizedType === "outputimage";
+}
+
+function hasInlineHistoryImageDataURL(value) {
+  if (typeof value === "string") {
+    return value.toLowerCase().startsWith("data:image");
+  }
+
+  if (Array.isArray(value)) {
+    return value.some(hasInlineHistoryImageDataURL);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.values(value).some(hasInlineHistoryImageDataURL);
+  }
+
+  return false;
 }
 
 function parseBridgeJSON(value) {

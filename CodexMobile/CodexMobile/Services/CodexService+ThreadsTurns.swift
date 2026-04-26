@@ -1010,6 +1010,13 @@ extension CodexService {
         shouldAppendUserMessage: Bool = true,
         collaborationMode: CodexCollaborationModeKind? = nil
     ) async throws {
+        let automaticTitleSeed = shouldAppendUserMessage
+            ? automaticThreadTitleSeedIfNeeded(
+                userInput: userInput,
+                attachments: attachments,
+                threadId: threadId
+            )
+            : nil
         let pendingMessageId = shouldAppendUserMessage
             ? appendUserMessage(
                 threadId: threadId,
@@ -1054,6 +1061,11 @@ extension CodexService {
                     response,
                     pendingMessageId: pendingMessageId,
                     threadId: threadId
+                )
+                scheduleAutomaticThreadTitleGenerationIfNeeded(
+                    seed: automaticTitleSeed,
+                    threadId: threadId,
+                    attachments: attachments
                 )
                 if didDowngradePlanModeForRuntime {
                     appendSystemMessage(
@@ -1103,6 +1115,111 @@ extension CodexService {
                 return
             }
         }
+    }
+
+    // Generates a compact first-turn title without blocking turn/start or overwriting user renames.
+    private func scheduleAutomaticThreadTitleGenerationIfNeeded(
+        seed: String?,
+        threadId: String,
+        attachments: [CodexImageAttachment]
+    ) {
+        guard let seed,
+              !seed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return
+        }
+
+        let fallbackTitle = fallbackThreadTitle(from: seed)
+        let allowedTitles: Set<String> = [
+            CodexThread.defaultDisplayTitle,
+            "Conversation",
+            fallbackTitle,
+        ]
+        applyAutomaticThreadTitle(fallbackTitle, for: threadId, replacing: allowedTitles)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let generatedTitle = await self.generatedThreadTitleOrNil(
+                seed: seed,
+                threadId: threadId,
+                attachmentCount: attachments.count
+            ) else {
+                return
+            }
+
+            self.applyAutomaticThreadTitle(
+                generatedTitle,
+                for: threadId,
+                replacing: allowedTitles
+            )
+        }
+    }
+
+    private func generatedThreadTitleOrNil(
+        seed: String,
+        threadId: String,
+        attachmentCount: Int
+    ) async -> String? {
+        var params: [String: JSONValue] = [
+            "message": .string(seed),
+            "attachmentCount": .integer(attachmentCount),
+        ]
+        if let model = gitWriterModelIdentifier(),
+           !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["model"] = .string(model)
+        }
+        if let workingDirectory = thread(for: threadId)?.gitWorkingDirectory,
+           !workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["cwd"] = .string(workingDirectory)
+        }
+
+        do {
+            let response = try await sendRequest(method: "thread/generateTitle", params: .object(params))
+            let title = response.result?.objectValue?["title"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return title?.isEmpty == false ? title : nil
+        } catch {
+            return nil
+        }
+    }
+
+    private func automaticThreadTitleSeedIfNeeded(
+        userInput: String,
+        attachments: [CodexImageAttachment],
+        threadId: String
+    ) -> String? {
+        guard persistedThreadRename(for: threadId) == nil,
+              let thread = thread(for: threadId),
+              CodexThread.isGenericPlaceholderTitle(thread.title) || thread.displayTitle == CodexThread.defaultDisplayTitle,
+              !hasExistingUserChatMessage(threadId: threadId) else {
+            return nil
+        }
+
+        let trimmedInput = userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedInput.isEmpty {
+            return trimmedInput
+        }
+        return attachments.isEmpty ? nil : "Image request"
+    }
+
+    private func hasExistingUserChatMessage(threadId: String) -> Bool {
+        (messagesByThread[threadId] ?? []).contains { message in
+            message.role == .user && message.kind == .chat
+        }
+    }
+
+    private func fallbackThreadTitle(from seed: String) -> String {
+        let words = seed
+            .components(separatedBy: .whitespacesAndNewlines)
+            .map { word in
+                word.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+            }
+            .filter { !$0.isEmpty }
+            .prefix(4)
+        let title = words.joined(separator: " ")
+        guard !title.isEmpty else {
+            return CodexThread.defaultDisplayTitle
+        }
+        return title.prefix(1).uppercased() + title.dropFirst()
     }
 
     // Steers an active turn using the same mixed input-item encoding as turn/start.

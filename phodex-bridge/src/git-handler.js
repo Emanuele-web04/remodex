@@ -40,7 +40,7 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
   }
 
   const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
-  if (!method.startsWith("git/")) {
+  if (!method.startsWith("git/") && method !== "thread/generateTitle") {
     return false;
   }
 
@@ -70,6 +70,10 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
 }
 
 async function handleGitMethod(method, params, options = {}) {
+  if (method === "thread/generateTitle") {
+    return threadGenerateTitle(params, options);
+  }
+
   const cwd = await resolveGitCwd(params);
 
   switch (method) {
@@ -276,6 +280,46 @@ async function gitGeneratePullRequestDraft(cwd, params, options = {}) {
       throw error;
     }
     throw wrapDraftGenerationError(error, "pull_request");
+  }
+}
+
+async function threadGenerateTitle(params, options = {}) {
+  const model = resolveGitWriterModel(params.model);
+  const message = normalizeNonEmptyMultilineString(params.message || params.prompt);
+  if (!message) {
+    throw gitError("missing_thread_title_message", "A first message is required to generate a thread title.");
+  }
+
+  try {
+    const cwd = resolveThreadTitleCwd(params.cwd || params.workingDirectory);
+    const prompt = buildThreadTitlePrompt({
+      message,
+      attachmentCount: normalizeNonNegativeInteger(params.attachmentCount),
+    });
+    const schema = {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+      },
+      required: ["title"],
+      additionalProperties: false,
+    };
+    const draft = await runStructuredCodexJsonImpl({
+      cwd,
+      model,
+      prompt,
+      schema,
+      codexAppPath: options.codexAppPath,
+      skipGitRepoCheck: true,
+      sandboxMode: "read-only",
+    });
+
+    return normalizeThreadTitleDraft(draft, message);
+  } catch (error) {
+    if (error?.errorCode) {
+      throw error;
+    }
+    throw wrapDraftGenerationError(error, "thread_title");
   }
 }
 
@@ -1028,6 +1072,35 @@ function buildPullRequestDraftPrompt(context) {
   ].join("\n");
 }
 
+function buildThreadTitlePrompt(context) {
+  const attachmentLine = context.attachmentCount > 0
+    ? `Attachments: ${context.attachmentCount} image${context.attachmentCount === 1 ? "" : "s"}`
+    : "Attachments: none";
+
+  return [
+    "Write a short chat thread title from the user's first message.",
+    "Return JSON only that matches the provided schema.",
+    "Rules:",
+    "- `title` must be 2 to 4 words, maximum 4 words.",
+    "- Use a concise noun or verb phrase that captures the task.",
+    "- Do not use markdown, quotes, emoji, or final punctuation.",
+    "- Do not mention AI, Codex, prompt instructions, or that the title was generated.",
+    "",
+    attachmentLine,
+    "",
+    "First message:",
+    messageForPrompt(context.message),
+  ].join("\n");
+}
+
+function messageForPrompt(message) {
+  const trimmed = normalizeNonEmptyMultilineString(message);
+  if (trimmed.length <= 4_000) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 4_000).trimEnd()}\n[Message truncated for title generation.]`;
+}
+
 function normalizeCommitDraft(draft) {
   const subject = normalizeCommitSubject(draft?.subject);
   const body = normalizeNonEmptyMultilineString(draft?.body);
@@ -1054,6 +1127,47 @@ function normalizePullRequestDraft(draft) {
   }
 
   return { title, body };
+}
+
+function normalizeThreadTitleDraft(draft, fallbackMessage) {
+  const title = sanitizeGeneratedThreadTitle(draft?.title || buildPromptThreadTitleFallback(fallbackMessage));
+  return { title };
+}
+
+function buildPromptThreadTitleFallback(message) {
+  const words = tokenizeThreadTitleWords(message);
+  if (words.length === 0) {
+    return "New Thread";
+  }
+  return titleCaseThreadTitle(words.slice(0, 4).join(" "));
+}
+
+function sanitizeGeneratedThreadTitle(rawTitle) {
+  const words = tokenizeThreadTitleWords(rawTitle);
+  const title = words.slice(0, 4).join(" ");
+  return titleCaseThreadTitle(title || "New Thread").slice(0, 50).trim() || "New Thread";
+}
+
+function tokenizeThreadTitleWords(value) {
+  if (typeof value !== "string") {
+    return [];
+  }
+
+  return value
+    .replace(/[`*_~#[\](){}<>]/g, " ")
+    .replace(/[.!?;:,，。！？；：]+$/g, "")
+    .replace(/["'“”‘’]/g, "")
+    .split(/\s+/)
+    .map((word) => word.trim().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
+    .filter(Boolean);
+}
+
+function titleCaseThreadTitle(value) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  if (!trimmed) {
+    return "";
+  }
+  return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
 }
 
 function normalizeCommitSubject(rawValue) {
@@ -1098,6 +1212,13 @@ function wrapDraftGenerationError(error, kind) {
     );
   }
 
+  if (kind === "thread_title") {
+    return gitError(
+      "thread_title_generation_failed",
+      detail ? `Could not generate a thread title. ${detail}` : "Could not generate a thread title."
+    );
+  }
+
   return gitError(
     "pull_request_draft_generation_failed",
     detail ? `Could not generate a pull request draft. ${detail}` : "Could not generate a pull request draft."
@@ -1119,7 +1240,27 @@ function normalizeDraftErrorDetail(error) {
   return singleLine.endsWith(".") ? singleLine : `${singleLine}.`;
 }
 
-async function runStructuredCodexJson({ cwd, model, prompt, schema, codexAppPath }) {
+function normalizeNonNegativeInteger(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+function resolveThreadTitleCwd(rawCwd) {
+  const normalized = normalizeExistingPath(typeof rawCwd === "string" ? rawCwd : "");
+  if (normalized && isExistingDirectory(normalized)) {
+    return normalized;
+  }
+  return process.cwd();
+}
+
+async function runStructuredCodexJson({
+  cwd,
+  model,
+  prompt,
+  schema,
+  codexAppPath,
+  skipGitRepoCheck = false,
+  sandboxMode = null,
+}) {
   const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-ai-"));
   const schemaPath = path.join(tempDirectory, "schema.json");
   const outputPath = path.join(tempDirectory, "output.json");
@@ -1139,6 +1280,8 @@ async function runStructuredCodexJson({ cwd, model, prompt, schema, codexAppPath
           prompt,
           schemaPath,
           outputPath,
+          skipGitRepoCheck,
+          sandboxMode,
         });
       } catch (error) {
         lastError = error;
@@ -1185,7 +1328,16 @@ function shouldRetryCodexExecWithNextCommand(error) {
   return error?.code === "ENOENT";
 }
 
-function spawnCodexExecJson({ command, cwd, model, prompt, schemaPath, outputPath }) {
+function spawnCodexExecJson({
+  command,
+  cwd,
+  model,
+  prompt,
+  schemaPath,
+  outputPath,
+  skipGitRepoCheck = false,
+  sandboxMode = null,
+}) {
   const args = [
     "exec",
     "--ephemeral",
@@ -1193,12 +1345,14 @@ function spawnCodexExecJson({ command, cwd, model, prompt, schemaPath, outputPat
     cwd,
     "-m",
     model,
-    "--output-schema",
-    schemaPath,
-    "-o",
-    outputPath,
-    "-",
   ];
+  if (skipGitRepoCheck) {
+    args.push("--skip-git-repo-check");
+  }
+  if (sandboxMode) {
+    args.push("-s", sandboxMode);
+  }
+  args.push("--output-schema", schemaPath, "-o", outputPath, "-");
 
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -2028,6 +2182,7 @@ module.exports = {
   __test: {
     gitGenerateCommitMessage,
     gitGeneratePullRequestDraft,
+    threadGenerateTitle,
     gitBranches,
     gitCreateBranch,
     gitCreateWorktree,

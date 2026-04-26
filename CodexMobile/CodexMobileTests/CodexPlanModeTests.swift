@@ -406,6 +406,39 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertNil(service.currentPlanSessionSource(for: threadID))
     }
 
+    func testNonPlanStartClearsStalePlanSessionStateWithoutSendingDefaultMode() async throws {
+        let service = makeService()
+        service.supportsTurnCollaborationMode = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
+
+        let threadID = "thread-plan"
+        service.threads = [CodexThread(id: threadID, title: "Plan thread")]
+        service.markNativePlanSession(for: threadID)
+
+        var capturedTurnStartParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "turn/start")
+            capturedTurnStartParams = params
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-normal")]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.startTurn(
+            userInput: "Normal follow-up",
+            threadId: threadID,
+            collaborationMode: nil
+        )
+
+        // Normal sends clear local plan UI state, but only explicit plan implementation
+        // sends `default` to force the runtime out of sticky plan mode.
+        XCTAssertNil(capturedTurnStartParams?.objectValue?["collaborationMode"])
+        XCTAssertNil(service.currentPlanSessionSource(for: threadID))
+    }
+
     func testImplementProposedPlanSteerExplicitlyReturnsToDefaultMode() async throws {
         let service = makeService()
         service.supportsTurnCollaborationMode = true

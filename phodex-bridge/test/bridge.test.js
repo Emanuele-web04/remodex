@@ -130,6 +130,46 @@ test("sanitizeThreadHistoryImagesForRelay replaces inline history images with li
   });
 });
 
+test("sanitizeThreadHistoryImagesForRelay replaces input_image history data URLs", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-thread-input-image",
+    result: {
+      thread: {
+        id: "thread-input-image",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "item-user",
+                type: "user_message",
+                content: [
+                  {
+                    type: "input_image",
+                    image_url: {
+                      url: "data:image/png;base64,AAAA",
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  const content = sanitized.result.thread.turns[0].items[0].content;
+
+  assert.deepEqual(content[0], {
+    type: "input_image",
+    url: "remodex://history-image-elided",
+  });
+});
+
 test("sanitizeThreadHistoryImagesForRelay leaves unrelated RPC payloads unchanged", () => {
   const rawMessage = JSON.stringify({
     id: "req-other",

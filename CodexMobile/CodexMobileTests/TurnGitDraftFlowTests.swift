@@ -11,6 +11,87 @@ import XCTest
 final class TurnGitDraftFlowTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testFirstTurnGeneratesAutomaticThreadTitle() async throws {
+        let service = makeService()
+        service.availableModels = [
+            makeModel(id: "gpt-5.4-mini"),
+        ]
+        service.threads = [
+            CodexThread(id: "thread-1", title: CodexThread.defaultDisplayTitle),
+        ]
+        service.resumedThreadIDs.insert("thread-1")
+
+        var recordedMethods: [String] = []
+        let titleExpectation = expectation(description: "Thread title generation completes")
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            switch method {
+            case "turn/start":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["turnId": .string("turn-1")]),
+                    includeJSONRPC: false
+                )
+            case "thread/generateTitle":
+                XCTAssertEqual(
+                    params?.objectValue?["message"]?.stringValue,
+                    "Fix the sidebar thread naming after the first message"
+                )
+                titleExpectation.fulfill()
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["title": .string("Fix Thread Naming")]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method: \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        try await service.startTurn(
+            userInput: "Fix the sidebar thread naming after the first message",
+            threadId: "thread-1"
+        )
+        await fulfillment(of: [titleExpectation], timeout: 2.0)
+
+        XCTAssertEqual(recordedMethods, ["turn/start", "thread/generateTitle"])
+        XCTAssertEqual(service.thread(for: "thread-1")?.displayTitle, "Fix Thread Naming")
+    }
+
+    func testAutomaticThreadTitleDoesNotOverwriteUserRename() {
+        let service = makeService()
+        service.threads = [
+            CodexThread(id: "thread-1", title: CodexThread.defaultDisplayTitle),
+        ]
+
+        service.renameThread("thread-1", name: "Manual Title")
+        let didApply = service.applyAutomaticThreadTitle(
+            "Generated Title",
+            for: "thread-1",
+            replacing: [CodexThread.defaultDisplayTitle, "Fix thread naming"]
+        )
+
+        XCTAssertFalse(didApply)
+        XCTAssertEqual(service.thread(for: "thread-1")?.displayTitle, "Manual Title")
+    }
+
+    func testAutomaticThreadTitleOnlyReplacesExpectedFallbackTitles() {
+        let service = makeService()
+        service.threads = [
+            CodexThread(id: "thread-1", title: "Server Title", name: "Fallback Title"),
+        ]
+
+        let didApply = service.applyAutomaticThreadTitle(
+            "Generated Title",
+            for: "thread-1",
+            replacing: [CodexThread.defaultDisplayTitle, "Fallback Title"]
+        )
+
+        XCTAssertFalse(didApply)
+        XCTAssertEqual(service.thread(for: "thread-1")?.displayTitle, "Fallback Title")
+    }
+
     func testCommitActionGeneratesDraftBeforeCommitting() async throws {
         let service = makeService()
         service.availableModels = [

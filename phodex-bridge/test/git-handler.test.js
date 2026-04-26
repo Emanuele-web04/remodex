@@ -524,6 +524,40 @@ test("gitGenerateCommitMessage supports repositories without an initial commit",
   }
 });
 
+test("threadGenerateTitle uses Codex structured JSON with read-only title constraints", async () => {
+  let capturedInvocation = null;
+
+  __test.setRunStructuredCodexJsonImplementation(async (payload) => {
+    capturedInvocation = payload;
+    return { title: "fix the sidebar thread title please" };
+  });
+
+  const result = await __test.threadGenerateTitle({
+    message: "Can you fix the sidebar thread title so it summarizes the first request?",
+    model: "gpt-5.4-mini",
+    attachmentCount: 2,
+  });
+
+  assert.equal(result.title, "Fix the sidebar thread");
+  assert.equal(capturedInvocation?.model, "gpt-5.4-mini");
+  assert.equal(capturedInvocation?.skipGitRepoCheck, true);
+  assert.equal(capturedInvocation?.sandboxMode, "read-only");
+  assert.match(capturedInvocation?.prompt || "", /maximum 4 words/);
+  assert.match(capturedInvocation?.prompt || "", /Attachments: 2 images/);
+});
+
+test("threadGenerateTitle falls back to a sanitized first-message title", async () => {
+  __test.setRunStructuredCodexJsonImplementation(async () => {
+    return { title: "" };
+  });
+
+  const result = await __test.threadGenerateTitle({
+    message: "rename this conversation after first send",
+  });
+
+  assert.equal(result.title, "Rename this conversation after");
+});
+
 test("gitCreateWorktree creates a managed worktree under CODEX_HOME/worktrees", async () => {
   const repoDir = makeTempRepo();
   const projectDir = path.join(repoDir, "phodex-bridge");

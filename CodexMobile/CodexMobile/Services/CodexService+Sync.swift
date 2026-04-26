@@ -377,6 +377,55 @@ extension CodexService {
         sendThreadNameSetRPC(threadId: threadId, name: trimmedName)
     }
 
+    // Applies an automatic first-turn title only while the current title still matches the expected seed.
+    @discardableResult
+    func applyAutomaticThreadTitle(
+        _ title: String,
+        for threadId: String,
+        replacing allowedCurrentTitles: Set<String>
+    ) -> Bool {
+        let trimmedName = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              let index = threadIndex(for: threadId) else {
+            return false
+        }
+
+        let currentName = threads[index].name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentTitle = threads[index].title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentDisplayTitle = threads[index].displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let persistedName = persistedThreadRename(for: threadId)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedAllowed = Set(allowedCurrentTitles.map(Self.normalizedAutomaticTitleComparisonValue))
+
+        let currentCandidates = [persistedName, currentName, currentTitle, currentDisplayTitle]
+            .compactMap { $0 }
+            .map(Self.normalizedAutomaticTitleComparisonValue)
+            .filter { !$0.isEmpty }
+        let defaultTitle = Self.normalizedAutomaticTitleComparisonValue(CodexThread.defaultDisplayTitle)
+        let legacyTitle = Self.normalizedAutomaticTitleComparisonValue("Conversation")
+        let canReplace = currentCandidates.isEmpty
+            || currentCandidates.allSatisfy { candidate in
+                normalizedAllowed.contains(candidate)
+                    || candidate == defaultTitle
+                    || candidate == legacyTitle
+            }
+
+        guard canReplace else {
+            debugSyncLog("automatic thread title skipped after user rename: \(threadId)")
+            return false
+        }
+
+        threads[index].name = trimmedName
+        threads[index].title = trimmedName
+        persistThreadRename(trimmedName, for: threadId)
+        debugSyncLog("thread renamed automatically: \(threadId) → \(trimmedName)")
+        sendThreadNameSetRPC(threadId: threadId, name: trimmedName)
+        return true
+    }
+
+    private static func normalizedAutomaticTitleComparisonValue(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
     private func sendThreadNameSetRPC(threadId: String, name: String) {
         guard isConnected, webSocketConnection != nil || webSocketTask != nil else { return }
         Task { @MainActor [weak self] in
