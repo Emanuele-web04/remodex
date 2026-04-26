@@ -13,6 +13,10 @@ const { execFileSync } = require("node:child_process");
 
 const { __test, gitStatus } = require("../src/git-handler");
 
+test.afterEach(() => {
+  __test.resetRunStructuredCodexJsonImplementation();
+});
+
 function git(cwd, ...args) {
   return execFileSync("git", args, {
     cwd,
@@ -397,6 +401,126 @@ test("gitStatus marks a branch as published when origin has it even without loca
   } finally {
     fs.rmSync(repoDir, { recursive: true, force: true });
     fs.rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("gitGenerateCommitMessage forwards the selected model and includes tracked plus untracked changes", async () => {
+  const repoDir = makeTempRepo();
+  let capturedInvocation = null;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\nupdated\n");
+    fs.writeFileSync(path.join(repoDir, "new-file.txt"), "hello from untracked\n");
+
+    __test.setRunStructuredCodexJsonImplementation(async (payload) => {
+      capturedInvocation = payload;
+      return {
+        subject: "Update repository docs",
+        body: "- Refresh the README content\n- Add a new untracked file for the workflow",
+        fullMessage: "ignored by normalization",
+      };
+    });
+
+    const result = await __test.gitGenerateCommitMessage(repoDir, { model: "gpt-5.4-mini" });
+
+    assert.equal(result.subject, "Update repository docs");
+    assert.equal(
+      result.fullMessage,
+      "Update repository docs\n\n- Refresh the README content\n- Add a new untracked file for the workflow"
+    );
+    assert.equal(capturedInvocation?.model, "gpt-5.4-mini");
+    assert.equal(capturedInvocation?.cwd, repoDir);
+    assert.match(capturedInvocation?.prompt || "", /README\.md/);
+    assert.match(capturedInvocation?.prompt || "", /new-file\.txt/);
+    assert.match(capturedInvocation?.prompt || "", /updated/);
+    assert.match(capturedInvocation?.prompt || "", /hello from untracked/);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitGeneratePullRequestDraft summarizes branch changes against the default branch", async () => {
+  const repoDir = makeTempRepo();
+  const remoteDir = makeBareRemote();
+  let capturedInvocation = null;
+
+  try {
+    git(remoteDir, "init", "--bare");
+    git(repoDir, "remote", "add", "origin", remoteDir);
+    git(repoDir, "push", "-u", "origin", "main");
+    git(repoDir, "checkout", "-b", "remodex/pr-draft");
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\nbranch change\n");
+    git(repoDir, "add", "README.md");
+    git(repoDir, "commit", "-m", "Update readme on branch");
+
+    __test.setRunStructuredCodexJsonImplementation(async (payload) => {
+      capturedInvocation = payload;
+      return {
+        title: "Improve README branch summary",
+        body: "## Summary\n- Update the README content for the branch\n\n## Testing\n- Not run (not requested)\n\n## Notes\n- Keeps the change scoped to documentation",
+      };
+    });
+
+    const result = await __test.gitGeneratePullRequestDraft(repoDir, { model: "gpt-5.4-mini", baseBranch: "main" });
+
+    assert.equal(result.title, "Improve README branch summary");
+    assert.match(capturedInvocation?.prompt || "", /Base branch: main/);
+    assert.match(capturedInvocation?.prompt || "", /Current branch: remodex\/pr-draft/);
+    assert.match(capturedInvocation?.prompt || "", /Update readme on branch/);
+    assert.match(capturedInvocation?.prompt || "", /branch change/);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("gitGenerateCommitMessage surfaces generation failures without falling back to a default message", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\nupdated\n");
+
+    __test.setRunStructuredCodexJsonImplementation(async () => {
+      throw new Error("Auth failed");
+    });
+
+    await assert.rejects(
+      __test.gitGenerateCommitMessage(repoDir, { model: "gpt-5.4-mini" }),
+      (error) =>
+        error?.errorCode === "commit_message_generation_failed"
+          && error?.userMessage === "Could not generate a commit message. Auth failed."
+    );
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitGenerateCommitMessage supports repositories without an initial commit", async () => {
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-unborn-"));
+  let capturedInvocation = null;
+
+  try {
+    git(repoDir, "init", "-b", "main");
+    git(repoDir, "config", "user.name", "Remodex Tests");
+    git(repoDir, "config", "user.email", "tests@example.com");
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# First commit\n");
+
+    __test.setRunStructuredCodexJsonImplementation(async (payload) => {
+      capturedInvocation = payload;
+      return {
+        subject: "Create initial project files",
+        body: "- Add the first tracked project file\n- Prepare the repository for its initial commit",
+        fullMessage: "ignored by normalization",
+      };
+    });
+
+    const result = await __test.gitGenerateCommitMessage(repoDir, { model: "gpt-5.4-mini" });
+
+    assert.equal(result.subject, "Create initial project files");
+    assert.match(capturedInvocation?.prompt || "", /README\.md/);
+    assert.match(capturedInvocation?.prompt || "", /First commit/);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
   }
 });
 

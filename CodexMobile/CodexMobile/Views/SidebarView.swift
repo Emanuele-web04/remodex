@@ -32,7 +32,6 @@ struct SidebarView: View {
     @State private var lastGroupedThreadsFingerprint: Int = 0
     @State private var lastDiffFingerprint: Int = 0
     @State private var lastBadgeFingerprint: Int = 0
-    @State private var sidebarDebugSequence = 0
 
     var body: some View {
         let diffTotalsByThreadID = cachedDiffTotals
@@ -468,10 +467,17 @@ struct SidebarView: View {
         codex.isConnected && codex.isInitialized
     }
 
-    private func debugSidebarLog(_ message: String) {
-        sidebarDebugSequence += 1
-        print("[SidebarData] #\(sidebarDebugSequence) \(message)")
+    // Sidebar refresh and search events can fire during gestures; logs must not mutate view state.
+    private func debugSidebarLog(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        guard Self.isSidebarDebugLoggingEnabled else { return }
+        print("[SidebarData] \(message())")
+        #endif
     }
+}
+
+private extension SidebarView {
+    static var isSidebarDebugLoggingEnabled: Bool { false }
 }
 
 enum SidebarThreadsLoadingPresentation {

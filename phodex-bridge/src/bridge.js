@@ -510,7 +510,9 @@ function startBridge({
     })) {
       return;
     }
-    if (handleGitRequest(rawMessage, sendApplicationResponse)) {
+    if (handleGitRequest(rawMessage, sendApplicationResponse, {
+      codexAppPath: config.codexAppPath,
+    })) {
       return;
     }
     desktopRefresher.handleInbound(rawMessage);

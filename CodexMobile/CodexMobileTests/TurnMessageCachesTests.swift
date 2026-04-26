@@ -36,6 +36,18 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(buildCount, 2)
     }
 
+    func testStableTextFingerprintChangesForUnsampledTextEdits() {
+        let prefix = String(repeating: "a", count: 48)
+        let suffix = String(repeating: "z", count: 48)
+        let first = "\(prefix)middle-one\(suffix)"
+        let second = "\(prefix)middle-two\(suffix)"
+
+        XCTAssertNotEqual(
+            TurnTextCacheKey.stableFingerprint(for: first),
+            TurnTextCacheKey.stableFingerprint(for: second)
+        )
+    }
+
     func testMessageRowRenderModelCacheSeparatesEqualLengthCommandTexts() {
         let runningMessage = CodexMessage(
             id: "message-row-cache",

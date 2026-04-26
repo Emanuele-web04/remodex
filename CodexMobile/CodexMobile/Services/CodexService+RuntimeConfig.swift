@@ -93,6 +93,12 @@ extension CodexService {
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
+    func setSelectedGitWriterModelId(_ modelId: String?) {
+        let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        selectedGitWriterModelId = (normalized?.isEmpty == false) ? normalized : nil
+        normalizeRuntimeSelectionsAfterModelsUpdate()
+    }
+
     func setSelectedReasoningEffort(_ effort: String?) {
         let normalized = effort?.trimmingCharacters(in: .whitespacesAndNewlines)
         selectedReasoningEffort = (normalized?.isEmpty == false) ? normalized : nil
@@ -176,6 +182,14 @@ extension CodexService {
 
     func selectedModelOption() -> CodexModelOption? {
         selectedModelOption(from: availableModels)
+    }
+
+    func selectedGitWriterModelOption() -> CodexModelOption? {
+        selectedGitWriterModelOption(from: availableModels)
+    }
+
+    func gitWriterModelIdentifier() -> String? {
+        selectedGitWriterModelOption()?.model
     }
 
     func supportedReasoningEffortsForSelectedModel() -> [CodexReasoningEffortOption] {
@@ -442,6 +456,13 @@ private extension CodexService {
             selectedReasoningEffort = nil
         }
 
+        if let selectedGitWriterModelId,
+           !availableModels.contains(where: {
+               $0.id == selectedGitWriterModelId || $0.model == selectedGitWriterModelId
+           }) {
+            self.selectedGitWriterModelId = nil
+        }
+
         persistRuntimeSelections()
     }
 
@@ -458,6 +479,31 @@ private extension CodexService {
         return nil
     }
 
+    func selectedGitWriterModelOption(
+        from models: [CodexModelOption],
+        explicitModelId: String? = nil
+    ) -> CodexModelOption? {
+        guard !models.isEmpty else {
+            return nil
+        }
+
+        let savedSelection = explicitModelId ?? selectedGitWriterModelId
+        if let savedSelection,
+           let directMatch = models.first(where: { $0.id == savedSelection || $0.model == savedSelection }) {
+            return directMatch
+        }
+
+        if let miniModel = models.first(where: { $0.id == "gpt-5.4-mini" || $0.model == "gpt-5.4-mini" }) {
+            return miniModel
+        }
+
+        if let runtimeSelected = selectedModelOption(from: models) {
+            return runtimeSelected
+        }
+
+        return fallbackModel(from: models)
+    }
+
     func fallbackModel(from models: [CodexModelOption]) -> CodexModelOption? {
         if let defaultModel = models.first(where: { $0.isDefault }) {
             return defaultModel
@@ -470,6 +516,12 @@ private extension CodexService {
             defaults.set(selectedModelId, forKey: Self.selectedModelIdDefaultsKey)
         } else {
             defaults.removeObject(forKey: Self.selectedModelIdDefaultsKey)
+        }
+
+        if let selectedGitWriterModelId, !selectedGitWriterModelId.isEmpty {
+            defaults.set(selectedGitWriterModelId, forKey: Self.selectedGitWriterModelIdDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.selectedGitWriterModelIdDefaultsKey)
         }
 
         if let selectedReasoningEffort, !selectedReasoningEffort.isEmpty {

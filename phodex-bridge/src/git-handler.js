@@ -4,7 +4,7 @@
 // Exports: handleGitRequest
 // Depends on: child_process, fs, os, path, crypto
 
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -13,7 +13,17 @@ const { promisify } = require("util");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
+const GIT_DRAFT_TIMEOUT_MS = 120_000;
+const GIT_DRAFT_PATCH_MAX_BYTES = 80_000;
 const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const DEFAULT_GIT_WRITER_MODEL = "gpt-5.4-mini";
+
+let runStructuredCodexJsonImpl = runStructuredCodexJson;
+
+function resolveGitWriterModel(rawModel) {
+  const trimmed = typeof rawModel === "string" ? rawModel.trim() : "";
+  return trimmed || DEFAULT_GIT_WRITER_MODEL;
+}
 
 /**
  * Intercepts git/* JSON-RPC methods and executes git commands locally.
@@ -21,7 +31,7 @@ const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
  * @param {(response: string) => void} sendResponse - Callback to send response back
  * @returns {boolean} true if message was handled, false if it should pass through
  */
-function handleGitRequest(rawMessage, sendResponse) {
+function handleGitRequest(rawMessage, sendResponse, options = {}) {
   let parsed;
   try {
     parsed = JSON.parse(rawMessage);
@@ -37,7 +47,7 @@ function handleGitRequest(rawMessage, sendResponse) {
   const id = parsed.id;
   const params = parsed.params || {};
 
-  handleGitMethod(method, params)
+  handleGitMethod(method, params, options)
     .then((result) => {
       sendResponse(JSON.stringify({ id, result }));
     })
@@ -59,7 +69,7 @@ function handleGitRequest(rawMessage, sendResponse) {
   return true;
 }
 
-async function handleGitMethod(method, params) {
+async function handleGitMethod(method, params, options = {}) {
   const cwd = await resolveGitCwd(params);
 
   switch (method) {
@@ -69,6 +79,8 @@ async function handleGitMethod(method, params) {
       return gitDiff(cwd);
     case "git/commit":
       return gitCommit(cwd, params);
+    case "git/generateCommitMessage":
+      return gitGenerateCommitMessage(cwd, params, options);
     case "git/push":
       return gitPush(cwd);
     case "git/pull":
@@ -97,6 +109,8 @@ async function handleGitMethod(method, params) {
       return gitResetToRemote(cwd, params);
     case "git/remoteUrl":
       return gitRemoteUrl(cwd);
+    case "git/generatePullRequestDraft":
+      return gitGeneratePullRequestDraft(cwd, params, options);
     case "git/branchesWithStatus":
       return gitBranchesWithStatus(cwd);
     default:
@@ -196,6 +210,73 @@ async function gitCommit(cwd, params) {
   const summary = summaryMatch ? summaryMatch[0] : output.split("\n").pop()?.trim() || "";
 
   return { hash, branch, summary };
+}
+
+// ─── Git Draft Generation ────────────────────────────────────
+
+async function gitGenerateCommitMessage(cwd, params, options = {}) {
+  const model = resolveGitWriterModel(params.model);
+
+  try {
+    const context = await buildCommitDraftContext(cwd);
+    const prompt = buildCommitDraftPrompt(context);
+    const schema = {
+      type: "object",
+      properties: {
+        subject: { type: "string" },
+        body: { type: "string" },
+        fullMessage: { type: "string" },
+      },
+      required: ["subject", "body", "fullMessage"],
+      additionalProperties: false,
+    };
+    const draft = await runStructuredCodexJsonImpl({
+      cwd,
+      model,
+      prompt,
+      schema,
+      codexAppPath: options.codexAppPath,
+    });
+
+    return normalizeCommitDraft(draft);
+  } catch (error) {
+    if (error?.errorCode) {
+      throw error;
+    }
+    throw wrapDraftGenerationError(error, "commit");
+  }
+}
+
+async function gitGeneratePullRequestDraft(cwd, params, options = {}) {
+  const model = resolveGitWriterModel(params.model);
+
+  try {
+    const context = await buildPullRequestDraftContext(cwd, params);
+    const prompt = buildPullRequestDraftPrompt(context);
+    const schema = {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        body: { type: "string" },
+      },
+      required: ["title", "body"],
+      additionalProperties: false,
+    };
+    const draft = await runStructuredCodexJsonImpl({
+      cwd,
+      model,
+      prompt,
+      schema,
+      codexAppPath: options.codexAppPath,
+    });
+
+    return normalizePullRequestDraft(draft);
+  } catch (error) {
+    if (error?.errorCode) {
+      throw error;
+    }
+    throw wrapDraftGenerationError(error, "pull_request");
+  }
 }
 
 // ─── Git Push ─────────────────────────────────────────────────
@@ -301,6 +382,7 @@ async function gitBranches(cwd) {
     localCheckoutPath,
     current,
     default: defaultBranch,
+    defaultBranch,
   };
 }
 
@@ -765,6 +847,432 @@ async function gitRemoteUrl(cwd) {
   const raw = (await git(cwd, "config", "--get", "remote.origin.url")).trim();
   const ownerRepo = parseOwnerRepo(raw);
   return { url: raw, ownerRepo };
+}
+
+async function buildCommitDraftContext(cwd) {
+  const [statusResult, repoRoot] = await Promise.all([
+    gitStatus(cwd),
+    resolveRepoRoot(cwd).catch(() => cwd),
+  ]);
+
+  if (!statusResult.dirty) {
+    throw gitError("nothing_to_commit", "Nothing to commit.");
+  }
+
+  const trackedBase = await refExists(cwd, "HEAD") ? "HEAD" : EMPTY_TREE_HASH;
+  const trackedPatch = await git(cwd, "diff", "--binary", "--find-renames", trackedBase);
+  const untrackedPaths = statusResult.files
+    .filter((file) => file.status === "??")
+    .map((file) => file.path)
+    .filter(Boolean);
+  const untrackedPatch = await diffPatchForUntrackedFiles(cwd, untrackedPaths);
+  const patch = truncateDraftPatch(
+    [trackedPatch.trim(), untrackedPatch.trim()].filter(Boolean).join("\n\n").trim()
+  );
+
+  if (!patch) {
+    throw gitError("nothing_to_commit", "Nothing to commit.");
+  }
+
+  return {
+    repoRoot,
+    branch: statusResult.branch || "HEAD",
+    files: statusResult.files,
+    diff: statusResult.diff || { additions: 0, deletions: 0, binaryFiles: 0 },
+    patch,
+  };
+}
+
+async function buildPullRequestDraftContext(cwd, params) {
+  const branchResult = await gitBranches(cwd);
+  const currentBranch = (branchResult.current || "").trim();
+  const baseBranch = resolveBaseBranchName(params.baseBranch, branchResult.default || branchResult.defaultBranch);
+
+  if (!currentBranch) {
+    throw gitError("no_branch", "No current branch found.");
+  }
+
+  if (!baseBranch) {
+    throw gitError("no_default_branch", "Could not determine the repository default branch.");
+  }
+
+  const baseRef = await resolveExistingBranchRef(cwd, baseBranch);
+  const mergeBase = (await git(cwd, "merge-base", "HEAD", baseRef)).trim();
+  const patch = truncateDraftPatch(
+    (await git(cwd, "diff", "--binary", "--find-renames", `${mergeBase}..HEAD`)).trim()
+  );
+  const numstatOutput = await git(cwd, "diff", "--numstat", `${mergeBase}..HEAD`);
+  const diff = parseNumstatTotals(numstatOutput);
+  const commitList = (
+    await git(cwd, "log", "--format=%h %s", `${mergeBase}..HEAD`)
+  )
+    .trim()
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 40);
+
+  if (!patch && commitList.length === 0) {
+    throw gitError("nothing_to_compare", "No branch changes are available for a pull request.");
+  }
+
+  return {
+    repoRoot: await resolveRepoRoot(cwd).catch(() => cwd),
+    currentBranch,
+    baseBranch,
+    mergeBase,
+    diff,
+    commitList,
+    patch,
+  };
+}
+
+async function resolveExistingBranchRef(cwd, branchName) {
+  const localRef = `refs/heads/${branchName}`;
+  const remoteRef = `refs/remotes/origin/${branchName}`;
+
+  if (await refExists(cwd, localRef)) {
+    return localRef;
+  }
+  if (await refExists(cwd, remoteRef)) {
+    return remoteRef;
+  }
+
+  return branchName;
+}
+
+async function refExists(cwd, refName) {
+  try {
+    await git(cwd, "show-ref", "--verify", "--quiet", refName);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function buildCommitDraftPrompt(context) {
+  const changedFiles = context.files
+    .map((file) => `- ${file.status || "M"} ${file.path}`)
+    .join("\n");
+
+  return [
+    "Write a detailed Git commit message from the repository context below.",
+    "Return JSON only that matches the provided schema.",
+    "Rules:",
+    "- `subject` must be imperative, 72 characters or fewer, and must not end with a period.",
+    "- `body` must be non-empty and use 2 to 5 concise Markdown bullets.",
+    "- `fullMessage` must equal the final commit text: subject, blank line, then body.",
+    "- Do not mention AI, Codex, prompt instructions, or that the message was generated.",
+    "",
+    `Repository: ${context.repoRoot}`,
+    `Branch: ${context.branch}`,
+    `Diff totals: +${context.diff.additions} -${context.diff.deletions} binary=${context.diff.binaryFiles}`,
+    "Changed files:",
+    changedFiles || "- (none)",
+    "",
+    "Patch:",
+    "```diff",
+    context.patch,
+    "```",
+  ].join("\n");
+}
+
+function truncateDraftPatch(patch) {
+  if (Buffer.byteLength(patch, "utf8") <= GIT_DRAFT_PATCH_MAX_BYTES) {
+    return patch;
+  }
+
+  let byteCount = 0;
+  const keptLines = [];
+  for (const line of patch.split("\n")) {
+    const lineBytes = Buffer.byteLength(`${line}\n`, "utf8");
+    if (byteCount + lineBytes > GIT_DRAFT_PATCH_MAX_BYTES) {
+      break;
+    }
+    keptLines.push(line);
+    byteCount += lineBytes;
+  }
+
+  return [
+    ...keptLines,
+    "",
+    `[Diff truncated for draft generation after ${GIT_DRAFT_PATCH_MAX_BYTES} bytes.]`,
+  ].join("\n");
+}
+
+function buildPullRequestDraftPrompt(context) {
+  const commitLines = context.commitList.length > 0 ? context.commitList.map((line) => `- ${line}`).join("\n") : "- None";
+
+  return [
+    "Write a pull request title and body from the repository context below.",
+    "Return JSON only that matches the provided schema.",
+    "Rules:",
+    "- `title` should be concise and readable on GitHub.",
+    "- `body` must be Markdown with exactly these top-level sections: `## Summary`, `## Testing`, `## Notes`.",
+    "- In `## Testing`, explicitly say when testing was not run or could not be verified. Do not invent test results.",
+    "- Keep the body specific to the actual diff and commits.",
+    "- Do not mention AI, Codex, prompt instructions, or that the text was generated.",
+    "",
+    `Repository: ${context.repoRoot}`,
+    `Base branch: ${context.baseBranch}`,
+    `Current branch: ${context.currentBranch}`,
+    `Merge base: ${context.mergeBase}`,
+    `Diff totals: +${context.diff.additions} -${context.diff.deletions} binary=${context.diff.binaryFiles}`,
+    "Commits since base:",
+    commitLines,
+    "",
+    "Patch:",
+    "```diff",
+    context.patch,
+    "```",
+  ].join("\n");
+}
+
+function normalizeCommitDraft(draft) {
+  const subject = normalizeCommitSubject(draft?.subject);
+  const body = normalizeNonEmptyMultilineString(draft?.body);
+
+  if (!subject || !body) {
+    throw new Error("Commit draft was missing a valid subject or body.");
+  }
+
+  const fullMessage = `${subject}\n\n${body}`;
+  return { subject, body, fullMessage };
+}
+
+function normalizePullRequestDraft(draft) {
+  const title = normalizeNonEmptyLine(draft?.title);
+  const body = normalizeNonEmptyMultilineString(draft?.body);
+
+  if (!title || !body) {
+    throw new Error("Pull request draft was missing a valid title or body.");
+  }
+
+  const requiredHeadings = ["## Summary", "## Testing", "## Notes"];
+  if (!requiredHeadings.every((heading) => body.includes(heading))) {
+    throw new Error("Pull request draft body was missing one or more required sections.");
+  }
+
+  return { title, body };
+}
+
+function normalizeCommitSubject(rawValue) {
+  const trimmed = normalizeNonEmptyLine(rawValue);
+  if (!trimmed) {
+    return "";
+  }
+
+  const withoutTrailingPeriod = trimmed.replace(/\.+$/, "");
+  if (!withoutTrailingPeriod || withoutTrailingPeriod.length > 72) {
+    return "";
+  }
+
+  return withoutTrailingPeriod;
+}
+
+function normalizeNonEmptyLine(rawValue) {
+  if (typeof rawValue !== "string") {
+    return "";
+  }
+
+  return rawValue
+    .split("\n")[0]
+    .trim();
+}
+
+function normalizeNonEmptyMultilineString(rawValue) {
+  if (typeof rawValue !== "string") {
+    return "";
+  }
+
+  const trimmed = rawValue.trim();
+  return trimmed || "";
+}
+
+function wrapDraftGenerationError(error, kind) {
+  const detail = normalizeDraftErrorDetail(error);
+  if (kind === "commit") {
+    return gitError(
+      "commit_message_generation_failed",
+      detail ? `Could not generate a commit message. ${detail}` : "Could not generate a commit message."
+    );
+  }
+
+  return gitError(
+    "pull_request_draft_generation_failed",
+    detail ? `Could not generate a pull request draft. ${detail}` : "Could not generate a pull request draft."
+  );
+}
+
+function normalizeDraftErrorDetail(error) {
+  const rawMessage = typeof error?.userMessage === "string"
+    ? error.userMessage
+    : typeof error?.message === "string"
+      ? error.message
+      : "";
+  const trimmed = rawMessage.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const singleLine = trimmed.split("\n").map((line) => line.trim()).filter(Boolean).pop() || trimmed;
+  return singleLine.endsWith(".") ? singleLine : `${singleLine}.`;
+}
+
+async function runStructuredCodexJson({ cwd, model, prompt, schema, codexAppPath }) {
+  const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-ai-"));
+  const schemaPath = path.join(tempDirectory, "schema.json");
+  const outputPath = path.join(tempDirectory, "output.json");
+  const commands = resolveCodexExecCommands(codexAppPath);
+
+  fs.writeFileSync(schemaPath, JSON.stringify(schema), "utf8");
+
+  try {
+    let lastError = null;
+
+    for (const command of commands) {
+      try {
+        return await spawnCodexExecJson({
+          command,
+          cwd,
+          model,
+          prompt,
+          schemaPath,
+          outputPath,
+        });
+      } catch (error) {
+        lastError = error;
+        if (!shouldRetryCodexExecWithNextCommand(error)) {
+          throw error;
+        }
+      }
+    }
+
+    throw lastError || new Error("Codex CLI is not available on this Mac.");
+  } finally {
+    fs.rmSync(tempDirectory, { recursive: true, force: true });
+  }
+}
+
+function resolveCodexExecCommands(codexAppPath) {
+  const commands = ["codex"];
+  const bundledCommand = resolveBundledCodexCommand(codexAppPath);
+  if (bundledCommand && !commands.includes(bundledCommand)) {
+    commands.push(bundledCommand);
+  }
+  return commands;
+}
+
+function resolveBundledCodexCommand(codexAppPath) {
+  const trimmedAppPath = typeof codexAppPath === "string" ? codexAppPath.trim() : "";
+  if (!trimmedAppPath) {
+    return "";
+  }
+
+  const candidate = path.join(trimmedAppPath, "Contents", "Resources", "codex");
+  return isLaunchableFile(candidate) ? candidate : "";
+}
+
+function isLaunchableFile(candidatePath) {
+  try {
+    return fs.statSync(candidatePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function shouldRetryCodexExecWithNextCommand(error) {
+  return error?.code === "ENOENT";
+}
+
+function spawnCodexExecJson({ command, cwd, model, prompt, schemaPath, outputPath }) {
+  const args = [
+    "exec",
+    "--ephemeral",
+    "-C",
+    cwd,
+    "-m",
+    model,
+    "--output-schema",
+    schemaPath,
+    "-o",
+    outputPath,
+    "-",
+  ];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, GIT_DRAFT_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timeout);
+
+      if (timedOut) {
+        reject(new Error("Codex CLI timed out while generating the draft."));
+        return;
+      }
+
+      if (code !== 0) {
+        reject(createCodexExecFailure(code, signal, stdout, stderr));
+        return;
+      }
+
+      try {
+        const outputText = fs.readFileSync(outputPath, "utf8").trim();
+        if (!outputText) {
+          throw new Error("Codex CLI returned an empty structured response.");
+        }
+        resolve(JSON.parse(outputText));
+      } catch (error) {
+        reject(error);
+      }
+    });
+
+    child.stdin.end(prompt);
+  });
+}
+
+function createCodexExecFailure(code, signal, stdout, stderr) {
+  const detail = [stderr, stdout]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .flatMap((value) => value.split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .pop();
+
+  const suffix = detail ? ` ${detail}` : "";
+  const error = new Error(
+    signal
+      ? `Codex CLI was interrupted while generating the draft.${suffix}`
+      : `Codex CLI exited with code ${code} while generating the draft.${suffix}`
+  );
+  error.code = code;
+  error.signal = signal;
+  return error;
 }
 
 function parseOwnerRepo(remoteUrl) {
@@ -1518,6 +2026,8 @@ module.exports = {
   handleGitRequest,
   gitStatus,
   __test: {
+    gitGenerateCommitMessage,
+    gitGeneratePullRequestDraft,
     gitBranches,
     gitCreateBranch,
     gitCreateWorktree,
@@ -1536,5 +2046,11 @@ module.exports = {
     scopedLocalCheckoutPath,
     scopedWorktreePath,
     resolveBaseBranchName,
+    setRunStructuredCodexJsonImplementation(fn) {
+      runStructuredCodexJsonImpl = typeof fn === "function" ? fn : runStructuredCodexJson;
+    },
+    resetRunStructuredCodexJsonImplementation() {
+      runStructuredCodexJsonImpl = runStructuredCodexJson;
+    },
   },
 };

@@ -131,6 +131,27 @@ struct SettingsView: View {
                 .labelsHidden()
                 .tint(settingsAccentColor)
             }
+
+            Divider()
+
+            HStack {
+                Text("Git writer model")
+                Spacer()
+                Picker("Git writer model", selection: gitWriterModelSelection) {
+                    ForEach(gitWriterModelOptions, id: \.id) { model in
+                        Text(TurnComposerMetaMapper.modelTitle(for: model))
+                            .tag(model.id)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(settingsAccentColor)
+                .disabled(gitWriterModelOptions.isEmpty)
+            }
+
+            Text("Used for AI-generated commit messages and PR drafts. Defaults to GPT-5.4 Mini when available.")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -298,6 +319,17 @@ struct SettingsView: View {
                     selection == runtimeNormalValue ? nil : CodexServiceTier(rawValue: selection)
                 )
             }
+        )
+    }
+
+    private var gitWriterModelOptions: [CodexModelOption] {
+        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+    }
+
+    private var gitWriterModelSelection: Binding<String> {
+        Binding(
+            get: { codex.selectedGitWriterModelOption()?.id ?? gitWriterModelOptions.first?.id ?? "" },
+            set: { codex.setSelectedGitWriterModelId($0.isEmpty ? nil : $0) }
         )
     }
 

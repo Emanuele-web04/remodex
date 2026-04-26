@@ -85,7 +85,7 @@ private struct CachingMarkdownParser: MarkupParser {
     private let inner: AttributedStringMarkdownParser = .markdown()
 
     func attributedString(for input: String) throws -> AttributedString {
-        let key = TurnTextCacheKey.key(namespace: "markdown-parser", text: input)
+        let key = TurnTextCacheKey.stableKey(namespace: "markdown-parser", text: input)
         if let cached = Self.cache.get(key) {
             return cached
         }
@@ -132,6 +132,58 @@ struct MarkdownTextView: View {
                 .clipped()
         } else {
             renderedContent
+        }
+    }
+}
+
+private struct StreamingAssistantMarkdownTextView: View {
+    let text: String
+    var enablesSelection: Bool = false
+    var constrainsToAvailableWidth: Bool = false
+
+    @State private var displayedText = ""
+
+    var body: some View {
+        let effectiveText = displayedText.isEmpty ? text : displayedText
+        let rendered = Text(effectiveText)
+            .font(AppFont.body())
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        let selectable = Group {
+            if enablesSelection {
+                rendered.textSelection(.enabled)
+            } else {
+                rendered
+            }
+        }
+
+        Group {
+            if constrainsToAvailableWidth {
+                selectable
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                selectable
+            }
+        }
+        .onAppear {
+            reconcileDisplayedText(with: text)
+        }
+        .onChange(of: text) { _, nextText in
+            reconcileDisplayedText(with: nextText)
+        }
+    }
+
+    // Keep the streaming row append-oriented; the finalized row returns to Textual markdown.
+    private func reconcileDisplayedText(with nextText: String) {
+        guard !nextText.isEmpty else {
+            displayedText = ""
+            return
+        }
+        if nextText.hasPrefix(displayedText) {
+            displayedText.append(String(nextText.dropFirst(displayedText.count)))
+        } else {
+            displayedText = nextText
         }
     }
 }
@@ -936,7 +988,9 @@ struct MessageRow: View, Equatable {
         let commentContent = renderModel.codeCommentContent
         let bodyText = commentContent?.fallbackText ?? text
         let mermaidContent = renderModel.mermaidContent
-        let assistantProposedPlanCandidate = commentContent == nil && mermaidContent == nil
+        let shouldParseStructuredAssistantContent = !message.isStreaming
+        let assistantProposedPlanCandidate = shouldParseStructuredAssistantContent
+            && commentContent == nil && mermaidContent == nil
             ? (message.proposedPlan ?? CodexProposedPlanParser.parse(from: bodyText))
             : nil
         let currentPlanSessionSource = planSessionSource
@@ -959,7 +1013,7 @@ struct MessageRow: View, Equatable {
                     ? (CodexProposedPlanParser.removingEnvelope(from: bodyText) ?? "")
                     : ""
             )
-        let inferredQuestionnaire = commentContent == nil
+        let inferredQuestionnaire = shouldParseStructuredAssistantContent && commentContent == nil
             ? resolvedInferredPlanQuestionnaire(
                 bodyText: bodyText,
                 message: message,
@@ -1033,6 +1087,12 @@ struct MessageRow: View, Equatable {
                         proposedPlan: proposedPlan,
                         isStreaming: message.isStreaming,
                         canImplement: assistantTurnCompleted
+                    )
+                } else if message.isStreaming {
+                    StreamingAssistantMarkdownTextView(
+                        text: visibleAssistantText,
+                        enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                        constrainsToAvailableWidth: true
                     )
                 } else {
                     MarkdownTextView(

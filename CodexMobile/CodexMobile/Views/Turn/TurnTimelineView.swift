@@ -259,7 +259,7 @@ private struct TurnTimelineToolBurstView: View {
 private struct TurnTimelineRowsSection: View {
     let shouldWarmRecentTailProgressively: Bool
     let hasEarlierMessages: Bool
-    let visibleMessages: ArraySlice<CodexMessage>
+    let renderItems: [TurnTimelineRenderItem]
     let isRetryAvailable: Bool
     let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
     let planSessionSource: CodexPlanSessionSource?
@@ -273,10 +273,6 @@ private struct TurnTimelineRowsSection: View {
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
     let onLoadEarlierMessages: () -> Void
-
-    private var renderItems: [TurnTimelineRenderItem] {
-        TurnTimelineRenderProjection.project(messages: Array(visibleMessages))
-    }
 
     var body: some View {
         if shouldWarmRecentTailProgressively {
@@ -432,6 +428,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Cached per-render artifacts to avoid O(n) recomputation inside the body.
     @State private var cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState] = [:]
     @State private var cachedNewestStreamingMessageID: String? = nil
+    @State private var cachedRenderItems: [TurnTimelineRenderItem] = []
+    @State private var cachedRenderItemsInputKey: Int = 0
     @State private var blockInfoInputKey: Int = 0
     @State private var scrollSessionThreadID: String?
     @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
@@ -443,13 +441,20 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var isUserDraggingScroll = false
     @State private var userScrollCooldownUntil: Date?
     @State private var scrollGeometryCoalescer = ScrollGeometryCoalescer()
-    @State private var timelineDebugSequence = 0
     @State private var lastTimelineGeometryLogBucket: Int?
 
     /// The tail slice of messages currently rendered in the timeline.
     private var visibleMessages: ArraySlice<CodexMessage> {
         let startIndex = max(messages.count - visibleTailCount, 0)
         return messages[startIndex...]
+    }
+
+    private var visibleRenderItems: [TurnTimelineRenderItem] {
+        let key = renderItemsInputKey(for: visibleMessages)
+        if key == cachedRenderItemsInputKey, !cachedRenderItems.isEmpty {
+            return cachedRenderItems
+        }
+        return TurnTimelineRenderProjection.project(messages: Array(visibleMessages))
     }
 
     private var hasEarlierMessages: Bool {
@@ -492,6 +497,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         return hasher.finalize()
     }
 
+    private func renderItemsInputKey(for messages: ArraySlice<CodexMessage>) -> Int {
+        var hasher = Hasher()
+        hasher.combine(messages.count)
+        for message in messages {
+            // Render items carry CodexMessage values, so the cache key must track
+            // content updates too; otherwise streaming rows can reuse stale text.
+            hasher.combine(message)
+        }
+        return hasher.finalize()
+    }
+
     var body: some View {
         if messages.isEmpty {
             // Keep new/empty chats static to avoid scroll indicators and inert scrolling.
@@ -519,7 +535,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         TurnTimelineRowsSection(
                             shouldWarmRecentTailProgressively: shouldWarmRecentTailProgressively,
                             hasEarlierMessages: hasEarlierMessages,
-                            visibleMessages: visibleMessages,
+                            renderItems: visibleRenderItems,
                             isRetryAvailable: isRetryAvailable,
                             cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
                             planSessionSource: planSessionSource,
@@ -609,6 +625,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         "timelineChangeToken changed token=\(timelineChangeToken) "
                             + "messageCount=\(messages.count) visibleTail=\(visibleTailCount)"
                     )
+                    recomputeRenderItemsIfNeeded()
                     recomputeBlockInfoIfNeeded()
                     scheduleProgressiveTailRevealIfNeeded()
                     handleTimelineMutation(using: proxy)
@@ -620,6 +637,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .onChange(of: threadID) { _, _ in
                     debugTimelineLog("threadID changed to=\(threadID)")
                     beginScrollSessionIfNeeded(force: true)
+                    recomputeRenderItemsIfNeeded()
                     recomputeBlockInfoIfNeeded()
                     scheduleProgressiveTailRevealIfNeeded()
                     handleTimelineMutation(using: proxy)
@@ -639,6 +657,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 }
                 .onChange(of: visibleTailCount) { _, _ in
                     debugTimelineLog("visibleTailCount changed value=\(visibleTailCount) totalMessages=\(messages.count)")
+                    recomputeRenderItemsIfNeeded()
                     recomputeBlockInfoIfNeeded()
                 }
                 .onChange(of: shouldAnchorToAssistantResponse) { _, newValue in
@@ -658,6 +677,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 .onAppear {
                     debugTimelineLog("onAppear threadID=\(threadID) messageCount=\(messages.count)")
                     beginScrollSessionIfNeeded()
+                    recomputeRenderItemsIfNeeded()
                     recomputeBlockInfoIfNeeded()
                     scheduleProgressiveTailRevealIfNeeded()
                     handleTimelineMutation(using: proxy)
@@ -668,6 +688,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 }
             }
         }
+    }
+
+    private func recomputeRenderItemsIfNeeded() {
+        let key = renderItemsInputKey(for: visibleMessages)
+        guard key != cachedRenderItemsInputKey || cachedRenderItems.isEmpty else { return }
+        cachedRenderItemsInputKey = key
+        cachedRenderItems = TurnTimelineRenderProjection.project(messages: Array(visibleMessages))
     }
 
     private func recomputeBlockInfoIfNeeded() {
@@ -1181,7 +1208,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             let fileChangeMessages = Array(messages[blockStart...blockEnd].filter {
                 $0.role == .system && $0.kind == .fileChange && !$0.isStreaming
             })
-            let blockDiffPresentation = FileChangeBlockPresentationBuilder.build(from: fileChangeMessages)
+            let blockDiffPresentation = FileChangeBlockPresentationCache.presentation(from: fileChangeMessages)
             let blockDiffText = blockDiffPresentation?.bodyText
             let blockDiffEntries = blockDiffPresentation?.entries
 
@@ -1337,10 +1364,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         )
     }
 
-    private func debugTimelineLog(_ message: String) {
-        timelineDebugSequence += 1
-        print("[TimelineDebug] #\(timelineDebugSequence) \(message)")
+    // Scroll callbacks hit this often; keep logging fully lazy and non-mutating.
+    private func debugTimelineLog(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        guard Self.isTimelineDebugLoggingEnabled else { return }
+        print("[TimelineDebug] \(message())")
+        #endif
     }
+}
+
+private extension TurnTimelineView {
+    static var isTimelineDebugLoggingEnabled: Bool { false }
 }
 
 private struct ScrollBottomGeometry: Equatable {

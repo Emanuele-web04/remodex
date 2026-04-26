@@ -68,6 +68,7 @@ struct ContentView: View {
     private let sidebarSwipeCommitDistance: CGFloat = 30
     private let whatsNewReleaseVersion = "1.1"
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
+    private static var isSidebarDebugLoggingEnabled: Bool { false }
 
     var body: some View {
         rootContentWithBannerOverlay
@@ -859,6 +860,7 @@ struct ContentView: View {
     }
 
     private func beginSidebarGestureDebugIfNeeded(kind: String, startX: CGFloat) {
+        guard Self.isSidebarDebugLoggingEnabled else { return }
         guard activeSidebarGestureDebugID == nil else { return }
         sidebarGestureDebugSequence += 1
         activeSidebarGestureDebugID = sidebarGestureDebugSequence
@@ -870,6 +872,7 @@ struct ContentView: View {
     }
 
     private func logSidebarGestureProgressIfNeeded(translation: CGFloat) {
+        guard Self.isSidebarDebugLoggingEnabled else { return }
         guard let gestureID = activeSidebarGestureDebugID else { return }
         let bucket = max(0, Int(translation / sidebarGestureLogBucketWidth))
         guard bucket != lastSidebarGestureLogBucket else { return }
@@ -885,8 +888,12 @@ struct ContentView: View {
         lastSidebarGestureLogBucket = nil
     }
 
-    private func debugSidebarLog(_ message: String) {
-        print("[SidebarDebug] \(message)")
+    // Gesture and lifecycle logs are lazy so release builds do not build strings on hot paths.
+    private func debugSidebarLog(_ message: @autoclosure () -> String) {
+        #if DEBUG
+        guard Self.isSidebarDebugLoggingEnabled else { return }
+        print("[SidebarDebug] \(message())")
+        #endif
     }
 
     // Uses the responder chain instead of per-view bindings so mixed SwiftUI/UIKit inputs all close together.
