@@ -42,7 +42,7 @@ extension CodexService {
 
         markThreadAsRunning(context.threadId)
         clearMirroredRunningCatchupNeeded(for: context.threadId)
-        appendAssistantDelta(
+        enqueueAssistantDelta(
             threadId: context.threadId,
             turnId: turnId,
             itemId: context.identity.itemId,

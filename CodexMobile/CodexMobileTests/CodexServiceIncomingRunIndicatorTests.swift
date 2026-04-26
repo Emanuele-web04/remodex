@@ -22,6 +22,84 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testAssistantDeltaCoalescingAppliesOrderedDeltasOnFlush() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Hello")
+        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: " world")
+
+        XCTAssertTrue(service.messages(for: threadID).isEmpty)
+
+        service.flushAllPendingStreamingDeltas()
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.role, .assistant)
+        XCTAssertEqual(messages.first?.text, "Hello world")
+        XCTAssertTrue(messages.first?.isStreaming == true)
+    }
+
+    func testSystemDeltaCoalescingAppliesThinkingDeltasOnFlush() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "thinking-\(UUID().uuidString)"
+
+        service.appendStreamingSystemItemDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            kind: .thinking,
+            delta: "Looking"
+        )
+        service.appendStreamingSystemItemDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            kind: .thinking,
+            delta: " around"
+        )
+
+        XCTAssertTrue(service.messages(for: threadID).isEmpty)
+
+        service.flushAllPendingStreamingDeltas()
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.role, .system)
+        XCTAssertEqual(messages.first?.kind, .thinking)
+        XCTAssertEqual(messages.first?.text, "Looking around")
+        XCTAssertTrue(messages.first?.isStreaming == true)
+    }
+
+    func testNilTurnSystemDeltasFlushBeforeTurnCompletionClosesRows() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let itemID = "thinking-\(UUID().uuidString)"
+
+        service.appendStreamingSystemItemDelta(
+            threadId: threadID,
+            turnId: nil,
+            itemId: itemID,
+            kind: .thinking,
+            delta: "Recovering"
+        )
+
+        XCTAssertTrue(service.messages(for: threadID).isEmpty)
+
+        service.markTurnCompleted(threadId: threadID, turnId: nil)
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.kind, .thinking)
+        XCTAssertEqual(messages.first?.text, "Recovering")
+        XCTAssertFalse(messages.first?.isStreaming ?? true)
+        XCTAssertTrue(service.pendingSystemDeltasByKey.isEmpty)
+    }
+
     func testIncomingMethodIsTrimmedBeforeRouting() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

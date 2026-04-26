@@ -229,6 +229,7 @@ enum CodexPendingCodeReviewTarget: Equatable, Sendable {
 struct TurnTimelineRenderSnapshot: Equatable {
     let threadID: String
     let messages: [CodexMessage]
+    let messageIndexByID: [String: Int]
     let planMatchingMessages: [CodexMessage]
     let timelineChangeToken: Int
     let activeTurnID: String?
@@ -243,6 +244,7 @@ struct TurnTimelineRenderSnapshot: Equatable {
         TurnTimelineRenderSnapshot(
             threadID: threadID,
             messages: [],
+            messageIndexByID: [:],
             planMatchingMessages: [],
             timelineChangeToken: 0,
             activeTurnID: nil,
@@ -254,6 +256,21 @@ struct TurnTimelineRenderSnapshot: Equatable {
             repoRefreshSignal: nil
         )
     }
+}
+
+struct PendingAssistantStreamingDeltas {
+    let threadId: String
+    let turnId: String
+    let itemId: String?
+    var deltas: [String]
+}
+
+struct PendingSystemStreamingDeltas {
+    let threadId: String
+    let turnId: String?
+    let itemId: String
+    let kind: CodexMessageKind
+    var deltas: [String]
 }
 
 @MainActor
@@ -536,11 +553,16 @@ final class CodexService {
     // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
     @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]
     @ObservationIgnored var latestAssistantOutputByThread: [String: String] = [:]
+    @ObservationIgnored var latestAssistantMessageIDByThread: [String: String] = [:]
     @ObservationIgnored var latestRepoAffectingMessageSignalByThread: [String: String] = [:]
     @ObservationIgnored var assistantRevertStateCacheByThread: [String: AssistantRevertStateCacheEntry] = [:]
     @ObservationIgnored var assistantRevertStateRevision: Int = 0
     @ObservationIgnored var busyRepoRoots: Set<String> = []
     @ObservationIgnored var busyRepoRootsRevision: Int = 0
+    @ObservationIgnored var pendingAssistantDeltasByKey: [String: PendingAssistantStreamingDeltas] = [:]
+    @ObservationIgnored var assistantDeltaFlushTasksByKey: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var pendingSystemDeltasByKey: [String: PendingSystemStreamingDeltas] = [:]
+    @ObservationIgnored var systemDeltaFlushTasksByKey: [String: Task<Void, Never>] = [:]
 
     let encoder: JSONEncoder
     let decoder: JSONDecoder
