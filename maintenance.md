@@ -27,6 +27,36 @@ Expected:
 {"ok":true}
 ```
 
+## After reboot
+
+The relay should start automatically when you log in because it is installed as a LaunchAgent.
+
+Check the relay:
+
+```bash
+curl -fsS "http://100.107.153.95:9000/health"
+```
+
+If the relay is not healthy, restart it:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.remodex.tailnet-relay
+```
+
+Start or refresh the bridge server:
+
+```bash
+cd "/Users/dyllon/Developer/codex-remote/phodex-bridge"
+REMODEX_RELAY="ws://100.107.153.95:9000/relay" node ./bin/remodex.js up
+```
+
+Check bridge status:
+
+```bash
+cd "/Users/dyllon/Developer/codex-remote/phodex-bridge"
+REMODEX_RELAY="ws://100.107.153.95:9000/relay" node ./bin/remodex.js status
+```
+
 ## Relay restart
 
 ```bash
