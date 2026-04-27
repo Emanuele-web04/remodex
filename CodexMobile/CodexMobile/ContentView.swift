@@ -23,7 +23,6 @@ private enum RootSheetRoute: Identifiable, Equatable {
 
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -148,15 +147,11 @@ struct ContentView: View {
                 codex.setForegroundState(phase != .background)
                 if phase == .active {
                     Task {
-                        async let subscriptionRefresh: Void = subscriptions.refreshCustomerInfoSilently()
-
                         guard hasSeenOnboarding, !isShowingManualScanner else {
-                            await subscriptionRefresh
                             return
                         }
 
                         await attemptSavedMacReconnectRecoveryIfNeeded()
-                        await subscriptionRefresh
                         scheduleSidebarPrewarmIfNeeded()
                     }
                 } else if phase == .background {
@@ -193,7 +188,7 @@ struct ContentView: View {
     // Keeps sheets and alerts out of the lifecycle chain so the compiler can reason about each stage separately.
     private var rootContentWithPresentations: some View {
         rootContentWithLifecycleObservers
-            // Presents exactly one root-owned sheet at a time so onboarding, paywall, updates,
+            // Presents exactly one root-owned sheet at a time so onboarding, updates,
             // and delayed announcements cannot race each other into stacked presentations.
             .sheet(item: presentedRootSheetBinding) { route in
                 switch route {
@@ -271,10 +266,6 @@ struct ContentView: View {
             OnboardingView {
                 finishOnboardingAndShowScanner()
             }
-        } else if subscriptions.bootstrapState == .failed && !subscriptions.hasAppAccess {
-            SubscriptionBootstrapFailureView()
-        } else if !subscriptions.hasAppAccess {
-            SubscriptionGateView()
         } else if shouldShowQRScanner {
             qrScannerBody
         } else {
@@ -802,14 +793,13 @@ struct ContentView: View {
     private func scheduleSidebarPrewarmIfNeeded() {
         guard scenePhase == .active,
               hasSeenOnboarding,
-              subscriptions.hasAppAccess,
               !isShowingManualScanner,
               !isSidebarPrewarmed,
               sidebarPrewarmTask == nil,
               (codex.isConnected || !codex.threads.isEmpty) else {
             debugSidebarLog(
                 "prewarm skipped phase=\(String(describing: scenePhase)) onboarding=\(hasSeenOnboarding) "
-                    + "appAccess=\(subscriptions.hasAppAccess) scanner=\(isShowingManualScanner) "
+                    + "scanner=\(isShowingManualScanner) "
                     + "prewarmed=\(isSidebarPrewarmed) taskActive=\(sidebarPrewarmTask != nil) "
                     + "connected=\(codex.isConnected) threadCount=\(codex.threads.count)"
             )
@@ -823,7 +813,6 @@ struct ContentView: View {
             guard !Task.isCancelled,
                   scenePhase == .active,
                   hasSeenOnboarding,
-                  subscriptions.hasAppAccess,
                   !isShowingManualScanner,
                   !isSidebarOpen,
                   sidebarDragOffset == 0,
@@ -962,11 +951,10 @@ struct ContentView: View {
         return nil
     }
 
-    // Blocks lower-priority sheets while onboarding, pairing, paywall, or root alerts own the screen.
+    // Blocks lower-priority sheets while onboarding, pairing, or root alerts own the screen.
     private var canPresentDeferredRootSheet: Bool {
         scenePhase == .active
             && hasSeenOnboarding
-            && subscriptions.hasAppAccess
             && !isShowingManualScanner
             && !shouldShowQRScanner
             && !isShowingManualPairingEntry
@@ -988,7 +976,6 @@ struct ContentView: View {
         [
             String(scenePhase == .active),
             String(hasSeenOnboarding),
-            String(subscriptions.hasAppAccess),
             String(isShowingManualScanner),
             String(shouldShowQRScanner),
             String(isShowingManualPairingEntry),

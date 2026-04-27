@@ -411,7 +411,7 @@ What is live today:
 
 What is not fully live today:
 
-- `Codex.app` does not act like a second live subscriber to the active run by default.
+- `Codex.app` does not act like a second live listener to the active run by default.
 - The desktop app catches up from the persisted session files and can be nudged with the optional refresh workaround below.
 - True phone-to-desktop live sync in the `Codex.app` GUI is not supported today.
 

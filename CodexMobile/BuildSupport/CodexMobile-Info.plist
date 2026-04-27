@@ -66,12 +66,6 @@
 	<string>$(PHODEX_CHATGPT_CALLBACK_SCHEME)</string>
 	<key>PHODEX_DEFAULT_RELAY_URL</key>
 	<string>$(PHODEX_DEFAULT_RELAY_URL)</string>
-	<key>REVENUECAT_PUBLIC_API_KEY</key>
-	<string>$(REVENUECAT_PUBLIC_API_KEY)</string>
-	<key>REVENUECAT_ENTITLEMENT_NAME</key>
-	<string>$(REVENUECAT_ENTITLEMENT_NAME)</string>
-	<key>REVENUECAT_DEFAULT_OFFERING_ID</key>
-	<string>$(REVENUECAT_DEFAULT_OFFERING_ID)</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>JetBrainsMono-Regular.ttf</string>

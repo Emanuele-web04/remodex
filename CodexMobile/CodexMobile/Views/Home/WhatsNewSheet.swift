@@ -8,8 +8,6 @@ import SwiftUI
 
 private let whatsNewItems: [String] = [
     "Added Plan Mode.",
-    "Added Lifetime access.",
-    "Added 5 free messages before upgrading to Pro.",
     "Added `caffeinate` support to help keep your Mac reachable.",
     "Added the `/feedback` button.",
     "The sidebar now uses a full-width view.",

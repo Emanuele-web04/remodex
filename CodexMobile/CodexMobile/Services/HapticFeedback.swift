@@ -1,5 +1,5 @@
 // FILE: HapticFeedback.swift
-// Purpose: Centralized haptic feedback utility for premium button interactions.
+// Purpose: Centralized haptic feedback utility for tactile button interactions.
 // Layer: Service
 // Exports: HapticFeedback
 // Depends on: UIKit

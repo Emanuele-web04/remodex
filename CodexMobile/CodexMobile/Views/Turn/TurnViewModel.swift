@@ -931,7 +931,6 @@ final class TurnViewModel {
     // Sends a composer payload, queueing follow-ups while the current run is still active.
     func sendTurn(
         codex: CodexService,
-        subscriptions: SubscriptionService? = nil,
         threadID: String
     ) {
         let payload = buildPayloadWithMentions()
@@ -950,11 +949,6 @@ final class TurnViewModel {
 
         if reviewSelection != nil, hasComposerContentConflictingWithReview {
             codex.lastErrorMessage = "Clear text, files, skills, and images before starting a code review."
-            return
-        }
-
-        if let subscriptions, !subscriptions.hasAppAccess {
-            codex.lastErrorMessage = "Your 5 free messages are over. Unlock Remodex Pro to keep chatting."
             return
         }
 
@@ -986,7 +980,6 @@ final class TurnViewModel {
         let threadBusy = isThreadBusy(codex: codex, threadID: threadID)
         let queuePaused = isQueuePaused(codex: codex, threadID: threadID)
 
-        subscriptions?.consumeFreeSendAttemptIfNeeded()
         isSending = true
         Task { @MainActor in
             defer { isSending = false }

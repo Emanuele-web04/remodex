@@ -30,7 +30,6 @@ Remodex is a local-first remote companion for Codex on your Mac. In practice, th
 
 - **Pairing and identity keys** — The App generates cryptographic identity material used for secure pairing and trusted reconnect.
 - **Relay and trusted-device metadata** — The App stores relay session data, trusted Mac identifiers, and reconnect metadata needed to restore a secure connection.
-- **Subscription and purchase state** — We use RevenueCat and Apple to determine whether your Pro entitlement is active. This includes entitlement status and related purchase metadata exposed by those services to the app.
 - **Connection metadata** — If you use a hosted relay, the relay can process network and session metadata needed to route traffic, maintain trusted reconnect, and operate the service.
 
 ### 2.3 Information We Do Not Collect for Analytics or Advertising
@@ -49,7 +48,6 @@ We use the information above only to operate and secure Remodex, including:
 - pairing your iPhone with your Mac
 - routing encrypted traffic between your iPhone and Mac
 - performing trusted reconnect
-- checking and restoring subscription entitlements
 - transcribing voice input when you explicitly use voice mode
 - maintaining app security, stability, and abuse prevention for the hosted infrastructure
 
@@ -59,7 +57,7 @@ We do not use your information for advertising, profiling, or resale.
 
 If you are in the European Economic Area, we rely on the following legal bases:
 
-- **Contract performance** — to provide the App's core features, including pairing, relay transport, voice transcription, and subscription handling
+- **Contract performance** — to provide the App's core features, including pairing, relay transport, and voice transcription
 - **Legitimate interests** — to secure the service, prevent abuse, maintain relay connectivity, and protect users and infrastructure
 - **Consent** — for permissions such as camera, microphone, photo library, and local network access
 
@@ -88,17 +86,10 @@ This is the only instance where your data is processed by a third-party AI servi
 
 - Privacy policy: [openai.com/privacy](https://openai.com/privacy)
 
-### 4.3 RevenueCat
-
-RevenueCat is used for subscription and entitlement management. RevenueCat may process an anonymous app user identifier, entitlement status, purchase information, device/app metadata, and subscription management URLs.
-
-- Privacy policy: [www.revenuecat.com/privacy](https://www.revenuecat.com/privacy)
-
-### 4.4 Apple
+### 4.3 Apple
 
 Apple provides:
 
-- App Store billing and subscription management
 - iOS permission and platform services used by the app
 
 - Privacy policy: [apple.com/privacy](https://www.apple.com/privacy/)
@@ -124,15 +115,13 @@ When the hosted relay is used, the server side may keep limited operational stat
 
 - The iPhone and Mac establish an end-to-end encrypted session using modern cryptography.
 - The relay can observe connection metadata and secure-session setup traffic, but not encrypted application payloads after the secure session is established.
-- Voice transcription and subscription requests are sent over HTTPS/TLS.
+- Voice transcription requests are sent over HTTPS/TLS.
 
 ## 6. Data Retention
 
 - **Chat history on iPhone** — stored locally until the app's local storage is removed. Unpairing or forgetting a Mac does **not** automatically erase local chat history.
 - **Voice recordings** — temporary voice files are deleted by the app after transcription completes or fails.
 - **Pairing and trusted-device state** — retained in local app storage and Keychain until removed by app actions or platform behavior.
-- **Subscription records** — retained by Apple and RevenueCat according to their own policies.
-
 We do not maintain a cloud chat history database for your message contents.
 
 ## 7. Your Choices
@@ -141,11 +130,7 @@ We do not maintain a cloud chat history database for your message contents.
 
 You can revoke camera, microphone, photo library, and local network permissions at any time in iOS Settings. Doing so disables the related feature.
 
-### 7.2 Subscription Management
-
-You can manage or cancel your subscription through Apple account settings or through the in-app management link when available.
-
-### 7.3 Local Data and Reset
+### 7.2 Local Data and Reset
 
 - Deleting the app removes ordinary app-container files such as local encrypted chat history and temporary files.
 - Keychain items are managed by iOS separately from ordinary app files and may persist differently, including across reinstall scenarios.
@@ -155,7 +140,7 @@ You can manage or cancel your subscription through Apple account settings or thr
 
 Depending on your jurisdiction, you may have rights to access, correct, delete, restrict, or object to the processing of personal information, and to request portability where applicable.
 
-Because Remodex is primarily local-first, much of your data remains under your direct control on your devices. We do not maintain a centralized database of your personal data. Some data may be processed or retained by Apple, RevenueCat, and OpenAI according to their own operational needs and policies.
+Because Remodex is primarily local-first, much of your data remains under your direct control on your devices. We do not maintain a centralized database of your personal data. Some data may be processed or retained by Apple and OpenAI according to their own operational needs and policies.
 
 ### 8.1 California Notice
 
@@ -167,7 +152,7 @@ The App is not directed to children under 13, or the minimum age required by loc
 
 ## 10. International Transfers
 
-Depending on where you use the App and where service providers or hosted infrastructure are located, data processed by OpenAI, RevenueCat, Apple, or the hosted relay may be handled outside your country of residence.
+Depending on where you use the App and where service providers or hosted infrastructure are located, data processed by OpenAI, Apple, or the hosted relay may be handled outside your country of residence.
 
 ## 11. Changes to This Policy
 
