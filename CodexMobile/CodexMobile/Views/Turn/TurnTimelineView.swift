@@ -501,9 +501,27 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         var hasher = Hasher()
         hasher.combine(messages.count)
         for message in messages {
-            // Render items carry CodexMessage values, so the cache key must track
-            // content updates too; otherwise streaming rows can reuse stale text.
-            hasher.combine(message)
+            hasher.combine(message.id)
+            hasher.combine(message.role)
+            hasher.combine(message.kind)
+            hasher.combine(message.turnId)
+            hasher.combine(message.itemId)
+            hasher.combine(message.isStreaming)
+            hasher.combine(message.deliveryState)
+            hasher.combine(message.orderIndex)
+            hasher.combine(message.attachments)
+            hasher.combine(message.planState)
+            hasher.combine(message.planPresentation)
+            hasher.combine(message.proposedPlan)
+            hasher.combine(message.subagentAction)
+            hasher.combine(message.structuredUserInputRequest)
+            // Streaming prose only appends during live output; length is enough to
+            // invalidate the projected row without rehashing the full transcript text.
+            if message.isStreaming {
+                hasher.combine(message.text.count)
+            } else {
+                hasher.combine(message.text)
+            }
         }
         return hasher.finalize()
     }

@@ -40,7 +40,7 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
   }
 
   const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
-  if (!method.startsWith("git/") && method !== "thread/generateTitle") {
+  if (!method.startsWith("git/") && !["thread/generateTitle", "thread/name/set"].includes(method)) {
     return false;
   }
 
@@ -50,6 +50,9 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
   handleGitMethod(method, params, options)
     .then((result) => {
       sendResponse(JSON.stringify({ id, result }));
+      if (method === "thread/name/set") {
+        options.onThreadNameSet?.(result);
+      }
     })
     .catch((err) => {
       const errorCode = err.errorCode || "git_error";
@@ -72,6 +75,9 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
 async function handleGitMethod(method, params, options = {}) {
   if (method === "thread/generateTitle") {
     return threadGenerateTitle(params, options);
+  }
+  if (method === "thread/name/set") {
+    return threadNameSet(params);
   }
 
   const cwd = await resolveGitCwd(params);
@@ -120,6 +126,20 @@ async function handleGitMethod(method, params, options = {}) {
     default:
       throw gitError("unknown_method", `Unknown git method: ${method}`);
   }
+}
+
+// Owns mobile thread renames locally so they do not fall through to unsupported Codex RPC.
+function threadNameSet(params) {
+  const threadId = normalizeNonEmptyLine(params.threadId || params.thread_id || params.conversationId || params.conversation_id);
+  const name = normalizeNonEmptyLine(params.name || params.threadName || params.thread_name || params.title);
+  if (!threadId) {
+    throw gitError("missing_thread_id", "A thread ID is required to rename a thread.");
+  }
+  if (!name) {
+    throw gitError("missing_thread_name", "A thread name is required.");
+  }
+
+  return { threadId, thread_id: threadId, name, title: name };
 }
 
 // ─── Git Status ───────────────────────────────────────────────
@@ -2183,6 +2203,7 @@ module.exports = {
     gitGenerateCommitMessage,
     gitGeneratePullRequestDraft,
     threadGenerateTitle,
+    threadNameSet,
     gitBranches,
     gitCreateBranch,
     gitCreateWorktree,

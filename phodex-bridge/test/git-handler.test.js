@@ -11,7 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 
-const { __test, gitStatus } = require("../src/git-handler");
+const { __test, gitStatus, handleGitRequest } = require("../src/git-handler");
 
 test.afterEach(() => {
   __test.resetRunStructuredCodexJsonImplementation();
@@ -556,6 +556,54 @@ test("threadGenerateTitle falls back to a sanitized first-message title", async 
   });
 
   assert.equal(result.title, "Rename this conversation after");
+});
+
+test("threadNameSet normalizes mobile rename params", () => {
+  const result = __test.threadNameSet({
+    thread_id: " thread-1 ",
+    name: "  Fix Thread Naming  ",
+  });
+
+  assert.deepEqual(result, {
+    threadId: "thread-1",
+    thread_id: "thread-1",
+    name: "Fix Thread Naming",
+    title: "Fix Thread Naming",
+  });
+});
+
+test("handleGitRequest owns thread rename and emits the rename hook", async () => {
+  const responses = [];
+  const notifications = [];
+  const handled = handleGitRequest(
+    JSON.stringify({
+      id: "rename-1",
+      method: "thread/name/set",
+      params: {
+        threadId: "thread-1",
+        title: "Polish loading states",
+      },
+    }),
+    (response) => responses.push(JSON.parse(response)),
+    {
+      onThreadNameSet: (result) => notifications.push(result),
+    }
+  );
+
+  assert.equal(handled, true);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(responses.length, 1);
+  assert.deepEqual(responses[0], {
+    id: "rename-1",
+    result: {
+      threadId: "thread-1",
+      thread_id: "thread-1",
+      name: "Polish loading states",
+      title: "Polish loading states",
+    },
+  });
+  assert.deepEqual(notifications, [responses[0].result]);
 });
 
 test("gitCreateWorktree creates a managed worktree under CODEX_HOME/worktrees", async () => {

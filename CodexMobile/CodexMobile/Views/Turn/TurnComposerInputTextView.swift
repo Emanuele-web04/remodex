@@ -49,11 +49,15 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             shouldBeFocused: isFocused,
             isEditable: isEditable
         )
-        context.coordinator.updateHeight(for: textView)
+        context.coordinator.updateHeightIfNeeded(for: textView, force: true)
         return textView
     }
 
     func updateUIView(_ uiView: TurnComposerPasteInterceptingTextView, context: Context) {
+        let nextFont = composerUIFont()
+        let currentFont = uiView.font
+        let fontChanged = currentFont?.fontName != nextFont.fontName
+            || abs((currentFont?.pointSize ?? 0) - nextFont.pointSize) > 0.5
         let textChanged = uiView.text != text
         if textChanged {
             uiView.text = text
@@ -66,8 +70,10 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         )
         uiView.isEditable = isEditable
         uiView.isSelectable = true
-        uiView.font = composerUIFont()
-        uiView.typingAttributes[.font] = composerUIFont()
+        if fontChanged {
+            uiView.font = nextFont
+        }
+        uiView.typingAttributes[.font] = nextFont
         uiView.typingAttributes[.foregroundColor] = UIColor.label
         uiView.adjustsFontForContentSizeCategory = true
         uiView.textContainerInset = .zero
@@ -83,7 +89,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             shouldBeFocused: isFocused,
             isEditable: isEditable
         )
-        context.coordinator.updateHeight(for: uiView)
+        context.coordinator.updateHeightIfNeeded(for: uiView, force: textChanged || fontChanged)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -113,6 +119,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private var lastFocusBindingValue: Bool
         private var pendingHeightValue: CGFloat?
         private var isHeightCommitScheduled = false
+        private var lastHeightMeasurementSignature: HeightMeasurementSignature?
 
         init(
             text: Binding<String>,
@@ -143,7 +150,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             if text.wrappedValue != textView.text {
                 text.wrappedValue = textView.text
             }
-            updateHeight(for: textView)
+            updateHeightIfNeeded(for: textView, force: true)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -158,7 +165,16 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             }
         }
 
-        fileprivate func updateHeight(for textView: UITextView) {
+        fileprivate func updateHeightIfNeeded(for textView: UITextView, force: Bool = false) {
+            let signature = heightMeasurementSignature(for: textView)
+            guard force || signature != lastHeightMeasurementSignature else {
+                return
+            }
+            lastHeightMeasurementSignature = signature
+            updateHeight(for: textView)
+        }
+
+        private func updateHeight(for textView: UITextView) {
             textView.layoutIfNeeded()
             textView.layoutManager.ensureLayout(for: textView.textContainer)
             let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
@@ -183,6 +199,18 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             }
 
             keepCaretVisible(in: textView)
+        }
+
+        // Avoids recalculating UITextView layout when only the streaming transcript invalidated SwiftUI.
+        private func heightMeasurementSignature(for textView: UITextView) -> HeightMeasurementSignature {
+            let font = textView.font ?? UIFont.preferredFont(forTextStyle: .body)
+            let width = max(textView.bounds.width, textView.textContainer.size.width, 1)
+            return HeightMeasurementSignature(
+                textHash: textView.text.hashValue,
+                widthBucket: Int((width * 2).rounded()),
+                lineHeightBucket: Int((font.lineHeight * 10).rounded()),
+                isScrollEnabled: textView.isScrollEnabled
+            )
         }
 
         // Coalesces repeated text-layout height writes so SwiftUI sees at most one
@@ -278,6 +306,13 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 }
             }
         }
+    }
+
+    private struct HeightMeasurementSignature: Equatable {
+        let textHash: Int
+        let widthBucket: Int
+        let lineHeightBucket: Int
+        let isScrollEnabled: Bool
     }
 }
 

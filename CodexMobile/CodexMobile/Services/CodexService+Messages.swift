@@ -3260,7 +3260,7 @@ extension CodexService {
             for index in messages[cachedIndex...].indices.reversed() {
                 let candidate = messages[index]
                 guard candidate.role == .assistant,
-                      !candidate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                      hasRenderableAssistantOutputText(candidate.text) else {
                     continue
                 }
                 latestAssistantOutputByThread[threadId] = candidate.text
@@ -3270,11 +3270,22 @@ extension CodexService {
         }
 
         let latestAssistant = messages
-            .last(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            .last(where: { $0.role == .assistant && hasRenderableAssistantOutputText($0.text) })
         let latestAssistantText = latestAssistant?.text ?? ""
         latestAssistantOutputByThread[threadId] = latestAssistantText
         latestAssistantMessageIDByThread[threadId] = latestAssistant?.id
         return latestAssistantText
+    }
+
+    // Streaming calls hit this on every delta; avoid allocating a trimmed copy for normal prose.
+    func hasRenderableAssistantOutputText(_ text: String) -> Bool {
+        guard let first = text.first else {
+            return false
+        }
+        if !first.isWhitespace {
+            return true
+        }
+        return text.contains { !$0.isWhitespace }
     }
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.

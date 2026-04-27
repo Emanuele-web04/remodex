@@ -512,6 +512,7 @@ function startBridge({
     }
     if (handleGitRequest(rawMessage, sendApplicationResponse, {
       codexAppPath: config.codexAppPath,
+      onThreadNameSet: sendThreadNameUpdatedNotification,
     })) {
       return;
     }
@@ -525,6 +526,25 @@ function startBridge({
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
     secureTransport.queueOutboundApplicationMessage(rawMessage, sendRelayWireMessage);
+  }
+
+  // Mirrors accepted local renames back to the phone using the existing push-event shape.
+  function sendThreadNameUpdatedNotification(result) {
+    const threadId = readString(result?.threadId || result?.thread_id);
+    const name = readString(result?.name || result?.title);
+    if (!threadId || !name) {
+      return;
+    }
+
+    sendApplicationResponse(JSON.stringify({
+      method: "thread/name/updated",
+      params: {
+        threadId,
+        thread_id: threadId,
+        name,
+        title: name,
+      },
+    }));
   }
 
   // ─── Bridge-owned auth snapshot ─────────────────────────────
