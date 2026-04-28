@@ -239,6 +239,25 @@ extension CodexService {
             return
         }
         let updatedMessage = rawMessages[updatedMessageIndex]
+        if updatedMessage.role == .assistant,
+           let terminalMessageId = assistantReplayTargetMessageId(
+               in: rawMessages,
+               threadId: threadId,
+               turnId: updatedMessage.turnId,
+               text: updatedMessage.text,
+               excludingMessageID: messageId
+           ) {
+            var nextRawMessages = rawMessages
+            nextRawMessages.remove(at: updatedMessageIndex)
+            messagesByThread[threadId] = nextRawMessages
+            removeAssistantStreamingLookups(messageId: messageId)
+            if let turnId = updatedMessage.turnId {
+                noteAssistantMessage(threadId: threadId, turnId: turnId, assistantMessageId: terminalMessageId)
+            }
+            persistMessages()
+            updateCurrentOutput(for: threadId)
+            return
+        }
 
         let revision = messageRevisionByThread[threadId] ?? 0
         var projectedMessages = state.renderSnapshot.messages
@@ -1848,7 +1867,11 @@ extension CodexService {
                     }
                 }
                 if let finalIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) {
-                    threadMessages[finalIndex].orderIndex = CodexMessageOrderCounter.next()
+                    if kind == .fileChange {
+                        // File-change cards are intentionally trailed; other activity keeps
+                        // its original slot so late completion refreshes do not jump below the answer.
+                        threadMessages[finalIndex].orderIndex = CodexMessageOrderCounter.next()
+                    }
                     finalRawIndex = finalIndex
                 }
                 threadMessages.sort(by: { $0.orderIndex < $1.orderIndex })
@@ -2588,6 +2611,10 @@ extension CodexService {
             return
         }
 
+        if applyLateTerminalAssistantDelta(threadId: threadId, turnId: turnId, itemId: itemId, delta: delta) {
+            return
+        }
+
         let messageID = ensureStreamingAssistantMessage(threadId: threadId, turnId: turnId, itemId: itemId)
         guard let messageID,
               let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) else {
@@ -2616,6 +2643,60 @@ extension CodexService {
 
         persistMessages()
         updateStreamingAssistantOutput(for: threadId, messageId: messageID, rawMessageIndex: messageIndex)
+    }
+
+    // Late replay deltas for a closed turn should patch the closed assistant row, not reopen streaming.
+    private func applyLateTerminalAssistantDelta(threadId: String, turnId: String, itemId: String?, delta: String) -> Bool {
+        let normalizedTurnId = turnId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTurnId.isEmpty,
+              terminalStateByTurnID[normalizedTurnId] != nil,
+              activeTurnIdByThread[threadId] != normalizedTurnId,
+              var threadMessages = messagesByThread[threadId] else {
+            return false
+        }
+
+        let normalizedItemId = normalizedStreamingItemID(itemId)
+        let targetIndex: Int? = {
+            if let normalizedItemId {
+                return threadMessages.indices.reversed().first { index in
+                    let candidate = threadMessages[index]
+                    return candidate.role == .assistant
+                        && candidate.turnId == normalizedTurnId
+                        && (candidate.itemId == normalizedItemId || candidate.itemId == nil)
+                }
+            }
+
+            return threadMessages.indices.reversed().first { index in
+                let candidate = threadMessages[index]
+                return candidate.role == .assistant
+                    && candidate.turnId == normalizedTurnId
+                    && !candidate.isStreaming
+            }
+        }()
+
+        guard let targetIndex else {
+            // Closed turns must not be reopened by late status/progress replay chunks.
+            return true
+        }
+
+        let currentText = threadMessages[targetIndex].text
+        let nextText = mergeAssistantDelta(existingText: currentText, incomingDelta: delta)
+        let didResolveItemId = threadMessages[targetIndex].itemId == nil && normalizedItemId != nil
+
+        guard nextText != currentText || threadMessages[targetIndex].isStreaming || didResolveItemId else {
+            return true
+        }
+
+        threadMessages[targetIndex].text = nextText
+        threadMessages[targetIndex].isStreaming = false
+        if didResolveItemId {
+            threadMessages[targetIndex].itemId = normalizedItemId
+        }
+        messagesByThread[threadId] = threadMessages
+        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: targetIndex)
+        persistMessages()
+        updateCurrentOutput(for: threadId)
+        return true
     }
 
     // Finalizes assistant text when item/completed carries the canonical message body.
@@ -2652,12 +2733,58 @@ extension CodexService {
         }
 
         let resolvedTurnId = explicitTurnId
+            ?? explicitItemId.flatMap { knownAssistantTurnId(threadId: threadId, itemId: $0) }
+            ?? (explicitItemId == nil ? nil : activeTurnIdForThread)
+        if let resolvedTurnId {
+            threadIdByTurnID[resolvedTurnId] = threadId
+        }
         flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId, itemId: explicitItemId)
 
         if resolvedTurnId == nil, explicitItemId == nil,
            let fingerprint = assistantCompletionFingerprintByThread[threadId],
            fingerprint.text == trimmedText,
            now.timeIntervalSince(fingerprint.timestamp) <= 45 {
+            return
+        }
+
+        if let replayTerminalMessageId = absorbAssistantBlockReplayCompletion(
+            threadId: threadId,
+            turnId: resolvedTurnId,
+            text: trimmedText
+        ) {
+            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            persistMessages()
+            if let resolvedTurnId {
+                noteAssistantMessage(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    assistantMessageId: replayTerminalMessageId
+                )
+            }
+            updateCurrentOutput(for: threadId)
+            return
+        }
+
+        if let resolvedTurnId,
+           explicitItemId == nil,
+           let duplicateIndex = completedAssistantMessageIndices(
+               threadId: threadId,
+               turnId: resolvedTurnId
+           ).last(where: { index in
+               Self.normalizedMessageText(messagesByThread[threadId]?[index].text ?? "") == trimmedText
+           }) {
+            messagesByThread[threadId]?[duplicateIndex].isStreaming = false
+            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
+            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            if let resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id {
+                persistMessages()
+                noteAssistantMessage(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    assistantMessageId: resolvedAssistantMessageId
+                )
+                updateCurrentOutput(for: threadId)
+            }
             return
         }
 
@@ -2799,6 +2926,104 @@ extension CodexService {
             )
         }
         updateCurrentOutput(for: threadId)
+    }
+
+    // Suppresses completion replays that resend the whole assistant block already shown around tool rows.
+    private func absorbAssistantBlockReplayCompletion(
+        threadId: String,
+        turnId: String?,
+        text: String
+    ) -> String? {
+        guard var threadMessages = messagesByThread[threadId] else {
+            return nil
+        }
+
+        if let exactReplayIndex = AssistantReplayDeduper.exactReplayMessageIndex(
+            in: threadMessages,
+            threadId: threadId,
+            turnId: turnId,
+            text: text
+        ) {
+            var didMutate = false
+            if threadMessages[exactReplayIndex].isStreaming {
+                threadMessages[exactReplayIndex].isStreaming = false
+                didMutate = true
+            }
+            if threadMessages[exactReplayIndex].turnId == nil, let turnId {
+                threadMessages[exactReplayIndex].turnId = turnId
+                didMutate = true
+            }
+            if didMutate {
+                messagesByThread[threadId] = threadMessages
+            }
+            return threadMessages[exactReplayIndex].id
+        }
+
+        guard let assistantIndices = AssistantReplayDeduper.blockReplayMessageIndices(
+            in: threadMessages,
+            threadId: threadId,
+            turnId: turnId,
+            text: text
+        ),
+        let terminalIndex = assistantIndices.last else {
+            return nil
+        }
+
+        var didMutate = false
+        for index in assistantIndices where threadMessages[index].isStreaming {
+            threadMessages[index].isStreaming = false
+            didMutate = true
+        }
+        if threadMessages[terminalIndex].turnId == nil, let turnId {
+            threadMessages[terminalIndex].turnId = turnId
+            didMutate = true
+        }
+        if didMutate {
+            messagesByThread[threadId] = threadMessages
+        }
+        return threadMessages[terminalIndex].id
+    }
+
+    private func removeAssistantStreamingLookups(messageId: String) {
+        streamingAssistantFallbackMessageByTurnID = streamingAssistantFallbackMessageByTurnID.filter { $0.value != messageId }
+        streamingAssistantMessageByItemKey = streamingAssistantMessageByItemKey.filter { $0.value != messageId }
+    }
+
+    private func assistantReplayTargetMessageId(
+        in messages: [CodexMessage],
+        threadId: String,
+        turnId: String?,
+        text: String,
+        excludingMessageID: String
+    ) -> String? {
+        if let exactReplayIndex = AssistantReplayDeduper.exactReplayMessageIndex(
+            in: messages,
+            threadId: threadId,
+            turnId: turnId,
+            text: text,
+            excludingMessageID: excludingMessageID
+        ) {
+            return messages[exactReplayIndex].id
+        }
+
+        guard let replayIndices = AssistantReplayDeduper.blockReplayMessageIndices(
+            in: messages,
+            threadId: threadId,
+            turnId: turnId,
+            text: text,
+            excludingMessageID: excludingMessageID
+        ) else {
+            return nil
+        }
+        return replayIndices.last.map { messages[$0].id }
+    }
+
+    private func knownAssistantTurnId(threadId: String, itemId: String) -> String? {
+        messagesByThread[threadId]?.reversed().first(where: { message in
+            message.role == .assistant
+                && message.itemId == itemId
+                && !(message.turnId ?? "").isEmpty
+        })?.turnId
     }
 
     func markMessageDeliveryState(

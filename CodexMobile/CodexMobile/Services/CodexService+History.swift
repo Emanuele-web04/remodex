@@ -441,7 +441,9 @@ extension CodexService {
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
             // so that the stable sort preserves server-provided chronology.
-            var sorted = history.sorted(by: { $0.createdAt < $1.createdAt })
+            var sorted = AssistantReplayDeduper.dedupeBlockReplays(
+                in: history.sorted(by: { $0.createdAt < $1.createdAt })
+            )
             for index in sorted.indices {
                 sorted[index].orderIndex = CodexMessageOrderCounter.next()
             }
@@ -677,6 +679,16 @@ extension CodexService {
                 continue
             }
 
+            if message.role == .assistant,
+               AssistantReplayDeduper.isReplayMessage(
+                   in: merged,
+                   threadId: message.threadId,
+                   turnId: message.turnId,
+                   text: message.text
+               ) {
+                continue
+            }
+
             merged.append(message)
         }
 
@@ -887,7 +899,7 @@ extension CodexService {
         guard let itemId = normalizedHistoryIdentifier(itemId) else {
             return false
         }
-        return !itemId.hasPrefix("turn:")
+        return !itemId.hasPrefix("turn:") && !itemId.hasPrefix("rollout-")
     }
 
     // Running assistant rows may absorb history only when the provider item identity agrees.
@@ -921,10 +933,12 @@ extension CodexService {
             return nil
         }
 
+        let normalizedTurnId = normalizedHistoryIdentifier(turnId) ?? turnId
         let candidates = messages.indices.filter { index in
             let candidate = messages[index]
+            let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
             return candidate.role == .assistant
-                && candidate.turnId == turnId
+                && (candidateTurnId == nil || candidateTurnId == normalizedTurnId)
                 && normalizedMessageText(candidate.text) == normalizedText
         }
 
@@ -935,7 +949,9 @@ extension CodexService {
 
         let localItemId = normalizedHistoryIdentifier(messages[index].itemId)
         let incomingItemId = normalizedHistoryIdentifier(message.itemId)
-        if let localItemId, let incomingItemId, localItemId != incomingItemId {
+        if let localItemId, let incomingItemId, localItemId != incomingItemId,
+           hasStableAssistantIdentity(localItemId),
+           hasStableAssistantIdentity(incomingItemId) {
             return nil
         }
 

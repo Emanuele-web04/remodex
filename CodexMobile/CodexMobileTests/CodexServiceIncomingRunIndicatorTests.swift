@@ -1025,6 +1025,223 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(assistantMessages.last?.isStreaming ?? false)
     }
 
+    func testNoItemCompletionReusesClosedAssistantRowWhileThreadStillLooksRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let finalText = "Final answer that was already persisted before mirror replay."
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-existing",
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                turnId: turnID,
+                isStreaming: false
+            )
+        )
+        service.markThreadAsRunning(threadID)
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: finalText
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.id, "assistant-existing")
+        XCTAssertEqual(assistantMessages.first?.text, finalText)
+        XCTAssertFalse(assistantMessages.first?.isStreaming ?? true)
+    }
+
+    func testFullBlockCompletionReplayDoesNotAppendDuplicateAssistantRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "I'll check Gmail for the latest TestFlight message."
+        let finalText = "Latest TestFlight version: 1.4 (123)."
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-intro",
+                threadId: threadID,
+                role: .assistant,
+                text: introText,
+                turnId: turnID,
+                itemId: "item-intro",
+                isStreaming: false
+            )
+        )
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                turnId: turnID,
+                itemId: "item-final",
+                isStreaming: false
+            )
+        )
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "item-replay",
+            text: "\(introText)\n\n\(finalText)"
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.map(\.id), ["assistant-intro", "assistant-final"])
+        XCTAssertEqual(assistantMessages.map(\.text), [introText, finalText])
+    }
+
+    func testFullBlockCompletionReplayWithoutTurnIdUsesActiveTurnAndDoesNotAppendDuplicateRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "I'll check Gmail for the latest TestFlight message."
+        let finalText = "Latest TestFlight version: 1.4 (123)."
+
+        service.setActiveTurnID(turnID, for: threadID)
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-intro",
+                threadId: threadID,
+                role: .assistant,
+                text: introText,
+                turnId: turnID,
+                itemId: "item-intro",
+                isStreaming: false
+            )
+        )
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                turnId: nil,
+                itemId: "item-final",
+                isStreaming: false
+            )
+        )
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: nil,
+            itemId: "item-replay",
+            text: "\(introText)\n\n\(finalText)"
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.map(\.id), ["assistant-intro", "assistant-final"])
+        XCTAssertEqual(assistantMessages.map(\.text), [introText, finalText])
+    }
+
+    func testLateDeltaForCompletedTurnDoesNotReopenAssistantBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "item-1",
+            delta: "Final answer"
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.markTurnCompleted(threadId: threadID, turnId: turnID)
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            delta: " replay"
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.text, "Final answer replay")
+        XCTAssertFalse(assistantMessages.first?.isStreaming ?? true)
+    }
+
+    func testTurnlessFinalThenTerminalReplayDoesNotDuplicateAssistantAnswer() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let finalText = """
+        Latest TestFlight inbox email says:
+
+        Remodex version 1.4, build 124
+
+        Subject: "Remodex - Remote AI Coding 1.4 (124) for iOS is now available to test."
+        """
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: nil,
+            itemId: "item-final",
+            text: finalText
+        )
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.markTurnCompleted(threadId: threadID, turnId: turnID)
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "item-status",
+            delta: "I'll use the Gmail connector to search your recent inbox."
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID, itemId: "item-status")
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "item-terminal",
+            text: finalText
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.text, finalText)
+        XCTAssertEqual(assistantMessages.first?.turnId, turnID)
+        XCTAssertFalse(assistantMessages.first?.isStreaming ?? true)
+    }
+
+    func testTurnlessTerminalReplayDoesNotDuplicateAssistantAnswer() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let finalText = """
+        Latest TestFlight inbox email says:
+
+        Remodex version 1.4, build 124
+
+        Subject: "Remodex - Remote AI Coding 1.4 (124) for iOS is now available to test."
+        """
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: nil,
+            itemId: "item-final",
+            text: finalText
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: nil,
+            itemId: "item-terminal",
+            text: finalText
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.text, finalText)
+    }
+
     func testMergeAssistantDeltaKeepsLongReplayOverlapWithoutDuplication() {
         let service = makeService()
         let overlap = String(repeating: "a", count: 300)

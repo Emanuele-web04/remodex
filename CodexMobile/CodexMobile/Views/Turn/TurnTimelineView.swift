@@ -5,6 +5,7 @@
 // Depends on: SwiftUI, TurnTimelineReducer, TurnScrollStateTracker, MessageRow
 
 import SwiftUI
+import UIKit
 
 struct AssistantBlockAccessoryState: Equatable {
     let copyText: String?
@@ -574,8 +575,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         // SwiftUI can otherwise let a streaming text row report an
                         // over-wide ideal size, which makes the vertical timeline pan sideways.
                         .frame(width: contentWidth, alignment: .leading)
-                        .clipped()
                         .padding(.horizontal, timelineHorizontalPadding)
+                        .frame(width: viewport.size.width, alignment: .leading)
+                        .clipped()
+                        .background(VerticalScrollAxisGuard())
                         .padding(.top, 12)
                         .padding(.bottom, 12)
 
@@ -584,6 +587,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         Color.clear
                             .frame(width: contentWidth, height: 1)
                             .padding(.horizontal, timelineHorizontalPadding)
+                            .frame(width: viewport.size.width, alignment: .leading)
+                            .clipped()
                             .id(scrollBottomAnchorID)
                             .allowsHitTesting(false)
                     }
@@ -594,6 +599,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             timelineLoadingOverlay
                         }
                     }
+                    .frame(width: viewport.size.width)
+                    .clipped()
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .defaultScrollAnchor(.bottom, for: .sizeChanges)
                     .scrollDismissesKeyboard(.interactively)
@@ -1412,6 +1419,64 @@ private struct ScrollBottomGeometry: Equatable {
     let isAtBottom: Bool
     let viewportHeight: CGFloat
     let contentHeight: CGFloat
+}
+
+// Pins SwiftUI's backing UIScrollView to the vertical axis when an oversized row
+// briefly makes UIKit preserve a horizontal content offset.
+private struct VerticalScrollAxisGuard: UIViewRepresentable {
+    func makeUIView(context: Context) -> VerticalScrollAxisGuardView {
+        VerticalScrollAxisGuardView()
+    }
+
+    func updateUIView(_ uiView: VerticalScrollAxisGuardView, context: Context) {
+        uiView.attachToNearestScrollViewIfNeeded()
+    }
+}
+
+private final class VerticalScrollAxisGuardView: UIView {
+    private weak var guardedScrollView: UIScrollView?
+    private var contentOffsetObservation: NSKeyValueObservation?
+    private var boundsObservation: NSKeyValueObservation?
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        attachToNearestScrollViewIfNeeded()
+    }
+
+    func attachToNearestScrollViewIfNeeded() {
+        guard let scrollView = enclosingScrollView(), guardedScrollView !== scrollView else {
+            clampHorizontalOffset()
+            return
+        }
+
+        guardedScrollView = scrollView
+        scrollView.alwaysBounceHorizontal = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.isDirectionalLockEnabled = true
+
+        contentOffsetObservation = scrollView.observe(\.contentOffset, options: [.new]) { [weak self] _, _ in
+            self?.clampHorizontalOffset()
+        }
+        boundsObservation = scrollView.observe(\.bounds, options: [.new]) { [weak self] _, _ in
+            self?.clampHorizontalOffset()
+        }
+        clampHorizontalOffset()
+    }
+
+    private func enclosingScrollView() -> UIScrollView? {
+        sequence(first: superview, next: { $0?.superview })
+            .first { $0 is UIScrollView } as? UIScrollView
+    }
+
+    private func clampHorizontalOffset() {
+        guard let scrollView = guardedScrollView else { return }
+        let pinnedX = -scrollView.adjustedContentInset.left
+        guard abs(scrollView.contentOffset.x - pinnedX) > 0.5 else { return }
+
+        var offset = scrollView.contentOffset
+        offset.x = pinnedX
+        scrollView.setContentOffset(offset, animated: false)
+    }
 }
 
 /// Batches rapid `onScrollGeometryChange` callbacks so at most one @State

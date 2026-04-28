@@ -2,9 +2,10 @@
 // Purpose: Mirrors desktop-origin rollout activity back into live bridge notifications for iPhone catch-up.
 // Layer: CLI helper
 // Exports: createRolloutLiveMirrorController
-// Depends on: fs, ./rollout-watch
+// Depends on: fs, crypto, ./rollout-watch
 
 const fs = require("fs");
+const crypto = require("crypto");
 const {
   findRecentRolloutFileForContextRead,
   resolveSessionsRoot,
@@ -379,10 +380,12 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
       if (!message || !shouldMirrorAgentMessage(payload)) {
         return [];
       }
+      const turnId = readString(payload.turn_id) || readString(payload.turnId) || state.activeTurnId || "";
 
       notifications.push(createNotification("codex/event/agent_message", {
         threadId: state.threadId,
-        turnId: readString(payload.turn_id) || readString(payload.turnId) || state.activeTurnId || "",
+        turnId,
+        itemId: buildAgentMessageItemId(state.threadId, turnId, entry, message),
         message,
       }));
       return notifications;
@@ -661,8 +664,24 @@ function createNotification(method, params) {
   return { method, params };
 }
 
-function buildSyntheticItemId(kind, threadId, turnId) {
-  return `rollout-${kind}:${threadId}:${turnId}`;
+function buildSyntheticItemId(kind, threadId, turnId, suffix = "") {
+  const suffixPart = suffix ? `:${suffix}` : "";
+  return `rollout-${kind}:${threadId}:${turnId}${suffixPart}`;
+}
+
+function buildAgentMessageItemId(threadId, turnId, entry, message) {
+  const timestamp = readString(entry?.timestamp) || "untimed";
+  const messageHash = crypto
+    .createHash("sha256")
+    .update(readString(message))
+    .digest("hex")
+    .slice(0, 12);
+  return buildSyntheticItemId(
+    "agent-message",
+    threadId,
+    turnId || "turnless",
+    `${timestamp}:${messageHash}`
+  );
 }
 
 function resetRunState(state) {

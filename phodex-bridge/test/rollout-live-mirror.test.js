@@ -120,6 +120,10 @@ test("desktop-origin bootstrap replays the pending user message and final assist
   );
   assert.equal(outbound[0].params.message, "Please review this diff");
   assert.equal(outbound[3].params.message, "Review complete");
+  assert.equal(
+    outbound[3].params.itemId,
+    "rollout-agent-message:thread-chat:turn-chat:2026-03-15T19:47:40.000Z:73e01b91e228"
+  );
 });
 
 test("phone-origin rollouts do not emit mirrored updates", async (t) => {

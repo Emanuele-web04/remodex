@@ -1218,6 +1218,198 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(assistantRows.map(\.itemId), ["local-message", "server-message"])
     }
 
+    func testHistoryMergeSkipsFlattenedAssistantBlockReplay() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+        let introText = "I'll check Gmail for the latest TestFlight message."
+        let finalText = "Latest TestFlight version: 1.4 (123)."
+
+        let existing = [
+            CodexMessage(
+                id: "assistant-intro",
+                threadId: threadID,
+                role: .assistant,
+                text: introText,
+                createdAt: now,
+                turnId: turnID,
+                itemId: "item-intro",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                id: "tool-row",
+                threadId: threadID,
+                role: .system,
+                kind: .toolActivity,
+                text: "Read 6807e4de/...",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "tool-1",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                createdAt: now.addingTimeInterval(2),
+                turnId: nil,
+                itemId: "item-final",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "assistant-replay",
+                threadId: threadID,
+                role: .assistant,
+                text: "\(introText)\n\n\(finalText)",
+                createdAt: now.addingTimeInterval(3),
+                turnId: turnID,
+                itemId: "item-replay",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.map(\.id), ["assistant-intro", "assistant-final"])
+        XCTAssertEqual(assistantRows.map(\.text), [introText, finalText])
+    }
+
+    func testHistoryMergeSkipsLongExactTerminalReplayAfterTurnlessFinal() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+        let finalText = """
+        Latest TestFlight inbox email says:
+
+        Remodex version 1.4, build 124
+
+        Subject: "Remodex - Remote AI Coding 1.4 (124) for iOS is now available to test."
+        """
+
+        let existing = [
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                createdAt: now,
+                turnId: nil,
+                itemId: "item-final",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                id: "assistant-status",
+                threadId: threadID,
+                role: .assistant,
+                text: "I'll use the Gmail connector to search recent inbox mentions.",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "item-status",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "assistant-terminal-replay",
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                createdAt: now.addingTimeInterval(2),
+                turnId: turnID,
+                itemId: "item-terminal",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.map(\.id), ["assistant-final", "assistant-status"])
+        XCTAssertEqual(assistantRows.map(\.text), [
+            finalText,
+            "I'll use the Gmail connector to search recent inbox mentions.",
+        ])
+    }
+
+    func testInitialHistorySkipsFlattenedAssistantBlockReplay() throws {
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+        let introText = "I'll check Gmail for the latest TestFlight message."
+        let finalText = "Latest TestFlight version: 1.4 (123)."
+        let history = [
+            CodexMessage(
+                id: "assistant-intro",
+                threadId: threadID,
+                role: .assistant,
+                text: introText,
+                createdAt: now,
+                turnId: turnID,
+                itemId: "item-intro",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                id: "tool-row",
+                threadId: threadID,
+                role: .system,
+                kind: .toolActivity,
+                text: "Read 6807e4de/...",
+                createdAt: now.addingTimeInterval(1),
+                turnId: turnID,
+                itemId: "tool-1",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                id: "assistant-final",
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                createdAt: now.addingTimeInterval(2),
+                turnId: nil,
+                itemId: "item-final",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                id: "assistant-replay",
+                threadId: threadID,
+                role: .assistant,
+                text: "\(introText)\n\n\(finalText)",
+                createdAt: now.addingTimeInterval(3),
+                turnId: turnID,
+                itemId: "item-replay",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = try CodexService.mergeHistoryMessages(
+            [],
+            history,
+            activeThreadIDs: [],
+            runningThreadIDs: []
+        )
+        let assistantRows = merged.filter { $0.role == .assistant }
+
+        XCTAssertEqual(assistantRows.map(\.id), ["assistant-intro", "assistant-final"])
+        XCTAssertEqual(assistantRows.map(\.text), [introText, finalText])
+    }
+
     func testHistoryMergeDoesNotRegressClosedSingleAssistantTurnToShorterSnapshot() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
