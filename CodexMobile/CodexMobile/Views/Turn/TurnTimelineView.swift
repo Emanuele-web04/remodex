@@ -2,7 +2,7 @@
 // Purpose: Renders timeline scrolling, bottom-anchor behavior and the footer container.
 // Layer: View Component
 // Exports: TurnTimelineView
-// Depends on: SwiftUI, TurnTimelineReducer, TurnScrollStateTracker, MessageRow
+// Depends on: SwiftUI, TurnTimelineRenderProjection, TurnTimelineReducer, MessageRow
 
 import SwiftUI
 import UIKit
@@ -13,116 +13,15 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockDiffText: String?
     let blockDiffEntries: [TurnFileChangeSummaryEntry]?
     let blockRevertPresentation: AssistantRevertPresentation?
-}
 
-// ─── Tool Burst Projection ─────────────────────────────────────
-
-struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
-    static let collapsedVisibleCount = 5
-
-    let id: String
-    let messages: [CodexMessage]
-
-    init(messages: [CodexMessage]) {
-        self.messages = messages
-        self.id = "tool-burst:\(messages.first?.id ?? "unknown")"
-    }
-
-    var pinnedMessages: [CodexMessage] {
-        Array(messages.prefix(Self.collapsedVisibleCount))
-    }
-
-    var overflowMessages: [CodexMessage] {
-        Array(messages.dropFirst(Self.collapsedVisibleCount))
-    }
-
-    var hiddenCount: Int {
-        overflowMessages.count
-    }
-}
-
-enum TurnTimelineRenderItem: Identifiable, Equatable {
-    case message(CodexMessage)
-    case toolBurst(TurnTimelineToolBurstGroup)
-
-    var id: String {
-        switch self {
-        case .message(let message):
-            return message.id
-        case .toolBurst(let group):
-            return group.id
-        }
-    }
-}
-
-enum TurnTimelineRenderProjection {
-    // Groups long contiguous tool-call runs into one stable container so the main
-    // timeline height stays bounded without introducing nested scrolling.
-    static func project(messages: [CodexMessage]) -> [TurnTimelineRenderItem] {
-        var items: [TurnTimelineRenderItem] = []
-        var bufferedToolMessages: [CodexMessage] = []
-
-        func flushBufferedToolMessages() {
-            guard !bufferedToolMessages.isEmpty else { return }
-            if bufferedToolMessages.count > TurnTimelineToolBurstGroup.collapsedVisibleCount {
-                items.append(.toolBurst(TurnTimelineToolBurstGroup(messages: bufferedToolMessages)))
-            } else {
-                items.append(contentsOf: bufferedToolMessages.map(TurnTimelineRenderItem.message))
-            }
-            bufferedToolMessages.removeAll(keepingCapacity: true)
-        }
-
-        for message in messages {
-            guard isToolBurstCandidate(message) else {
-                flushBufferedToolMessages()
-                items.append(.message(message))
-                continue
-            }
-
-            if let previous = bufferedToolMessages.last,
-               !canShareToolBurst(previous: previous, incoming: message) {
-                flushBufferedToolMessages()
-            }
-
-            bufferedToolMessages.append(message)
-        }
-
-        flushBufferedToolMessages()
-        return items
-    }
-
-    private static func isToolBurstCandidate(_ message: CodexMessage) -> Bool {
-        guard message.role == .system else {
-            return false
-        }
-
-        switch message.kind {
-        case .toolActivity, .commandExecution:
-            return true
-        case .thinking, .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
-            return false
-        }
-    }
-
-    // Late turn ids can arrive mid-stream, so only split when both rows already
-    // have distinct stable turn ids.
-    private static func canShareToolBurst(previous: CodexMessage, incoming: CodexMessage) -> Bool {
-        let previousTurnID = normalizedIdentifier(previous.turnId)
-        let incomingTurnID = normalizedIdentifier(incoming.turnId)
-
-        guard let previousTurnID, let incomingTurnID else {
-            return true
-        }
-
-        return previousTurnID == incomingTurnID
-    }
-
-    private static func normalizedIdentifier(_ value: String?) -> String? {
-        guard let value else {
-            return nil
-        }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+    func replacingCopyText(_ copyText: String?) -> AssistantBlockAccessoryState {
+        AssistantBlockAccessoryState(
+            copyText: copyText,
+            showsRunningIndicator: showsRunningIndicator,
+            blockDiffText: blockDiffText,
+            blockDiffEntries: blockDiffEntries,
+            blockRevertPresentation: blockRevertPresentation
+        )
     }
 }
 
@@ -257,6 +156,80 @@ private struct TurnTimelineToolBurstView: View {
     }
 }
 
+private struct TurnTimelinePreviousMessagesView: View {
+    let group: TurnTimelinePreviousMessagesGroup
+    let isRetryAvailable: Bool
+    let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
+    let planSessionSource: CodexPlanSessionSource?
+    let allowsAssistantPlanFallbackRecovery: Bool
+    let completedTurnIDs: Set<String>
+    let threadMessagesForPlanMatching: [CodexMessage]
+    let planMatchingFingerprint: Int
+    let newestStreamingMessageID: String?
+    let autoScrollMode: TurnAutoScrollMode
+    let onRetryUserMessage: (String) -> Void
+    let onTapAssistantRevert: (CodexMessage) -> Void
+    let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
+
+    @State private var isExpanded = false
+
+    private var title: String {
+        group.hiddenCount == 1 ? "1 previous message" : "\(group.hiddenCount) previous messages"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text(title)
+                        .font(AppFont.title3(weight: .regular))
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(AppFont.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Spacer(minLength: 0)
+                }
+                .padding(.bottom, 8)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Color.secondary.opacity(0.18))
+                        .frame(height: 1)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityHint(isExpanded ? "Collapse previous messages" : "Expand previous messages")
+
+            if isExpanded {
+                ForEach(group.messages) { message in
+                    TurnTimelineMessageRow(
+                        message: message,
+                        isRetryAvailable: isRetryAvailable,
+                        cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                        planSessionSource: planSessionSource,
+                        allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                        completedTurnIDs: completedTurnIDs,
+                        threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        planMatchingFingerprint: planMatchingFingerprint,
+                        newestStreamingMessageID: newestStreamingMessageID,
+                        autoScrollMode: autoScrollMode,
+                        onRetryUserMessage: onRetryUserMessage,
+                        onTapAssistantRevert: onTapAssistantRevert,
+                        onTapSubagent: onTapSubagent
+                    )
+                }
+            }
+        }
+        .id(group.id)
+    }
+}
+
 private struct TurnTimelineRowsSection: View {
     let shouldWarmRecentTailProgressively: Bool
     let hasEarlierMessages: Bool
@@ -318,6 +291,22 @@ private struct TurnTimelineRowsSection: View {
                 )
             case .toolBurst(let group):
                 TurnTimelineToolBurstView(
+                    group: group,
+                    isRetryAvailable: isRetryAvailable,
+                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                    planSessionSource: planSessionSource,
+                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                    completedTurnIDs: completedTurnIDs,
+                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    planMatchingFingerprint: planMatchingFingerprint,
+                    newestStreamingMessageID: newestStreamingMessageID,
+                    autoScrollMode: autoScrollMode,
+                    onRetryUserMessage: onRetryUserMessage,
+                    onTapAssistantRevert: onTapAssistantRevert,
+                    onTapSubagent: onTapSubagent
+                )
+            case .previousMessages(let group):
+                TurnTimelinePreviousMessagesView(
                     group: group,
                     isRetryAvailable: isRetryAvailable,
                     cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
@@ -455,7 +444,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         if key == cachedRenderItemsInputKey, !cachedRenderItems.isEmpty {
             return cachedRenderItems
         }
-        return TurnTimelineRenderProjection.project(messages: Array(visibleMessages))
+        return TurnTimelineRenderProjection.project(
+            messages: Array(visibleMessages),
+            completedTurnIDs: completedTurnIDs
+        )
     }
 
     private var hasEarlierMessages: Bool {
@@ -501,6 +493,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func renderItemsInputKey(for messages: ArraySlice<CodexMessage>) -> Int {
         var hasher = Hasher()
         hasher.combine(messages.count)
+        hasher.combine(completedTurnIDs)
         for message in messages {
             hasher.combine(message.id)
             hasher.combine(message.role)
@@ -682,6 +675,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         debugTimelineLog("latestTurnTerminalState changed to=\(String(describing: latestTurnTerminalState))")
                         recomputeBlockInfoIfNeeded()
                     }
+                    .onChange(of: completedTurnIDs) { _, _ in
+                        debugTimelineLog("completedTurnIDs changed count=\(completedTurnIDs.count)")
+                        recomputeRenderItemsIfNeeded()
+                        recomputeBlockInfoIfNeeded()
+                    }
                     .onChange(of: stoppedTurnIDs) { _, _ in
                         debugTimelineLog("stoppedTurnIDs changed count=\(stoppedTurnIDs.count)")
                         recomputeBlockInfoIfNeeded()
@@ -732,7 +730,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         let key = renderItemsInputKey(for: visibleMessages)
         guard key != cachedRenderItemsInputKey || cachedRenderItems.isEmpty else { return }
         cachedRenderItemsInputKey = key
-        cachedRenderItems = TurnTimelineRenderProjection.project(messages: Array(visibleMessages))
+        cachedRenderItems = TurnTimelineRenderProjection.project(
+            messages: Array(visibleMessages),
+            completedTurnIDs: completedTurnIDs
+        )
     }
 
     private func recomputeBlockInfoIfNeeded() {
@@ -750,12 +751,21 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             revertStatesByMessageID: assistantRevertStatesByMessageID
         )
 
-        let updated = [String: AssistantBlockAccessoryState](
+        var updated = [String: AssistantBlockAccessoryState](
             uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
                 guard let blockText else { return nil }
                 return (message.id, blockText)
             }
         )
+        let collapsedFinalMessageIDs = TurnTimelineRenderProjection.collapsedFinalMessageIDs(
+            in: visible,
+            completedTurnIDs: completedTurnIDs
+        )
+        for message in visible where collapsedFinalMessageIDs.contains(message.id) {
+            guard let state = updated[message.id] else { continue }
+            let finalCopyText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            updated[message.id] = state.replacingCopyText(finalCopyText.isEmpty ? nil : finalCopyText)
+        }
         if updated != cachedBlockInfoByMessageID {
             cachedBlockInfoByMessageID = updated
         }
@@ -774,6 +784,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         hasher.combine(isThreadRunning)
         hasher.combine(activeTurnID)
         hasher.combine(latestTurnTerminalState)
+        hasher.combine(completedTurnIDs)
         hasher.combine(stoppedTurnIDs)
 
         for message in messages {

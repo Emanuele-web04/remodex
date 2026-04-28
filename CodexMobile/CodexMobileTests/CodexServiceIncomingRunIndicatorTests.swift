@@ -42,6 +42,24 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(messages.first?.isStreaming == true)
     }
 
+    func testAssistantDeltaCoalescingMergesCumulativeSnapshotsBeforeFlush() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes")
+        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the")
+        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the imagegen skill")
+
+        service.flushAllPendingStreamingDeltas()
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.text, "Yes, the imagegen skill")
+        XCTAssertTrue(messages.first?.isStreaming == true)
+    }
+
     func testSystemDeltaCoalescingAppliesThinkingDeltasOnFlush() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
