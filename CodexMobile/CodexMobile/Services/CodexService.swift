@@ -372,6 +372,7 @@ final class CodexService {
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     var pendingNotificationOpenThreadID: String?
     var supportsStructuredSkillInput = true
+    var supportsStructuredMentionInput = true
     // Runtime compatibility flag for `turn/start.collaborationMode` plan turns.
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.

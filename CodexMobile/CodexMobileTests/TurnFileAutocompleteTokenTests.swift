@@ -38,8 +38,54 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "paste @t3tools/contracts:build"))
     }
 
-    func testTrailingTokenDoesNotParseBareTerminalHandle() {
-        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "paste @remodex"))
+    func testTrailingTokenParsesBareLowercaseSearchAfterAt() {
+        let token = TurnViewModel.trailingFileAutocompleteToken(in: "paste @remodex")
+
+        XCTAssertEqual(token?.query, "remodex")
+    }
+
+    func testTrailingFileTokenParsesAfterFirstLowercaseLetter() {
+        let token = TurnViewModel.trailingFileAutocompleteToken(in: "open @r")
+
+        XCTAssertEqual(token?.query, "r")
+    }
+
+    func testTrailingPluginTokenParsesBareAtMention() {
+        let token = TurnViewModel.trailingPluginAutocompleteToken(in: "use @gmail")
+
+        XCTAssertEqual(token?.query, "gmail")
+    }
+
+    func testTrailingPluginTokenParsesBareAtTrigger() {
+        let token = TurnViewModel.trailingPluginAutocompleteToken(in: "use @")
+
+        XCTAssertEqual(token?.query, "")
+    }
+
+    func testTrailingPluginTokenUsesLastAdjacentAtMention() {
+        let token = TurnViewModel.trailingPluginAutocompleteToken(in: "@first@gma")
+
+        XCTAssertEqual(token?.query, "gma")
+    }
+
+    func testTrailingPluginTokenDoesNotParseEmailAddress() {
+        XCTAssertNil(TurnViewModel.trailingPluginAutocompleteToken(in: "email@test.com"))
+    }
+
+    func testReplacingTrailingPluginTokenUpdatesOnlyFinalAtToken() {
+        let updated = TurnViewModel.replacingTrailingPluginAutocompleteToken(
+            in: "compare @first and @gma",
+            with: "gmail"
+        )
+
+        XCTAssertEqual(updated, "compare @first and @gmail ")
+    }
+
+    func testProviderDiscoveryTextNormalizesSeparatorsLikeT3Code() {
+        XCTAssertEqual(
+            CodexPluginMetadata.normalizedDiscoveryText("openai-curated/gmail_plugin"),
+            "openai curated gmail plugin"
+        )
     }
 
     func testTrailingTokenStillParsesLineReferencedFile() {

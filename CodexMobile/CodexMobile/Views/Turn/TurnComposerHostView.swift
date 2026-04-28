@@ -67,6 +67,10 @@ struct TurnComposerHostView: View {
             isSkillAutocompleteVisible: viewModel.isSkillAutocompleteVisible,
             isSkillAutocompleteLoading: viewModel.isSkillAutocompleteLoading,
             skillAutocompleteQuery: viewModel.skillAutocompleteQuery,
+            pluginAutocompleteItems: viewModel.pluginAutocompleteItems,
+            isPluginAutocompleteVisible: viewModel.isPluginAutocompleteVisible,
+            isPluginAutocompleteLoading: viewModel.isPluginAutocompleteLoading,
+            pluginAutocompleteQuery: viewModel.pluginAutocompleteQuery,
             slashCommandPanelState: viewModel.slashCommandPanelState,
             hasComposerContentConflictingWithReview: viewModel.hasComposerContentConflictingWithReview,
             isThreadRunning: isThreadRunning,
@@ -84,6 +88,7 @@ struct TurnComposerHostView: View {
             composerAttachments: viewModel.composerAttachments,
             composerMentionedFiles: viewModel.composerMentionedFiles,
             composerMentionedSkills: viewModel.composerMentionedSkills,
+            composerMentionedPlugins: viewModel.composerMentionedPlugins,
             composerReviewSelection: viewModel.composerReviewSelection,
             isSubagentsSelectionArmed: viewModel.isSubagentsSelectionArmed,
             isVoiceRecording: isVoiceRecording,
@@ -174,6 +179,14 @@ struct TurnComposerHostView: View {
                     activeTurnID: activeTurnID
                 )
             },
+            onInputChangedForPluginAutocomplete: { text in
+                viewModel.onInputChangedForPluginAutocomplete(
+                    text,
+                    codex: codex,
+                    thread: thread,
+                    activeTurnID: activeTurnID
+                )
+            },
             onInputChangedForSlashCommandAutocomplete: { text in
                 viewModel.onInputChangedForSlashCommandAutocomplete(
                     text,
@@ -182,6 +195,7 @@ struct TurnComposerHostView: View {
             },
             onSelectFileAutocomplete: viewModel.onSelectFileAutocomplete,
             onSelectSkillAutocomplete: viewModel.onSelectSkillAutocomplete,
+            onSelectPluginAutocomplete: viewModel.onSelectPluginAutocomplete,
             onSelectSlashCommand: { command in
                 switch command {
                 case .codeReview:
@@ -217,6 +231,7 @@ struct TurnComposerHostView: View {
             onCloseSlashCommandPanel: viewModel.closeSlashCommandPanel,
             onRemoveMentionedFile: viewModel.removeMentionedFile,
             onRemoveMentionedSkill: viewModel.removeMentionedSkill,
+            onRemoveMentionedPlugin: viewModel.removeMentionedPlugin,
             onRemoveComposerReviewSelection: viewModel.clearComposerReviewSelection,
             onRemoveComposerSubagentsSelection: viewModel.clearSubagentsSelection,
             onPasteImageData: { imageDataItems in

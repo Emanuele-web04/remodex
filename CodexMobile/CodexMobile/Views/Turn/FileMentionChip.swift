@@ -1,7 +1,7 @@
 // FILE: FileMentionChip.swift
 // Purpose: Shared file-mention chip UI used in the composer (removable) and message timeline (read-only).
 // Layer: View Component
-// Exports: FileMentionChip, SkillMentionChip, ComposerActionChip, FileMentionChipRow, UserMentionChipRow, UserMessageParser, UserMessageParsed, SkillDisplayNameFormatter
+// Exports: FileMentionChip, SkillMentionChip, PluginMentionChip, ComposerActionChip, FileMentionChipRow, UserMentionChipRow, UserMessageParser, UserMessageParsed, SkillDisplayNameFormatter
 // Depends on: SwiftUI
 
 import SwiftUI
@@ -73,6 +73,40 @@ struct SkillMentionChip: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color.indigo.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// Compact inline `@ plugin` pill with optional remove affordance.
+struct PluginMentionChip: View {
+    let pluginName: String
+    var onRemove: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "puzzlepiece.extension")
+                .font(AppFont.system(size: 9, weight: .semibold))
+                .foregroundStyle(Color.purple)
+
+            Text(SkillDisplayNameFormatter.displayName(for: pluginName))
+                .font(AppFont.footnote(weight: .medium))
+                .foregroundStyle(Color.purple)
+                .lineLimit(1)
+
+            if let onRemove {
+                Button(action: onRemove) {
+                    Image(systemName: "xmark")
+                        .font(AppFont.system(size: 8, weight: .bold))
+                        .foregroundStyle(Color.purple)
+                        .frame(width: 14, height: 14)
+                        .background(Color.purple.opacity(0.14), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Remove plugin mention")
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

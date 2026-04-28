@@ -169,6 +169,7 @@ extension CodexService {
             connectionRecoveryState = .idle
         }
         supportsStructuredSkillInput = true
+        supportsStructuredMentionInput = true
         supportsTurnCollaborationMode = false
         hasResolvedRateLimitsSnapshot = false
         bridgeInstalledVersion = nil
@@ -526,6 +527,7 @@ extension CodexService {
         shouldAutoReconnectOnForeground = false
         connectionRecoveryState = .idle
         supportsStructuredSkillInput = true
+        supportsStructuredMentionInput = true
         supportsTurnCollaborationMode = false
         bridgeInstalledVersion = nil
         latestBridgePackageVersion = nil

@@ -1,7 +1,7 @@
 // FILE: CodexSkillMetadata.swift
 // Purpose: Skill metadata and mention payload types used by composer autocomplete + turn/start.
 // Layer: Model
-// Exports: CodexSkillMetadata, CodexTurnSkillMention
+// Exports: CodexSkillMetadata, CodexPluginMetadata, CodexTurnSkillMention, CodexTurnMention
 // Depends on: Foundation
 
 import Foundation
@@ -58,4 +58,95 @@ struct CodexTurnSkillMention: Hashable, Sendable {
     let id: String
     let name: String?
     let path: String?
+}
+
+struct CodexPluginMetadata: Hashable, Sendable, Identifiable {
+    let id: String
+    let name: String
+    let marketplaceName: String
+    let marketplacePath: String?
+    let displayName: String?
+    let shortDescription: String?
+    let installed: Bool
+    let enabled: Bool
+    let installPolicy: String?
+
+    nonisolated var isAvailableForMention: Bool {
+        installed || enabled || installPolicy == "INSTALLED_BY_DEFAULT"
+    }
+
+    nonisolated var mentionPath: String {
+        "plugin://\(name)@\(marketplaceName)"
+    }
+
+    nonisolated var displayTitle: String {
+        let trimmedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedDisplayName, !trimmedDisplayName.isEmpty {
+            return trimmedDisplayName
+        }
+        return name
+    }
+
+    nonisolated var normalizedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    nonisolated var searchBlob: String {
+        [
+            name,
+            displayName ?? "",
+            shortDescription ?? "",
+            marketplaceName,
+        ]
+            .map(Self.normalizedDiscoveryText)
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+    }
+
+    nonisolated func matchesSearch(query: String) -> Bool {
+        let normalizedQuery = Self.normalizedDiscoveryText(query)
+        return normalizedQuery.isEmpty || searchBlob.contains(normalizedQuery)
+    }
+
+    nonisolated static func normalizedDiscoveryText(_ value: String) -> String {
+        let separators = CharacterSet(charactersIn: ":/_-")
+        return value
+            .lowercased()
+            .components(separatedBy: separators)
+            .joined(separator: " ")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+}
+
+struct CodexPluginListResponse: Decodable {
+    let marketplaces: [CodexPluginMarketplace]
+}
+
+struct CodexPluginMarketplace: Decodable {
+    let name: String
+    let path: String?
+    let plugins: [CodexPluginListItem]
+}
+
+struct CodexPluginListItem: Decodable {
+    let id: String
+    let name: String
+    let installed: Bool
+    let enabled: Bool
+    let installPolicy: String?
+    let interface: CodexPluginInterface?
+}
+
+struct CodexPluginInterface: Decodable, Hashable, Sendable {
+    let displayName: String?
+    let shortDescription: String?
+    let category: String?
+    let developerName: String?
+}
+
+struct CodexTurnMention: Hashable, Sendable {
+    let name: String
+    let path: String
 }
