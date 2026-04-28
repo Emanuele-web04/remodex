@@ -108,6 +108,7 @@ struct TurnView: View {
                 planSessionSource: planSessionSource,
                 allowsAssistantPlanFallbackRecovery: planSessionSource == .compatibilityFallback,
                 threadMessagesForPlanMatching: renderSnapshot.planMatchingMessages,
+                currentWorkingDirectory: gitWorkingDirectory,
                 errorMessage: codex.lastErrorMessage,
                 composerRecoveryAccessory: composerRecoveryAccessory,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
