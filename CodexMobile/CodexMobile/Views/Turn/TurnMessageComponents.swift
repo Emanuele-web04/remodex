@@ -2103,7 +2103,7 @@ private actor WorkspaceImagePreviewCache {
     }
 
     private func cacheKey(for metadata: WorkspaceImageMetadata) -> String {
-        let mtimeMs = metadata.mtimeMs.map { Int64($0.rounded()) } ?? -1
+        let mtimeMs = metadata.mtimeMs.map { String($0.bitPattern) } ?? "missing"
         return "\(metadata.path)|\(metadata.byteLength)|\(mtimeMs)"
     }
 
