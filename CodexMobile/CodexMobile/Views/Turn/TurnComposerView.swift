@@ -69,15 +69,18 @@ struct TurnComposerView: View {
     let onStopTurn: (String?) -> Void
     let onInputChangedForFileAutocomplete: (String) -> Void
     let onInputChangedForSkillAutocomplete: (String) -> Void
+    let onInputChangedForPluginAutocomplete: (String) -> Void
     let onInputChangedForSlashCommandAutocomplete: (String) -> Void
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
+    let onSelectPluginAutocomplete: (CodexPluginMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
+    let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
     let onPasteImageData: ([Data]) -> Void
@@ -108,13 +111,14 @@ struct TurnComposerView: View {
                     onRemoveAttachment: onRemoveAttachment,
                     onRemoveMentionedFile: onRemoveMentionedFile,
                     onRemoveMentionedSkill: onRemoveMentionedSkill,
+                    onRemoveMentionedPlugin: onRemoveMentionedPlugin,
                     onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
                     onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection
                 )
 
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
-                        Text("Ask anything... @files, $skills, /commands")
+                        Text("Ask anything... @files/plugins, $skills, /commands")
                             .font(AppFont.body())
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
@@ -146,6 +150,7 @@ struct TurnComposerView: View {
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)
+                    onInputChangedForPluginAutocomplete(newValue)
                     onInputChangedForSlashCommandAutocomplete(newValue)
                 }
 
@@ -196,6 +201,7 @@ struct TurnComposerView: View {
                                 state: autocompleteState,
                                 onSelectFileAutocomplete: onSelectFileAutocomplete,
                                 onSelectSkillAutocomplete: onSelectSkillAutocomplete,
+                                onSelectPluginAutocomplete: onSelectPluginAutocomplete,
                                 onSelectSlashCommand: onSelectSlashCommand,
                                 onSelectCodeReviewTarget: onSelectCodeReviewTarget,
                                 onSelectForkDestination: onSelectForkDestination,
@@ -253,6 +259,7 @@ private struct TurnComposerAutocompletePanels: View {
     let state: TurnComposerAutocompleteState
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
+    let onSelectPluginAutocomplete: (CodexPluginMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
@@ -263,9 +270,26 @@ private struct TurnComposerAutocompletePanels: View {
             if state.isFileAutocompleteVisible {
                 FileAutocompletePanel(
                     items: state.fileAutocompleteItems,
+                    pluginItems: state.pluginAutocompleteItems,
                     isLoading: state.isFileAutocompleteLoading,
+                    isLoadingPlugins: state.isPluginAutocompleteLoading,
                     query: state.fileAutocompleteQuery,
-                    onSelect: onSelectFileAutocomplete
+                    pluginQuery: state.pluginAutocompleteQuery,
+                    onSelect: onSelectFileAutocomplete,
+                    onSelectPlugin: onSelectPluginAutocomplete
+                )
+            }
+
+            if !state.isFileAutocompleteVisible && state.isPluginAutocompleteVisible {
+                FileAutocompletePanel(
+                    items: [],
+                    pluginItems: state.pluginAutocompleteItems,
+                    isLoading: false,
+                    isLoadingPlugins: state.isPluginAutocompleteLoading,
+                    query: state.pluginAutocompleteQuery,
+                    pluginQuery: state.pluginAutocompleteQuery,
+                    onSelect: onSelectFileAutocomplete,
+                    onSelectPlugin: onSelectPluginAutocomplete
                 )
             }
 
@@ -345,6 +369,7 @@ private struct TurnComposerAccessorySection: View {
     let onRemoveAttachment: (String) -> Void
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
+    let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
 
@@ -381,6 +406,21 @@ private struct TurnComposerAccessorySection: View {
                         ForEach(state.composerMentionedSkills) { skill in
                             SkillMentionChip(skillName: skill.name) {
                                 onRemoveMentionedSkill(skill.id)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+            }
+
+            if state.showsMentionedPlugins {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(state.composerMentionedPlugins) { plugin in
+                            PluginMentionChip(pluginName: plugin.displayName ?? plugin.name) {
+                                onRemoveMentionedPlugin(plugin.id)
                             }
                         }
                     }
@@ -459,6 +499,7 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     composerAttachments: [],
                     composerMentionedFiles: [],
                     composerMentionedSkills: [],
+                    composerMentionedPlugins: [],
                     composerReviewSelection: nil,
                     isSubagentsSelectionArmed: true,
                     isVoiceRecording: false,
@@ -475,6 +516,10 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                     isSkillAutocompleteVisible: false,
                     isSkillAutocompleteLoading: false,
                     skillAutocompleteQuery: "",
+                    pluginAutocompleteItems: [],
+                    isPluginAutocompleteVisible: false,
+                    isPluginAutocompleteLoading: false,
+                    pluginAutocompleteQuery: "",
                     slashCommandPanelState: .hidden,
                     hasComposerContentConflictingWithReview: false,
                     isThreadRunning: true,
@@ -554,15 +599,18 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
                 onStopTurn: { _ in },
                 onInputChangedForFileAutocomplete: { _ in },
                 onInputChangedForSkillAutocomplete: { _ in },
+                onInputChangedForPluginAutocomplete: { _ in },
                 onInputChangedForSlashCommandAutocomplete: { _ in },
                 onSelectFileAutocomplete: { _ in },
                 onSelectSkillAutocomplete: { _ in },
+                onSelectPluginAutocomplete: { _ in },
                 onSelectSlashCommand: { _ in },
                 onSelectCodeReviewTarget: { _ in },
                 onSelectForkDestination: { _ in },
                 onCloseSlashCommandPanel: {},
                 onRemoveMentionedFile: { _ in },
                 onRemoveMentionedSkill: { _ in },
+                onRemoveMentionedPlugin: { _ in },
                 onRemoveComposerReviewSelection: {},
                 onRemoveComposerSubagentsSelection: {},
                 onPasteImageData: { _ in },

@@ -171,6 +171,7 @@ extension CodexService {
         threadId: String?,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
+        mentionMentions: [CodexTurnMention] = [],
         fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
         collaborationMode: CodexCollaborationModeKind? = nil,
@@ -201,6 +202,7 @@ extension CodexService {
                     trimmedInput,
                     attachments: attachments,
                     skillMentions: skillMentions,
+                    mentionMentions: mentionMentions,
                     fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendUserMessage,
@@ -217,6 +219,7 @@ extension CodexService {
                 trimmedInput,
                 attachments: attachments,
                 skillMentions: skillMentions,
+                mentionMentions: mentionMentions,
                 fileMentions: fileMentions,
                 to: initialThreadId,
                 shouldAppendUserMessage: shouldAppendUserMessage,
@@ -241,6 +244,7 @@ extension CodexService {
                     trimmedInput,
                     attachments: attachments,
                     skillMentions: skillMentions,
+                    mentionMentions: mentionMentions,
                     fileMentions: fileMentions,
                     to: continuationThread.id,
                     shouldAppendUserMessage: shouldAppendUserMessage,
@@ -445,6 +449,39 @@ extension CodexService {
             .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         return dedupedByName
+    }
+
+    // Loads Codex app-server plugins and returns entries usable as `@plugin` mentions.
+    func listPlugins(
+        cwds: [String]?,
+        forceReload: Bool = false
+    ) async throws -> [CodexPluginMetadata] {
+        let normalizedCwds = (cwds ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var paramsObject: RPCObject = [:]
+        if !normalizedCwds.isEmpty {
+            paramsObject["cwds"] = .array(normalizedCwds.map { .string($0) })
+        }
+        if forceReload {
+            paramsObject["forceReload"] = .bool(true)
+        }
+
+        let response = try await sendRequest(method: "plugin/list", params: .object(paramsObject))
+
+        guard let decodedPlugins = decodePluginMetadata(from: response.result) else {
+            throw CodexServiceError.invalidResponse("plugin/list response missing result.marketplaces[].plugins")
+        }
+
+        let mentionablePlugins = decodedPlugins.filter(\.isAvailableForMention)
+        let dedupedByPath = Dictionary(grouping: mentionablePlugins) { $0.mentionPath }
+            .compactMap { _, bucket -> CodexPluginMetadata? in
+                bucket.first
+            }
+            .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .sorted { $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending }
+
+        return dedupedByPath
     }
 
     // Accepts the latest pending approval request.
@@ -1005,6 +1042,7 @@ extension CodexService {
         _ userInput: String,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
+        mentionMentions: [CodexTurnMention] = [],
         fileMentions: [String] = [],
         to threadId: String,
         shouldAppendUserMessage: Bool = true,
@@ -1030,6 +1068,7 @@ extension CodexService {
         setProtectedRunningFallback(true, for: threadId)
 
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
+        var includeStructuredMentionItems = supportsStructuredMentionInput && !mentionMentions.isEmpty
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
@@ -1048,8 +1087,10 @@ extension CodexService {
                     userInput: userInput,
                     attachments: attachments,
                     skillMentions: skillMentions,
+                    mentionMentions: mentionMentions,
                     imageURLKey: imageURLKey,
                     includeStructuredSkillItems: includeStructuredSkillItems,
+                    includeStructuredMentionItems: includeStructuredMentionItems,
                     collaborationMode: effectiveCollaborationMode,
                     includeServiceTier: includesServiceTier
                 )
@@ -1080,6 +1121,13 @@ extension CodexService {
                     // Disable structured skill input for this runtime after first incompatibility signal.
                     supportsStructuredSkillInput = false
                     includeStructuredSkillItems = false
+                    continue
+                }
+
+                if includeStructuredMentionItems,
+                   shouldRetryTurnStartWithoutMentionItems(error) {
+                    supportsStructuredMentionInput = false
+                    includeStructuredMentionItems = false
                     continue
                 }
 
@@ -1229,6 +1277,7 @@ extension CodexService {
         expectedTurnId: String?,
         attachments: [CodexImageAttachment] = [],
         skillMentions: [CodexTurnSkillMention] = [],
+        mentionMentions: [CodexTurnMention] = [],
         fileMentions: [String] = [],
         shouldAppendUserMessage: Bool = true,
         collaborationMode: CodexCollaborationModeKind? = nil
@@ -1263,6 +1312,7 @@ extension CodexService {
         }
 
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
+        var includeStructuredMentionItems = supportsStructuredMentionInput && !mentionMentions.isEmpty
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var currentExpectedTurnID = initialTurnID
@@ -1284,7 +1334,9 @@ extension CodexService {
                         attachments: attachments,
                         imageURLKey: imageURLKey,
                         skillMentions: skillMentions,
-                        includeStructuredSkillItems: includeStructuredSkillItems
+                        mentionMentions: mentionMentions,
+                        includeStructuredSkillItems: includeStructuredSkillItems,
+                        includeStructuredMentionItems: includeStructuredMentionItems
                     )
                 ),
             ]
@@ -1315,6 +1367,13 @@ extension CodexService {
                    shouldRetryTurnStartWithoutSkillItems(error) {
                     supportsStructuredSkillInput = false
                     includeStructuredSkillItems = false
+                    continue
+                }
+
+                if includeStructuredMentionItems,
+                   shouldRetryTurnStartWithoutMentionItems(error) {
+                    supportsStructuredMentionInput = false
+                    includeStructuredMentionItems = false
                     continue
                 }
 
@@ -1390,7 +1449,9 @@ extension CodexService {
         attachments: [CodexImageAttachment],
         imageURLKey: String,
         skillMentions: [CodexTurnSkillMention] = [],
-        includeStructuredSkillItems: Bool = true
+        mentionMentions: [CodexTurnMention] = [],
+        includeStructuredSkillItems: Bool = true,
+        includeStructuredMentionItems: Bool = true
     ) -> [JSONValue] {
         var inputItems: [JSONValue] = []
 
@@ -1444,6 +1505,24 @@ extension CodexService {
             }
         }
 
+        if includeStructuredMentionItems {
+            for mention in mentionMentions {
+                let normalizedName = mention.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let normalizedPath = mention.path.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !normalizedName.isEmpty, !normalizedPath.isEmpty else {
+                    continue
+                }
+
+                inputItems.append(
+                    .object([
+                        "type": .string("mention"),
+                        "name": .string(normalizedName),
+                        "path": .string(normalizedPath),
+                    ])
+                )
+            }
+        }
+
         return inputItems
     }
 
@@ -1453,8 +1532,10 @@ extension CodexService {
         userInput: String,
         attachments: [CodexImageAttachment],
         skillMentions: [CodexTurnSkillMention],
+        mentionMentions: [CodexTurnMention],
         imageURLKey: String,
         includeStructuredSkillItems: Bool,
+        includeStructuredMentionItems: Bool,
         collaborationMode: CodexCollaborationModeKind?,
         includeServiceTier: Bool
     ) throws -> RPCObject {
@@ -1466,7 +1547,9 @@ extension CodexService {
                     attachments: attachments,
                     imageURLKey: imageURLKey,
                     skillMentions: skillMentions,
-                    includeStructuredSkillItems: includeStructuredSkillItems
+                    mentionMentions: mentionMentions,
+                    includeStructuredSkillItems: includeStructuredSkillItems,
+                    includeStructuredMentionItems: includeStructuredMentionItems
                 )
             ),
         ]
@@ -1827,6 +1910,27 @@ extension CodexService {
             || message.contains("field")
     }
 
+    // Detects legacy runtimes that reject input items with `type: "mention"`.
+    func shouldRetryTurnStartWithoutMentionItems(_ error: Error) -> Bool {
+        guard let serviceError = error as? CodexServiceError,
+              case .rpcError(let rpcError) = serviceError else {
+            return false
+        }
+
+        let message = rpcError.message.lowercased()
+        guard message.contains("mention") else {
+            return false
+        }
+
+        return message.contains("unknown")
+            || message.contains("unsupported")
+            || message.contains("invalid")
+            || message.contains("expected")
+            || message.contains("unrecognized")
+            || message.contains("type")
+            || message.contains("field")
+    }
+
     // Detects runtimes that reject plan-mode `collaborationMode` without `experimentalApi`.
     func shouldRetryTurnStartWithoutCollaborationMode(_ error: Error) -> Bool {
         guard let serviceError = error as? CodexServiceError,
@@ -1896,6 +2000,45 @@ extension CodexService {
         }
 
         return hasSkillContainer ? collectedSkills : nil
+    }
+
+    // Parses Codex app-server plugin/list marketplace payloads.
+    func decodePluginMetadata(from result: JSONValue?) -> [CodexPluginMetadata]? {
+        guard let resultObject = result?.objectValue,
+              let response = decodeModel(CodexPluginListResponse.self, from: .object(resultObject)) else {
+            return nil
+        }
+
+        var plugins: [CodexPluginMetadata] = []
+        for marketplace in response.marketplaces {
+            let marketplaceName = marketplace.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !marketplaceName.isEmpty else {
+                continue
+            }
+
+            for plugin in marketplace.plugins {
+                let pluginName = plugin.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !pluginName.isEmpty else {
+                    continue
+                }
+
+                plugins.append(
+                    CodexPluginMetadata(
+                        id: plugin.id,
+                        name: pluginName,
+                        marketplaceName: marketplaceName,
+                        marketplacePath: marketplace.path,
+                        displayName: plugin.interface?.displayName,
+                        shortDescription: plugin.interface?.shortDescription,
+                        installed: plugin.installed,
+                        enabled: plugin.enabled,
+                        installPolicy: plugin.installPolicy
+                    )
+                )
+            }
+        }
+
+        return plugins
     }
 
     func shouldRetrySkillsListWithCwdFallback(_ error: Error) -> Bool {

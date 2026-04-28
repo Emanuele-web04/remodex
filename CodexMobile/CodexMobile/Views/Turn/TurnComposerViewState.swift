@@ -16,6 +16,10 @@ struct TurnComposerAutocompleteState {
     let isSkillAutocompleteVisible: Bool
     let isSkillAutocompleteLoading: Bool
     let skillAutocompleteQuery: String
+    let pluginAutocompleteItems: [CodexPluginMetadata]
+    let isPluginAutocompleteVisible: Bool
+    let isPluginAutocompleteLoading: Bool
+    let pluginAutocompleteQuery: String
     let slashCommandPanelState: TurnComposerSlashCommandPanelState
     let hasComposerContentConflictingWithReview: Bool
     let isThreadRunning: Bool
@@ -34,6 +38,7 @@ struct TurnComposerAccessoryState {
     let composerAttachments: [TurnComposerImageAttachment]
     let composerMentionedFiles: [TurnComposerMentionedFile]
     let composerMentionedSkills: [TurnComposerMentionedSkill]
+    let composerMentionedPlugins: [TurnComposerMentionedPlugin]
     let composerReviewSelection: TurnComposerReviewSelection?
     let isSubagentsSelectionArmed: Bool
     let isVoiceRecording: Bool
@@ -52,6 +57,10 @@ struct TurnComposerAccessoryState {
         !composerMentionedSkills.isEmpty
     }
 
+    var showsMentionedPlugins: Bool {
+        !composerMentionedPlugins.isEmpty
+    }
+
     var reviewTarget: TurnComposerReviewTarget? {
         composerReviewSelection?.target
     }
@@ -65,6 +74,6 @@ struct TurnComposerAccessoryState {
     }
 
     var topInputPadding: CGFloat {
-        showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || showsSubagentsSelection || showsVoiceRecordingCapsule || reviewTarget != nil ? 6 : 10
+        showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || showsMentionedPlugins || showsSubagentsSelection || showsVoiceRecordingCapsule || reviewTarget != nil ? 6 : 10
     }
 }
