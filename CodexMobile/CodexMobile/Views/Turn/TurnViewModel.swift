@@ -1696,27 +1696,35 @@ final class TurnViewModel {
         TurnComposerCommandLogic.removingTrailingSlashCommandToken(in: text)
     }
 
-    // Allows file autocomplete queries to span spaces once they already look like a file or path.
+    // Keeps file autocomplete scoped to the final adjacent `@token`; prose after a space closes it.
     private static func trailingFileToken(in text: String) -> TurnTrailingToken? {
-        guard !text.isEmpty,
-              let lastCharacter = text.last,
-              !lastCharacter.isWhitespace,
-              let triggerIndex = text.lastIndex(of: "@") else {
+        guard !text.isEmpty else {
             return nil
         }
 
-        if triggerIndex > text.startIndex {
-            let previousCharacter = text[text.index(before: triggerIndex)]
+        let tokenStart: String.Index
+        if let lastWhitespaceIndex = text.lastIndex(where: { $0.isWhitespace }) {
+            tokenStart = text.index(after: lastWhitespaceIndex)
+        } else {
+            tokenStart = text.startIndex
+        }
+
+        guard tokenStart < text.endIndex,
+              text[tokenStart] == "@" else {
+            return nil
+        }
+
+        if tokenStart > text.startIndex {
+            let previousCharacter = text[text.index(before: tokenStart)]
             guard previousCharacter.isWhitespace else {
                 return nil
             }
         }
 
-        let queryStart = text.index(after: triggerIndex)
-        let rawQuery = String(text[queryStart..<text.endIndex])
-        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let queryStart = text.index(after: tokenStart)
+        let query = String(text[queryStart..<text.endIndex])
         guard !query.isEmpty,
-              !query.contains(where: \.isNewline) else {
+              !query.contains(where: { $0.isWhitespace || $0 == "@" }) else {
             return nil
         }
 
@@ -1725,16 +1733,13 @@ final class TurnViewModel {
             return nil
         }
 
-        if query.contains(where: \.isWhitespace) {
-            let looksFileLike = query.contains("/")
-                || query.contains("\\")
-                || query.contains(".")
-            guard looksFileLike else {
-                return nil
-            }
+        if let lastCharacter = query.last,
+           ",.;:!?)]}".contains(lastCharacter),
+           !TurnFileMentionHeuristics.isAllowedInlineMentionToken(query) {
+            return nil
         }
 
-        return TurnTrailingToken(query: query, tokenRange: triggerIndex..<text.endIndex)
+        return TurnTrailingToken(query: query, tokenRange: tokenStart..<text.endIndex)
     }
 
     // Allows flexible file aliases while keeping common Swift attributes out of file search.
