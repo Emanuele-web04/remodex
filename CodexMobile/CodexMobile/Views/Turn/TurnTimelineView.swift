@@ -169,6 +169,7 @@ private struct TurnTimelinePreviousMessagesView: View {
     let allowsAssistantPlanFallbackRecovery: Bool
     let completedTurnIDs: Set<String>
     let threadMessagesForPlanMatching: [CodexMessage]
+    let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
     let autoScrollMode: TurnAutoScrollMode
@@ -221,6 +222,7 @@ private struct TurnTimelinePreviousMessagesView: View {
                         allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                         completedTurnIDs: completedTurnIDs,
                         threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        currentWorkingDirectory: currentWorkingDirectory,
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
@@ -322,6 +324,7 @@ private struct TurnTimelineRowsSection: View {
                     allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                     completedTurnIDs: completedTurnIDs,
                     threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    currentWorkingDirectory: currentWorkingDirectory,
                     planMatchingFingerprint: planMatchingFingerprint,
                     newestStreamingMessageID: newestStreamingMessageID,
                     autoScrollMode: autoScrollMode,
