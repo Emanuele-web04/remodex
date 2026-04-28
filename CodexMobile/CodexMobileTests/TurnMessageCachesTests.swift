@@ -79,6 +79,127 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(stopped?.statusLabel, "stopped")
     }
 
+    func testCommandOutputImageReferenceParserCombinesLsDirectoryAndOutputFile() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "/bin/zsh -lc 'ls -1 /Users/example/.codex/generated_images/turn-123'",
+            outputTail: "hero image.png\nnotes.txt",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertEqual(
+            reference?.path,
+            "/Users/example/.codex/generated_images/turn-123/hero image.png"
+        )
+        XCTAssertEqual(reference?.fileName, "hero image.png")
+    }
+
+    func testCommandOutputImageReferenceParserFindsMarkdownImagePath() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "echo done",
+            outputTail: "Created ![preview](/Users/example/project/out/mockup.webp)",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertEqual(reference?.path, "/Users/example/project/out/mockup.webp")
+    }
+
+    func testAssistantMarkdownImageReferenceParserFindsLocalImage() {
+        let references = AssistantMarkdownImageReferenceParser.references(
+            in: "Here it is:\n![wing](/Users/example/.codex/generated_images/turn/wing.png)"
+        )
+
+        XCTAssertEqual(references.count, 1)
+        XCTAssertEqual(references.first?.path, "/Users/example/.codex/generated_images/turn/wing.png")
+        XCTAssertEqual(references.first?.displayTitle, "wing")
+    }
+
+    func testAssistantMarkdownImageReferenceParserKeepsDuplicatePathsDistinct() {
+        let references = AssistantMarkdownImageReferenceParser.references(
+            in: """
+            ![first](/Users/example/wing.png)
+            ![second](/Users/example/wing.png)
+            """
+        )
+
+        XCTAssertEqual(references.map(\.path), [
+            "/Users/example/wing.png",
+            "/Users/example/wing.png"
+        ])
+        XCTAssertEqual(Set(references.map(\.id)).count, 2)
+    }
+
+    func testAssistantMarkdownImageReferenceParserRemovesImageOnlyLines() {
+        let visibleText = AssistantMarkdownImageReferenceParser.visibleTextRemovingImageSyntax(
+            from: "Before\n![wing](/Users/example/wing.png)\nAfter"
+        )
+
+        XCTAssertEqual(visibleText, "Before\nAfter")
+    }
+
+    func testAssistantMarkdownImageReferenceParserIgnoresCodeExamples() {
+        let text = """
+        Inline `![inline](/Users/example/inline.png)` stays literal.
+
+        ```markdown
+        ![fenced](/Users/example/fenced.png)
+        ```
+
+        ![real](/Users/example/real.png)
+        """
+
+        let references = AssistantMarkdownImageReferenceParser.references(in: text)
+        let visibleText = AssistantMarkdownImageReferenceParser.visibleTextRemovingImageSyntax(from: text)
+
+        XCTAssertEqual(references.map(\.path), ["/Users/example/real.png"])
+        XCTAssertTrue(visibleText.contains("`![inline](/Users/example/inline.png)`"))
+        XCTAssertTrue(visibleText.contains("![fenced](/Users/example/fenced.png)"))
+        XCTAssertFalse(visibleText.contains("![real](/Users/example/real.png)"))
+    }
+
+    func testMessageRowRenderModelCachesAssistantImageReferences() {
+        let text = "Before\n![wing](/Users/example/wing.png)\nAfter"
+        let message = CodexMessage(
+            id: "assistant-image-cache",
+            threadId: "thread-1",
+            role: .assistant,
+            text: text
+        )
+
+        let renderModel = MessageRowRenderModelCache.model(for: message, displayText: text)
+
+        XCTAssertEqual(renderModel.assistantImageReferences.first?.path, "/Users/example/wing.png")
+        XCTAssertEqual(renderModel.assistantTextWithoutImageSyntax, "Before\nAfter")
+    }
+
+    func testMessageRowRenderModelStripsImagesBeforeMermaidParsing() {
+        let text = """
+        Intro
+        ![wing](/Users/example/wing.png)
+        ```mermaid
+        graph TD
+          A --> B
+        ```
+        Outro
+        """
+        let message = CodexMessage(
+            id: "assistant-image-mermaid-cache",
+            threadId: "thread-1",
+            role: .assistant,
+            text: text
+        )
+
+        let renderModel = MessageRowRenderModelCache.model(for: message, displayText: text)
+        let markdownSegments = renderModel.mermaidContent?.segments.compactMap { segment -> String? in
+            if case .markdown(let markdown) = segment.kind {
+                return markdown
+            }
+            return nil
+        } ?? []
+
+        XCTAssertEqual(renderModel.assistantImageReferences.first?.path, "/Users/example/wing.png")
+        XCTAssertFalse(markdownSegments.joined(separator: "\n").contains("![wing]"))
+    }
+
     func testFileChangeRenderCacheSeparatesEqualLengthTexts() {
         let first = FileChangeSystemRenderCache.renderState(
             messageID: "file-change-cache",

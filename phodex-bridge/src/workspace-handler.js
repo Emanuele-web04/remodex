@@ -13,6 +13,16 @@ const { gitStatus } = require("./git-handler");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
+const MAX_IMAGE_READ_BYTES = 8 * 1024 * 1024;
+const IMAGE_MIME_TYPES_BY_EXTENSION = new Map([
+  [".jpg", "image/jpeg"],
+  [".jpeg", "image/jpeg"],
+  [".png", "image/png"],
+  [".gif", "image/gif"],
+  [".webp", "image/webp"],
+  [".heic", "image/heic"],
+  [".heif", "image/heif"],
+]);
 const repoMutationLocks = new Map();
 
 function handleWorkspaceRequest(rawMessage, sendResponse) {
@@ -54,6 +64,10 @@ function handleWorkspaceRequest(rawMessage, sendResponse) {
 }
 
 async function handleWorkspaceMethod(method, params) {
+  if (method === "workspace/readImage") {
+    return workspaceReadImage(params);
+  }
+
   const cwd = await resolveWorkspaceCwd(params);
   const repoRoot = await resolveRepoRoot(cwd);
 
@@ -65,6 +79,88 @@ async function handleWorkspaceMethod(method, params) {
     default:
       throw workspaceError("unknown_method", `Unknown workspace method: ${method}`);
   }
+}
+
+// Reads only recognized local image files, and only from the bound repo or Codex generated-images cache.
+async function workspaceReadImage(params) {
+  const requestedPath = firstNonEmptyString([params.path, params.filePath, params.localPath]);
+  if (!requestedPath) {
+    throw workspaceError("missing_image_path", "The request must include an image path.");
+  }
+
+  const cwd = firstNonEmptyString([params.cwd, params.currentWorkingDirectory])
+    ? await resolveWorkspaceCwd(params)
+    : null;
+  const imagePath = path.isAbsolute(requestedPath)
+    ? path.resolve(requestedPath)
+    : path.resolve(cwd || process.cwd(), requestedPath);
+  const extension = path.extname(imagePath).toLowerCase();
+  const mimeType = IMAGE_MIME_TYPES_BY_EXTENSION.get(extension);
+  if (!mimeType) {
+    throw workspaceError("unsupported_image_type", "Only local image files can be previewed.");
+  }
+
+  const [realImagePath, realGeneratedImagesRoot] = await Promise.all([
+    realpathOrNull(imagePath),
+    realpathOrNull(path.join(os.homedir(), ".codex", "generated_images")),
+  ]);
+  if (!realImagePath) {
+    throw workspaceError("image_not_found", "The image file no longer exists on this Mac.");
+  }
+
+  const repoRoot = cwd ? await resolveRepoRoot(cwd).catch(() => null) : null;
+  const realRepoRoot = repoRoot ? await realpathOrNull(repoRoot) : null;
+  const isAllowed =
+    (realRepoRoot && isPathInside(realImagePath, realRepoRoot))
+    || (realGeneratedImagesRoot && isPathInside(realImagePath, realGeneratedImagesRoot));
+  if (!isAllowed) {
+    throw workspaceError("image_path_not_allowed", "Only images in this workspace or Codex generated images can be previewed.");
+  }
+
+  const stat = await fs.promises.stat(realImagePath);
+  if (!stat.isFile()) {
+    throw workspaceError("image_not_found", "The image path is not a file.");
+  }
+  if (stat.size > MAX_IMAGE_READ_BYTES) {
+    throw workspaceError(
+      "image_too_large",
+      "This image is too large to send to the phone. Open it on the Mac or move a smaller preview into the workspace."
+    );
+  }
+
+  const includeData = params.includeData !== false && params.metadataOnly !== true;
+  const result = {
+    path: realImagePath,
+    fileName: path.basename(realImagePath),
+    mimeType,
+    byteLength: stat.size,
+    mtimeMs: stat.mtimeMs,
+  };
+  if (!includeData) {
+    return result;
+  }
+  if (isUnchangedImageRead(params, stat)) {
+    return {
+      ...result,
+      notModified: true,
+    };
+  }
+
+  const data = await fs.promises.readFile(realImagePath);
+  return {
+    ...result,
+    byteLength: data.length,
+    dataBase64: data.toString("base64"),
+  };
+}
+
+function isUnchangedImageRead(params, stat) {
+  const cachedByteLength = Number(params.ifByteLength);
+  const cachedMtimeMs = Number(params.ifMtimeMs);
+  return Number.isFinite(cachedByteLength)
+    && Number.isFinite(cachedMtimeMs)
+    && cachedByteLength === stat.size
+    && cachedMtimeMs === stat.mtimeMs;
 }
 
 // Validates the reverse patch against the current tree without writing repo files.
@@ -445,6 +541,19 @@ function isExistingDirectory(candidatePath) {
   }
 }
 
+async function realpathOrNull(candidatePath) {
+  try {
+    return await fs.promises.realpath(candidatePath);
+  } catch {
+    return null;
+  }
+}
+
+function isPathInside(candidatePath, rootPath) {
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
 function workspaceError(errorCode, userMessage) {
   const err = new Error(userMessage);
   err.errorCode = errorCode;
@@ -461,4 +570,4 @@ function git(cwd, ...args) {
     });
 }
 
-module.exports = { handleWorkspaceRequest };
+module.exports = { handleWorkspaceMethod, handleWorkspaceRequest };

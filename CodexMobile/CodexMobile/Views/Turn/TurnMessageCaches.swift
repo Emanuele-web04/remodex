@@ -7,7 +7,7 @@
 //   FileChangeBlockPresentationBuilder, PerFileDiffChunk, PerFileDiffParser, PerFileDiffChunkCache,
 //   CodeCommentDirectiveContentCache, FileChangeGroupingCache
 // Depends on: Foundation, CodexMessage, TurnMessageRegexCache, TurnFileChangeSummaryParser,
-//   TurnDiffLineKind, MarkdownRenderProfile, TurnMermaidRenderer
+//   TurnDiffLineKind, MarkdownRenderProfile, TurnMermaidRenderer, CommandExecutionViews
 
 import Foundation
 
@@ -206,6 +206,8 @@ struct FileChangeRenderState {
 struct MessageRowRenderModel {
     let codeCommentContent: CodeCommentDirectiveContent?
     let mermaidContent: MermaidMarkdownContent?
+    let assistantImageReferences: [AssistantMarkdownImageReference]
+    let assistantTextWithoutImageSyntax: String?
     let fileChangeState: FileChangeRenderState?
     let fileChangeGroups: [FileChangeGroup]
     let thinkingContent: ThinkingDisclosureContent?
@@ -216,6 +218,8 @@ struct MessageRowRenderModel {
     static let empty = MessageRowRenderModel(
         codeCommentContent: nil,
         mermaidContent: nil,
+        assistantImageReferences: [],
+        assistantTextWithoutImageSyntax: nil,
         fileChangeState: nil,
         fileChangeGroups: [],
         thinkingContent: nil,
@@ -243,6 +247,13 @@ enum MessageRowRenderModelCache {
     private static func buildModel(for message: CodexMessage, displayText: String) -> MessageRowRenderModel {
         switch message.role {
         case .assistant:
+            let assistantImageReferences = message.isStreaming
+                ? []
+                : AssistantMarkdownImageReferenceParser.references(in: displayText)
+            let assistantTextWithoutImageSyntax = assistantImageReferences.isEmpty
+                ? nil
+                : AssistantMarkdownImageReferenceParser.visibleTextRemovingImageSyntax(from: displayText)
+            let assistantRenderText = assistantTextWithoutImageSyntax ?? displayText
             // Defer Mermaid parsing until the assistant row is finalized so streaming deltas
             // keep the lightweight append-only path and avoid repeated parser/WebKit churn.
             return MessageRowRenderModel(
@@ -253,8 +264,10 @@ enum MessageRowRenderModelCache {
                     ? nil
                     : MermaidMarkdownContentCache.content(
                         messageID: message.id,
-                        text: displayText
+                        text: assistantRenderText
                     ),
+                assistantImageReferences: assistantImageReferences,
+                assistantTextWithoutImageSyntax: assistantTextWithoutImageSyntax,
                 fileChangeState: nil,
                 fileChangeGroups: [],
                 thinkingContent: nil,
@@ -274,6 +287,8 @@ enum MessageRowRenderModelCache {
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
                     mermaidContent: nil,
+                    assistantImageReferences: [],
+                    assistantTextWithoutImageSyntax: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],
                     thinkingContent: thinkingText.isEmpty
@@ -293,6 +308,8 @@ enum MessageRowRenderModelCache {
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
                     mermaidContent: nil,
+                    assistantImageReferences: [],
+                    assistantTextWithoutImageSyntax: nil,
                     fileChangeState: fileChangeState,
                     fileChangeGroups: FileChangeGroupingCache.grouped(messageID: message.id, entries: allEntries),
                     thinkingContent: nil,
@@ -306,6 +323,8 @@ enum MessageRowRenderModelCache {
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
                     mermaidContent: nil,
+                    assistantImageReferences: [],
+                    assistantTextWithoutImageSyntax: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],
                     thinkingContent: nil,

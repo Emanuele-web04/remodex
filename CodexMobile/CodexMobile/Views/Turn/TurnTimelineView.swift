@@ -134,6 +134,7 @@ private struct TurnTimelineMessageRow: View {
     let allowsAssistantPlanFallbackRecovery: Bool
     let completedTurnIDs: Set<String>
     let threadMessagesForPlanMatching: [CodexMessage]
+    let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
     let autoScrollMode: TurnAutoScrollMode
@@ -151,6 +152,7 @@ private struct TurnTimelineMessageRow: View {
             allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
             assistantTurnCompleted: message.turnId.map(completedTurnIDs.contains) ?? false,
             threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+            currentWorkingDirectory: currentWorkingDirectory,
             planMatchingFingerprint: planMatchingFingerprint,
             showsStreamingAnimations: autoScrollMode == .followBottom
                 && message.id == newestStreamingMessageID,
@@ -170,6 +172,7 @@ private struct TurnTimelineToolBurstView: View {
     let allowsAssistantPlanFallbackRecovery: Bool
     let completedTurnIDs: Set<String>
     let threadMessagesForPlanMatching: [CodexMessage]
+    let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
     let autoScrollMode: TurnAutoScrollMode
@@ -198,6 +201,7 @@ private struct TurnTimelineToolBurstView: View {
                     allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                     completedTurnIDs: completedTurnIDs,
                     threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    currentWorkingDirectory: currentWorkingDirectory,
                     planMatchingFingerprint: planMatchingFingerprint,
                     newestStreamingMessageID: newestStreamingMessageID,
                     autoScrollMode: autoScrollMode,
@@ -244,6 +248,7 @@ private struct TurnTimelineToolBurstView: View {
                         allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                         completedTurnIDs: completedTurnIDs,
                         threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                        currentWorkingDirectory: currentWorkingDirectory,
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
@@ -267,6 +272,7 @@ private struct TurnTimelineRowsSection: View {
     let allowsAssistantPlanFallbackRecovery: Bool
     let completedTurnIDs: Set<String>
     let threadMessagesForPlanMatching: [CodexMessage]
+    let currentWorkingDirectory: String?
     let planMatchingFingerprint: Int
     let newestStreamingMessageID: String?
     let autoScrollMode: TurnAutoScrollMode
@@ -309,6 +315,7 @@ private struct TurnTimelineRowsSection: View {
                     allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                     completedTurnIDs: completedTurnIDs,
                     threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    currentWorkingDirectory: currentWorkingDirectory,
                     planMatchingFingerprint: planMatchingFingerprint,
                     newestStreamingMessageID: newestStreamingMessageID,
                     autoScrollMode: autoScrollMode,
@@ -325,6 +332,7 @@ private struct TurnTimelineRowsSection: View {
                     allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                     completedTurnIDs: completedTurnIDs,
                     threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    currentWorkingDirectory: currentWorkingDirectory,
                     planMatchingFingerprint: planMatchingFingerprint,
                     newestStreamingMessageID: newestStreamingMessageID,
                     autoScrollMode: autoScrollMode,
@@ -400,6 +408,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let planSessionSource: CodexPlanSessionSource?
     let allowsAssistantPlanFallbackRecovery: Bool
     let threadMessagesForPlanMatching: [CodexMessage]
+    let currentWorkingDirectory: String?
     let isRetryAvailable: Bool
     let errorMessage: String?
     let hidesErrorMessage: Bool
@@ -563,6 +572,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                                 allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                                 completedTurnIDs: completedTurnIDs,
                                 threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                                currentWorkingDirectory: currentWorkingDirectory,
                                 planMatchingFingerprint: planMatchingFingerprint,
                                 newestStreamingMessageID: cachedNewestStreamingMessageID,
                                 autoScrollMode: autoScrollMode,
