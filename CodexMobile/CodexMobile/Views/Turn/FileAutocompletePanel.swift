@@ -69,7 +69,7 @@ struct FileAutocompletePanel: View {
                                 HStack(spacing: 8) {
                                     Image(systemName: "circle.grid.2x2")
                                         .font(AppFont.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(.blue)
+                                        .foregroundStyle(.secondary)
 
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(item.displayTitle)
