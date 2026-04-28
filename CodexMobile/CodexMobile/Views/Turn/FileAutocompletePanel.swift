@@ -67,9 +67,9 @@ struct FileAutocompletePanel: View {
                                 onSelectPlugin(item)
                             } label: {
                                 HStack(spacing: 8) {
-                                    Image(systemName: "puzzlepiece.extension")
+                                    Image(systemName: "circle.grid.2x2")
                                         .font(AppFont.system(size: 12, weight: .semibold))
-                                        .foregroundStyle(Color.purple)
+                                        .foregroundStyle(.blue)
 
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(item.displayTitle)

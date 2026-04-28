@@ -83,22 +83,22 @@ struct PluginMentionChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "puzzlepiece.extension")
+            Image(systemName: "circle.grid.2x2")
                 .font(AppFont.system(size: 9, weight: .semibold))
-                .foregroundStyle(Color.purple)
+                .foregroundStyle(.blue)
 
             Text(SkillDisplayNameFormatter.displayName(for: pluginName))
                 .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(Color.purple)
+                .foregroundStyle(.blue)
                 .lineLimit(1)
 
             if let onRemove {
                 Button(action: onRemove) {
                     Image(systemName: "xmark")
                         .font(AppFont.system(size: 8, weight: .bold))
-                        .foregroundStyle(Color.purple)
+                        .foregroundStyle(.blue)
                         .frame(width: 14, height: 14)
-                        .background(Color.purple.opacity(0.14), in: Circle())
+                        .background(Color.blue.opacity(0.14), in: Circle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Remove plugin mention")
@@ -106,7 +106,7 @@ struct PluginMentionChip: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(Color.purple.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

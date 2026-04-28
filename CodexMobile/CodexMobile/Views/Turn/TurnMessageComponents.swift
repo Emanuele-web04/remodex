@@ -854,7 +854,7 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    // Renders inline @file and $skill mentions inside one AttributedString so large
+    // Renders inline @file/plugin and $skill mentions inside one AttributedString so large
     // messages do not build an arbitrarily deep SwiftUI Text concatenation chain.
     private func userBubbleText(_ rawText: String) -> Text {
         let normalizedRawText = SkillReferenceFormatter.replacingSkillReferences(
@@ -941,7 +941,9 @@ struct MessageRow: View, Equatable {
             let (normalizedToken, trailingPunctuation) = normalizedMentionToken(rawToken)
             let fullMatch = nsText.substring(with: matchRange)
             let normalizedConfirmedToken = TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: normalizedToken)
-            if trigger == "@", !confirmedFileMentions.contains(normalizedConfirmedToken) {
+            let isConfirmedFileMention = confirmedFileMentions.contains(normalizedConfirmedToken)
+            let isPluginMention = trigger == "@" && isLikelyPluginMention(normalizedToken)
+            if trigger == "@", !isConfirmedFileMention, !isPluginMention {
                 attributed.append(AttributedString(fullMatch))
                 cursor = matchRange.location + matchRange.length
                 continue
@@ -951,9 +953,12 @@ struct MessageRow: View, Equatable {
                 let displayName: String
                 let color: Color
 
-                if trigger == "@" {
+                if trigger == "@", isConfirmedFileMention {
                     let fileName = (normalizedToken as NSString).lastPathComponent
                     displayName = fileName.isEmpty ? normalizedToken : fileName
+                    color = .blue
+                } else if trigger == "@" {
+                    displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
                     color = .blue
                 } else {
                     displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
@@ -981,6 +986,19 @@ struct MessageRow: View, Equatable {
         }
 
         return attributed
+    }
+
+    // Keeps plugin coloring to app-style slugs so Swift attributes and scoped build labels stay plain.
+    private func isLikelyPluginMention(_ token: String) -> Bool {
+        let normalized = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = normalized.first,
+              first.isLowercase || first.isNumber else {
+            return false
+        }
+
+        return normalized.allSatisfy { character in
+            character.isLetter || character.isNumber || character == "-" || character == "_"
+        }
     }
 
     private func assistantView(text: String, renderModel: MessageRowRenderModel) -> some View {

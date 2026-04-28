@@ -760,6 +760,33 @@ extension TurnViewModel {
         )
         return alertState.alert(for: operation)
     }
+
+    // Applies branch metadata without overwriting an explicit PR base the user already chose.
+    func applyGitBranchTargets(_ result: GitBranchesWithStatusResult) {
+        availableGitBranchTargets = result.branches
+        gitBranchesCheckedOutElsewhere = result.branchesCheckedOutElsewhere
+        gitWorktreePathsByBranch = result.worktreePathByBranch
+        gitLocalCheckoutPath = CodexThreadStartProjectBinding.normalizedProjectPath(result.localCheckoutPath)
+        if let current = result.currentBranch, !current.isEmpty {
+            currentGitBranch = current
+        }
+        if let defaultBranch = result.defaultBranch, !defaultBranch.isEmpty {
+            gitDefaultBranch = defaultBranch
+            let currentSelectedBaseBranch = selectedGitBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+            let localDefaultBranch = remodexSelectableDefaultBranch(
+                defaultBranch: defaultBranch,
+                availableGitBranchTargets: result.branches
+            ) ?? ""
+            let isValidSelectedBaseBranch = currentSelectedBaseBranch.isEmpty
+                || result.branches.contains(currentSelectedBaseBranch)
+
+            if !isValidSelectedBaseBranch {
+                selectedGitBaseBranch = localDefaultBranch
+            } else if currentSelectedBaseBranch.isEmpty {
+                selectedGitBaseBranch = localDefaultBranch
+            }
+        }
+    }
 }
 
 private extension TurnViewModel {
@@ -789,33 +816,6 @@ private extension TurnViewModel {
             branch: result.currentBranch ?? "",
             remote: trackingRemoteName(from: result.trackingBranch)
         )
-    }
-
-    // Applies branch metadata without overwriting an explicit PR base the user already chose.
-    func applyGitBranchTargets(_ result: GitBranchesWithStatusResult) {
-        availableGitBranchTargets = result.branches
-        gitBranchesCheckedOutElsewhere = result.branchesCheckedOutElsewhere
-        gitWorktreePathsByBranch = result.worktreePathByBranch
-        gitLocalCheckoutPath = CodexThreadStartProjectBinding.normalizedProjectPath(result.localCheckoutPath)
-        if let current = result.currentBranch, !current.isEmpty {
-            currentGitBranch = current
-        }
-        if let defaultBranch = result.defaultBranch, !defaultBranch.isEmpty {
-            gitDefaultBranch = defaultBranch
-            let currentSelectedBaseBranch = selectedGitBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
-            let localDefaultBranch = remodexSelectableDefaultBranch(
-                defaultBranch: defaultBranch,
-                availableGitBranchTargets: result.branches
-            ) ?? ""
-            let isValidSelectedBaseBranch = currentSelectedBaseBranch.isEmpty
-                || result.branches.contains(currentSelectedBaseBranch)
-
-            if !isValidSelectedBaseBranch {
-                selectedGitBaseBranch = localDefaultBranch
-            } else if currentSelectedBaseBranch.isEmpty {
-                selectedGitBaseBranch = localDefaultBranch
-            }
-        }
     }
 
     // Runs the deferred branch/worktree action after an alert-confirmed preflight step.

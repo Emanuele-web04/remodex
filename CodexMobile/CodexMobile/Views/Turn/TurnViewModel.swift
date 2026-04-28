@@ -277,7 +277,6 @@ final class TurnViewModel {
     let maxComposerImages = 4
     let maxFileAutocompleteItems = 6
     let maxSkillAutocompleteItems = 6
-    let maxPluginAutocompleteItems = 6
     private let fileAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
     private let skillAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
     private let pluginAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
@@ -1946,7 +1945,7 @@ final class TurnViewModel {
         let filtered = indexedPlugins.lazy
             .filter { $0.plugin.matchesSearch(query: query) }
             .map(\.plugin)
-        return Array(filtered.prefix(maxPluginAutocompleteItems))
+        return Array(filtered)
     }
 
     private func normalizedAutocompleteRoot(for thread: CodexThread) -> String? {

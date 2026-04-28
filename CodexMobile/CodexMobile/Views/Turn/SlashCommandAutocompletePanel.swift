@@ -74,9 +74,9 @@ struct SlashCommandAutocompletePanel: View {
                                 commandIcon(for: item, isEnabled: isEnabled)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(item.title)
+                                    Text(item.commandToken)
                                         .font(AppFont.subheadline(weight: .semibold))
-                                        .foregroundStyle(isEnabled ? .primary : .secondary)
+                                        .foregroundStyle(isEnabled ? Color.teal : .secondary)
                                         .lineLimit(1)
 
                                     Text(commandSubtitle(for: item))
@@ -87,7 +87,7 @@ struct SlashCommandAutocompletePanel: View {
 
                                 Spacer(minLength: 8)
 
-                                Text(item.commandToken)
+                                Text(item.title)
                                     .font(AppFont.footnote())
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
