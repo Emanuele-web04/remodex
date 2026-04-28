@@ -3349,7 +3349,10 @@ extension CodexService {
            !pendingAssistantDeltaStreamOrder.contains(streamID) {
             pendingAssistantDeltaStreamOrder.append(streamID)
         }
-        pendingAssistantDeltaByStreamID[streamID, default: ""].append(delta)
+        pendingAssistantDeltaByStreamID[streamID] = mergeAssistantDelta(
+            existingText: pendingAssistantDeltaByStreamID[streamID] ?? "",
+            incomingDelta: delta
+        )
         schedulePendingAssistantDeltaFlushIfNeeded()
     }
 
@@ -3371,7 +3374,10 @@ extension CodexService {
            !pendingAssistantDeltaStreamOrder.contains(destinationStreamID) {
             pendingAssistantDeltaStreamOrder.append(destinationStreamID)
         }
-        pendingAssistantDeltaByStreamID[destinationStreamID, default: ""].append(fallbackDelta)
+        pendingAssistantDeltaByStreamID[destinationStreamID] = mergeAssistantDelta(
+            existingText: pendingAssistantDeltaByStreamID[destinationStreamID] ?? "",
+            incomingDelta: fallbackDelta
+        )
         pendingAssistantDeltaContextByStreamID[destinationStreamID] = (
             threadId: threadId,
             turnId: turnId.trimmingCharacters(in: .whitespacesAndNewlines),

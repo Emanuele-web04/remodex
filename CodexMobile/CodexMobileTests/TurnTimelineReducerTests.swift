@@ -320,6 +320,111 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(messageIDs, ["tool-1", "tool-2"])
     }
 
+    func testTimelineRenderProjectionCollapsesCompletedTurnBeforeFinalAnswer() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Check Gmail",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "status",
+                threadID: "thread",
+                role: .assistant,
+                text: "I'll use the Gmail connector.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "status-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Read inbox",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "tool-item",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "Latest TestFlight version: 1.4 (124).",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.count, 3)
+        guard case .message(let user) = items[0],
+              case .previousMessages(let previousGroup) = items[1],
+              case .message(let final) = items[2] else {
+            return XCTFail("Expected user, previous-messages disclosure, final answer")
+        }
+
+        XCTAssertEqual(user.id, "user")
+        XCTAssertEqual(previousGroup.finalMessageID, "final")
+        XCTAssertEqual(previousGroup.hiddenCount, 2)
+        XCTAssertEqual(previousGroup.messages.map(\.id), ["status", "tool"])
+        XCTAssertEqual(final.id, "final")
+        XCTAssertEqual(
+            TurnTimelineRenderProjection.collapsedFinalMessageIDs(
+                in: messages,
+                completedTurnIDs: ["turn-1"]
+            ),
+            Set(["final"])
+        )
+    }
+
+    func testTimelineRenderProjectionKeepsRunningTurnExpandedBeforeFinalAnswer() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "status",
+                threadID: "thread",
+                role: .assistant,
+                text: "Working",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "Final",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+        let messageIDs = items.compactMap { item -> String? in
+            if case .message(let message) = item {
+                return message.id
+            }
+            return nil
+        }
+
+        XCTAssertEqual(messageIDs, ["status", "final"])
+    }
+
     func testRemoveDuplicateAssistantMessagesByTurnAndText() {
         let now = Date()
         let messages = [
