@@ -22,6 +22,7 @@ const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
+const { handleProjectRequest } = require("./project-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
 const { createVoiceHandler, resolveVoiceAuth } = require("./voice-handler");
 const {
@@ -497,6 +498,9 @@ function startBridge({
       return;
     }
     if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
+    if (handleProjectRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
     if (notificationsHandler.handleNotificationsRequest(rawMessage, sendApplicationResponse)) {

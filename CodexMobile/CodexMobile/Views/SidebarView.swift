@@ -22,7 +22,7 @@ struct SidebarView: View {
     @State private var searchText = ""
     @State private var isCreatingThread = false
     @State private var groupedThreads: [SidebarThreadGroup] = []
-    @State private var isShowingNewChatProjectPicker = false
+    @State private var activeSidebarSheet: SidebarPresentedSheet?
     @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
     @State private var threadPendingDeletion: CodexThread? = nil
     @State private var createThreadErrorMessage: String? = nil
@@ -164,19 +164,8 @@ struct SidebarView: View {
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
-        .sheet(isPresented: $isShowingNewChatProjectPicker) {
-            SidebarNewChatProjectPickerSheet(
-                choices: newChatProjectChoices,
-                onSelectProject: { projectPath in
-                    handleNewChatTap(preferredProjectPath: projectPath)
-                },
-                onSelectWorktreeProject: { projectPath in
-                    handleNewWorktreeChatTap(preferredProjectPath: projectPath)
-                },
-                onSelectWithoutProject: {
-                    handleNewChatTap(preferredProjectPath: nil)
-                }
-            )
+        .sheet(item: $activeSidebarSheet) { sheet in
+            sidebarSheetContent(sheet)
         }
         .confirmationDialog(
             "Archive \"\(projectGroupPendingArchive?.label ?? "project")\"?",
@@ -255,12 +244,11 @@ struct SidebarView: View {
 
     // Shows a native sheet so folder names and full paths stay readable on small screens.
     private func handleNewChatButtonTap() {
-        if newChatProjectChoices.isEmpty {
-            handleNewChatTap(preferredProjectPath: nil)
-            return
-        }
+        activeSidebarSheet = .newChatProjectPicker
+    }
 
-        isShowingNewChatProjectPicker = true
+    private func presentLocalFolderBrowser() {
+        activeSidebarSheet = .localFolderBrowser
     }
 
     private func handleNewChatTap(preferredProjectPath: String?) {
@@ -480,6 +468,45 @@ private extension SidebarView {
     static var isSidebarDebugLoggingEnabled: Bool { false }
 }
 
+private enum SidebarPresentedSheet: String, Identifiable {
+    case newChatProjectPicker
+    case localFolderBrowser
+
+    var id: String { rawValue }
+}
+
+private extension SidebarView {
+    @ViewBuilder
+    func sidebarSheetContent(_ sheet: SidebarPresentedSheet) -> some View {
+        switch sheet {
+        case .newChatProjectPicker:
+            SidebarNewChatProjectPickerSheet(
+                choices: newChatProjectChoices,
+                onSelectProject: { projectPath in
+                    activeSidebarSheet = nil
+                    handleNewChatTap(preferredProjectPath: projectPath)
+                },
+                onSelectWorktreeProject: { projectPath in
+                    activeSidebarSheet = nil
+                    handleNewWorktreeChatTap(preferredProjectPath: projectPath)
+                },
+                onSelectWithoutProject: {
+                    activeSidebarSheet = nil
+                    handleNewChatTap(preferredProjectPath: nil)
+                },
+                onBrowseLocalFolder: {
+                    presentLocalFolderBrowser()
+                }
+            )
+        case .localFolderBrowser:
+            SidebarLocalFolderBrowserSheet { projectPath in
+                activeSidebarSheet = nil
+                handleNewChatTap(preferredProjectPath: projectPath)
+            }
+        }
+    }
+}
+
 enum SidebarThreadsLoadingPresentation {
     // Keeps pull-to-refresh from stacking a second spinner over an already populated sidebar.
     static func shouldShowOverlay(isLoadingThreads: Bool, threadCount: Int) -> Bool {
@@ -492,6 +519,7 @@ private struct SidebarNewChatProjectPickerSheet: View {
     let onSelectProject: (String) -> Void
     let onSelectWorktreeProject: (String) -> Void
     let onSelectWithoutProject: () -> Void
+    let onBrowseLocalFolder: () -> Void
 
     @Environment(\.dismiss) private var dismiss
 
@@ -503,6 +531,31 @@ private struct SidebarNewChatProjectPickerSheet: View {
                         .font(AppFont.body())
                         .foregroundStyle(.secondary)
                         .listRowBackground(Color.clear)
+                }
+
+                Section {
+                    Button {
+                        onBrowseLocalFolder()
+                    } label: {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "folder.badge.plus")
+                                .font(AppFont.body(weight: .medium))
+                                .foregroundStyle(.secondary)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Add Local Folder")
+                                    .font(AppFont.body(weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                                Text("Browse or create a folder on your Mac.")
+                                    .font(AppFont.body())
+                                    .foregroundStyle(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
                 }
 
                 Section("Local") {
