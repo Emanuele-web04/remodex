@@ -70,6 +70,61 @@ test("normalizeBranchListEntry strips linked-worktree markers from branch labels
   });
 });
 
+test("gitStatus reports non-repository directories without failing", async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-nonrepo-"));
+
+  try {
+    fs.writeFileSync(path.join(projectDir, "README.md"), "# New project\n");
+
+    const result = await gitStatus(projectDir);
+
+    assert.equal(result.isRepo, false);
+    assert.equal(result.state, "not_initialized");
+    assert.equal(result.branch, null);
+    assert.deepEqual(result.files, []);
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("gitInit creates a main unborn branch without committing files", async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-init-"));
+
+  try {
+    fs.writeFileSync(path.join(projectDir, "README.md"), "# New project\n");
+
+    const result = await __test.gitInit(projectDir);
+    const head = git(projectDir, "symbolic-ref", "--short", "HEAD");
+    const commitCount = git(projectDir, "rev-list", "--count", "--all");
+
+    assert.equal(head, "main");
+    assert.equal(commitCount, "0");
+    assert.equal(result.status.isRepo, true);
+    assert.equal(result.status.branch, "main");
+    assert.equal(result.status.hasHeadCommit, false);
+    assert.equal(result.status.hasPushRemote, false);
+    assert.equal(result.status.canPush, false);
+    assert.equal(result.status.dirty, true);
+    assert.ok(result.status.files.some((file) => file.path === "README.md" && file.status === "??"));
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("gitBranchesWithStatus returns explicit non-repository state", async () => {
+  const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-branches-nonrepo-"));
+
+  try {
+    const result = await __test.gitBranchesWithStatus(projectDir);
+
+    assert.deepEqual(result.branches, []);
+    assert.equal(result.status.isRepo, false);
+    assert.equal(result.status.state, "not_initialized");
+  } finally {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  }
+});
+
 test("gitBranches marks branches that are checked out in another worktree", async () => {
   const repoDir = makeTempRepo();
   const siblingWorktree = path.join(path.dirname(repoDir), `${path.basename(repoDir)}-wt-feature`);
@@ -302,10 +357,108 @@ test("gitStatus reports local-only commits when remotes exist but upstream is mi
 
     assert.equal(result.tracking, null);
     assert.equal(result.state, "no_upstream");
+    assert.equal(result.hasPushRemote, true);
+    assert.equal(result.canPush, true);
     assert.equal(result.localOnlyCommitCount, 1);
   } finally {
     fs.rmSync(repoDir, { recursive: true, force: true });
     fs.rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("gitStatus does not mark commits pushable when origin is missing", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\nlocal\n");
+    git(repoDir, "add", "README.md");
+    git(repoDir, "commit", "-m", "Local commit");
+
+    const result = await gitStatus(repoDir);
+
+    assert.equal(result.hasHeadCommit, true);
+    assert.equal(result.hasPushRemote, false);
+    assert.equal(result.canPush, false);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitStatus keeps branches pushable when their upstream remote is not origin", async () => {
+  const repoDir = makeTempRepo();
+  const remoteDir = makeBareRemote();
+
+  try {
+    git(remoteDir, "init", "--bare");
+    git(repoDir, "remote", "add", "upstream", remoteDir);
+    git(repoDir, "push", "-u", "upstream", "main");
+
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\nnon-origin remote\n");
+    git(repoDir, "add", "README.md");
+    git(repoDir, "commit", "-m", "Local commit");
+
+    const result = await gitStatus(repoDir);
+
+    assert.equal(result.tracking, "upstream/main");
+    assert.equal(result.hasPushRemote, true);
+    assert.equal(result.canPush, true);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("gitPush allows an existing upstream remote that is not origin", async () => {
+  const repoDir = makeTempRepo();
+  const remoteDir = makeBareRemote();
+
+  try {
+    git(remoteDir, "init", "--bare");
+    git(repoDir, "remote", "add", "upstream", remoteDir);
+    git(repoDir, "push", "-u", "upstream", "main");
+
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\npush upstream\n");
+    git(repoDir, "add", "README.md");
+    git(repoDir, "commit", "-m", "Push upstream");
+
+    const response = await new Promise((resolve) => {
+      handleGitRequest(
+        JSON.stringify({
+          id: 1,
+          method: "git/push",
+          params: { cwd: repoDir },
+        }),
+        (rawResponse) => resolve(JSON.parse(rawResponse))
+      );
+    });
+
+    assert.equal(response.error, undefined);
+    assert.equal(response.result.remote, "upstream");
+    assert.equal(response.result.status.canPush, false);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("gitPush rejects before running push when origin is missing", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    const response = await new Promise((resolve) => {
+      handleGitRequest(
+        JSON.stringify({
+          id: 1,
+          method: "git/push",
+          params: { cwd: repoDir },
+        }),
+        (rawResponse) => resolve(JSON.parse(rawResponse))
+      );
+    });
+
+    assert.equal(response.error.data.errorCode, "no_remote");
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
   }
 });
 

@@ -10,6 +10,8 @@ extension TurnGitActionKind {
     func menuIcon(pointSize: CGFloat = 20) -> UIImage {
         let cgSize = CGSize(width: pointSize, height: pointSize)
         switch self {
+        case .initialize:
+            return Self.resizedSymbol(named: "plus.circle", size: cgSize)
         case .syncNow:
             return Self.resizedSymbol(named: "arrow.trianglehead.2.clockwise.rotate.90", size: cgSize)
         case .commit:
@@ -62,6 +64,8 @@ struct TurnGitActionsToolbarButton: View {
 
     private var syncStatusColor: Color? {
         switch gitSyncState {
+        case "not_initialized":
+            return Color(.systemOrange)
         case "behind_only", "diverged", "dirty_and_behind":
             return Color(.systemGray2)
         default:
@@ -71,6 +75,8 @@ struct TurnGitActionsToolbarButton: View {
 
     private var syncStatusAccessibilityValue: String? {
         switch gitSyncState {
+        case "not_initialized":
+            return "Git is not initialized"
         case "up_to_date":
             return "Repository up to date"
         case "ahead_only":
@@ -94,20 +100,26 @@ struct TurnGitActionsToolbarButton: View {
 
     var body: some View {
         Menu {
-            Section("Update") {
-                actionButton(for: .syncNow)
-            }
-
-            Section("Write") {
-                ForEach([TurnGitActionKind.commit, .push, .commitAndPush, .createPR], id: \.self) { action in
-                    actionButton(for: action)
+            if gitSyncState == "not_initialized" {
+                Section("Setup") {
+                    actionButton(for: .initialize)
                 }
-            }
+            } else {
+                Section("Update") {
+                    actionButton(for: .syncNow)
+                }
 
-            if !recoveryActions.isEmpty {
-                Section("Recovery") {
-                    ForEach(recoveryActions, id: \.self) { action in
+                Section("Write") {
+                    ForEach([TurnGitActionKind.commit, .push, .commitAndPush, .createPR], id: \.self) { action in
                         actionButton(for: action)
+                    }
+                }
+
+                if !recoveryActions.isEmpty {
+                    Section("Recovery") {
+                        ForEach(recoveryActions, id: \.self) { action in
+                            actionButton(for: action)
+                        }
                     }
                 }
             }
@@ -117,7 +129,7 @@ struct TurnGitActionsToolbarButton: View {
                     .controlSize(.small)
                     .frame(width: 24, height: 24)
             } else {
-                toolbarIcon(for: .commit, size: 24)
+                toolbarIcon(for: gitSyncState == "not_initialized" ? .initialize : .commit, size: 24)
                     .overlay(alignment: .topTrailing) {
                         if let syncStatusColor {
                             Circle()

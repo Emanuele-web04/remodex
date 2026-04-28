@@ -24,6 +24,7 @@ struct SidebarView: View {
     @State private var groupedThreads: [SidebarThreadGroup] = []
     @State private var activeSidebarSheet: SidebarPresentedSheet?
     @State private var projectGroupPendingArchive: SidebarThreadGroup? = nil
+    @State private var projectGroupPendingDeletion: SidebarThreadGroup? = nil
     @State private var threadPendingDeletion: CodexThread? = nil
     @State private var createThreadErrorMessage: String? = nil
     @State private var cachedDiffTotals: [String: TurnSessionDiffTotals] = [:]
@@ -73,6 +74,9 @@ struct SidebarView: View {
                 },
                 onArchiveProjectGroup: { group in
                     projectGroupPendingArchive = group
+                },
+                onDeleteProjectGroup: { group in
+                    projectGroupPendingDeletion = group
                 },
                 onRenameThread: { thread, newName in
                     codex.renameThread(thread.id, name: newName)
@@ -184,25 +188,44 @@ struct SidebarView: View {
         } message: {
             Text("All active chats in this project will be archived.")
         }
+        .confirmationDialog(
+            "Remove \"\(projectGroupPendingDeletion?.label ?? "project")\" from this phone?",
+            isPresented: Binding(
+                get: { projectGroupPendingDeletion != nil },
+                set: { if !$0 { projectGroupPendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Remove from Phone", role: .destructive) {
+                deletePendingProjectGroupLocally()
+            }
+            Button("Cancel", role: .cancel) {
+                projectGroupPendingDeletion = nil
+            }
+        } message: {
+            Text("Chats for this project will be deleted only from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
+        }
         .alert(
-            "Delete \"\(threadPendingDeletion?.displayTitle ?? "conversation")\"?",
+            "Remove \"\(threadPendingDeletion?.displayTitle ?? "conversation")\" from this phone?",
             isPresented: Binding(
                 get: { threadPendingDeletion != nil },
                 set: { if !$0 { threadPendingDeletion = nil } }
             )
         ) {
-            Button("Delete", role: .destructive) {
+            Button("Remove from Phone", role: .destructive) {
                 if let thread = threadPendingDeletion {
                     if selectedThread?.id == thread.id {
                         selectedThread = nil
                     }
-                    codex.deleteThread(thread.id)
+                    codex.deleteThreadLocally(thread.id)
                 }
                 threadPendingDeletion = nil
             }
             Button("Cancel", role: .cancel) {
                 threadPendingDeletion = nil
             }
+        } message: {
+            Text("This only removes the chat from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
         }
         .alert(
             "Action failed",
@@ -321,6 +344,26 @@ struct SidebarView: View {
         }
 
         projectGroupPendingArchive = nil
+    }
+
+    // Removes every local chat for the selected project while leaving the desktop runtime untouched.
+    private func deletePendingProjectGroupLocally() {
+        guard let group = projectGroupPendingDeletion else { return }
+
+        let threadIDs = SidebarThreadGrouping.allThreadIDsForProjectGroup(group, in: codex.threads)
+        let selectedThreadWasDeleted = selectedThread.map { selected in
+            threadIDs.contains(selected.id)
+        } ?? false
+
+        _ = codex.deleteLocalThreadGroup(threadIDs: threadIDs)
+
+        if selectedThreadWasDeleted {
+            selectedThread = codex.threads.first { thread in
+                thread.syncState == .live && !threadIDs.contains(thread.id)
+            }
+        }
+
+        projectGroupPendingDeletion = nil
     }
 
     // Rebuilds sidebar sections only when the source thread array changes.

@@ -365,6 +365,17 @@ extension CodexService {
         sendThreadArchiveRPC(threadId: threadId, unarchive: false)
     }
 
+    func deleteThreadLocally(_ threadId: String) {
+        // Match deleteThread's local behavior without mutating the paired desktop runtime.
+        let descendants = collectDescendantThreadIDs(for: threadId)
+        for childId in descendants {
+            setThreadArchivedLocally(childId, isArchived: true)
+        }
+
+        removeThreadLocally(threadId, persistAsDeleted: true)
+        debugSyncLog("thread deleted locally by user: \(threadId) (cascaded \(descendants.count) children)")
+    }
+
     func renameThread(_ threadId: String, name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         // Optimistic local update.

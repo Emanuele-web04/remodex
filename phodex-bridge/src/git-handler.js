@@ -85,6 +85,8 @@ async function handleGitMethod(method, params, options = {}) {
   switch (method) {
     case "git/status":
       return gitStatus(cwd);
+    case "git/init":
+      return gitInit(cwd);
     case "git/diff":
       return gitDiff(cwd);
     case "git/commit":
@@ -145,6 +147,10 @@ function threadNameSet(params) {
 // ─── Git Status ───────────────────────────────────────────────
 
 async function gitStatus(cwd) {
+  if (!(await isInsideGitWorkTree(cwd))) {
+    return nonRepositoryStatus(cwd);
+  }
+
   const [porcelain, branchInfo, repoRoot] = await Promise.all([
     git(cwd, "status", "--porcelain=v1", "-b"),
     revListCounts(cwd).catch(() => ({ ahead: 0, behind: 0 })),
@@ -166,20 +172,25 @@ async function gitStatus(cwd) {
   const { ahead, behind } = branchInfo;
   const detached = branchLine.includes("HEAD detached") || branchLine.includes("no branch");
   const noUpstream = tracking === null && !detached;
+  const hasHeadCommit = await refExists(cwd, "HEAD").catch(() => false);
+  const hasPushRemote = await pushRemoteAvailable(cwd, tracking).catch(() => false);
   const publishedToRemote = !detached && !!branch && await remoteBranchExists(cwd, branch).catch(() => false);
   const localOnlyCommitCount = await countLocalOnlyCommits(cwd, { detached }).catch(() => 0);
   const state = computeState(dirty, ahead, behind, detached, noUpstream);
-  const canPush = (ahead > 0 || noUpstream) && !detached;
+  const canPush = hasPushRemote && hasHeadCommit && (ahead > 0 || noUpstream) && !detached;
   const diff = await repoDiffTotals(cwd, {
     tracking,
     fileLines,
   }).catch(() => ({ additions: 0, deletions: 0, binaryFiles: 0 }));
 
   return {
+    isRepo: true,
     repoRoot,
     branch,
     tracking,
     dirty,
+    hasHeadCommit,
+    hasPushRemote,
     ahead,
     behind,
     localOnlyCommitCount,
@@ -189,6 +200,29 @@ async function gitStatus(cwd) {
     files,
     diff,
   };
+}
+
+async function gitInit(cwd) {
+  if (await isInsideGitWorkTree(cwd)) {
+    throw gitError("already_git_repository", "This folder is already inside a Git repository.");
+  }
+
+  if (fs.existsSync(path.join(cwd, ".git"))) {
+    throw gitError("git_metadata_exists", "A .git entry already exists in this folder.");
+  }
+
+  try {
+    await git(cwd, "init", "-b", "main");
+  } catch (err) {
+    if (gitInitBranchFlagUnsupported(err)) {
+      await git(cwd, "init");
+      await git(cwd, "symbolic-ref", "HEAD", "refs/heads/main");
+    } else {
+      throw gitError("git_init_failed", err.message || "Git initialization failed.");
+    }
+  }
+
+  return { status: await gitStatus(cwd) };
 }
 
 // ─── Git Diff ─────────────────────────────────────────────────
@@ -347,6 +381,14 @@ async function threadGenerateTitle(params, options = {}) {
 
 async function gitPush(cwd) {
   try {
+    const statusOutput = await git(cwd, "status", "--porcelain=v1", "-b");
+    const branchLine = statusOutput.trim().split("\n").filter(Boolean)[0] || "";
+    const tracking = parseTrackingFromStatus(branchLine);
+    if (!(await pushRemoteAvailable(cwd, tracking))) {
+      throw gitError("no_remote", "Add a Git remote before pushing.");
+    }
+    const remote = trackingRemoteName(tracking) || "origin";
+
     const branchOutput = await git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
     const branch = branchOutput.trim();
 
@@ -364,7 +406,6 @@ async function gitPush(cwd) {
       }
     }
 
-    const remote = "origin";
     const status = await gitStatus(cwd);
     return { branch, remote, status };
   } catch (err) {
@@ -436,11 +477,20 @@ async function gitBranches(cwd) {
     if (isCurrent) current = name;
   }
 
-  const branches = [...branchSet].sort();
-  const defaultBranch = await detectDefaultBranch(cwd, branches);
+  if (!current) {
+    const unbornBranch = await currentBranchFromStatus(cwd).catch(() => null);
+    if (unbornBranch) {
+      current = unbornBranch;
+      if (!branchSet.has(unbornBranch)) {
+        branchSet.add(unbornBranch);
+      }
+    }
+  }
+  const resolvedBranches = [...branchSet].sort();
+  const defaultBranch = await detectDefaultBranch(cwd, resolvedBranches);
 
   return {
-    branches,
+    branches: resolvedBranches,
     branchesCheckedOutElsewhere: [...branchesCheckedOutElsewhere].sort(),
     worktreePathByBranch,
     localCheckoutPath,
@@ -1457,6 +1507,20 @@ function parseOwnerRepo(remoteUrl) {
 // ─── Git Branches With Status ─────────────────────────────────
 
 async function gitBranchesWithStatus(cwd) {
+  const initialStatus = await gitStatus(cwd);
+  if (initialStatus.isRepo === false) {
+    return {
+      branches: [],
+      branchesCheckedOutElsewhere: [],
+      worktreePathByBranch: {},
+      localCheckoutPath: null,
+      current: null,
+      default: null,
+      defaultBranch: null,
+      status: initialStatus,
+    };
+  }
+
   const [branchResult, statusResult] = await Promise.all([
     gitBranches(cwd),
     gitStatus(cwd),
@@ -1753,6 +1817,30 @@ async function remoteBranchExists(cwd, branchName) {
   }
 }
 
+// Uses the branch upstream when one exists; otherwise origin is the publish target.
+async function pushRemoteAvailable(cwd, tracking) {
+  const remoteName = trackingRemoteName(tracking) || "origin";
+  return remoteExists(cwd, remoteName);
+}
+
+async function remoteExists(cwd, remoteName) {
+  try {
+    const output = await git(cwd, "config", "--get", `remote.${remoteName}.url`);
+    return output.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function trackingRemoteName(tracking) {
+  const trimmed = typeof tracking === "string" ? tracking.trim() : "";
+  const slashIndex = trimmed.indexOf("/");
+  if (slashIndex <= 0) {
+    return null;
+  }
+  return trimmed.slice(0, slashIndex);
+}
+
 function sameFilePath(leftPath, rightPath) {
   const normalizedLeft = normalizeExistingPath(leftPath);
   const normalizedRight = normalizeExistingPath(rightPath);
@@ -1854,6 +1942,10 @@ async function repoDiffTotals(cwd, context) {
 
 // Uses upstream when available; otherwise falls back to commits not yet present on any remote.
 async function resolveRepoDiffBase(cwd, tracking) {
+  if (!(await refExists(cwd, "HEAD"))) {
+    return EMPTY_TREE_HASH;
+  }
+
   if (tracking) {
     try {
       return (await git(cwd, "merge-base", "HEAD", "@{u}")).trim();
@@ -2076,6 +2168,9 @@ function parseBranchFromStatus(line) {
   const match = line.match(/^## (.+?)(?:\.{3}|$)/);
   if (!match) return null;
   const branch = match[1].trim();
+  if (branch.startsWith("No commits yet on ")) {
+    return branch.substring("No commits yet on ".length).trim() || null;
+  }
   if (branch === "HEAD (no branch)" || branch.includes("HEAD detached")) return null;
   return branch;
 }
@@ -2124,6 +2219,48 @@ function gitError(errorCode, userMessage) {
   err.errorCode = errorCode;
   err.userMessage = userMessage;
   return err;
+}
+
+function nonRepositoryStatus(cwd) {
+  return {
+    isRepo: false,
+    repoRoot: null,
+    branch: null,
+    tracking: null,
+    dirty: false,
+    hasHeadCommit: false,
+    hasPushRemote: false,
+    ahead: 0,
+    behind: 0,
+    localOnlyCommitCount: 0,
+    state: "not_initialized",
+    canPush: false,
+    publishedToRemote: false,
+    files: [],
+    diff: { additions: 0, deletions: 0, binaryFiles: 0 },
+  };
+}
+
+async function isInsideGitWorkTree(cwd) {
+  try {
+    const output = await git(cwd, "rev-parse", "--is-inside-work-tree");
+    return output.trim() === "true";
+  } catch {
+    return false;
+  }
+}
+
+async function currentBranchFromStatus(cwd) {
+  const output = await git(cwd, "status", "--porcelain=v1", "-b");
+  const branchLine = output.trim().split("\n").filter(Boolean)[0] || "";
+  return parseBranchFromStatus(branchLine);
+}
+
+function gitInitBranchFlagUnsupported(error) {
+  const message = error?.message || "";
+  return message.includes("unknown switch `b'")
+    || message.includes("unknown option `b'")
+    || message.includes("usage: git init");
 }
 
 // Resolves git commands to a concrete local directory.
@@ -2205,6 +2342,8 @@ module.exports = {
     threadGenerateTitle,
     threadNameSet,
     gitBranches,
+    gitBranchesWithStatus,
+    gitInit,
     gitCreateBranch,
     gitCreateWorktree,
     gitCreateManagedWorktree,

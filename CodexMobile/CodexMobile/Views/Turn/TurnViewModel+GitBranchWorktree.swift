@@ -601,6 +601,17 @@ extension TurnViewModel {
 
     func applyGitRepoSync(_ result: GitRepoSyncResult) {
         gitRepoSync = result
+        guard result.isGitRepository else {
+            currentGitBranch = ""
+            availableGitBranchTargets = []
+            gitBranchesCheckedOutElsewhere = []
+            gitWorktreePathsByBranch = [:]
+            gitLocalCheckoutPath = nil
+            gitDefaultBranch = ""
+            selectedGitBaseBranch = ""
+            return
+        }
+
         if let branch = result.currentBranch, !branch.isEmpty {
             currentGitBranch = branch
         }

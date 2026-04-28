@@ -123,6 +123,19 @@ enum SidebarThreadGrouping {
         ).map(\.id)
     }
 
+    // Includes archived and pinned chats so local project removal fully hides the project on this device.
+    static func allThreadIDsForProjectGroup(_ group: SidebarThreadGroup, in threads: [CodexThread]) -> [String] {
+        guard group.kind == .project else {
+            return []
+        }
+
+        return sortThreadsByRecentActivity(
+            threads.filter { thread in
+                projectGroupID(for: thread) == group.id
+            }
+        ).map(\.id)
+    }
+
     private static func makeProjectGroup(projectKey: String, threads: [CodexThread]) -> SidebarThreadGroup {
         let sortedThreads = sortThreadsByRecentActivity(threads)
         let representativeThread = sortedThreads.first

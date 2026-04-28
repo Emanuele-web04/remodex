@@ -26,6 +26,9 @@ enum GitActionsError: LocalizedError {
         switch code {
         case "nothing_to_commit": return "Nothing to commit."
         case "nothing_to_push": return "Nothing to push."
+        case "already_git_repository": return fallback ?? "This folder is already inside a Git repository."
+        case "git_metadata_exists": return fallback ?? "A .git entry already exists in this folder."
+        case "git_init_failed": return fallback ?? "Could not initialize Git in this folder."
         case "push_rejected": return "Push rejected. Pull changes first."
         case "branch_is_main": return "Cannot operate on the main branch."
         case "protected_branch": return "This branch is protected."
@@ -88,6 +91,15 @@ final class GitActionsService {
         let json = try await request(method: "git/status")
         let result = GitRepoSyncResult(from: json)
         rememberRepoRoot(from: result)
+        return result
+    }
+
+    func initializeRepository() async throws -> GitInitResult {
+        let json = try await request(method: "git/init")
+        let result = GitInitResult(from: json)
+        if let status = result.status {
+            rememberRepoRoot(from: status)
+        }
         return result
     }
 

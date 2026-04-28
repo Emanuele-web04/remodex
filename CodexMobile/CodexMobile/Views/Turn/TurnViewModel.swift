@@ -171,6 +171,20 @@ final class TurnViewModel {
     var gitDefaultBranch = ""
     var gitRepoSync: GitRepoSyncResult? = nil
     var gitSyncState: String? { gitRepoSync?.state }
+    var isGitRepositoryInitialized: Bool { gitRepoSync?.isGitRepository == true }
+    var disabledGitActions: Set<TurnGitActionKind> {
+        var disabledActions: Set<TurnGitActionKind> = []
+        if !canCreatePullRequest {
+            disabledActions.insert(.createPR)
+        }
+        if gitRepoSync?.canPush != true {
+            disabledActions.insert(.push)
+        }
+        if gitRepoSync?.hasPushRemote != true {
+            disabledActions.insert(.commitAndPush)
+        }
+        return disabledActions
+    }
     // Keeps PR creation tied to live Git state instead of chat-local remembered branch state.
     var createPullRequestValidationMessage: String? {
         guard let repoSync = gitRepoSync else {
@@ -2102,6 +2116,16 @@ final class TurnViewModel {
 
             do {
                 switch action {
+                case .initialize:
+                    let result = try await gitService.initializeRepository()
+                    if let status = result.status {
+                        applyGitRepoSync(status)
+                    }
+                    let branchesResult = try? await gitService.branchesWithStatus()
+                    if let branchesResult {
+                        applyGitBranchTargets(branchesResult)
+                    }
+
                 case .syncNow:
                     let result = try await gitService.status()
                     applyGitRepoSync(result)
@@ -2141,6 +2165,12 @@ final class TurnViewModel {
                     )
 
                 case .commitAndPush:
+                    guard gitRepoSync?.hasPushRemote == true else {
+                        throw GitActionsError.bridgeError(
+                            code: "no_remote",
+                            message: "Add a Git remote before using Commit & Push."
+                        )
+                    }
                     _ = try await gitService.commit(
                         message: await generatedGitCommitMessageOrNil(
                             gitService: gitService,

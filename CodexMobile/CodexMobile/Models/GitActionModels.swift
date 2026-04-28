@@ -73,10 +73,13 @@ struct GitChangedFile: Equatable, Sendable {
 }
 
 struct GitRepoSyncResult: Sendable {
+    let isGitRepository: Bool
     let repoRoot: String?
     let currentBranch: String?
     let trackingBranch: String?
     let isDirty: Bool
+    let hasHeadCommit: Bool
+    let hasPushRemote: Bool
     let aheadCount: Int
     let behindCount: Int
     let localOnlyCommitCount: Int
@@ -87,10 +90,13 @@ struct GitRepoSyncResult: Sendable {
     let repoDiffTotals: GitDiffTotals?
 
     init(from json: [String: JSONValue]) {
+        self.isGitRepository = json["isRepo"]?.boolValue ?? true
         self.repoRoot = json["repoRoot"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.currentBranch = json["branch"]?.stringValue
         self.trackingBranch = json["tracking"]?.stringValue
         self.isDirty = json["dirty"]?.boolValue ?? false
+        self.hasHeadCommit = json["hasHeadCommit"]?.boolValue ?? true
+        self.hasPushRemote = json["hasPushRemote"]?.boolValue ?? true
         self.aheadCount = json["ahead"]?.intValue ?? 0
         self.behindCount = json["behind"]?.intValue ?? 0
         self.localOnlyCommitCount = json["localOnlyCommitCount"]?.intValue ?? 0
@@ -102,6 +108,18 @@ struct GitRepoSyncResult: Sendable {
             return GitChangedFile(from: object)
         } ?? []
         self.repoDiffTotals = GitDiffTotals(from: json["diff"]?.objectValue)
+    }
+}
+
+struct GitInitResult: Sendable {
+    let status: GitRepoSyncResult?
+
+    init(from json: [String: JSONValue]) {
+        if let statusObj = json["status"]?.objectValue {
+            self.status = GitRepoSyncResult(from: statusObj)
+        } else {
+            self.status = nil
+        }
     }
 }
 
@@ -337,6 +355,7 @@ private extension GitBranchesWithStatusResult {
 // MARK: - Action kind
 
 enum TurnGitActionKind: CaseIterable, Sendable {
+    case initialize
     case syncNow
     case commit
     case push
@@ -346,6 +365,7 @@ enum TurnGitActionKind: CaseIterable, Sendable {
 
     var title: String {
         switch self {
+        case .initialize: return "Initialize Git"
         case .syncNow: return "Update"
         case .commit: return "Commit"
         case .push: return "Push"

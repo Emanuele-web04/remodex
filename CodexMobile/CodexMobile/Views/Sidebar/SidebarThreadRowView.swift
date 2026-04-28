@@ -265,7 +265,7 @@ struct SidebarThreadRowView: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onDelete()
             } label: {
-                Label("Delete", systemImage: "trash")
+                Label("Remove from Phone", systemImage: "trash")
             }
         }
     }

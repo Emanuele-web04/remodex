@@ -19,6 +19,7 @@ struct SidebarThreadListView: View {
     let onSelectThread: (CodexThread) -> Void
     let onCreateThreadInProjectGroup: (SidebarThreadGroup) -> Void
     var onArchiveProjectGroup: ((SidebarThreadGroup) -> Void)? = nil
+    var onDeleteProjectGroup: ((SidebarThreadGroup) -> Void)? = nil
     var onRenameThread: ((CodexThread, String) -> Void)? = nil
     var onPinToggleThread: ((CodexThread) -> Void)? = nil
     var onArchiveToggleThread: ((CodexThread) -> Void)? = nil
@@ -229,6 +230,15 @@ struct SidebarThreadListView: View {
                         onArchiveProjectGroup(group)
                     } label: {
                         Label("Archive Project", systemImage: "archivebox")
+                    }
+                }
+
+                if let onDeleteProjectGroup {
+                    Button(role: .destructive) {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onDeleteProjectGroup(group)
+                    } label: {
+                        Label("Remove from Phone", systemImage: "trash")
                     }
                 }
             }
