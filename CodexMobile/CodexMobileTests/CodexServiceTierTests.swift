@@ -91,6 +91,16 @@ final class CodexServiceTierTests: XCTestCase {
             "supportedReasoningEfforts": ["medium"]
           },
           {
+            "slug": "gpt-5.3-codex",
+            "name": "GPT-5.3 Codex",
+            "supportedReasoningEfforts": ["medium"]
+          },
+          {
+            "slug": "gpt-5.3-codex-spark",
+            "name": "GPT-5.3 Codex Spark",
+            "supportedReasoningEfforts": ["medium"]
+          },
+          {
             "slug": "unknown-model",
             "name": "Unknown Model",
             "supportedReasoningEfforts": ["medium"]
@@ -103,6 +113,8 @@ final class CodexServiceTierTests: XCTestCase {
         XCTAssertTrue(models[0].supportsFastMode)
         XCTAssertTrue(models[1].supportsFastMode)
         XCTAssertFalse(models[2].supportsFastMode)
+        XCTAssertFalse(models[3].supportsFastMode)
+        XCTAssertFalse(models[4].supportsFastMode)
     }
 
     func testSwitchingBetweenFastCapableModelsKeepsSelectedServiceTier() {
@@ -129,7 +141,7 @@ final class CodexServiceTierTests: XCTestCase {
         let service = makeService()
         service.availableModels = [
             makeModel(id: "gpt-5.5", supportsFastMode: true),
-            makeModel(id: "gpt-5.1-codex-mini", supportsFastMode: false),
+            makeModel(id: "gpt-5.3-codex", supportsFastMode: false),
         ]
 
         service.setSelectedModelId("gpt-5.5")
@@ -137,7 +149,7 @@ final class CodexServiceTierTests: XCTestCase {
         XCTAssertEqual(service.selectedServiceTier, .fast)
         XCTAssertEqual(service.effectiveServiceTier(), .fast)
 
-        service.setSelectedModelId("gpt-5.1-codex-mini")
+        service.setSelectedModelId("gpt-5.3-codex")
 
         XCTAssertNil(service.selectedServiceTier)
         XCTAssertNil(service.effectiveServiceTier())
