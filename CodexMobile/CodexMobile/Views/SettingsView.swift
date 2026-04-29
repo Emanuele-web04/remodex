@@ -105,18 +105,20 @@ struct SettingsView: View {
                 .disabled(runtimeReasoningOptions.isEmpty)
             }
 
-            HStack {
-                Text("Speed")
-                Spacer()
-                Picker("Speed", selection: runtimeServiceTierSelection) {
-                    Text("Normal").tag(runtimeNormalValue)
-                    ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
-                        Text(tier.displayName).tag(tier.rawValue)
+            if codex.selectedModelSupportsServiceTier(.fast) {
+                HStack {
+                    Text("Speed")
+                    Spacer()
+                    Picker("Speed", selection: runtimeServiceTierSelection) {
+                        Text("Normal").tag(runtimeNormalValue)
+                        ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
+                            Text(tier.displayName).tag(tier.rawValue)
+                        }
                     }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .tint(settingsAccentColor)
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .tint(settingsAccentColor)
             }
 
             HStack {

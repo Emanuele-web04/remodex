@@ -111,6 +111,39 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         XCTAssertEqual(service.effectiveServiceTier(for: "thread-new"), .fast)
     }
 
+    func testStartThreadDropsFastRuntimeOverrideWhenSelectedModelDoesNotSupportFastMode() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.availableModels = [makeLowOnlyModel()]
+        service.setSelectedModelId("gpt-5.4-low")
+
+        var capturedThreadStartParams: [JSONValue] = []
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/start")
+            capturedThreadStartParams.append(params ?? .null)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "id": .string("thread-new"),
+                        "cwd": .string("/tmp/project"),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let override = CodexThreadRuntimeOverride(
+            reasoningEffort: "low",
+            serviceTierRawValue: "fast",
+            overridesReasoning: true,
+            overridesServiceTier: true
+        )
+        _ = try await service.startThread(runtimeOverride: override)
+
+        XCTAssertNil(capturedThreadStartParams.first?.objectValue?["serviceTier"]?.stringValue)
+    }
+
     func testUnsupportedThreadReasoningOverrideIsNotReportedAsActive() {
         let service = makeService()
         service.availableModels = [makeLowOnlyModel()]
@@ -137,6 +170,7 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
             displayName: "GPT-5.4",
             description: "Test model",
             isDefault: true,
+            supportsFastMode: true,
             supportedReasoningEfforts: [
                 CodexReasoningEffortOption(reasoningEffort: "medium", description: "Medium"),
                 CodexReasoningEffortOption(reasoningEffort: "high", description: "High"),

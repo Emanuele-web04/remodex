@@ -105,7 +105,7 @@ extension CodexService {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
         // Brand-new chats start from app defaults; per-chat overrides are inherited only on continuation.
         let explicitServiceTier = runtimeOverride?.overridesServiceTier == true
-            ? runtimeOverride?.serviceTierRawValue
+            ? normalizedServiceTierForSelectedModel(runtimeOverride?.serviceTier)?.rawValue
             : runtimeServiceTierForTurn()
         var includesServiceTier = explicitServiceTier != nil
 

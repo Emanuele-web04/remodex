@@ -20,18 +20,28 @@ struct CodexReasoningEffortOption: Identifiable, Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case reasoningEffort
         case reasoningEffortSnake = "reasoning_effort"
+        case value
+        case label
         case description
     }
 
     init(from decoder: Decoder) throws {
+        if let singleValue = try? decoder.singleValueContainer().decode(String.self) {
+            reasoningEffort = singleValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            description = ""
+            return
+        }
+
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
         let camelEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
         let snakeEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffortSnake)
-        let effort = camelEffort ?? snakeEffort ?? ""
+        let valueEffort = try container.decodeIfPresent(String.self, forKey: .value)
+        let effort = camelEffort ?? snakeEffort ?? valueEffort ?? ""
 
         reasoningEffort = effort.trimmingCharacters(in: .whitespacesAndNewlines)
-        description = (try container.decodeIfPresent(String.self, forKey: .description) ?? "")
+        let label = try container.decodeIfPresent(String.self, forKey: .label)
+        description = (try container.decodeIfPresent(String.self, forKey: .description) ?? label ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
