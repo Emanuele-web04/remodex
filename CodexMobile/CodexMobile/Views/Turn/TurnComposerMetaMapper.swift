@@ -13,6 +13,7 @@ enum TurnComposerMetaMapper {
     // Returns models sorted using the explicit product order expected by the UI.
     static func orderedModels(from models: [CodexModelOption]) -> [CodexModelOption] {
         let preferredOrder: [String] = [
+            "gpt-5.5",
             "gpt-5.1-codex-mini",
             "gpt-5.2",
             "gpt-5.1-codex-max",
@@ -36,6 +37,8 @@ enum TurnComposerMetaMapper {
     // Normalizes backend ids into consistent menu labels.
     static func modelTitle(for model: CodexModelOption) -> String {
         switch model.model.lowercased() {
+        case "gpt-5.5":
+            return "GPT-5.5"
         case "gpt-5.3-codex":
             return "GPT-5.3-Codex"
         case "gpt-5.2-codex":
@@ -79,6 +82,8 @@ enum TurnComposerMetaMapper {
             .lowercased()
 
         switch normalized {
+        case "none":
+            return "None"
         case "minimal", "low":
             return "Low"
         case "medium":
@@ -104,16 +109,18 @@ struct TurnComposerReasoningDisplayOption: Identifiable {
     // Provides deterministic ordering for reasoning rows.
     var rank: Int {
         switch title {
+        case "None":
+            return -1
         case "Low":
             return 0
         case "Medium":
             return 1
         case "High":
             return 2
-        case "Exceptional":
+        case "Extra High", "Exceptional":
             return 3
         default:
-            return 4
+            return -2
         }
     }
 }
