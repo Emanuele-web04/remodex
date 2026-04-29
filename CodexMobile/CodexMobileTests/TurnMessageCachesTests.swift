@@ -156,6 +156,21 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertFalse(visibleText.contains("![real](/Users/example/real.png)"))
     }
 
+    func testAssistantMarkdownImageReferenceParserReadsEscapedAnglePathWithClosingParenthesis() {
+        let path = "/Users/example/generated images/final)%20 mock.png"
+        let markdownPath = CodexService.markdownImagePath(path)
+        let text = "![Generated image](\(markdownPath))"
+
+        let references = AssistantMarkdownImageReferenceParser.references(in: text)
+
+        XCTAssertEqual(markdownPath, "</Users/example/generated images/final%29%2520 mock.png>")
+        XCTAssertEqual(references.map(\.path), [path])
+        XCTAssertEqual(
+            CodexService.markdownImagePath("/Users/example/final%20mock.png"),
+            "</Users/example/final%2520mock.png>"
+        )
+    }
+
     func testMessageRowRenderModelCachesAssistantImageReferences() {
         let text = "Before\n![wing](/Users/example/wing.png)\nAfter"
         let message = CodexMessage(

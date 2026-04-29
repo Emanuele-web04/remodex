@@ -76,7 +76,7 @@ extension CodexService {
             guard let turnObject = turnValue.objectValue else { continue }
             let turnID = turnObject["id"]?.stringValue
             let turnTimestamp = decodeHistoryTimestamp(from: turnObject)
-            let turnCompleted = isCompletedHistoryTurn(turnObject)
+            let turnCompleted = historyTurnTerminalState(turnObject) == .completed
             let items = turnObject["items"]?.arrayValue ?? []
 
             for itemValue in items {
@@ -132,6 +132,21 @@ extension CodexService {
                         itemId: itemID,
                         createdAt: timestamp,
                         attachments: imageAttachments
+                    )
+
+                case "imagegeneration", "imagegenerationcall", "imagegenerationend", "imageview":
+                    guard let generatedImageText = decodeGeneratedImageMarkdown(from: itemObject) else {
+                        continue
+                    }
+                    appendHistoryMessage(
+                        to: &result,
+                        role: .assistant,
+                        kind: .chat,
+                        text: generatedImageText,
+                        threadId: threadId,
+                        turnId: turnID,
+                        itemId: itemID,
+                        createdAt: timestamp
                     )
 
                 case "reasoning":
@@ -289,6 +304,24 @@ extension CodexService {
         return result
     }
 
+    // Extracts persisted turn outcomes from canonical history so render grouping survives app relaunch.
+    func decodeTurnTerminalStatesFromThreadRead(_ threadObject: [String: JSONValue]) -> [String: CodexTurnTerminalState] {
+        let turns = threadObject["turns"]?.arrayValue ?? []
+        var result: [String: CodexTurnTerminalState] = [:]
+
+        for turnValue in turns {
+            guard let turnObject = turnValue.objectValue,
+                  let turnID = turnObject["id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !turnID.isEmpty,
+                  let terminalState = historyTurnTerminalState(turnObject) else {
+                continue
+            }
+            result[turnID] = terminalState
+        }
+
+        return result
+    }
+
     func decodeHistoryBaseDate(from threadObject: [String: JSONValue]) -> Date {
         if let rawCreatedAt = threadObject["createdAt"]?.doubleValue {
             return CodexTimestampParser.decodeUnixTimestamp(rawCreatedAt)
@@ -379,6 +412,45 @@ extension CodexService {
         }
 
         return ""
+    }
+
+    func decodeGeneratedImageMarkdown(from itemObject: [String: JSONValue]) -> String? {
+        let imagePath = firstNonEmptyString([
+            itemObject["saved_path"]?.stringValue,
+            itemObject["savedPath"]?.stringValue,
+            itemObject["path"]?.stringValue,
+            itemObject["file_path"]?.stringValue
+        ])?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let imagePath, Self.isGeneratedImagePath(imagePath) else {
+            return nil
+        }
+
+        return "![Generated image](\(Self.markdownImagePath(imagePath)))"
+    }
+
+    nonisolated static func isGeneratedImagePath(_ path: String) -> Bool {
+        let lowercased = path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return lowercased.hasSuffix(".png")
+            || lowercased.hasSuffix(".jpg")
+            || lowercased.hasSuffix(".jpeg")
+            || lowercased.hasSuffix(".gif")
+            || lowercased.hasSuffix(".webp")
+            || lowercased.hasSuffix(".heic")
+            || lowercased.hasSuffix(".heif")
+    }
+
+    nonisolated static func markdownImagePath(_ path: String) -> String {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.contains(")") || trimmed.contains(" ") || trimmed.contains("%") {
+            let escaped = trimmed
+                .replacingOccurrences(of: "%", with: "%25")
+                .replacingOccurrences(of: ">", with: "%3E")
+                .replacingOccurrences(of: ")", with: "%29")
+            return "<\(escaped)>"
+        }
+        return trimmed
     }
 
     // Extracts user images from history payload and converts them into renderable thumbnail attachments.
@@ -1426,6 +1498,10 @@ extension CodexService {
     }
 
     func isCompletedHistoryTurn(_ turnObject: [String: JSONValue]) -> Bool {
+        historyTurnTerminalState(turnObject) == .completed
+    }
+
+    func historyTurnTerminalState(_ turnObject: [String: JSONValue]) -> CodexTurnTerminalState? {
         let statusObject = turnObject["status"]?.objectValue
         let rawStatus = firstNonEmptyString([
             turnObject["status"]?.stringValue,
@@ -1435,11 +1511,7 @@ extension CodexService {
             turnObject["result"]?.stringValue,
         ]) ?? ""
 
-        guard let terminalState = threadTerminalState(from: normalizeThreadStatusType(rawStatus)) else {
-            return false
-        }
-
-        return terminalState == .completed
+        return threadTerminalState(from: normalizeThreadStatusType(rawStatus))
     }
 
     // Parses collabAgentToolCall payloads into a stable summary row the timeline can render.

@@ -652,59 +652,29 @@ private struct AssistantMarkdownImagePreviewButton: View {
     let currentWorkingDirectory: String?
 
     @Environment(CodexService.self) private var codex
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isLoading = false
+    @State private var loadedPreview: PreviewImagePayload?
     @State private var previewImage: PreviewImagePayload?
     @State private var previewError: String?
+    @State private var showsPreviewErrorAlert = false
+    @State private var shouldOpenWhenLoaded = false
+
+    private static let cornerRadius: CGFloat = 18
+    private static let maxWidth: CGFloat = 360
+    private static let placeholderHeight: CGFloat = 200
 
     var body: some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            loadPreview()
+            openPreview()
         } label: {
-            HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(.secondarySystemFill))
-                    if isLoading {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "photo")
-                            .font(AppFont.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .frame(width: 32, height: 32)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(reference.displayTitle)
-                        .font(AppFont.caption(weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text(reference.fileName)
-                        .font(AppFont.mono(.caption))
-                        .foregroundStyle(.primary.opacity(0.78))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-
-                Spacer(minLength: 0)
-
-                Image(systemName: "chevron.right")
-                    .font(AppFont.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.quaternary)
-            }
-            .padding(8)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(.secondarySystemBackground).opacity(0.55))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color(.separator).opacity(0.55), lineWidth: 1)
-            )
+            content
         }
         .buttonStyle(.plain)
-        .disabled(isLoading)
+        .task(id: reference.path) {
+            loadPreview(openWhenFinished: false)
+        }
         .fullScreenCover(item: $previewImage) { payload in
             ZoomableImagePreviewScreen(
                 payload: payload,
@@ -720,9 +690,134 @@ private struct AssistantMarkdownImagePreviewButton: View {
         })
     }
 
-    private func loadPreview() {
-        guard !isLoading else { return }
+    @ViewBuilder
+    private var content: some View {
+        if let loadedPreview {
+            loadedImage(loadedPreview)
+        } else if previewError != nil {
+            errorPlaceholder
+        } else {
+            loadingPlaceholder
+        }
+    }
+
+    private func loadedImage(_ payload: PreviewImagePayload) -> some View {
+        Image(uiImage: payload.image)
+            .resizable()
+            .scaledToFit()
+            .frame(maxWidth: Self.maxWidth, alignment: .leading)
+            .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+            )
+            .shadow(
+                color: Color.black.opacity(colorScheme == .dark ? 0.35 : 0.10),
+                radius: 14,
+                y: 6
+            )
+            .contentShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+    }
+
+    private var loadingPlaceholder: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(.secondarySystemBackground),
+                            Color(.tertiarySystemBackground)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay {
+                    ShimmerMask()
+                        .mask(
+                            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                        )
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                        .stroke(Color.primary.opacity(0.05), lineWidth: 0.5)
+                )
+
+            VStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(AppFont.system(size: 24, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .symbolEffect(.pulse, options: .repeating)
+
+                Text("Generating preview")
+                    .font(AppFont.caption(weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: Self.maxWidth)
+        .frame(height: Self.placeholderHeight)
+    }
+
+    private var errorPlaceholder: some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(Color.orange.opacity(0.14))
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(AppFont.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+            .frame(width: 32, height: 32)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Image unavailable")
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+                Text(reference.fileName)
+                    .font(AppFont.mono(.caption))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: Self.maxWidth, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .fill(Color(.secondarySystemBackground))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+        )
+    }
+
+    private func openPreview() {
+        if let loadedPreview {
+            previewImage = loadedPreview
+            return
+        }
+        shouldOpenWhenLoaded = true
+        loadPreview(openWhenFinished: true)
+    }
+
+    private func loadPreview(openWhenFinished: Bool) {
+        if isLoading {
+            shouldOpenWhenLoaded = shouldOpenWhenLoaded || openWhenFinished
+            return
+        }
+        if let loadedPreview {
+            if openWhenFinished {
+                previewImage = loadedPreview
+            }
+            return
+        }
         isLoading = true
+        if openWhenFinished {
+            shouldOpenWhenLoaded = true
+        }
 
         Task { @MainActor in
             defer { isLoading = false }
@@ -734,29 +829,43 @@ private struct AssistantMarkdownImagePreviewButton: View {
                     cachedMetadata: cachedPreview?.metadata
                 )
                 if result.isNotModified, let cachedPreview {
-                    previewImage = PreviewImagePayload(
+                    let payload = PreviewImagePayload(
                         image: cachedPreview.payload.image,
                         title: cachedPreview.metadata.fileName.isEmpty ? reference.fileName : cachedPreview.metadata.fileName
                     )
+                    finishLoading(payload)
                     return
                 }
 
                 let decodedImage = try await WorkspaceImagePreviewCache.shared.preview(for: result)
-                previewImage = PreviewImagePayload(
+                let payload = PreviewImagePayload(
                     image: decodedImage.image,
                     title: result.fileName.isEmpty ? reference.fileName : result.fileName
                 )
+                finishLoading(payload)
             } catch {
+                let shouldAlert = shouldOpenWhenLoaded
                 previewError = error.localizedDescription
+                shouldOpenWhenLoaded = false
+                showsPreviewErrorAlert = shouldAlert
             }
+        }
+    }
+
+    private func finishLoading(_ payload: PreviewImagePayload) {
+        loadedPreview = payload
+        if shouldOpenWhenLoaded {
+            previewImage = payload
+            shouldOpenWhenLoaded = false
         }
     }
 
     private var previewErrorIsPresented: Binding<Bool> {
         Binding(
-            get: { previewError != nil },
+            get: { previewError != nil && showsPreviewErrorAlert },
             set: { isPresented in
                 if !isPresented {
+                    showsPreviewErrorAlert = false
                     previewError = nil
                 }
             }
@@ -1165,15 +1274,6 @@ struct MessageRow: View, Equatable {
             && visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && inferredQuestionnaire == nil
             && mermaidContent == nil
-        // Prefer copying the exact assistant block the user can see instead of the
-        // whole non-user turn aggregate assembled by the timeline footer cache.
-        let assistantCopyText: String? = {
-            let trimmedVisibleText = visibleAssistantText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedVisibleText.isEmpty {
-                return trimmedVisibleText
-            }
-            return assistantBlockAccessoryState?.copyText
-        }()
         let usesCachedAssistantImageContent = !message.isStreaming && visibleAssistantText == bodyText
         let assistantImageReferences = usesCachedAssistantImageContent
             ? renderModel.assistantImageReferences
@@ -1184,6 +1284,15 @@ struct MessageRow: View, Equatable {
         let hasRenderableAssistantContent = !visibleAssistantTextWithoutImageSyntax.isEmpty
             || proposedPlan != nil
             || !assistantImageReferences.isEmpty
+        // Copy only the visible prose. Image-only artifact rows should not expose a
+        // second copy affordance for the hidden markdown image syntax.
+        let assistantCopyText: String? = {
+            let trimmedVisibleText = visibleAssistantTextWithoutImageSyntax.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedVisibleText.isEmpty {
+                return trimmedVisibleText
+            }
+            return assistantImageReferences.isEmpty ? assistantBlockAccessoryState?.copyText : nil
+        }()
         return VStack(alignment: .leading, spacing: 8) {
             if let commentContent, commentContent.hasFindings {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1631,7 +1740,7 @@ struct MessageRow: View, Equatable {
         }
 
         assistantDisplayUpdateTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 80_000_000)
+            try? await Task.sleep(nanoseconds: 100_000_000)
             guard !Task.isCancelled else { return }
             throttledAssistantDisplayText = pendingAssistantDisplayText ?? nextText
             assistantDisplayUpdateTask = nil
@@ -2104,7 +2213,8 @@ private actor WorkspaceImagePreviewCache {
 
     private func cacheKey(for metadata: WorkspaceImageMetadata) -> String {
         let mtimeMs = metadata.mtimeMs.map { String($0.bitPattern) } ?? "missing"
-        return "\(metadata.path)|\(metadata.byteLength)|\(mtimeMs)"
+        let previewMax = metadata.previewMaxPixelDimension.map(String.init) ?? "original"
+        return "\(metadata.path)|\(metadata.byteLength)|\(mtimeMs)|\(previewMax)"
     }
 
     private func rememberMetadata(_ metadata: WorkspaceImageMetadata) {
