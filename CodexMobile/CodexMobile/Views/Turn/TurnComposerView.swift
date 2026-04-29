@@ -584,7 +584,7 @@ private struct ComposerPreviewContent: View {
             displayName: "GPT-5.3-Codex",
             description: "Preview model",
             isDefault: false,
-            supportsFastMode: false,
+            supportsFastMode: true,
             supportedReasoningEfforts: [
                 CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
                 CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),

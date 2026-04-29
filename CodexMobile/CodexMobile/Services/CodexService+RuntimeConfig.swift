@@ -413,6 +413,16 @@ extension CodexService {
             || message.contains("onrequest")
             || message.contains("on-request")
     }
+
+    func normalizedServiceTierForSelectedModel(_ serviceTier: CodexServiceTier?) -> CodexServiceTier? {
+        guard let serviceTier else {
+            return nil
+        }
+        guard let selectedModel = selectedModelOption() else {
+            return serviceTier
+        }
+        return selectedModel.supportsServiceTier(serviceTier) ? serviceTier : nil
+    }
 }
 
 private extension CodexService {
@@ -494,16 +504,6 @@ private extension CodexService {
         }
 
         return nil
-    }
-
-    func normalizedServiceTierForSelectedModel(_ serviceTier: CodexServiceTier?) -> CodexServiceTier? {
-        guard let serviceTier else {
-            return nil
-        }
-        guard let selectedModel = selectedModelOption() else {
-            return serviceTier
-        }
-        return selectedModel.supportsServiceTier(serviceTier) ? serviceTier : nil
     }
 
     func selectedGitWriterModelOption(
