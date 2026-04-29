@@ -105,6 +105,15 @@ extension CodexService {
         }
 
         let itemType = normalizedItemType(itemObject["type"]?.stringValue ?? "")
+        if isCompletedGeneratedImageItemType(itemType) {
+            appendCompletedGeneratedImageItem(
+                itemObject: itemObject,
+                paramsObject: paramsObject,
+                eventObject: eventObject
+            )
+            return
+        }
+
         if handleStructuredItemLifecycle(
             itemObject: itemObject,
             paramsObject: paramsObject,
@@ -154,6 +163,53 @@ extension CodexService {
             itemId: context.identity.itemId,
             text: text
         )
+    }
+
+    func isCompletedGeneratedImageItemType(_ itemType: String) -> Bool {
+        itemType == "imagegeneration"
+            || itemType == "imagegenerationcall"
+            || itemType == "imagegenerationend"
+            || itemType == "imageview"
+    }
+
+    // Converts live generated-image completion items into the same markdown preview used by history.
+    func appendCompletedGeneratedImageItem(
+        itemObject: IncomingParamsObject,
+        paramsObject: IncomingParamsObject,
+        eventObject: IncomingParamsObject?
+    ) {
+        let itemType = normalizedItemType(itemObject["type"]?.stringValue ?? "")
+        let itemId = extractAssistantMessageItemID(
+            paramsObject: paramsObject,
+            eventObject: eventObject,
+            itemObject: itemObject
+        ) ?? ""
+        let imagePath = firstNonEmptyString([
+            firstStringValue(in: itemObject, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: eventObject, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: paramsObject, keys: ["saved_path", "savedPath", "path", "file_path"])
+        ])
+        guard let imagePath, Self.isGeneratedImagePath(imagePath) else {
+            debugRuntimeLog("generated image item dropped type=\(itemType) item=\(itemId) reason=missing-path")
+            return
+        }
+
+        guard let context = resolveAssistantEventContext(
+            paramsObject: paramsObject,
+            eventObject: eventObject,
+            itemObject: itemObject
+        ) else {
+            debugRuntimeLog("generated image item dropped type=\(itemType) item=\(itemId) path=\(URL(fileURLWithPath: imagePath).lastPathComponent) reason=missing-context")
+            return
+        }
+
+        appendGeneratedImageReference(
+            threadId: context.threadId,
+            turnId: context.identity.turnId,
+            itemId: context.identity.itemId,
+            imagePath: imagePath
+        )
+        debugRuntimeLog("generated image item appended type=\(itemType) thread=\(context.threadId) turn=\(context.identity.turnId ?? "") item=\(context.identity.itemId ?? "") path=\(URL(fileURLWithPath: imagePath).lastPathComponent)")
     }
 
     // Creates streaming assistant placeholder when an assistant item starts.

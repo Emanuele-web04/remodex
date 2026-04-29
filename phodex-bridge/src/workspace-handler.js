@@ -2,18 +2,22 @@
 // Purpose: Executes workspace-scoped reverse patch previews/applies without touching unrelated repo changes.
 // Layer: Bridge handler
 // Exports: handleWorkspaceRequest
-// Depends on: child_process, fs, os, path, ./git-handler
+// Depends on: child_process, fs, os, path, ./codex-home, ./git-handler
 
 const { execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { promisify } = require("util");
+const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const { gitStatus } = require("./git-handler");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_IMAGE_READ_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_PREVIEW_READ_BYTES = 2 * 1024 * 1024;
+const MIN_IMAGE_PREVIEW_PIXEL_DIMENSION = 128;
+const MAX_IMAGE_PREVIEW_PIXEL_DIMENSION = 3_200;
 const IMAGE_MIME_TYPES_BY_EXTENSION = new Map([
   [".jpg", "image/jpeg"],
   [".jpeg", "image/jpeg"],
@@ -102,7 +106,7 @@ async function workspaceReadImage(params) {
 
   const [realImagePath, realGeneratedImagesRoot] = await Promise.all([
     realpathOrNull(imagePath),
-    realpathOrNull(path.join(os.homedir(), ".codex", "generated_images")),
+    realpathOrNull(resolveCodexGeneratedImagesRoot()),
   ]);
   if (!realImagePath) {
     throw workspaceError("image_not_found", "The image file no longer exists on this Mac.");
@@ -121,44 +125,97 @@ async function workspaceReadImage(params) {
   if (!stat.isFile()) {
     throw workspaceError("image_not_found", "The image path is not a file.");
   }
-  if (stat.size > MAX_IMAGE_READ_BYTES) {
+  const includeData = params.includeData !== false && params.metadataOnly !== true;
+  const maxPixelDimension = normalizedPreviewPixelDimension(params);
+  if (stat.size > MAX_IMAGE_READ_BYTES && !maxPixelDimension) {
     throw workspaceError(
       "image_too_large",
       "This image is too large to send to the phone. Open it on the Mac or move a smaller preview into the workspace."
     );
   }
 
-  const includeData = params.includeData !== false && params.metadataOnly !== true;
   const result = {
     path: realImagePath,
     fileName: path.basename(realImagePath),
     mimeType,
     byteLength: stat.size,
     mtimeMs: stat.mtimeMs,
+    previewMaxPixelDimension: maxPixelDimension || undefined,
   };
   if (!includeData) {
     return result;
   }
-  if (isUnchangedImageRead(params, stat)) {
+  if (isUnchangedImageRead(params, stat, maxPixelDimension)) {
     return {
       ...result,
       notModified: true,
     };
   }
 
-  const data = await fs.promises.readFile(realImagePath);
+  const data = maxPixelDimension
+    ? await readPreviewImageData(realImagePath, maxPixelDimension)
+    : await fs.promises.readFile(realImagePath);
   return {
     ...result,
-    byteLength: data.length,
+    dataByteLength: data.length,
     dataBase64: data.toString("base64"),
   };
 }
 
-function isUnchangedImageRead(params, stat) {
+function normalizedPreviewPixelDimension(params) {
+  const requested = Number(params.maxPixelDimension || params.previewMaxPixelDimension);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return null;
+  }
+  return Math.min(
+    MAX_IMAGE_PREVIEW_PIXEL_DIMENSION,
+    Math.max(MIN_IMAGE_PREVIEW_PIXEL_DIMENSION, Math.round(requested))
+  );
+}
+
+async function readPreviewImageData(imagePath, maxPixelDimension) {
+  let previewData;
+  try {
+    previewData = await downsampleImageWithSips(imagePath, maxPixelDimension);
+  } catch {
+    throw workspaceError(
+      "image_preview_failed",
+      "This image could not be converted into a lightweight phone preview."
+    );
+  }
+  if (!previewData || previewData.length === 0 || previewData.length > MAX_IMAGE_PREVIEW_READ_BYTES) {
+    throw workspaceError(
+      "image_preview_too_large",
+      "This image preview is still too large to send to the phone."
+    );
+  }
+  return previewData;
+}
+
+async function downsampleImageWithSips(imagePath, maxPixelDimension) {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "remodex-image-preview-"));
+  const outputPath = path.join(tempDir, `preview${path.extname(imagePath) || ".png"}`);
+  try {
+    await execFileAsync("sips", ["-Z", String(maxPixelDimension), imagePath, "--out", outputPath], {
+      timeout: 15_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return await fs.promises.readFile(outputPath);
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function isUnchangedImageRead(params, stat, maxPixelDimension) {
   const cachedByteLength = Number(params.ifByteLength);
   const cachedMtimeMs = Number(params.ifMtimeMs);
+  const cachedPreviewMaxPixelDimension = Number(params.ifPreviewMaxPixelDimension || params.ifMaxPixelDimension);
+  const previewDimensionMatches = maxPixelDimension
+    ? Number.isFinite(cachedPreviewMaxPixelDimension) && cachedPreviewMaxPixelDimension === maxPixelDimension
+    : !Number.isFinite(cachedPreviewMaxPixelDimension);
   return Number.isFinite(cachedByteLength)
     && Number.isFinite(cachedMtimeMs)
+    && previewDimensionMatches
     && cachedByteLength === stat.size
     && cachedMtimeMs === stat.mtimeMs;
 }

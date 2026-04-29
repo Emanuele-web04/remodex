@@ -192,7 +192,7 @@ private struct TurnTimelinePreviousMessagesView: View {
             } label: {
                 HStack(spacing: 8) {
                     Text(title)
-                        .font(AppFont.title3(weight: .regular))
+                        .font(AppFont.body(weight: .regular))
                         .foregroundStyle(.secondary)
                     Image(systemName: "chevron.right")
                         .font(AppFont.system(size: 14, weight: .semibold))
@@ -764,21 +764,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             revertStatesByMessageID: assistantRevertStatesByMessageID
         )
 
-        var updated = [String: AssistantBlockAccessoryState](
+        let initialBlockInfoByMessageID = [String: AssistantBlockAccessoryState](
             uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
                 guard let blockText else { return nil }
                 return (message.id, blockText)
             }
         )
-        let collapsedFinalMessageIDs = TurnTimelineRenderProjection.collapsedFinalMessageIDs(
-            in: visible,
+        let updated = Self.rehomeCollapsedFinalAccessoryStates(
+            initialBlockInfoByMessageID,
+            messages: visible,
             completedTurnIDs: completedTurnIDs
         )
-        for message in visible where collapsedFinalMessageIDs.contains(message.id) {
-            guard let state = updated[message.id] else { continue }
-            let finalCopyText = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            updated[message.id] = state.replacingCopyText(finalCopyText.isEmpty ? nil : finalCopyText)
-        }
         if updated != cachedBlockInfoByMessageID {
             cachedBlockInfoByMessageID = updated
         }
@@ -1292,6 +1288,72 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             i = blockStart - 1
         }
         return result
+    }
+
+    static func rehomeCollapsedFinalAccessoryStates(
+        _ statesByMessageID: [String: AssistantBlockAccessoryState],
+        messages: [CodexMessage],
+        completedTurnIDs: Set<String>
+    ) -> [String: AssistantBlockAccessoryState] {
+        let collapsedFinalMessageIDs = TurnTimelineRenderProjection.collapsedFinalMessageIDs(
+            in: messages,
+            completedTurnIDs: completedTurnIDs
+        )
+        guard !collapsedFinalMessageIDs.isEmpty else {
+            return statesByMessageID
+        }
+
+        var updated = statesByMessageID
+        for finalIndex in messages.indices where collapsedFinalMessageIDs.contains(messages[finalIndex].id) {
+            let finalMessage = messages[finalIndex]
+            let sourceState = updated[finalMessage.id] ?? collapsedBlockAccessoryState(
+                forFinalIndex: finalIndex,
+                messages: messages,
+                statesByMessageID: updated
+            )
+            guard let sourceState else { continue }
+
+            let finalCopyText = finalMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            updated[finalMessage.id] = sourceState.replacingCopyText(finalCopyText.isEmpty ? nil : finalCopyText)
+        }
+        return updated
+    }
+
+    // When late tool rows are collapsed after the final answer, their block action
+    // state still belongs on the visible final row.
+    private static func collapsedBlockAccessoryState(
+        forFinalIndex finalIndex: Int,
+        messages: [CodexMessage],
+        statesByMessageID: [String: AssistantBlockAccessoryState]
+    ) -> AssistantBlockAccessoryState? {
+        let finalMessage = messages[finalIndex]
+        let finalTurnID = normalizedTurnID(finalMessage.turnId)
+        var blockStart = finalIndex
+        while blockStart > messages.startIndex && messages[blockStart - 1].role != .user {
+            blockStart -= 1
+        }
+
+        var blockEnd = finalIndex
+        while blockEnd < messages.index(before: messages.endIndex) && messages[blockEnd + 1].role != .user {
+            blockEnd += 1
+        }
+
+        for index in stride(from: blockEnd, through: blockStart, by: -1) {
+            let candidate = messages[index]
+            guard candidate.id != finalMessage.id else { continue }
+            if let finalTurnID, normalizedTurnID(candidate.turnId) != finalTurnID {
+                continue
+            }
+            if let state = statesByMessageID[candidate.id] {
+                return state
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedTurnID(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     // Keeps Copy aligned with real run completion instead of per-message streaming heuristics.

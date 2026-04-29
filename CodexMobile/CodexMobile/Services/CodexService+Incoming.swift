@@ -177,7 +177,7 @@ extension CodexService {
         switch method {
         case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
             debugRuntimeLog(
-                "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(paramsObject?["itemId"]?.stringValue ?? "")"
+                debugNotificationSummary(method: method, paramsObject: paramsObject)
             )
         default:
             break
@@ -241,7 +241,8 @@ extension CodexService {
              "codex/event/background_event",
              "codex/event/read",
              "codex/event/search",
-             "codex/event/list_files":
+             "codex/event/list_files",
+             "codex/event/image_generation_end":
             if handleLegacyCodexNamedEvent(method: method, paramsObject: paramsObject) {
                 return
             }
@@ -256,6 +257,15 @@ extension CodexService {
 
         case "codex/event":
             if handleLegacyCodexEnvelopeEvent(paramsObject) {
+                return
+            }
+
+        case "image_generation_end":
+            if handleLegacyCodexEventType(
+                eventType: "image_generation_end",
+                payload: paramsObject ?? [:],
+                paramsObject: paramsObject
+            ) {
                 return
             }
 
@@ -1265,9 +1275,52 @@ extension CodexService {
                 payload: payload,
                 paramsObject: paramsObject
             )
+        case "image_generation_end":
+            return handleImageGenerationEndEvent(
+                payload: payload,
+                paramsObject: paramsObject
+            )
         default:
             return false
         }
+    }
+
+    private func handleImageGenerationEndEvent(
+        payload: IncomingParamsObject,
+        paramsObject: IncomingParamsObject?
+    ) -> Bool {
+        let imagePath = firstNonEmptyString([
+            firstStringValue(in: payload, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: paramsObject, keys: ["saved_path", "savedPath", "path", "file_path"])
+        ])
+        guard let imagePath, Self.isGeneratedImagePath(imagePath) else {
+            debugRuntimeLog("generated image event dropped reason=missing-path event=image_generation_end")
+            return false
+        }
+
+        var normalizedParams = paramsObject ?? [:]
+        if normalizedParams["event"] == nil {
+            normalizedParams["event"] = .object(payload)
+        }
+
+        let turnId = extractTurnID(from: normalizedParams)
+        guard let threadId = resolveThreadID(from: normalizedParams, turnIdHint: turnId) else {
+            debugRuntimeLog("generated image event dropped reason=missing-thread event=image_generation_end path=\(URL(fileURLWithPath: imagePath).lastPathComponent)")
+            return false
+        }
+
+        let itemId = firstNonEmptyString([
+            firstStringValue(in: payload, keys: ["call_id", "callId", "id"]),
+            firstStringValue(in: paramsObject, keys: ["itemId", "item_id", "call_id", "callId"])
+        ])
+        appendGeneratedImageReference(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: itemId,
+            imagePath: imagePath
+        )
+        debugRuntimeLog("generated image event appended thread=\(threadId) turn=\(turnId ?? "") item=\(itemId ?? "") path=\(URL(fileURLWithPath: imagePath).lastPathComponent)")
+        return true
     }
 
     // Accepts legacy Codex token_count events, even when the runtime omits thread ids.
@@ -2018,6 +2071,7 @@ extension CodexService {
               !normalizedItemType(type).isEmpty else {
             return false
         }
+        let itemType = normalizedItemType(type)
 
         if object["content"] != nil || object["status"] != nil || object["output"] != nil {
             return true
@@ -2028,8 +2082,41 @@ extension CodexService {
         if object["result"] != nil || object["payload"] != nil || object["data"] != nil {
             return true
         }
+        let hasGeneratedImageIdentityOrPath = object["path"] != nil
+            || object["saved_path"] != nil
+            || object["savedPath"] != nil
+            || object["file_path"] != nil
+            || object["id"] != nil
+            || object["call_id"] != nil
+            || object["callId"] != nil
+        if isCompletedGeneratedImageItemType(itemType), hasGeneratedImageIdentityOrPath {
+            return true
+        }
 
         return false
+    }
+
+    private func debugNotificationSummary(method: String, paramsObject: IncomingParamsObject?) -> String {
+        let eventObject = paramsObject.flatMap { envelopeEventObject(from: $0) }
+        let itemObject = paramsObject.flatMap { extractIncomingItemObject(from: $0, eventObject: eventObject) }
+        let itemType = normalizedItemType(itemObject?["type"]?.stringValue ?? "")
+        let itemId = extractItemID(from: paramsObject, eventObject: eventObject, itemObject: itemObject) ?? ""
+        let nestedItemId = paramsObject?["item"]?.objectValue?["id"]?.stringValue ?? ""
+        let eventType = eventObject?["type"]?.stringValue ?? ""
+        let pathValue = firstNonEmptyString([
+            firstStringValue(in: itemObject, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: eventObject, keys: ["saved_path", "savedPath", "path", "file_path"]),
+            firstStringValue(in: paramsObject, keys: ["saved_path", "savedPath", "path", "file_path"])
+        ])
+        let pathName = pathValue.map { URL(fileURLWithPath: $0).lastPathComponent } ?? ""
+        let resultLength = [
+            itemObject?["result"]?.stringValue?.count,
+            eventObject?["result"]?.stringValue?.count,
+            paramsObject?["result"]?.stringValue?.count,
+        ]
+        .compactMap { $0 }
+        .first ?? 0
+        return "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(itemId) nestedItem=\(nestedItemId) type=\(itemType) event=\(eventType) path=\(pathName) resultLen=\(resultLength)"
     }
 
     private func extractItemID(

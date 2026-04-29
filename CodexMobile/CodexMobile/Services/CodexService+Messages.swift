@@ -604,7 +604,10 @@ extension CodexService {
         let previousState = latestTurnTerminalStateByThread[threadId]
         latestTurnTerminalStateByThread[threadId] = state
         if let turnId {
-            terminalStateByTurnID[turnId] = state
+            if terminalStateByTurnID[turnId] != state {
+                terminalStateByTurnID[turnId] = state
+                persistTurnTerminalStates()
+            }
         }
         refreshThreadTimelineState(for: threadId)
         triggerRunCompletionHapticIfNeeded(
@@ -905,6 +908,11 @@ extension CodexService {
                 return .skippedForRunningThread
             }
 
+            let historyTerminalStates = decodeTurnTerminalStatesFromThreadRead(threadObject)
+            let didUpdateTerminalStates = mergeHistoryTurnTerminalStates(
+                threadId: threadId,
+                terminalStatesByTurnID: historyTerminalStates
+            )
             let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
             registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
             var outcome: ThreadHistoryLoadOutcome = .loadedCanonicalHistory
@@ -940,6 +948,8 @@ extension CodexService {
                     messagesByThread[threadId] = merged
                     persistMessages()
                     updateCurrentOutput(for: threadId)
+                } else if didUpdateTerminalStates {
+                    refreshThreadTimelineState(for: threadId)
                 }
                 if usedRecentWindow {
                     outcome = .loadedRecentWindow
@@ -949,6 +959,8 @@ extension CodexService {
                 } else if !threadHasActiveOrRunningTurn(threadId) {
                     markThreadCanonicalHistoryReconciled(threadId)
                 }
+            } else if didUpdateTerminalStates {
+                refreshThreadTimelineState(for: threadId)
             }
 
             guard !Task.isCancelled,
@@ -2753,6 +2765,11 @@ extension CodexService {
             text: trimmedText
         ) {
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                assistantMessageId: replayTerminalMessageId
+            )
             persistMessages()
             if let resolvedTurnId {
                 noteAssistantMessage(
@@ -2777,6 +2794,11 @@ extension CodexService {
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
             if let resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id {
+                _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    assistantMessageId: resolvedAssistantMessageId
+                )
                 persistMessages()
                 noteAssistantMessage(
                     threadId: threadId,
@@ -2823,6 +2845,11 @@ extension CodexService {
                 }
                 assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
                 if let resolvedAssistantMessageId {
+                    _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
+                        threadId: threadId,
+                        turnId: resolvedTurnId,
+                        assistantMessageId: resolvedAssistantMessageId
+                    )
                     persistMessages()
                     noteAssistantMessage(
                         threadId: threadId,
@@ -2917,6 +2944,14 @@ extension CodexService {
 
         assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
 
+        if let resolvedAssistantMessageId {
+            _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                assistantMessageId: resolvedAssistantMessageId
+            )
+        }
+
         persistMessages()
         if let resolvedAssistantMessageId {
             noteAssistantMessage(
@@ -2926,6 +2961,131 @@ extension CodexService {
             )
         }
         updateCurrentOutput(for: threadId)
+    }
+
+    // Renders image-generation artifacts as assistant image previews without embedding image bytes.
+    func appendGeneratedImageReference(
+        threadId: String,
+        turnId: String?,
+        itemId: String?,
+        imagePath: String
+    ) {
+        let trimmedPath = imagePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else {
+            return
+        }
+
+        let resolvedTurnId = normalizedStreamingItemID(turnId) ?? activeTurnIdByThread[threadId]
+        let resolvedItemId = normalizedStreamingItemID(itemId)
+        if let resolvedTurnId {
+            threadIdByTurnID[resolvedTurnId] = threadId
+        }
+
+        let markdown = "![Generated image](\(Self.markdownImagePath(trimmedPath)))"
+        if var threadMessages = messagesByThread[threadId],
+           let existingIndex = threadMessages.indices.reversed().first(where: { index in
+               let candidate = threadMessages[index]
+               return candidate.role == .assistant
+                   && (
+                       candidate.text.contains(trimmedPath)
+                           || candidate.text.contains(markdown)
+                           || (resolvedItemId != nil && candidate.itemId == resolvedItemId)
+                   )
+           }) {
+            var existing = threadMessages[existingIndex]
+            if !existing.text.contains(trimmedPath) && !existing.text.contains(markdown) {
+                existing.text = existing.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? markdown
+                    : "\(existing.text)\n\n\(markdown)"
+            }
+            existing.isStreaming = false
+            if existing.turnId == nil {
+                existing.turnId = resolvedTurnId
+            }
+            if existing.itemId == nil {
+                existing.itemId = resolvedItemId
+            }
+            threadMessages[existingIndex] = existing
+            messagesByThread[threadId] = threadMessages
+            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: existingIndex)
+        } else {
+            let message = CodexMessage(
+                id: Self.stableAssistantMessageID(threadId: threadId, turnId: resolvedTurnId, itemId: resolvedItemId)
+                    ?? UUID().uuidString,
+                threadId: threadId,
+                role: .assistant,
+                text: markdown,
+                turnId: resolvedTurnId,
+                itemId: resolvedItemId,
+                isStreaming: false,
+                deliveryState: .confirmed
+            )
+            appendMessage(message)
+            return
+        }
+
+        persistMessages()
+        updateCurrentOutput(for: threadId)
+    }
+
+    // Folds image-generation artifact rows into the final assistant text for the same turn.
+    private func mergeGeneratedImageArtifactsIntoAssistantMessage(
+        threadId: String,
+        turnId: String?,
+        assistantMessageId: String
+    ) -> Bool {
+        guard let resolvedTurnId = turnId,
+              var threadMessages = messagesByThread[threadId],
+              let targetIndex = threadMessages.firstIndex(where: { $0.id == assistantMessageId }) else {
+            return false
+        }
+
+        let artifactMessages = threadMessages.filter { candidate in
+            candidate.id != assistantMessageId
+                && candidate.role == .assistant
+                && candidate.turnId == resolvedTurnId
+                && Self.isGeneratedImageArtifactOnly(candidate.text)
+        }
+        guard !artifactMessages.isEmpty else {
+            return false
+        }
+
+        var targetMessage = threadMessages[targetIndex]
+        var mergedText = targetMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        for artifact in artifactMessages {
+            let artifactText = artifact.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !artifactText.isEmpty, !mergedText.contains(artifactText) else {
+                continue
+            }
+            mergedText = mergedText.isEmpty ? artifactText : "\(mergedText)\n\n\(artifactText)"
+        }
+        targetMessage.text = mergedText
+        targetMessage.isStreaming = false
+        if targetMessage.turnId == nil {
+            targetMessage.turnId = resolvedTurnId
+        }
+
+        let artifactIds = Set(artifactMessages.map(\.id))
+        threadMessages.removeAll { artifactIds.contains($0.id) }
+        guard let updatedTargetIndex = threadMessages.firstIndex(where: { $0.id == assistantMessageId }) else {
+            return false
+        }
+        threadMessages[updatedTargetIndex] = targetMessage
+        messagesByThread[threadId] = threadMessages
+        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: updatedTargetIndex)
+        return true
+    }
+
+    private static func isGeneratedImageArtifactOnly(_ text: String) -> Bool {
+        let imageReferences = AssistantMarkdownImageReferenceParser.references(in: text)
+        guard !imageReferences.isEmpty else {
+            return false
+        }
+
+        return AssistantMarkdownImageReferenceParser
+            .visibleTextRemovingImageSyntax(from: text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
     }
 
     // Suppresses completion replays that resend the whole assistant block already shown around tool rows.
@@ -3322,6 +3482,21 @@ extension CodexService {
             }
         }
     }
+
+    // Persists per-turn terminal state so completed-turn grouping survives app relaunch.
+    func persistTurnTerminalStates() {
+        guard !terminalStateByTurnID.isEmpty else {
+            defaults.removeObject(forKey: Self.turnTerminalStatesDefaultsKey)
+            return
+        }
+
+        guard let data = try? encoder.encode(terminalStateByTurnID) else {
+            defaults.removeObject(forKey: Self.turnTerminalStatesDefaultsKey)
+            return
+        }
+
+        defaults.set(data, forKey: Self.turnTerminalStatesDefaultsKey)
+    }
 }
 
 // ─── Private helpers ──────────────────────────────────────────
@@ -3637,6 +3812,29 @@ extension CodexService {
         )
         stoppedTurnIDsByThread[threadId] = stoppedTurnIDs
         return stoppedTurnIDs
+    }
+
+    // Merges terminal states decoded from thread/read without firing haptics or unread badges.
+    @discardableResult
+    func mergeHistoryTurnTerminalStates(
+        threadId: String,
+        terminalStatesByTurnID historyStates: [String: CodexTurnTerminalState]
+    ) -> Bool {
+        guard !historyStates.isEmpty else {
+            return false
+        }
+
+        var didChange = false
+        for (turnId, state) in historyStates {
+            guard terminalStateByTurnID[turnId] != state else { continue }
+            terminalStateByTurnID[turnId] = state
+            didChange = true
+        }
+
+        if didChange {
+            persistTurnTerminalStates()
+        }
+        return didChange
     }
 
     // Tracks the latest repo-affecting system row so git refresh logic can stay out of the view body.

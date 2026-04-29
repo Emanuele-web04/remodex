@@ -12,6 +12,7 @@ struct WorkspaceImageMetadata: Sendable {
     let mimeType: String
     let byteLength: Int
     let mtimeMs: Double?
+    let previewMaxPixelDimension: Int?
 }
 
 struct WorkspaceImageReadResult: Sendable {
@@ -20,6 +21,7 @@ struct WorkspaceImageReadResult: Sendable {
     let mimeType: String
     let byteLength: Int
     let mtimeMs: Double?
+    let previewMaxPixelDimension: Int?
     let data: Data?
     let isNotModified: Bool
 
@@ -29,12 +31,15 @@ struct WorkspaceImageReadResult: Sendable {
             fileName: fileName,
             mimeType: mimeType,
             byteLength: byteLength,
-            mtimeMs: mtimeMs
+            mtimeMs: mtimeMs,
+            previewMaxPixelDimension: previewMaxPixelDimension
         )
     }
 }
 
 extension CodexService {
+    private static let timelineImagePreviewMaxPixelDimension = 1_600
+
     // Loads image bytes only after the user asks to preview them, keeping timeline rows lightweight.
     func readWorkspaceImage(
         path: String,
@@ -45,6 +50,7 @@ extension CodexService {
             path: path,
             cwd: cwd,
             includeData: true,
+            maxPixelDimension: Self.timelineImagePreviewMaxPixelDimension,
             cachedMetadata: cachedMetadata
         )
         let metadata = parseWorkspaceImageMetadata(result: result, fallbackPath: path)
@@ -55,6 +61,7 @@ extension CodexService {
                 mimeType: metadata.mimeType,
                 byteLength: metadata.byteLength,
                 mtimeMs: metadata.mtimeMs,
+                previewMaxPixelDimension: metadata.previewMaxPixelDimension,
                 data: nil,
                 isNotModified: true
             )
@@ -71,6 +78,7 @@ extension CodexService {
             mimeType: metadata.mimeType,
             byteLength: metadata.byteLength,
             mtimeMs: metadata.mtimeMs,
+            previewMaxPixelDimension: metadata.previewMaxPixelDimension,
             data: data,
             isNotModified: false
         )
@@ -80,14 +88,21 @@ extension CodexService {
         path: String,
         cwd: String?,
         includeData: Bool,
+        maxPixelDimension: Int? = nil,
         cachedMetadata: WorkspaceImageMetadata? = nil
     ) async throws -> RPCObject {
         var params: [String: JSONValue] = [
             "path": .string(path),
             "includeData": .bool(includeData)
         ]
+        if let maxPixelDimension {
+            params["maxPixelDimension"] = .integer(maxPixelDimension)
+        }
         if let cachedMetadata {
             params["ifByteLength"] = .integer(cachedMetadata.byteLength)
+            if let previewMaxPixelDimension = cachedMetadata.previewMaxPixelDimension {
+                params["ifPreviewMaxPixelDimension"] = .integer(previewMaxPixelDimension)
+            }
             if let mtimeMs = cachedMetadata.mtimeMs {
                 params["ifMtimeMs"] = .double(mtimeMs)
             }
@@ -109,7 +124,8 @@ extension CodexService {
             fileName: result["fileName"]?.stringValue ?? (path as NSString).lastPathComponent,
             mimeType: result["mimeType"]?.stringValue ?? "image",
             byteLength: result["byteLength"]?.intValue ?? 0,
-            mtimeMs: result["mtimeMs"]?.doubleValue
+            mtimeMs: result["mtimeMs"]?.doubleValue,
+            previewMaxPixelDimension: result["previewMaxPixelDimension"]?.intValue
         )
     }
 }

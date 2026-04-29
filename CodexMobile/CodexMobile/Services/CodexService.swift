@@ -193,7 +193,7 @@ enum CodexNotificationPayloadKeys {
 }
 
 // Tracks the real terminal outcome of a run, including user interruption.
-enum CodexTurnTerminalState: String, Equatable, Sendable {
+enum CodexTurnTerminalState: String, Codable, Equatable, Sendable {
     case completed
     case failed
     case stopped
@@ -446,7 +446,7 @@ final class CodexService {
     @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?)] = [:]
     @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
     @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
-    let assistantDeltaBatchIntervalNanoseconds: UInt64 = 40_000_000
+    let assistantDeltaBatchIntervalNanoseconds: UInt64 = 50_000_000
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -550,6 +550,7 @@ final class CodexService {
     var shouldAutoReconnectOnForeground = false
     // Test hook so connection handling can model `.inactive` without waiting for real app lifecycle changes.
     @ObservationIgnored var applicationStateProvider: () -> UIApplication.State = { UIApplication.shared.applicationState }
+    var backgroundTurnGraceExpiredUntilForeground = false
     var secureSession: CodexSecureSession?
     var pendingHandshake: CodexPendingHandshake?
     var phoneIdentityState: CodexPhoneIdentityState
@@ -613,6 +614,7 @@ final class CodexService {
     static let pinnedThreadIDsDefaultsKey = "codex.pinnedThreadIDs"
     static let pinnedThreadSnapshotsDefaultsKey = "codex.pinnedThreadSnapshots"
     static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"
+    static let turnTerminalStatesDefaultsKey = "codex.turnTerminalStates"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
     static let keepMacAwakeWhileBridgeRunsDefaultsKey = "codex.keepMacAwakeWhileBridgeRuns"
 
@@ -730,6 +732,16 @@ final class CodexService {
             self.associatedManagedWorktreePathByThreadID = decodedAssociatedManagedWorktreePaths
         } else {
             self.associatedManagedWorktreePathByThreadID = [:]
+        }
+
+        if let savedTurnTerminalStates = defaults.data(forKey: Self.turnTerminalStatesDefaultsKey),
+           let decodedTurnTerminalStates = try? decoder.decode(
+               [String: CodexTurnTerminalState].self,
+               from: savedTurnTerminalStates
+           ) {
+            self.terminalStateByTurnID = decodedTurnTerminalStates
+        } else {
+            self.terminalStateByTurnID = [:]
         }
 
         let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?
