@@ -12,13 +12,14 @@ struct TurnComposerRuntimeState {
     let selectedReasoningEffort: String?
     let reasoningMenuDisabled: Bool
     let selectedServiceTier: CodexServiceTier?
+    let supportsFastMode: Bool
 
     var selectedReasoningTitle: String {
         effectiveReasoningEffort.map(TurnComposerMetaMapper.reasoningTitle(for:)) ?? "Select reasoning"
     }
 
     var showsSpeedBadgeInModelMenu: Bool {
-        selectedServiceTier != nil
+        supportsFastMode && selectedServiceTier != nil
     }
 
     func isSelectedReasoning(_ effort: String) -> Bool {
@@ -38,7 +39,8 @@ struct TurnComposerRuntimeState {
             effectiveReasoningEffort: codex.selectedReasoningEffortForSelectedModel(),
             selectedReasoningEffort: codex.selectedReasoningEffort,
             reasoningMenuDisabled: reasoningDisplayOptions.isEmpty || codex.selectedModelOption() == nil,
-            selectedServiceTier: codex.selectedServiceTier
+            selectedServiceTier: codex.effectiveServiceTier(),
+            supportsFastMode: codex.selectedModelSupportsServiceTier(.fast)
         )
     }
 }

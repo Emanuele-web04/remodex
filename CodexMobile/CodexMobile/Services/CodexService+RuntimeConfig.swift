@@ -134,7 +134,7 @@ extension CodexService {
     }
 
     func setSelectedServiceTier(_ serviceTier: CodexServiceTier?) {
-        selectedServiceTier = serviceTier
+        selectedServiceTier = normalizedServiceTierForSelectedModel(serviceTier)
         persistRuntimeSelections()
     }
 
@@ -143,8 +143,9 @@ extension CodexService {
             return
         }
 
+        let normalizedServiceTier = normalizedServiceTierForSelectedModel(serviceTier)
         mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
-            override.serviceTierRawValue = serviceTier?.rawValue
+            override.serviceTierRawValue = normalizedServiceTier?.rawValue
             override.overridesServiceTier = true
         }
     }
@@ -186,6 +187,10 @@ extension CodexService {
 
     func selectedGitWriterModelOption() -> CodexModelOption? {
         selectedGitWriterModelOption(from: availableModels)
+    }
+
+    func selectedModelSupportsServiceTier(_ serviceTier: CodexServiceTier) -> Bool {
+        selectedModelOption()?.supportsServiceTier(serviceTier) == true
     }
 
     func gitWriterModelIdentifier() -> String? {
@@ -252,12 +257,18 @@ extension CodexService {
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
+        let candidate: CodexServiceTier?
         if let threadOverride = threadRuntimeOverride(for: threadId),
            threadOverride.overridesServiceTier {
-            return threadOverride.serviceTier
+            candidate = threadOverride.serviceTier
+        } else {
+            candidate = selectedServiceTier
         }
 
-        return selectedServiceTier
+        guard let candidate else {
+            return nil
+        }
+        return selectedModelSupportsServiceTier(candidate) ? candidate : nil
     }
 
     func runtimeServiceTierForTurn(threadId: String? = nil) -> String? {
@@ -452,8 +463,14 @@ private extension CodexService {
             } else {
                 selectedReasoningEffort = resolvedModel.supportedReasoningEfforts.first?.reasoningEffort
             }
+
+            if let selectedServiceTier,
+               !resolvedModel.supportsServiceTier(selectedServiceTier) {
+                self.selectedServiceTier = nil
+            }
         } else {
             selectedReasoningEffort = nil
+            selectedServiceTier = nil
         }
 
         if let selectedGitWriterModelId,
@@ -477,6 +494,16 @@ private extension CodexService {
         }
 
         return nil
+    }
+
+    func normalizedServiceTierForSelectedModel(_ serviceTier: CodexServiceTier?) -> CodexServiceTier? {
+        guard let serviceTier else {
+            return nil
+        }
+        guard let selectedModel = selectedModelOption() else {
+            return serviceTier
+        }
+        return selectedModel.supportsServiceTier(serviceTier) ? serviceTier : nil
     }
 
     func selectedGitWriterModelOption(
@@ -505,6 +532,13 @@ private extension CodexService {
     }
 
     func fallbackModel(from models: [CodexModelOption]) -> CodexModelOption? {
+        // Prefer GPT-5.5 when the bridge advertises it; the rest of the app treats
+        // it as the canonical default regardless of the bridge's `isDefault` flag.
+        if let preferred = models.first(where: {
+            $0.id.lowercased() == "gpt-5.5" || $0.model.lowercased() == "gpt-5.5"
+        }) {
+            return preferred
+        }
         if let defaultModel = models.first(where: { $0.isDefault }) {
             return defaultModel
         }

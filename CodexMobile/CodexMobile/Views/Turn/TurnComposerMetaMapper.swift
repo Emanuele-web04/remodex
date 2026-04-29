@@ -13,11 +13,13 @@ enum TurnComposerMetaMapper {
     // Returns models sorted using the explicit product order expected by the UI.
     static func orderedModels(from models: [CodexModelOption]) -> [CodexModelOption] {
         let preferredOrder: [String] = [
-            "gpt-5.1-codex-mini",
-            "gpt-5.2",
-            "gpt-5.1-codex-max",
-            "gpt-5.2-codex",
+            "gpt-5.5",
+            "gpt-5.4",
             "gpt-5.3-codex",
+            "gpt-5.2-codex",
+            "gpt-5.1-codex-max",
+            "gpt-5.2",
+            "gpt-5.1-codex-mini",
         ]
         let rankByModel = Dictionary(uniqueKeysWithValues: preferredOrder.enumerated().map { index, value in
             (value, index)
