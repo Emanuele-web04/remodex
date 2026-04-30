@@ -124,6 +124,20 @@ struct TurnToolbarContent: ToolbarContent {
 
         if repoDiffTotals != nil || showsGitActions {
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if onTapRepoDiff != nil {
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onTapRepoDiff?()
+                    } label: {
+                        Image(systemName: "folder")
+                            .font(AppFont.system(size: 14, weight: .semibold))
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isLoadingRepoDiff)
+                    .accessibilityLabel("Show changed files")
+                }
+
                 if let repoDiffTotals {
                     TurnToolbarDiffTotalsLabel(
                         totals: repoDiffTotals,
