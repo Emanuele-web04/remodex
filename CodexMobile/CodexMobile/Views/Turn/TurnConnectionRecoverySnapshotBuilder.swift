@@ -26,17 +26,6 @@ enum TurnConnectionRecoverySnapshotBuilder {
 
         let trimmedError = lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Once the silent wake attempt has already failed, prefer the explicit wake fallback over passive retry copy.
-        if showsWakeSavedMacDisplayAction {
-            return ConnectionRecoverySnapshot(
-                summary: trimmedError?.isEmpty == false
-                    ? trimmedError ?? ""
-                    : "Wake the computer screen to keep this chat in sync.",
-                status: .interrupted,
-                trailingStyle: .action("Wake Screen")
-            )
-        }
-
         if isWakingMacDisplayRecovery {
             return ConnectionRecoverySnapshot(
                 summary: trimmedError?.isEmpty == false
@@ -47,11 +36,23 @@ enum TurnConnectionRecoverySnapshotBuilder {
             )
         }
 
+        // While foreground auto-recovery is still running, keep the card in progress
+        // instead of surfacing the manual wake fallback on every app switch.
         if isConnecting || shouldAutoReconnectOnForeground || isRetryingConnectionRecovery {
             return ConnectionRecoverySnapshot(
                 summary: "Trying to reconnect to your computer.",
                 status: .reconnecting,
                 trailingStyle: .progress
+            )
+        }
+
+        if showsWakeSavedMacDisplayAction {
+            return ConnectionRecoverySnapshot(
+                summary: trimmedError?.isEmpty == false
+                    ? trimmedError ?? ""
+                    : "Wake the computer screen to keep this chat in sync.",
+                status: .interrupted,
+                trailingStyle: .action("Wake Screen")
             )
         }
 

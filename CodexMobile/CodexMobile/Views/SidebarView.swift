@@ -188,13 +188,12 @@ struct SidebarView: View {
         } message: {
             Text("All active chats in this project will be archived.")
         }
-        .confirmationDialog(
+        .alert(
             "Remove \"\(projectGroupPendingDeletion?.label ?? "project")\" from this phone?",
             isPresented: Binding(
                 get: { projectGroupPendingDeletion != nil },
                 set: { if !$0 { projectGroupPendingDeletion = nil } }
-            ),
-            titleVisibility: .visible
+            )
         ) {
             Button("Remove from Phone", role: .destructive) {
                 deletePendingProjectGroupLocally()
@@ -275,6 +274,7 @@ struct SidebarView: View {
     }
 
     private func handleNewChatTap(preferredProjectPath: String?) {
+        prepareSidebarForChatNavigation()
         Task { @MainActor in
             createThreadErrorMessage = nil
             isCreatingThread = true
@@ -295,6 +295,7 @@ struct SidebarView: View {
     }
 
     private func handleNewWorktreeChatTap(preferredProjectPath: String) {
+        prepareSidebarForChatNavigation()
         Task { @MainActor in
             createThreadErrorMessage = nil
             isCreatingThread = true
@@ -316,13 +317,21 @@ struct SidebarView: View {
 
     private func selectThread(_ thread: CodexThread) {
         debugSidebarLog("selectThread id=\(thread.id) title=\(thread.displayTitle)")
-        searchText = ""
+        prepareSidebarForChatNavigation()
         onOpenThread(thread)
     }
 
     private func openSettings() {
         searchText = ""
+        isSearchActive = false
         showSettings = true
+        onClose()
+    }
+
+    // Clears sidebar-only input state before navigation so full-width search mode cannot hold the drawer open.
+    private func prepareSidebarForChatNavigation() {
+        searchText = ""
+        isSearchActive = false
         onClose()
     }
 

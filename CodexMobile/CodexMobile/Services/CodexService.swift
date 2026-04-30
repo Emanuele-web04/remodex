@@ -515,7 +515,13 @@ final class CodexService {
         if let hostCapabilities = gptAccountSnapshot.hostCapabilities {
             return hostCapabilities
         }
-        return preferredTrustedMacRecord == nil ? CodexBridgeHostCapabilities() : .legacyMacOS
+        // Older bridges did not report capabilities; only apply that compatibility
+        // fallback when the remembered host is known to be macOS.
+        guard preferredTrustedMacRecord != nil,
+              bridgeHostPlatform == .macOS else {
+            return CodexBridgeHostCapabilities()
+        }
+        return .legacyMacOS
     }
     var supportsDesktopAppHandoff: Bool {
         bridgeHostCapabilities.desktopHandoff

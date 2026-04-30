@@ -18,6 +18,9 @@ const MAX_IMAGE_READ_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_READ_BYTES = 2 * 1024 * 1024;
 const MIN_IMAGE_PREVIEW_PIXEL_DIMENSION = 128;
 const MAX_IMAGE_PREVIEW_PIXEL_DIMENSION = 3_200;
+const IMAGE_PREVIEW_RETRY_SCALE = 0.75;
+const IMAGE_PREVIEW_TOOL_TIMEOUT_MS = 5_000;
+const IMAGE_PREVIEW_TOTAL_TIMEOUT_MS = 15_000;
 const IMAGE_MIME_TYPES_BY_EXTENSION = new Map([
   [".jpg", "image/jpeg"],
   [".jpeg", "image/jpeg"],
@@ -85,7 +88,7 @@ async function handleWorkspaceMethod(method, params) {
   }
 }
 
-// Reads only recognized local image files, and only from the bound repo or Codex generated-images cache.
+// Reads recognized local image files from the bound repo, Codex image cache, or host temp screenshot folders.
 async function workspaceReadImage(params) {
   const requestedPath = firstNonEmptyString([params.path, params.filePath, params.localPath]);
   if (!requestedPath) {
@@ -112,13 +115,16 @@ async function workspaceReadImage(params) {
     throw workspaceError("image_not_found", "The image file no longer exists on this Mac.");
   }
 
-  const repoRoot = cwd ? await resolveRepoRoot(cwd).catch(() => null) : null;
-  const realRepoRoot = repoRoot ? await realpathOrNull(repoRoot) : null;
+  const [realRepoRoot, realTempRoots] = await Promise.all([
+    cwd ? resolveRepoRoot(cwd).then(realpathOrNull).catch(() => null) : null,
+    realTemporaryImageRoots(),
+  ]);
   const isAllowed =
     (realRepoRoot && isPathInside(realImagePath, realRepoRoot))
-    || (realGeneratedImagesRoot && isPathInside(realImagePath, realGeneratedImagesRoot));
+    || (realGeneratedImagesRoot && isPathInside(realImagePath, realGeneratedImagesRoot))
+    || realTempRoots.some((tempRoot) => isPathInside(realImagePath, tempRoot));
   if (!isAllowed) {
-    throw workspaceError("image_path_not_allowed", "Only images in this workspace or Codex generated images can be previewed.");
+    throw workspaceError("image_path_not_allowed", "Only images in this workspace, Codex generated images, or temporary screenshot files can be previewed.");
   }
 
   const stat = await fs.promises.stat(realImagePath);
@@ -153,7 +159,7 @@ async function workspaceReadImage(params) {
   }
 
   const data = maxPixelDimension
-    ? await readPreviewImageData(realImagePath, maxPixelDimension)
+    ? await readPreviewImageData(realImagePath, maxPixelDimension, stat.size)
     : await fs.promises.readFile(realImagePath);
   return {
     ...result,
@@ -173,37 +179,125 @@ function normalizedPreviewPixelDimension(params) {
   );
 }
 
-async function readPreviewImageData(imagePath, maxPixelDimension) {
-  let previewData;
-  try {
-    previewData = await downsampleImageWithSips(imagePath, maxPixelDimension);
-  } catch {
+async function realTemporaryImageRoots() {
+  const candidates = [
+    os.tmpdir(),
+    process.env.TMPDIR,
+  ];
+
+  if (process.platform === "darwin") {
+    candidates.push("/tmp");
+  }
+
+  const roots = await Promise.all(
+    Array.from(new Set(candidates.filter(Boolean))).map((candidate) => realpathOrNull(candidate))
+  );
+  return Array.from(new Set(roots.filter(Boolean)));
+}
+
+async function readPreviewImageData(imagePath, maxPixelDimension, originalByteLength) {
+  if (!usesSipsImagePreview()) {
+    if (originalByteLength <= MAX_IMAGE_PREVIEW_READ_BYTES) {
+      return fs.promises.readFile(imagePath);
+    }
+
+    throw workspaceError(
+      "image_preview_unsupported_platform",
+      "This computer cannot resize image previews yet. Try a smaller image or open it on the computer."
+    );
+  }
+
+  let sawConversionFailure = false;
+  const previewDeadline = Date.now() + IMAGE_PREVIEW_TOTAL_TIMEOUT_MS;
+  for (const candidateDimension of previewPixelDimensionCandidates(maxPixelDimension)) {
+    const remainingTimeoutMs = previewDeadline - Date.now();
+    if (remainingTimeoutMs <= 0) {
+      throw workspaceError(
+        "image_preview_timed_out",
+        "This image preview took too long to resize. Try a smaller image or open it on the computer."
+      );
+    }
+
+    try {
+      const previewData = await downsampleImageWithSips(
+        imagePath,
+        candidateDimension,
+        Math.min(IMAGE_PREVIEW_TOOL_TIMEOUT_MS, remainingTimeoutMs)
+      );
+      if (previewData && previewData.length > 0 && previewData.length <= MAX_IMAGE_PREVIEW_READ_BYTES) {
+        return previewData;
+      }
+    } catch (err) {
+      if (isImagePreviewTimeoutError(err)) {
+        throw workspaceError(
+          "image_preview_timed_out",
+          "This image preview took too long to resize. Try a smaller image or open it on the computer."
+        );
+      }
+      sawConversionFailure = true;
+    }
+  }
+
+  if (sawConversionFailure) {
     throw workspaceError(
       "image_preview_failed",
       "This image could not be converted into a lightweight phone preview."
     );
   }
-  if (!previewData || previewData.length === 0 || previewData.length > MAX_IMAGE_PREVIEW_READ_BYTES) {
-    throw workspaceError(
-      "image_preview_too_large",
-      "This image preview is still too large to send to the phone."
-    );
-  }
-  return previewData;
+
+  throw workspaceError(
+    "image_preview_too_large",
+    "This image preview is still too large to send to the phone."
+  );
 }
 
-async function downsampleImageWithSips(imagePath, maxPixelDimension) {
+function previewPixelDimensionCandidates(maxPixelDimension) {
+  const dimensions = [];
+  let next = maxPixelDimension;
+  while (next >= MIN_IMAGE_PREVIEW_PIXEL_DIMENSION) {
+    dimensions.push(next);
+    if (next === MIN_IMAGE_PREVIEW_PIXEL_DIMENSION) {
+      break;
+    }
+    next = Math.max(
+      MIN_IMAGE_PREVIEW_PIXEL_DIMENSION,
+      Math.floor(next * IMAGE_PREVIEW_RETRY_SCALE)
+    );
+  }
+
+  // Hard-to-compress previews can stay oversized after one resize; these checkpoints keep retry behavior predictable.
+  for (const checkpoint of [1024, 768, 512, 384, 256, MIN_IMAGE_PREVIEW_PIXEL_DIMENSION]) {
+    if (checkpoint <= maxPixelDimension) {
+      dimensions.push(checkpoint);
+    }
+  }
+
+  return Array.from(new Set(dimensions)).sort((a, b) => b - a);
+}
+
+function usesSipsImagePreview() {
+  const normalizedPlatform = String(process.platform || "").trim().toLowerCase();
+  return normalizedPlatform === "darwin" || normalizedPlatform === "macos" || normalizedPlatform === "mac";
+}
+
+async function downsampleImageWithSips(imagePath, maxPixelDimension, timeoutMs = IMAGE_PREVIEW_TOOL_TIMEOUT_MS) {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "remodex-image-preview-"));
   const outputPath = path.join(tempDir, `preview${path.extname(imagePath) || ".png"}`);
   try {
     await execFileAsync("sips", ["-Z", String(maxPixelDimension), imagePath, "--out", outputPath], {
-      timeout: 15_000,
+      timeout: Math.max(1, Math.floor(timeoutMs)),
       maxBuffer: 1024 * 1024,
     });
     return await fs.promises.readFile(outputPath);
   } finally {
     await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+function isImagePreviewTimeoutError(err) {
+  return err?.code === "ETIMEDOUT"
+    || (err?.killed === true && err?.signal === "SIGTERM")
+    || /timed out|timeout/i.test(String(err?.message || ""));
 }
 
 function isUnchangedImageRead(params, stat, maxPixelDimension) {

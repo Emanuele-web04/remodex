@@ -8,7 +8,7 @@ import XCTest
 @testable import CodexMobile
 
 final class TurnConnectionRecoverySnapshotBuilderTests: XCTestCase {
-    func testWakeActionWinsOverRetryProgressWhenManualWakeFallbackIsAvailable() {
+    func testReconnectProgressWinsWhileManualWakeFallbackIsAvailable() {
         let snapshot = TurnConnectionRecoverySnapshotBuilder.makeSnapshot(
             hasReconnectCandidate: true,
             isConnected: false,
@@ -21,9 +21,9 @@ final class TurnConnectionRecoverySnapshotBuilderTests: XCTestCase {
             lastErrorMessage: "Trying to reach your saved Mac. Remodex will keep retrying."
         )
 
-        XCTAssertEqual(snapshot?.status, .interrupted)
-        XCTAssertEqual(snapshot?.trailingStyle, .action("Wake Screen"))
-        XCTAssertEqual(snapshot?.summary, "Trying to reach your saved Mac. Remodex will keep retrying.")
+        XCTAssertEqual(snapshot?.status, .reconnecting)
+        XCTAssertEqual(snapshot?.trailingStyle, .progress)
+        XCTAssertEqual(snapshot?.summary, "Trying to reconnect to your computer.")
     }
 
     func testReconnectProgressStillShowsBeforeManualWakeFallbackIsUnlocked() {
@@ -41,7 +41,7 @@ final class TurnConnectionRecoverySnapshotBuilderTests: XCTestCase {
 
         XCTAssertEqual(snapshot?.status, .reconnecting)
         XCTAssertEqual(snapshot?.trailingStyle, .progress)
-        XCTAssertEqual(snapshot?.summary, "Trying to reconnect to your Mac.")
+        XCTAssertEqual(snapshot?.summary, "Trying to reconnect to your computer.")
     }
 
     func testWakeInFlightShowsProgressInsteadOfReconnectAction() {
@@ -60,5 +60,23 @@ final class TurnConnectionRecoverySnapshotBuilderTests: XCTestCase {
         XCTAssertEqual(snapshot?.status, .reconnecting)
         XCTAssertEqual(snapshot?.trailingStyle, .progress)
         XCTAssertEqual(snapshot?.summary, "Trying to wake your Mac display...")
+    }
+
+    func testWakeActionShowsAfterReconnectProgressStops() {
+        let snapshot = TurnConnectionRecoverySnapshotBuilder.makeSnapshot(
+            hasReconnectCandidate: true,
+            isConnected: false,
+            secureConnectionState: .trustedMac,
+            showsWakeSavedMacDisplayAction: true,
+            isWakingMacDisplayRecovery: false,
+            isConnecting: false,
+            shouldAutoReconnectOnForeground: false,
+            isRetryingConnectionRecovery: false,
+            lastErrorMessage: "Connection was interrupted. Tap Reconnect to try again."
+        )
+
+        XCTAssertEqual(snapshot?.status, .interrupted)
+        XCTAssertEqual(snapshot?.trailingStyle, .action("Wake Screen"))
+        XCTAssertEqual(snapshot?.summary, "Connection was interrupted. Tap Reconnect to try again.")
     }
 }

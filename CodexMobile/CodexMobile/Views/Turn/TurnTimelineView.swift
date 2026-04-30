@@ -424,6 +424,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     /// Heavy-chat staged warmup is temporarily disabled until geometry settles reliably.
     private static var initialWarmTailCount: Int { 0 }
     private static var scrollToLatestButtonLift: CGFloat { 44 + 18 }
+    private static var footerBottomOverlayPadding: CGFloat { 14 }
+    private static var scrollBottomTextBreathingRoom: CGFloat { 28 }
 
     @State private var visibleTailCount: Int = pageSize
     @State private var viewportHeight: CGFloat = 0
@@ -478,6 +480,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private var shouldShowFullTimelineLoader: Bool {
         shouldWarmRecentTailProgressively && visibleTailCount == 0
+    }
+
+    // Leaves only a small transparent tail so message text can travel behind the floating composer.
+    private var scrollBottomOverlaySpacerHeight: CGFloat {
+        Self.scrollBottomTextBreathingRoom
     }
 
     // Keeps larger accessibility text inside a slightly roomier gutter so assistant
@@ -543,8 +550,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     onTapOutsideComposer()
                 }
                 .simultaneousGesture(emptyStateKeyboardDismissGesture)
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    footer()
+                .overlay(alignment: .bottom) {
+                    footerOverlay()
                 }
                 .onAppear {
                     beginScrollSessionIfNeeded()
@@ -591,7 +598,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         // Keep bottom anchor outside the message stack so it is always
                         // reachable by scrollTo regardless of VStack layout timing.
                         Color.clear
-                            .frame(width: contentWidth, height: 1)
+                            .frame(width: contentWidth, height: scrollBottomOverlaySpacerHeight)
                             .padding(.horizontal, timelineHorizontalPadding)
                             .frame(width: viewport.size.width, alignment: .leading)
                             .clipped()
@@ -710,9 +717,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             autoScrollMode = isScrolledToBottom ? .followBottom : .manual
                         }
                     }
-                    // Keeps footer pinned to bottom without adding a solid spacer block above it.
-                    .safeAreaInset(edge: .bottom, spacing: 0) {
-                        footer(scrollToBottomAction: {
+                    // Float the composer above the timeline so rows can scroll underneath it.
+                    .overlay(alignment: .bottom) {
+                        footerOverlay(scrollToBottomAction: {
                             handleScrollToLatestButtonTap(using: proxy)
                         })
                     }
@@ -844,6 +851,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             onScrollToLatest: scrollToBottomAction,
             composer: composer
         )
+    }
+
+    // Keeps the footer visually floating; scroll content only gets a tiny transparent tail.
+    private func footerOverlay(scrollToBottomAction: (() -> Void)? = nil) -> some View {
+        footer(scrollToBottomAction: scrollToBottomAction)
+            .padding(.bottom, Self.footerBottomOverlayPadding)
     }
 
     // Restores swipe-to-dismiss in brand-new chats without putting a drag
@@ -1302,6 +1315,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         guard !collapsedFinalMessageIDs.isEmpty else {
             return statesByMessageID
         }
+        let hiddenMessageIDs = TurnTimelineRenderProjection.collapsedPreviousMessageIDs(
+            in: messages,
+            completedTurnIDs: completedTurnIDs
+        )
 
         var updated = statesByMessageID
         for finalIndex in messages.indices where collapsedFinalMessageIDs.contains(messages[finalIndex].id) {
@@ -1309,6 +1326,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             let sourceState = updated[finalMessage.id] ?? collapsedBlockAccessoryState(
                 forFinalIndex: finalIndex,
                 messages: messages,
+                hiddenMessageIDs: hiddenMessageIDs,
                 statesByMessageID: updated
             )
             guard let sourceState else { continue }
@@ -1324,6 +1342,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private static func collapsedBlockAccessoryState(
         forFinalIndex finalIndex: Int,
         messages: [CodexMessage],
+        hiddenMessageIDs: Set<String>,
         statesByMessageID: [String: AssistantBlockAccessoryState]
     ) -> AssistantBlockAccessoryState? {
         let finalMessage = messages[finalIndex]
@@ -1341,6 +1360,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         for index in stride(from: blockEnd, through: blockStart, by: -1) {
             let candidate = messages[index]
             guard candidate.id != finalMessage.id else { continue }
+            guard hiddenMessageIDs.contains(candidate.id) else { continue }
             if let finalTurnID, normalizedTurnID(candidate.turnId) != finalTurnID {
                 continue
             }

@@ -95,9 +95,15 @@ extension CodexService {
                 paramsObject: paramsObject,
                 eventObject: eventObject
             ) else { return }
+            let turnId = assistantCompletionTurnId(
+                context: context,
+                paramsObject: paramsObject,
+                eventObject: eventObject,
+                itemObject: nil
+            )
             completeAssistantMessage(
                 threadId: context.threadId,
-                turnId: context.identity.turnId,
+                turnId: turnId,
                 itemId: context.identity.itemId,
                 text: text
             )
@@ -157,9 +163,15 @@ extension CodexService {
             eventObject: eventObject,
             itemObject: itemObject
         ) else { return }
+        let turnId = assistantCompletionTurnId(
+            context: context,
+            paramsObject: paramsObject,
+            eventObject: eventObject,
+            itemObject: itemObject
+        )
         completeAssistantMessage(
             threadId: context.threadId,
-            turnId: context.identity.turnId,
+            turnId: turnId,
             itemId: context.identity.itemId,
             text: text
         )
@@ -337,6 +349,36 @@ private extension CodexService {
         }
 
         return AssistantEventContext(threadId: threadId, identity: identity)
+    }
+
+    // Codex app-server can emit final_answer text before task_complete without
+    // repeating turnId; bind that terminal text to the active turn for this thread.
+    func assistantCompletionTurnId(
+        context: AssistantEventContext,
+        paramsObject: IncomingParamsObject,
+        eventObject: IncomingParamsObject?,
+        itemObject: IncomingParamsObject?
+    ) -> String? {
+        if let turnId = context.identity.turnId {
+            return turnId
+        }
+        guard isFinalAnswerPhase(paramsObject: paramsObject, eventObject: eventObject, itemObject: itemObject) else {
+            return nil
+        }
+        return activeTurnIdByThread[context.threadId]
+    }
+
+    func isFinalAnswerPhase(
+        paramsObject: IncomingParamsObject,
+        eventObject: IncomingParamsObject?,
+        itemObject: IncomingParamsObject?
+    ) -> Bool {
+        let phase = firstNonEmptyString([
+            paramsObject["phase"]?.stringValue,
+            eventObject?["phase"]?.stringValue,
+            itemObject?["phase"]?.stringValue,
+        ])?.lowercased()
+        return phase == "final_answer"
     }
 
     // Checks if an incoming item payload should render as assistant prose.

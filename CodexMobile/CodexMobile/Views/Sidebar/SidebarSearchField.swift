@@ -25,6 +25,18 @@ struct SidebarSearchField: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .focused($isFocused)
+                    .submitLabel(.done)
+                    .onSubmit {
+                        isFocused = false
+                    }
+                    .toolbar {
+                        ToolbarItemGroup(placement: .keyboard) {
+                            Spacer()
+                            Button("Done") {
+                                isFocused = false
+                            }
+                        }
+                    }
 
                 if !text.isEmpty {
                     Button {
@@ -59,6 +71,11 @@ struct SidebarSearchField: View {
         .animation(.easeInOut(duration: 0.2), value: isFocused)
         .onChange(of: isFocused) { _, newValue in
             isActive = newValue
+        }
+        .onChange(of: isActive) { _, newValue in
+            if !newValue {
+                isFocused = false
+            }
         }
     }
 }

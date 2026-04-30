@@ -289,6 +289,8 @@ final class TurnViewModelQueueTests: XCTestCase {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
+        service.supportsTurnCollaborationMode = true
+        service.selectedModelId = "gpt-5.3-codex"
 
         let viewModel = makeViewModel()
         viewModel.isPlanModeArmed = true
@@ -321,7 +323,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(
-            capturedParams?.objectValue?["collaborationMode"]?.stringValue,
+            capturedParams?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
             CodexCollaborationModeKind.plan.rawValue
         )
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)

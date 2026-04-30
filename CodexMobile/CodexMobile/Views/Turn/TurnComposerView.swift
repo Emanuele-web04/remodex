@@ -180,7 +180,7 @@ struct TurnComposerView: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 26))
+            .adaptiveGlass(.regularInteractive, in: RoundedRectangle(cornerRadius: 26))
             .overlay(alignment: .topLeading) {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)

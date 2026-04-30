@@ -4,6 +4,7 @@
 // Exports: SidebarThreadRowView
 
 import SwiftUI
+import UIKit
 
 struct SidebarThreadRowView: View {
     let thread: CodexThread
@@ -227,6 +228,13 @@ struct SidebarThreadRowView: View {
 
     @ViewBuilder
     private var contextMenuContent: some View {
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            UIPasteboard.general.string = thread.sessionId
+        } label: {
+            Label("Copy sessionId", systemImage: "doc.on.doc")
+        }
+
         if onRename != nil {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)

@@ -157,6 +157,7 @@ struct TurnView: View {
         .environment(\.inlineCommitAndPushPhase, viewModel.inlineCommitAndPushPhase)
         .navigationTitle(resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             TurnToolbarContent(
                 displayTitle: resolvedThread.displayTitle,

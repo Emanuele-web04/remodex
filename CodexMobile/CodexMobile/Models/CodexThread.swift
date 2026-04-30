@@ -290,6 +290,11 @@ extension CodexThread {
         parentThreadId != nil
     }
 
+    // App-server exposes the rollout session identifier as Thread.id.
+    var sessionId: String {
+        id
+    }
+
     // Fork badges use ancestry rather than cwd heuristics so local/worktree routing stays independent.
     var isForkedThread: Bool {
         forkedFromThreadId != nil

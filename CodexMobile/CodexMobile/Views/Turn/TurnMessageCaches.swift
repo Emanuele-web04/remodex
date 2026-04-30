@@ -207,6 +207,7 @@ struct MessageRowRenderModel {
     let codeCommentContent: CodeCommentDirectiveContent?
     let mermaidContent: MermaidMarkdownContent?
     let assistantImageReferences: [AssistantMarkdownImageReference]
+    let assistantInlineContentSegments: [AssistantMarkdownContentSegment]
     let assistantTextWithoutImageSyntax: String?
     let fileChangeState: FileChangeRenderState?
     let fileChangeGroups: [FileChangeGroup]
@@ -219,6 +220,7 @@ struct MessageRowRenderModel {
         codeCommentContent: nil,
         mermaidContent: nil,
         assistantImageReferences: [],
+        assistantInlineContentSegments: [],
         assistantTextWithoutImageSyntax: nil,
         fileChangeState: nil,
         fileChangeGroups: [],
@@ -253,6 +255,9 @@ enum MessageRowRenderModelCache {
             let assistantTextWithoutImageSyntax = assistantImageReferences.isEmpty
                 ? nil
                 : AssistantMarkdownImageReferenceParser.visibleTextRemovingImageSyntax(from: displayText)
+            let assistantInlineContentSegments = assistantImageReferences.contains(where: \.isTemporaryScreenshotImage)
+                ? AssistantMarkdownImageReferenceParser.contentSegmentsPreservingTemporaryImages(from: displayText)
+                : []
             let assistantRenderText = assistantTextWithoutImageSyntax ?? displayText
             // Defer Mermaid parsing until the assistant row is finalized so streaming deltas
             // keep the lightweight append-only path and avoid repeated parser/WebKit churn.
@@ -265,8 +270,9 @@ enum MessageRowRenderModelCache {
                     : MermaidMarkdownContentCache.content(
                         messageID: message.id,
                         text: assistantRenderText
-                    ),
+                ),
                 assistantImageReferences: assistantImageReferences,
+                assistantInlineContentSegments: assistantInlineContentSegments,
                 assistantTextWithoutImageSyntax: assistantTextWithoutImageSyntax,
                 fileChangeState: nil,
                 fileChangeGroups: [],
@@ -288,6 +294,7 @@ enum MessageRowRenderModelCache {
                     codeCommentContent: nil,
                     mermaidContent: nil,
                     assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
                     assistantTextWithoutImageSyntax: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],
@@ -309,6 +316,7 @@ enum MessageRowRenderModelCache {
                     codeCommentContent: nil,
                     mermaidContent: nil,
                     assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
                     assistantTextWithoutImageSyntax: nil,
                     fileChangeState: fileChangeState,
                     fileChangeGroups: FileChangeGroupingCache.grouped(messageID: message.id, entries: allEntries),
@@ -324,6 +332,7 @@ enum MessageRowRenderModelCache {
                     codeCommentContent: nil,
                     mermaidContent: nil,
                     assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
                     assistantTextWithoutImageSyntax: nil,
                     fileChangeState: nil,
                     fileChangeGroups: [],

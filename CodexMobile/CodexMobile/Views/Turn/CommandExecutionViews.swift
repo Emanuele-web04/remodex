@@ -65,6 +65,28 @@ struct AssistantMarkdownImageReference: Identifiable, Equatable {
         let trimmedAlt = altText.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedAlt.isEmpty ? "Image" : trimmedAlt
     }
+
+    var isTemporaryScreenshotImage: Bool {
+        AssistantMarkdownImageReferenceParser.isTemporaryScreenshotImagePath(path)
+    }
+
+    var isCodexGeneratedImage: Bool {
+        AssistantMarkdownImageReferenceParser.isCodexGeneratedImagePath(path)
+    }
+}
+
+enum AssistantMarkdownContentSegment: Identifiable, Equatable {
+    case text(id: Int, value: String)
+    case image(AssistantMarkdownImageReference)
+
+    var id: String {
+        switch self {
+        case .text(let id, _):
+            return "text-\(id)"
+        case .image(let reference):
+            return reference.id
+        }
+    }
 }
 
 enum AssistantMarkdownImageReferenceParser {
@@ -135,6 +157,91 @@ enum AssistantMarkdownImageReferenceParser {
         }
 
         return transformedLines.joined(separator: "\n")
+    }
+
+    // Keeps temporary screenshots in their authored markdown position while generated images remain trailing previews.
+    static func contentSegmentsPreservingTemporaryImages(from text: String) -> [AssistantMarkdownContentSegment] {
+        var segments: [AssistantMarkdownContentSegment] = []
+        var isInsideFence = false
+        var occurrenceIndex = 0
+        var textSegmentID = 0
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+        func appendText(_ value: String) {
+            guard !value.isEmpty else { return }
+            if case .text(let id, let existing)? = segments.last {
+                segments[segments.count - 1] = .text(id: id, value: existing + value)
+            } else {
+                segments.append(.text(id: textSegmentID, value: value))
+                textSegmentID += 1
+            }
+        }
+
+        for (lineIndex, line) in lines.enumerated() {
+            let lineSuffix = lineIndex < lines.count - 1 ? "\n" : ""
+            if isFenceDelimiter(line) {
+                appendText(line + lineSuffix)
+                isInsideFence.toggle()
+                continue
+            }
+            guard !isInsideFence else {
+                appendText(line + lineSuffix)
+                continue
+            }
+
+            let matches = validImageMatches(in: line)
+            guard !matches.isEmpty else {
+                appendText(line + lineSuffix)
+                continue
+            }
+
+            let nsLine = line as NSString
+            var cursor = 0
+            for match in matches {
+                if match.range.location > cursor {
+                    appendText(nsLine.substring(with: NSRange(location: cursor, length: match.range.location - cursor)))
+                }
+
+                let reference = AssistantMarkdownImageReference(
+                    path: match.path,
+                    altText: match.altText,
+                    occurrenceIndex: occurrenceIndex
+                )
+                occurrenceIndex += 1
+                if reference.isTemporaryScreenshotImage {
+                    segments.append(.image(reference))
+                }
+
+                cursor = match.range.location + match.range.length
+            }
+            if cursor < nsLine.length {
+                appendText(nsLine.substring(from: cursor))
+            }
+            appendText(lineSuffix)
+        }
+
+        return segments.filter { segment in
+            if case .text(_, let value) = segment {
+                return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            return true
+        }
+    }
+
+    static func isTemporaryScreenshotImagePath(_ path: String) -> Bool {
+        let normalized = path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+            .lowercased()
+        return normalized.hasPrefix("/tmp/")
+            || normalized.hasPrefix("/private/tmp/")
+            || (normalized.hasPrefix("/private/var/folders/") && normalized.contains("/t/"))
+    }
+
+    static func isCodexGeneratedImagePath(_ path: String) -> Bool {
+        path.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+            .lowercased()
+            .contains("/.codex/generated_images/")
     }
 
     private static func markdownImageMatches(in text: String) -> [(range: NSRange, altText: String, path: String)] {

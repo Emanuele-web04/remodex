@@ -63,7 +63,10 @@ final class CodexPlanModeTests: XCTestCase {
         await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(capturedTurnStartParams.count, 2)
-        XCTAssertNil(capturedTurnStartParams[1].objectValue?["collaborationMode"])
+        XCTAssertEqual(
+            capturedTurnStartParams[1].objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
+            CodexCollaborationModeKind.default.rawValue
+        )
     }
 
     func testBuildCollaborationModePayloadUsesBuiltInPlanInstructionsByDefault() throws {
@@ -384,11 +387,17 @@ final class CodexPlanModeTests: XCTestCase {
         let threadID = "thread-plan"
         let turnID = "turn-live"
 
+        service.supportsTurnCollaborationMode = true
+        service.availableModels = [makeModel()]
+        service.setSelectedModelId("gpt-5-codex")
         service.markCompatibilityPlanFallback(for: threadID)
         service.requestTransportOverride = { method, params in
             XCTAssertEqual(method, "turn/steer")
             XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, threadID)
-            XCTAssertNil(params?.objectValue?["collaborationMode"])
+            XCTAssertEqual(
+                params?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
+                CodexCollaborationModeKind.default.rawValue
+            )
             return RPCMessage(
                 id: .string(UUID().uuidString),
                 result: .object(["turnId": .string(turnID)]),
@@ -406,7 +415,7 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertNil(service.currentPlanSessionSource(for: threadID))
     }
 
-    func testNonPlanStartClearsStalePlanSessionStateWithoutSendingDefaultMode() async throws {
+    func testNonPlanStartClearsStalePlanSessionStateBySendingDefaultMode() async throws {
         let service = makeService()
         service.supportsTurnCollaborationMode = true
         service.availableModels = [makeModel()]
@@ -433,9 +442,13 @@ final class CodexPlanModeTests: XCTestCase {
             collaborationMode: nil
         )
 
-        // Normal sends clear local plan UI state, but only explicit plan implementation
-        // sends `default` to force the runtime out of sticky plan mode.
-        XCTAssertNil(capturedTurnStartParams?.objectValue?["collaborationMode"])
+        XCTAssertEqual(
+            capturedTurnStartParams?
+                .objectValue?["collaborationMode"]?
+                .objectValue?["mode"]?
+                .stringValue,
+            CodexCollaborationModeKind.default.rawValue
+        )
         XCTAssertNil(service.currentPlanSessionSource(for: threadID))
     }
 

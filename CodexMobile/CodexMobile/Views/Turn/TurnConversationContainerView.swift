@@ -136,6 +136,7 @@ struct TurnConversationContainerView: View {
                 isShowingPinnedPlanSheet = false
             }
         }
+        .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: $isShowingPinnedPlanSheet) {
             if let pinnedTaskPlanMessage = messageLayout.pinnedTaskPlanMessage {
                 PlanExecutionSheet(message: pinnedTaskPlanMessage)

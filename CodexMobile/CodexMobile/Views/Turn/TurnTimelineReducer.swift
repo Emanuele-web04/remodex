@@ -538,6 +538,15 @@ enum TurnTimelineReducer {
             return false
         }
 
+        // Stale image pending rows from older sessions should still collapse when
+        // the runtime echo finally supplies the turn binding.
+        if isPendingToConfirmedUpgrade,
+           isTurnBindingUpgrade,
+           !previous.attachments.isEmpty,
+           previous.attachments.count == incoming.attachments.count {
+            return true
+        }
+
         return abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= 12
     }
 
@@ -600,7 +609,9 @@ enum TurnTimelineReducer {
         if !previousAttachments.isEmpty,
            !incomingAttachments.isEmpty,
            previousAttachments != incomingAttachments {
-            return false
+            // Render dedupe mirrors history reconciliation for optimistic image sends
+            // whose confirmed echo has a different attachment storage identity.
+            return previous.attachments.count == incoming.attachments.count
         }
 
         return true

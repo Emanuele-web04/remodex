@@ -301,7 +301,7 @@ extension CodexService {
             }
         }
 
-        return result
+        return Self.historyMessagesMergingGeneratedImageArtifacts(result)
     }
 
     // Extracts persisted turn outcomes from canonical history so render grouping survives app relaunch.
@@ -519,7 +519,7 @@ extension CodexService {
             for index in sorted.indices {
                 sorted[index].orderIndex = CodexMessageOrderCounter.next()
             }
-            return sorted
+            return historyMessagesMergingGeneratedImageArtifacts(sorted)
         }
 
         var merged = existing
@@ -765,7 +765,7 @@ extension CodexService {
         }
 
         merged.sort(by: { $0.orderIndex < $1.orderIndex })
-        return merged
+        return historyMessagesMergingGeneratedImageArtifacts(merged)
     }
 
     // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
@@ -1209,7 +1209,8 @@ extension CodexService {
 
     nonisolated static func userMessageMetadataLooksCompatible(
         localMessage: CodexMessage,
-        serverMessage: CodexMessage
+        serverMessage: CodexMessage,
+        allowAttachmentCountFallback: Bool = false
     ) -> Bool {
         let localFileMentions = fileMentionsSignature(for: localMessage.fileMentions)
         let serverFileMentions = fileMentionsSignature(for: serverMessage.fileMentions)
@@ -1224,7 +1225,10 @@ extension CodexService {
         if !localAttachments.isEmpty,
            !serverAttachments.isEmpty,
            localAttachments != serverAttachments {
-            return false
+            // Pending image sends can return with a different server attachment identity
+            // even though the user row is the same prompt/image count.
+            return allowAttachmentCountFallback
+                && localMessage.attachments.count == serverMessage.attachments.count
         }
 
         return true
@@ -1237,12 +1241,20 @@ extension CodexService {
     ) -> Bool {
         guard candidate.role == .user,
               candidate.deliveryState != .failed,
-              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
-              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+              normalizedMessageText(candidate.text) == normalizedMessageText(message.text) else {
             return false
         }
 
         let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+        let allowsAttachmentCountFallback = candidate.deliveryState == .pending
+            || candidateTurnId == turnId
+        guard userMessageMetadataLooksCompatible(
+            localMessage: candidate,
+            serverMessage: message,
+            allowAttachmentCountFallback: allowsAttachmentCountFallback
+        ) else {
+            return false
+        }
         return candidateTurnId == nil || candidateTurnId == turnId
     }
 
@@ -1253,7 +1265,11 @@ extension CodexService {
         guard candidate.role == .user,
               candidate.deliveryState == .pending,
               normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
-              userMessageMetadataLooksCompatible(localMessage: candidate, serverMessage: message) else {
+              userMessageMetadataLooksCompatible(
+                localMessage: candidate,
+                serverMessage: message,
+                allowAttachmentCountFallback: true
+              ) else {
             return false
         }
 
@@ -1382,6 +1398,75 @@ extension CodexService {
                 subagentAction: subagentAction
             )
         )
+    }
+
+    // Canonical history may store generated-image artifacts as separate items; the
+    // timeline presents them inside the final assistant answer for that turn.
+    nonisolated static func historyMessagesMergingGeneratedImageArtifacts(_ messages: [CodexMessage]) -> [CodexMessage] {
+        var result = messages
+        let turnIds = Array(Set(result.compactMap(\.turnId)))
+        for turnId in turnIds {
+            let assistantIndices = result.indices.filter { index in
+                result[index].role == .assistant && result[index].turnId == turnId
+            }
+            let imageOnlyIndices = assistantIndices.filter { index in
+                Self.isHistoryGeneratedImageArtifactOnly(result[index].text)
+            }
+            guard !imageOnlyIndices.isEmpty,
+                  let targetIndex = assistantIndices.last(where: { index in
+                      !imageOnlyIndices.contains(index)
+                  }) else {
+                continue
+            }
+
+            let existingText = result[targetIndex].text
+            let existingImagePaths = Set(AssistantMarkdownImageReferenceParser.references(in: existingText).map(\.path))
+            let imageText = imageOnlyIndices
+                .filter { index in
+                    AssistantMarkdownImageReferenceParser.references(in: result[index].text).contains { reference in
+                        !existingImagePaths.contains(reference.path)
+                    }
+                }
+                .map { result[$0].text.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+            guard !imageText.isEmpty else {
+                continue
+            }
+            result[targetIndex].text = [existingText, imageText]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n\n")
+        }
+
+        let removedIds = Set(result.indices.filter { index in
+            if let turnId = result[index].turnId,
+               Self.isHistoryGeneratedImageArtifactOnly(result[index].text) {
+                return result.contains { candidate in
+                    candidate.id != result[index].id
+                        && candidate.role == .assistant
+                        && candidate.turnId == turnId
+                        && !Self.isHistoryGeneratedImageArtifactOnly(candidate.text)
+                        && AssistantMarkdownImageReferenceParser.references(in: candidate.text).contains { reference in
+                            result[index].text.contains(reference.path)
+                        }
+                }
+            }
+            return false
+        }.map { result[$0].id })
+        return result.filter { !removedIds.contains($0.id) }
+    }
+
+    nonisolated static func isHistoryGeneratedImageArtifactOnly(_ text: String) -> Bool {
+        let imageReferences = AssistantMarkdownImageReferenceParser.references(in: text)
+        guard !imageReferences.isEmpty,
+              imageReferences.allSatisfy(\.isCodexGeneratedImage) else {
+            return false
+        }
+        return AssistantMarkdownImageReferenceParser
+            .visibleTextRemovingImageSyntax(from: text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
     }
 
     // Parses `data:image/...;base64,...` payloads into raw image bytes.

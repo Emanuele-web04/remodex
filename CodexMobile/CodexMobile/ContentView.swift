@@ -530,7 +530,7 @@ struct ContentView: View {
         }
 
         hasAttemptedAutomaticWakeSavedMacDisplay = true
-        await performSavedMacDisplayWakeAttempt()
+        await performSavedMacDisplayWakeAttempt(cancelAutoReconnectBeforeWake: false)
     }
 
     // Keeps foreground reconnect and the one-shot wake fallback in the same guarded path.
@@ -554,24 +554,29 @@ struct ContentView: View {
     // Uses a temporary bridge request to wake display sleep, then unlocks the manual button only if that fails.
     private func wakeSavedMacDisplay() {
         Task { @MainActor in
-            await performSavedMacDisplayWakeAttempt()
+            await performSavedMacDisplayWakeAttempt(cancelAutoReconnectBeforeWake: true)
         }
     }
 
     // Sends one wake pulse over the best remembered pairing path without hiding the manual wake affordance.
-    private func performSavedMacDisplayWakeAttempt() async {
+    private func performSavedMacDisplayWakeAttempt(cancelAutoReconnectBeforeWake: Bool) async {
         guard codex.supportsDisplayWake, !isWakingSavedMacDisplay else { return }
         isWakingSavedMacDisplay = true
 
         defer { isWakingSavedMacDisplay = false }
 
         do {
-            await viewModel.stopAutoReconnectForManualRetry(codex: codex)
+            if cancelAutoReconnectBeforeWake {
+                await viewModel.stopAutoReconnectForManualRetry(codex: codex)
+            }
             let handoffService = DesktopHandoffService(codex: codex)
             try await handoffService.wakeDisplay()
+            if codex.isConnected {
+                codex.schedulePostConnectSyncPass(preferredThreadId: codex.activeThreadId)
+            }
         } catch {
             // Wake failures are expected when the Mac has already gone past display sleep,
-            // so do not surface them as sticky composer errors inside the active chat.
+            // so keep automatic reconnect alive instead of surfacing sticky composer errors.
         }
     }
 
@@ -793,15 +798,16 @@ struct ContentView: View {
         setSidebar(open: open)
     }
 
-    // Forces UIKit-backed inputs like the composer text view to resign before the drawer settles open.
+    // Forces UIKit-backed inputs like the composer/search text views to resign before the drawer moves.
     private func setSidebar(open: Bool) {
         debugSidebarLog(
             "setSidebar open=\(open) prewarmed=\(isSidebarPrewarmed) "
                 + "visible=\(sidebarVisible) revealWidth=\(Int(sidebarRevealWidth))"
         )
-        if open {
-            dismissActiveKeyboard()
+        if !open {
+            isSearchActive = false
         }
+        dismissActiveKeyboard()
         withAnimation(Self.sidebarSpring) {
             isSidebarOpen = open
             sidebarDragOffset = 0

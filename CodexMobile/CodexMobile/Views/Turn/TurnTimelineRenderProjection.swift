@@ -72,11 +72,13 @@ enum TurnTimelineRenderProjection {
     static func project(messages: [CodexMessage], completedTurnIDs: Set<String> = []) -> [TurnTimelineRenderItem] {
         var items: [TurnTimelineRenderItem] = []
         var bufferedToolMessages: [CodexMessage] = []
+        let fileChangePlan = fileChangeCollapsePlan(in: messages)
         let finalCollapsePlan = previousMessagesCollapsePlan(
             in: messages,
             completedTurnIDs: completedTurnIDs
         )
         let hiddenIndices = Set(finalCollapsePlan.values.flatMap(\.indices))
+            .union(fileChangePlan.hiddenIndices)
         let groupByInsertionIndex = finalCollapsePlan.values.reduce(into: [Int: PreviousMessagesCollapse]()) { result, collapse in
             result[collapse.insertionIndex] = collapse
         }
@@ -101,18 +103,19 @@ enum TurnTimelineRenderProjection {
                 continue
             }
 
+            let renderedMessage = fileChangePlan.replacementByIndex[index] ?? message
             guard isToolBurstCandidate(message) else {
                 flushBufferedToolMessages()
-                items.append(.message(message))
+                items.append(.message(renderedMessage))
                 continue
             }
 
             if let previous = bufferedToolMessages.last,
-               !canShareToolBurst(previous: previous, incoming: message) {
+               !canShareToolBurst(previous: previous, incoming: renderedMessage) {
                 flushBufferedToolMessages()
             }
 
-            bufferedToolMessages.append(message)
+            bufferedToolMessages.append(renderedMessage)
         }
 
         flushBufferedToolMessages()
@@ -129,10 +132,73 @@ enum TurnTimelineRenderProjection {
         ).keys.map { messages[$0].id })
     }
 
+    static func collapsedPreviousMessageIDs(
+        in messages: [CodexMessage],
+        completedTurnIDs: Set<String>
+    ) -> Set<String> {
+        Set(previousMessagesCollapsePlan(
+            in: messages,
+            completedTurnIDs: completedTurnIDs
+        ).values.flatMap { collapse in
+            collapse.indices.map { messages[$0].id }
+        })
+    }
+
     private struct PreviousMessagesCollapse {
         let insertionIndex: Int
         let indices: [Int]
         let group: TurnTimelinePreviousMessagesGroup
+    }
+
+    private struct FileChangeCollapsePlan {
+        let hiddenIndices: Set<Int>
+        let replacementByIndex: [Int: CodexMessage]
+    }
+
+    // Shows one end-of-turn file table even when the bridge streams multiple file-change snapshots.
+    private static func fileChangeCollapsePlan(in messages: [CodexMessage]) -> FileChangeCollapsePlan {
+        var groups: [String: [Int]] = [:]
+        var blockStart = messages.startIndex
+
+        for index in messages.indices {
+            if messages[index].role == .user {
+                blockStart = messages.index(after: index)
+                continue
+            }
+
+            let message = messages[index]
+            guard message.role == .system,
+                  message.kind == .fileChange,
+                  !message.isStreaming else {
+                continue
+            }
+
+            let key = normalizedIdentifier(message.turnId)
+                .map { "turn:\($0)" }
+                ?? "block:\(blockStart)"
+            groups[key, default: []].append(index)
+        }
+
+        var hiddenIndices = Set<Int>()
+        var replacementByIndex: [Int: CodexMessage] = [:]
+
+        for indices in groups.values where indices.count > 1 {
+            guard let targetIndex = indices.max() else { continue }
+            let fileChangeMessages = indices.map { messages[$0] }
+            guard let presentation = FileChangeBlockPresentationBuilder.build(from: fileChangeMessages) else {
+                continue
+            }
+
+            hiddenIndices.formUnion(indices.filter { $0 != targetIndex })
+            var replacement = messages[targetIndex]
+            replacement.text = presentation.bodyText
+            replacementByIndex[targetIndex] = replacement
+        }
+
+        return FileChangeCollapsePlan(
+            hiddenIndices: hiddenIndices,
+            replacementByIndex: replacementByIndex
+        )
     }
 
     // Finds completed final answers and the same-turn status/tool rows that should sit behind the disclosure.

@@ -12,6 +12,43 @@ import XCTest
 final class CodexGPTAccountTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testKnownWindowsBridgeDoesNotUseLegacyMacDisplayWakeFallback() {
+        let service = makeService()
+        let macDeviceID = "host-\(UUID().uuidString)"
+
+        service.lastTrustedMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 7, count: 32).base64EncodedString(),
+            lastPairedAt: Date()
+        )
+        service.gptAccountSnapshot.hostPlatform = .windows
+        service.gptAccountSnapshot.hostCapabilities = nil
+
+        XCTAssertEqual(service.bridgeHostPlatform, .windows)
+        XCTAssertFalse(service.supportsDisplayWake)
+        XCTAssertFalse(service.supportsDesktopAppHandoff)
+        XCTAssertFalse(service.supportsKeepAwakeWhileBridgeRuns)
+    }
+
+    func testKnownMacBridgeKeepsLegacyDisplayWakeFallback() {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+
+        service.lastTrustedMacDeviceId = macDeviceID
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 8, count: 32).base64EncodedString(),
+            lastPairedAt: Date()
+        )
+        service.gptAccountSnapshot.hostPlatform = .macOS
+        service.gptAccountSnapshot.hostCapabilities = nil
+
+        XCTAssertTrue(service.supportsDisplayWake)
+        XCTAssertTrue(service.supportsDesktopAppHandoff)
+        XCTAssertTrue(service.supportsKeepAwakeWhileBridgeRuns)
+    }
+
     func testRefreshGPTAccountStateDecodesSanitizedBridgeStatus() async {
         let service = makeService()
         service.isConnected = true

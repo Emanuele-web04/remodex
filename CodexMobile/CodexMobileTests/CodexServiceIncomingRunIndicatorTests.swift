@@ -972,6 +972,308 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(assistantMessages.last?.isStreaming ?? false)
     }
 
+    func testCanonicalItemCompletionPreservesLateTurnImagePreview() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let imagePath = "/tmp/generated-preview.png"
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Here is the generated image."
+        )
+        service.appendGeneratedImageReference(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "image-item",
+            imagePath: imagePath
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "prose-item",
+            text: "Here is the final generated image."
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.itemId, "prose-item")
+        XCTAssertEqual(
+            assistantMessages.first?.text,
+            "Here is the final generated image.\n\n![Generated image](\(imagePath))"
+        )
+    }
+
+    func testFinalReplayCompletionAbsorbsPriorImagePreviewBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "Using the imagegen skill for this as a new bitmap icon asset."
+        let finalText = "Done. Generated a polished wing icon image using the built-in image generation tool."
+        let imagePath = "/tmp/generated-wing.png"
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "intro-item",
+            text: introText
+        )
+        service.appendGeneratedImageReference(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "image-item",
+            imagePath: imagePath
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "final-item",
+            text: "\(finalText)\n\n\(introText)"
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(
+            assistantMessages.first?.text,
+            "\(finalText)\n\n![Generated image](\(imagePath))"
+        )
+    }
+
+    func testFinalCompletionAfterImagePreviewReplacesPreparatoryBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "Using the imagegen skill for this as a new raster icon asset."
+        let finalText = "Generated a clean wing icon image using the built-in image generator."
+        let imagePath = "/tmp/generated-wing.png"
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: introText
+        )
+        service.appendGeneratedImageReference(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "image-item",
+            imagePath: imagePath
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: finalText
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(
+            assistantMessages.first?.text,
+            "\(finalText)\n\n![Generated image](\(imagePath))"
+        )
+    }
+
+    func testTurnlessFinalAnswerCompletionUsesActiveTurnImagePreview() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "Preparing an image asset for the current request."
+        let finalText = "Generated a clean wing icon image using the built-in image generator."
+        let imagePath = "/tmp/generated-wing.png"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: introText
+        )
+        service.appendGeneratedImageReference(
+            threadId: threadID,
+            turnId: nil,
+            itemId: "image-item",
+            imagePath: imagePath
+        )
+        service.handleNotification(
+            method: "codex/event/agent_message",
+            params: .object([
+                "threadId": .string(threadID),
+                "msg": .object([
+                    "type": .string("agent_message"),
+                    "phase": .string("final_answer"),
+                    "message": .string(finalText),
+                ]),
+            ])
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.turnId, turnID)
+        XCTAssertEqual(
+            assistantMessages.first?.text,
+            "\(finalText)\n\n![Generated image](\(imagePath))"
+        )
+    }
+
+    func testItemScopedCompletionAfterImagePreviewStaysSeparate() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "Preparing an image asset for the current request."
+        let laterItemText = "Here is a separate assistant item in the same turn."
+        let imagePath = "/tmp/generated-wing.png"
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: introText
+        )
+        service.appendGeneratedImageReference(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "image-item",
+            imagePath: imagePath
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "later-assistant-item",
+            text: laterItemText
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 2)
+        XCTAssertEqual(
+            assistantMessages.first?.text,
+            "\(introText)\n\n![Generated image](\(imagePath))"
+        )
+        XCTAssertEqual(assistantMessages.last?.text, laterItemText)
+    }
+
+    func testHistoryDecodeMergesGeneratedImageArtifactIntoFinalAssistantAnswer() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "Preparing an image asset for the current request."
+        let finalText = "Generated a clean wing icon image using the built-in image generator."
+        let imagePath = "/tmp/generated-wing.png"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("intro-item"),
+                                "type": .string("agentMessage"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("output_text"),
+                                        "text": .string(introText),
+                                    ]),
+                                ]),
+                            ]),
+                            .object([
+                                "id": .string("image-item"),
+                                "type": .string("imageGenerationCall"),
+                                "file_path": .string(imagePath),
+                            ]),
+                            .object([
+                                "id": .string("final-item"),
+                                "type": .string("agentMessage"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("output_text"),
+                                        "text": .string(finalText),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        let assistantMessages = messages.filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 2)
+        XCTAssertEqual(assistantMessages.first?.text, introText)
+        XCTAssertEqual(
+            assistantMessages.last?.text,
+            "\(finalText)\n\n![Generated image](\(imagePath))"
+        )
+    }
+
+    func testHistoryMergeCleansExistingDuplicateGeneratedImageArtifact() throws {
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let introText = "Preparing an image asset for the current request."
+        let finalText = "Generated a clean wing icon image using the built-in image generator."
+        let imagePath = "/tmp/generated-wing.png"
+        let imageMarkdown = "![Generated image](\(imagePath))"
+
+        let existing = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "\(introText)\n\n\(imageMarkdown)",
+                turnId: turnID,
+                itemId: "intro-item",
+                isStreaming: false
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: finalText,
+                turnId: turnID,
+                itemId: "final-item",
+                isStreaming: false
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: imageMarkdown,
+                turnId: turnID,
+                itemId: "image-item",
+                isStreaming: false
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: introText,
+                turnId: turnID,
+                itemId: "intro-item",
+                isStreaming: false
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                text: "\(finalText)\n\n\(imageMarkdown)",
+                turnId: turnID,
+                itemId: "final-item",
+                isStreaming: false
+            ),
+        ]
+
+        let merged = try CodexService.mergeHistoryMessages(
+            existing,
+            history,
+            activeThreadIDs: [],
+            runningThreadIDs: []
+        ).filter { $0.role == .assistant }
+
+        XCTAssertEqual(merged.count, 2)
+        XCTAssertEqual(merged.first?.text, introText)
+        XCTAssertEqual(merged.last?.text, "\(finalText)\n\n\(imageMarkdown)")
+    }
+
     func testIdentifierlessLateCompletionDoesNotAttachPreviousResponseToNewTurn() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
