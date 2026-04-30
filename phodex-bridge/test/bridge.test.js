@@ -633,7 +633,7 @@ test("sanitizeThreadHistoryImagesForRelay strips bulky compaction replacement hi
   });
 });
 
-test("sanitizeThreadHistoryImagesForRelay trims oversized history down to the newest turn tail", () => {
+test("sanitizeThreadHistoryImagesForRelay compacts oversized history before the newest turn tail", () => {
   const largeText = "A".repeat(4 * 1024 * 1024);
   const rawMessage = JSON.stringify({
     id: "req-thread-tail",
@@ -671,9 +671,54 @@ test("sanitizeThreadHistoryImagesForRelay trims oversized history down to the ne
   );
 
   assert.equal(sanitized.result.thread.historyTailTruncatedForRelay, true);
+  assert.equal(sanitized.result.thread.remodexHistoryCompacted, true);
+  assert.equal(sanitized.result.thread.remodexOmittedTurnCount, 1);
+  assert.equal(sanitized.result.thread.remodexKeptTurnCount, 1);
   assert.deepEqual(
     sanitized.result.thread.turns.map((turn) => turn.id),
-    ["turn-new"]
+    ["remodex-history-compacted-turn-old", "turn-new"]
+  );
+  assert.equal(
+    sanitized.result.thread.turns[0].items[0].text.includes("Older turns omitted: 1"),
+    true
+  );
+});
+
+test("sanitizeThreadHistoryImagesForRelay keeps the newest forty turns when compacting", () => {
+  const largeText = "A".repeat(750 * 1024);
+  const turns = Array.from({ length: 45 }, (_, index) => ({
+    id: `turn-${index + 1}`,
+    items: [
+      {
+        id: `item-${index + 1}`,
+        type: "assistant_message",
+        text: index < 5 ? largeText : `reply ${index + 1}`,
+      },
+    ],
+  }));
+  const rawMessage = JSON.stringify({
+    id: "req-thread-recent-window",
+    result: {
+      thread: {
+        id: "thread-recent-window",
+        turns,
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+
+  assert.equal(sanitized.result.thread.remodexHistoryCompacted, true);
+  assert.equal(sanitized.result.thread.remodexOmittedTurnCount, 5);
+  assert.equal(sanitized.result.thread.remodexKeptTurnCount, 40);
+  assert.deepEqual(
+    sanitized.result.thread.turns.map((turn) => turn.id),
+    [
+      "remodex-history-compacted-turn-1",
+      ...turns.slice(5).map((turn) => turn.id),
+    ]
   );
 });
 

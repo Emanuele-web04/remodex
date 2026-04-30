@@ -58,6 +58,7 @@ const STALE_RELAY_STATUS_MESSAGE = "Relay heartbeat stalled; reconnect pending."
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 3 * 1024 * 1024;
 const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
+const RELAY_HISTORY_RECENT_TURN_TARGET = 40;
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -1356,8 +1357,8 @@ function normalizeNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-// Shrinks `thread/read` and `thread/resume` snapshots by eliding bulky history payloads
-// that the iPhone does not render directly (inline images, compaction replacement history).
+// Shrinks `thread/read` and `thread/resume` snapshots for mobile relay delivery.
+// This elides bulky blobs and replaces oversized older history with a compact marker.
 function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
   if (requestMethod !== "thread/read" && requestMethod !== "thread/resume") {
     return rawMessage;
@@ -1759,19 +1760,25 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   }
 
   const turns = thread.turns;
-  let trimmedTurns = turns.slice();
+  let trimmedTurns = turns.length > RELAY_HISTORY_RECENT_TURN_TARGET
+    ? turns.slice(-RELAY_HISTORY_RECENT_TURN_TARGET)
+    : turns.slice();
   while (trimmedTurns.length > 1) {
-    trimmedTurns = trimmedTurns.slice(1);
-    const candidateThread = {
-      ...thread,
-      turns: trimmedTurns,
-      historyTailTruncatedForRelay: true,
-    };
+    if (trimmedTurns.length === turns.length) {
+      trimmedTurns = trimmedTurns.slice(1);
+    }
+    const candidateThread = buildRelayHistoryCompactedThread(
+      thread,
+      buildRelayCompactedHistoryTurns(turns, trimmedTurns),
+      Math.max(0, turns.length - trimmedTurns.length),
+      trimmedTurns.length
+    );
     encoded = encodeRelayThreadPayload(parsed, candidateThread);
     if (encoded != null && Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
       return encoded;
     }
     workingThread = candidateThread;
+    trimmedTurns = trimmedTurns.slice(1);
   }
 
   const newestTurn = trimmedTurns[0];
@@ -1782,14 +1789,23 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   let trimmedItems = newestTurn.items.slice();
   while (trimmedItems.length > 1) {
     trimmedItems = trimmedItems.slice(1);
-    const candidateThread = {
-      ...thread,
-      turns: [{
+    const compactedTurnPrefix = buildRelayHistoryCompactionTurn(
+      Math.max(0, turns.length - 1),
+      1,
+      thread
+    );
+    const candidateThread = buildRelayHistoryCompactedThread(
+      thread,
+      compactedTurnPrefix ? [compactedTurnPrefix, {
+        ...newestTurn,
+        items: trimmedItems,
+      }] : [{
         ...newestTurn,
         items: trimmedItems,
       }],
-      historyTailTruncatedForRelay: true,
-    };
+      Math.max(0, turns.length - 1),
+      1
+    );
     encoded = encodeRelayThreadPayload(parsed, candidateThread);
     if (encoded != null && Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
       return encoded;
@@ -1806,28 +1822,93 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
     mostRecentItem,
     RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS
   );
-  let candidateThread = {
-    ...thread,
-    turns: [{
-      ...newestTurn,
-      items: [truncatedItem],
-    }],
-    historyTailTruncatedForRelay: true,
-  };
+  let candidateThread = buildRelayHistoryCompactedThread(
+    thread,
+    [
+      ...buildRelayCompactedHistoryTurns(turns, [newestTurn]).slice(0, -1),
+      {
+        ...newestTurn,
+        items: [truncatedItem],
+      },
+    ],
+    Math.max(0, turns.length - 1),
+    1
+  );
   encoded = encodeRelayThreadPayload(parsed, candidateThread);
   if (encoded != null && Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
     return encoded;
   }
 
-  candidateThread = {
-    ...thread,
-    turns: [{
-      ...newestTurn,
-      items: [compactHistoryItemForRelay(mostRecentItem, RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS)],
-    }],
-    historyTailTruncatedForRelay: true,
-  };
+  candidateThread = buildRelayHistoryCompactedThread(
+    thread,
+    [
+      ...buildRelayCompactedHistoryTurns(turns, [newestTurn]).slice(0, -1),
+      {
+        ...newestTurn,
+        items: [compactHistoryItemForRelay(mostRecentItem, RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS)],
+      },
+    ],
+    Math.max(0, turns.length - 1),
+    1
+  );
   return encodeRelayThreadPayload(parsed, candidateThread);
+}
+
+function buildRelayHistoryCompactedThread(thread, turns, omittedTurnCount, keptTurnCount) {
+  return {
+    ...thread,
+    turns,
+    historyTailTruncatedForRelay: true,
+    remodexHistoryCompacted: omittedTurnCount > 0,
+    remodexOmittedTurnCount: omittedTurnCount,
+    remodexKeptTurnCount: keptTurnCount,
+  };
+}
+
+function buildRelayCompactedHistoryTurns(allTurns, keptTurns) {
+  const omittedTurnCount = Math.max(0, allTurns.length - keptTurns.length);
+  const compactionTurn = buildRelayHistoryCompactionTurn(
+    omittedTurnCount,
+    keptTurns.length,
+    allTurns[0]
+  );
+  return compactionTurn ? [compactionTurn, ...keptTurns] : keptTurns;
+}
+
+function buildRelayHistoryCompactionTurn(omittedTurnCount, keptTurnCount, idSource = {}) {
+  if (omittedTurnCount <= 0) {
+    return null;
+  }
+
+  const baseId = normalizeNonEmptyString(idSource?.id)
+    || normalizeNonEmptyString(idSource?.turnId)
+    || normalizeNonEmptyString(idSource?.turn_id)
+    || "history";
+  const text = [
+    "Earlier conversation compacted for mobile loading.",
+    "",
+    `Older turns omitted: ${omittedTurnCount}`,
+    `Recent turns kept: ${keptTurnCount}`,
+    "Full history remains available on the Mac runtime.",
+  ].join("\n");
+
+  return {
+    id: `remodex-history-compacted-${baseId}`,
+    remodexSynthetic: true,
+    remodexHistoryCompacted: true,
+    remodexOmittedTurnCount: omittedTurnCount,
+    remodexKeptTurnCount: keptTurnCount,
+    items: [
+      {
+        id: `remodex-history-compacted-item-${baseId}`,
+        type: "assistant_message",
+        role: "assistant",
+        text,
+        remodexSynthetic: true,
+        remodexHistoryCompacted: true,
+      },
+    ],
+  };
 }
 
 function encodeRelayThreadPayload(parsed, thread) {
