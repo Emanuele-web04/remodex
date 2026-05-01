@@ -1117,7 +1117,8 @@ extension CodexService {
         )
     }
 
-    // Consumes turn-level aggregated diff updates and renders them as file-change system messages.
+    // Consumes turn-level aggregated diffs only after a real file-change item exists;
+    // repo-wide dirty snapshots must not create turn-local change UI or undo state.
     private func handleTurnDiffUpdated(_ paramsObject: IncomingParamsObject?) {
         guard let paramsObject else { return }
 
@@ -1134,27 +1135,67 @@ extension CodexService {
         }
         if let turnId {
             threadIdByTurnID[turnId] = threadId
-            recordTurnDiffChangeSet(threadId: threadId, turnId: turnId, diff: diffText)
+            if shouldRecordTurnDiffChangeSet(threadId: threadId, turnId: turnId, diff: diffText) {
+                recordTurnDiffChangeSet(threadId: threadId, turnId: turnId, diff: diffText)
+            }
+        }
+    }
+
+    private func shouldRecordTurnDiffChangeSet(threadId: String, turnId: String, diff: String) -> Bool {
+        let diffPaths = normalizedPatchPaths(from: diff)
+        guard !diffPaths.isEmpty else {
+            return false
         }
 
-        let renderedBody = decodeTurnDiffUpdatedBody(from: diffText)
-        if let turnId, !turnId.isEmpty {
-            upsertStreamingSystemTurnMessage(
-                threadId: threadId,
-                turnId: turnId,
-                kind: .fileChange,
-                text: renderedBody,
-                isStreaming: false
-            )
-            return
+        let fileChangePaths = normalizedFileChangeEvidencePaths(threadId: threadId, turnId: turnId)
+        guard !fileChangePaths.isEmpty else {
+            return false
         }
 
-        appendSystemMessage(
-            threadId: threadId,
-            text: renderedBody,
-            turnId: turnId,
-            kind: .fileChange
-        )
+        return diffPaths.isSubset(of: fileChangePaths)
+    }
+
+    private func normalizedPatchPaths(from diff: String) -> Set<String> {
+        Set(AIUnifiedPatchParser.analyze(diff).fileChanges.compactMap {
+            normalizedTurnDiffPath($0.path)
+        })
+    }
+
+    private func normalizedFileChangeEvidencePaths(threadId: String, turnId: String) -> Set<String> {
+        let fileChangeMessages = messagesByThread[threadId] ?? []
+        return fileChangeMessages.reduce(into: Set<String>()) { paths, message in
+            guard message.role == .system,
+                  message.kind == .fileChange,
+                  message.turnId == turnId else {
+                return
+            }
+
+            for line in message.text.split(separator: "\n", omittingEmptySubsequences: false) {
+                let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard trimmedLine.lowercased().hasPrefix("path:") else { continue }
+                let rawPath = String(trimmedLine.dropFirst("Path:".count))
+                if let normalizedPath = normalizedTurnDiffPath(rawPath) {
+                    paths.insert(normalizedPath)
+                }
+            }
+        }
+    }
+
+    private func normalizedTurnDiffPath(_ rawPath: String) -> String? {
+        var normalized = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, normalized != "/dev/null" else {
+            return nil
+        }
+
+        if normalized.hasPrefix("a/") || normalized.hasPrefix("b/") {
+            normalized = String(normalized.dropFirst(2))
+        }
+        if normalized.hasPrefix("./") {
+            normalized = String(normalized.dropFirst(2))
+        }
+
+        normalized = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized.lowercased()
     }
 
     // Supports legacy codex/event envelopes where `msg.type == "turn_diff"` and payload uses unified_diff.
@@ -2615,10 +2656,6 @@ extension CodexService {
         }
 
         return ""
-    }
-
-    private func decodeTurnDiffUpdatedBody(from diff: String) -> String {
-        renderUnifiedDiffBody(diff, status: "inProgress")
     }
 
     private func renderUnifiedDiffBody(_ diff: String, status: String) -> String {

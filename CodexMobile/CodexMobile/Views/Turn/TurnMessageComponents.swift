@@ -2256,6 +2256,7 @@ private struct CommandExecutionStatusCard: View {
     @State private var isLoadingImagePreview = false
     @State private var imagePreviewError: String?
     @State private var previewImage: PreviewImagePayload?
+    @State private var unavailableImagePreviewPaths: Set<String> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2302,11 +2303,14 @@ private struct CommandExecutionStatusCard: View {
         guard let details = detailModel else {
             return nil
         }
-        return CommandOutputImageReferenceParser.firstReference(
+        guard let reference = CommandOutputImageReferenceParser.firstReference(
             command: details.fullCommand,
             outputTail: details.outputTail,
             cwd: details.cwd
-        )
+        ) else {
+            return nil
+        }
+        return unavailableImagePreviewPaths.contains(reference.path) ? nil : reference
     }
 
     private func commandImagePreviewButton(for reference: CommandOutputImageReference) -> some View {
@@ -2387,9 +2391,22 @@ private struct CommandExecutionStatusCard: View {
                     title: result.fileName.isEmpty ? reference.fileName : result.fileName
                 )
             } catch {
+                if Self.isMissingWorkspaceImageError(error) {
+                    unavailableImagePreviewPaths.insert(reference.path)
+                    return
+                }
                 imagePreviewError = error.localizedDescription
             }
         }
+    }
+
+    // Stale temp image previews are expected after streaming; hide the ghost row instead of interrupting the user.
+    private static func isMissingWorkspaceImageError(_ error: Error) -> Bool {
+        if case CodexServiceError.rpcError(let rpcError) = error {
+            return rpcError.message.localizedCaseInsensitiveContains("image file no longer exists")
+                || rpcError.message.localizedCaseInsensitiveContains("no longer exists")
+        }
+        return error.localizedDescription.localizedCaseInsensitiveContains("image file no longer exists")
     }
 
     private var imagePreviewErrorIsPresented: Binding<Bool> {

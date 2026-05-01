@@ -5,7 +5,7 @@
 # Remodex
 
 [![npm version](https://img.shields.io/npm/v/remodex)](https://www.npmjs.com/package/remodex)
-[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [Follow on X](https://x.com/emanueledpt)
 
 Control [Codex](https://openai.com/index/codex/) from your iPhone. Remodex is a local-first open-source bridge + iOS app that keeps the Codex runtime on your Mac and lets your phone connect through a paired secure session.
@@ -480,4 +480,6 @@ It is much stronger than a plain text proxy: traffic can be protected in transit
 
 ## License
 
-[ISC](LICENSE)
+[Apache License 2.0](LICENSE)
+
+The Remodex name, marks, and branding are not licensed for use in forks or derivative projects. If you fork, redistribute, or publish a modified version, use a different app name and branding.

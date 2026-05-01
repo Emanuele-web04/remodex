@@ -24,7 +24,7 @@
     "cli"
   ],
   "author": "Emanuele Di Pietro",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "type": "commonjs",
   "dependencies": {
     "qrcode-terminal": "^0.12.0",

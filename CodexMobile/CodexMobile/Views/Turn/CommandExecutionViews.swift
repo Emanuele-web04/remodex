@@ -298,6 +298,7 @@ enum CommandOutputImageReferenceParser {
     private static let imageExtensions: Set<String> = [
         "jpg", "jpeg", "png", "gif", "webp", "heic", "heif"
     ]
+    private static let wildcardCharacters = CharacterSet(charactersIn: "*?")
 
     // Extracts a local image path without touching disk; the bridge validates and reads it on tap.
     static func firstReference(
@@ -367,6 +368,10 @@ enum CommandOutputImageReferenceParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`()[]{}<>"))
 
+        guard !containsWildcardSyntax(candidate) else {
+            return nil
+        }
+
         while let last = candidate.last, ",.;:".contains(last) {
             candidate.removeLast()
         }
@@ -375,6 +380,9 @@ enum CommandOutputImageReferenceParser {
             candidate = String(candidate.dropFirst("file://".count))
         }
         candidate = candidate.removingPercentEncoding ?? candidate
+        guard !containsWildcardSyntax(candidate) else {
+            return nil
+        }
 
         guard isImagePath(candidate) else {
             return nil
@@ -394,6 +402,10 @@ enum CommandOutputImageReferenceParser {
     static func isImagePath(_ path: String) -> Bool {
         let ext = (path as NSString).pathExtension.lowercased()
         return imageExtensions.contains(ext)
+    }
+
+    private static func containsWildcardSyntax(_ value: String) -> Bool {
+        value.rangeOfCharacter(from: wildcardCharacters) != nil
     }
 
     private static func listingDirectory(from command: String, cwd: String?) -> String? {

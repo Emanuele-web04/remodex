@@ -572,6 +572,140 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(fileRows[0].itemId, "file-snapshot")
     }
 
+    func testTurnDiffUpdatedDoesNotCreateVisibleFileChangeRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let diff = """
+        diff --git a/README.md b/README.md
+        index 1111111..2222222 100644
+        --- a/README.md
+        +++ b/README.md
+        @@ -1,1 +1,1 @@
+        -old
+        +new
+        """
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Checked the repo."
+        )
+        service.handleNotification(
+            method: "turn/diff/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "diff": .string(diff),
+            ])
+        )
+
+        let visibleFileRows = service.messages(for: threadID).filter {
+            $0.role == .system && $0.kind == .fileChange
+        }
+        XCTAssertTrue(visibleFileRows.isEmpty)
+
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+        let assistantMessage = try? XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        XCTAssertNil(assistantMessage.flatMap { service.readyChangeSet(forAssistantMessage: $0) })
+    }
+
+    func testTurnDiffUpdatedCanRecordUndoAfterRealFileChangeEvidence() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let diff = """
+        diff --git a/README.md b/README.md
+        index 1111111..2222222 100644
+        --- a/README.md
+        +++ b/README.md
+        @@ -1,1 +1,1 @@
+        -old
+        +new
+        """
+
+        service.appendSystemMessage(
+            threadId: threadID,
+            text: """
+            Status: completed
+
+            Path: README.md
+            Kind: update
+            Totals: +1 -1
+            """,
+            turnId: turnID,
+            kind: .fileChange
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Updated README."
+        )
+        service.handleNotification(
+            method: "turn/diff/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "diff": .string(diff),
+            ])
+        )
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+
+        let assistantMessage = try? XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        let changeSet = assistantMessage.flatMap { service.readyChangeSet(forAssistantMessage: $0) }
+        XCTAssertEqual(changeSet?.fileChanges.map(\.path), ["README.md"])
+    }
+
+    func testTurnDiffUpdatedIgnoresTurnlessFileChangeEvidence() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let diff = """
+        diff --git a/README.md b/README.md
+        index 1111111..2222222 100644
+        --- a/README.md
+        +++ b/README.md
+        @@ -1,1 +1,1 @@
+        -old
+        +new
+        """
+
+        service.appendSystemMessage(
+            threadId: threadID,
+            text: """
+            Status: completed
+
+            Path: README.md
+            Kind: update
+            Totals: +1 -1
+            """,
+            kind: .fileChange
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: nil,
+            text: "Checked README."
+        )
+        service.handleNotification(
+            method: "turn/diff/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "diff": .string(diff),
+            ])
+        )
+        service.recordTurnTerminalState(threadId: threadID, turnId: turnID, state: .completed)
+        service.noteTurnFinished(turnId: turnID)
+
+        let assistantMessage = try? XCTUnwrap(service.messages(for: threadID).last(where: { $0.role == .assistant }))
+        XCTAssertNil(assistantMessage.flatMap { service.readyChangeSet(forAssistantMessage: $0) })
+    }
+
     func testLegacyToolActivityAfterAssistantCreatesNewLaterRow() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

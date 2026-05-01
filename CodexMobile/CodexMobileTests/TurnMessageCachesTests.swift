@@ -103,6 +103,36 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(reference?.path, "/Users/example/project/out/mockup.webp")
     }
 
+    func testCommandOutputImageReferenceParserIgnoresGlobCandidates() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "rg --files -g '*.png'",
+            outputTail: "*.png",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertNil(reference)
+    }
+
+    func testCommandOutputImageReferenceParserKeepsBracketedFileNames() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "echo done",
+            outputTail: "/Users/example/project/Screenshot [1].png",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertEqual(reference?.path, "/Users/example/project/Screenshot [1].png")
+    }
+
+    func testCommandOutputImageReferenceParserKeepsTemporaryImagePaths() {
+        let reference = CommandOutputImageReferenceParser.firstReference(
+            command: "echo done",
+            outputTail: "/tmp/remodex-preview.png",
+            cwd: "/Users/example/project"
+        )
+
+        XCTAssertEqual(reference?.path, "/tmp/remodex-preview.png")
+    }
+
     func testAssistantMarkdownImageReferenceParserFindsLocalImage() {
         let references = AssistantMarkdownImageReferenceParser.references(
             in: "Here it is:\n![wing](/Users/example/.codex/generated_images/turn/wing.png)"
