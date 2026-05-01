@@ -15,11 +15,13 @@ const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
 const ACTION_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
+  "item/fileRead/requestApproval",
   "item/tool/requestUserInput",
 ]);
 const REPLY_METHOD_BY_ACTION_METHOD = new Map([
   ["item/commandExecution/requestApproval", "thread-follower-command-approval-decision"],
   ["item/fileChange/requestApproval", "thread-follower-file-approval-decision"],
+  ["item/fileRead/requestApproval", "thread-follower-file-approval-decision"],
   ["item/tool/requestUserInput", "thread-follower-submit-user-input"],
 ]);
 const METHOD_VERSION_BY_NAME = new Map([

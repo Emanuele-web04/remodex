@@ -85,6 +85,17 @@ test("projects command and file approvals while ignoring completed or unsupporte
         },
       },
       {
+        id: "req-file-read",
+        method: "item/fileRead/requestApproval",
+        params: {
+          threadId: "thread-2",
+          turnId: "turn-2",
+          itemId: "item-file-read",
+          path: "/repo/secrets.txt",
+          reason: "Need to inspect a file",
+        },
+      },
+      {
         id: "req-done",
         method: "item/tool/requestUserInput",
         completed: true,
@@ -105,10 +116,12 @@ test("projects command and file approvals while ignoring completed or unsupporte
     [
       ["req-command", "item/commandExecution/requestApproval", "thread-2"],
       ["req-file", "item/fileChange/requestApproval", "thread-2"],
+      ["req-file-read", "item/fileRead/requestApproval", "thread-2"],
     ]
   );
   assert.equal(actions[0].params.command, "git status");
   assert.equal(actions[1].params.grantRoot, "/repo");
+  assert.equal(actions[2].params.path, "/repo/secrets.txt");
 });
 
 test("builds desktop follower reply payloads from iOS responses", () => {
@@ -154,6 +167,25 @@ test("builds desktop follower reply payloads from iOS responses", () => {
             q1: { answers: ["Yes"] },
           },
         },
+      },
+    }
+  );
+
+  assert.deepEqual(
+    desktopFollowerPayloadForResponse({
+      requestId: "req-file-read",
+      method: "item/fileRead/requestApproval",
+      threadId: "thread-1",
+    }, {
+      id: "req-file-read",
+      result: { decision: "accept" },
+    }),
+    {
+      method: "thread-follower-file-approval-decision",
+      params: {
+        conversationId: "thread-1",
+        requestId: "req-file-read",
+        decision: "accept",
       },
     }
   );
