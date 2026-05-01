@@ -68,7 +68,7 @@ private enum TurnGitBranchPickerMode: String, Identifiable {
     }
 }
 
-struct TurnGitBranchSelector: View {
+struct TurnGitBranchSelector: View, Equatable {
     let isEnabled: Bool
     let availableGitBranchTargets: [String]
     let gitBranchesCheckedOutElsewhere: Set<String>
@@ -101,6 +101,18 @@ struct TurnGitBranchSelector: View {
             return normalizedCurrentBranch
         }
         return normalizedDefaultBranch ?? "Branch"
+    }
+
+    static func == (lhs: TurnGitBranchSelector, rhs: TurnGitBranchSelector) -> Bool {
+        lhs.isEnabled == rhs.isEnabled
+            && lhs.availableGitBranchTargets == rhs.availableGitBranchTargets
+            && lhs.gitBranchesCheckedOutElsewhere == rhs.gitBranchesCheckedOutElsewhere
+            && lhs.gitWorktreePathsByBranch == rhs.gitWorktreePathsByBranch
+            && lhs.selectedGitBaseBranch == rhs.selectedGitBaseBranch
+            && lhs.currentGitBranch == rhs.currentGitBranch
+            && lhs.defaultBranch == rhs.defaultBranch
+            && lhs.isLoadingGitBranchTargets == rhs.isLoadingGitBranchTargets
+            && lhs.isSwitchingGitBranch == rhs.isSwitchingGitBranch
     }
 
     // Keep the repo default branch visible even if the latest branch-status payload omitted it.

@@ -39,8 +39,6 @@ struct ComposerBottomBar: View {
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
     private var metaSymbolFont: Font { AppFont.system(size: 11, weight: .regular) }
-    private let metaSymbolSize: CGFloat = 12
-    private var metaChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
     private let metaVerticalPadding: CGFloat = 6
     private let plusTapTargetSide: CGFloat = 22
 
@@ -59,7 +57,16 @@ struct ComposerBottomBar: View {
     var body: some View {
         HStack(spacing: 12) {
             attachmentMenu
-            runtimeMenu
+            ComposerRuntimeMenuControl(
+                orderedModelOptions: orderedModelOptions,
+                selectedModelID: selectedModelID,
+                selectedModelTitle: selectedModelTitle,
+                isLoadingModels: isLoadingModels,
+                runtimeState: runtimeState,
+                runtimeActions: runtimeActions,
+                showsAllModelsSheet: $showsAllModelsSheet
+            )
+            .equatable()
             if isPlanModeArmed {
                 Divider()
                     .frame(height: 16)
@@ -213,10 +220,77 @@ struct ComposerBottomBar: View {
         .accessibilityLabel("Composer options")
     }
 
+    private var planModeIndicator: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "checklist")
+                .font(metaSymbolFont)
+            Text("Plan")
+                .font(metaTextFont)
+                .fontWeight(.regular)
+                .lineLimit(1)
+        }
+        .padding(.vertical, metaVerticalPadding)
+        .padding(.horizontal, 4)
+        .foregroundStyle(Color(.plan))
+    }
+
+    // Toggling Fast Mode from the plus menu mirrors the runtime speed menu without adding another visible pill.
+    private func toggleFastMode() {
+        runtimeActions.selectServiceTier(runtimeState.isSelectedServiceTier(.fast) ? nil : .fast)
+    }
+
+    private var fastModePlusMenuIconName: String {
+        runtimeState.isSelectedServiceTier(.fast) ? "bolt.fill" : "bolt"
+    }
+
+    // Mirrors the bridge-provided runtime capability instead of guessing from the model name.
+    private func modelSupportsFastMode(_ model: CodexModelOption) -> Bool {
+        return model.supportsServiceTier(.fast)
+    }
+
+    private var queueBadge: some View {
+        HStack(spacing: 3) {
+            if isQueuePaused {
+                Image(systemName: "pause.fill")
+                    .font(AppFont.system(size: 8, weight: .bold))
+            }
+            Text("\(queuedCount)")
+                .font(AppFont.caption2(weight: .bold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(
+            Capsule().fill(isQueuePaused ? Color(.systemGray3) : Color(.systemGray4))
+        )
+    }
+}
+
+// Keeps the SwiftUI Menu from rebuilding during unrelated thread-sync updates.
+private struct ComposerRuntimeMenuControl: View, Equatable {
+    let orderedModelOptions: [CodexModelOption]
+    let selectedModelID: String?
+    let selectedModelTitle: String
+    let isLoadingModels: Bool
+    let runtimeState: TurnComposerRuntimeState
+    let runtimeActions: TurnComposerRuntimeActions
+    @Binding var showsAllModelsSheet: Bool
+
+    private let metaLabelColor = Color(.secondaryLabel)
+    private var metaTextFont: Font { AppFont.subheadline() }
+    private var metaSymbolFont: Font { AppFont.system(size: 11, weight: .regular) }
+    private var metaChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
+
+    static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {
+        lhs.orderedModelOptions == rhs.orderedModelOptions
+            && lhs.selectedModelID == rhs.selectedModelID
+            && lhs.selectedModelTitle == rhs.selectedModelTitle
+            && lhs.isLoadingModels == rhs.isLoadingModels
+            && lhs.runtimeState == rhs.runtimeState
+    }
+
     // One consolidated runtime pill: Effort + featured models + Speed as flat sections.
-    // The full model list opens in a sheet so we avoid nested SwiftUI Menus, which
-    // can self-dismiss when their label is tapped from inside the parent menu.
-    private var runtimeMenu: some View {
+    var body: some View {
         Menu {
             Section("Effort") {
                 if runtimeState.reasoningDisplayOptions.isEmpty {
@@ -294,8 +368,7 @@ struct ComposerBottomBar: View {
         } label: {
             composerMenuLabel(
                 title: compactRuntimeTitle,
-                leadingImageName: runtimeState.showsSpeedBadgeInModelMenu ? "bolt.fill" : nil,
-                leadingImageIsSystem: true
+                leadingImageName: runtimeState.showsSpeedBadgeInModelMenu ? "bolt.fill" : nil
             )
         }
         .fixedSize(horizontal: true, vertical: false)
@@ -303,26 +376,11 @@ struct ComposerBottomBar: View {
         .tint(metaLabelColor)
     }
 
-    private var planModeIndicator: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "checklist")
-                .font(metaSymbolFont)
-            Text("Plan")
-                .font(metaTextFont)
-                .fontWeight(.regular)
-                .lineLimit(1)
-        }
-        .padding(.vertical, metaVerticalPadding)
-        .padding(.horizontal, 4)
-        .foregroundStyle(Color(.plan))
-    }
-
     private var compactRuntimeTitle: String {
         "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
     }
 
-    // Strips the GPT- prefix and converts remaining dashes to spaces so the
-    // pill keeps the family suffix (Codex, Spark, mini, ...) instead of erasing it.
+    // Keeps the family suffix visible while shortening the common GPT prefix.
     private var compactModelTitle: String {
         let stripped: String
         if selectedModelTitle.lowercased().hasPrefix("gpt-") {
@@ -333,54 +391,20 @@ struct ComposerBottomBar: View {
         return stripped.replacingOccurrences(of: "-", with: " ")
     }
 
-    // Toggling Fast Mode from the plus menu mirrors the runtime speed menu without adding another visible pill.
-    private func toggleFastMode() {
-        runtimeActions.selectServiceTier(runtimeState.isSelectedServiceTier(.fast) ? nil : .fast)
-    }
-
-    private var fastModePlusMenuIconName: String {
-        runtimeState.isSelectedServiceTier(.fast) ? "bolt.fill" : "bolt"
-    }
-
     @ViewBuilder
     private func modelMenuRow(for model: CodexModelOption) -> some View {
-        modelMenuRow(
-            title: TurnComposerMetaMapper.modelTitle(for: model),
-            isSelected: selectedModelID == model.id,
-            supportsFastMode: modelSupportsFastMode(model)
-        )
-    }
-
-    @ViewBuilder
-    private func modelMenuRow(
-        title: String,
-        isSelected: Bool,
-        supportsFastMode: Bool
-    ) -> some View {
         HStack(spacing: 8) {
-            if isSelected {
+            if selectedModelID == model.id {
                 Image(systemName: "checkmark")
             }
-            if supportsFastMode {
+            if model.supportsServiceTier(.fast) {
                 Image(systemName: CodexServiceTier.fast.iconName)
             }
-            Text(title)
+            Text(TurnComposerMetaMapper.modelTitle(for: model))
         }
     }
 
-    // Mirrors the bridge-provided runtime capability instead of guessing from the model name.
-    private func modelSupportsFastMode(_ model: CodexModelOption) -> Bool {
-        return model.supportsServiceTier(.fast)
-    }
-
-    // The runtime menu inlines only a few "headline" models to stay compact; the
-    // rest live behind the "See all models…" sheet. The currently selected model
-    // is always pinned so the user never loses sight of it.
-    private static let featuredModelIdentifiers: Set<String> = [
-        "gpt-5.5",
-        "gpt-5.4",
-    ]
-
+    // The currently selected model is pinned alongside headline models.
     private var featuredModelOptions: [CodexModelOption] {
         var seenIDs = Set<String>()
         var result: [CodexModelOption] = []
@@ -405,6 +429,11 @@ struct ComposerBottomBar: View {
         }
     }
 
+    private static let featuredModelIdentifiers: Set<String> = [
+        "gpt-5.5",
+        "gpt-5.4",
+    ]
+
     private static func matchesFeaturedIdentifier(_ model: CodexModelOption) -> Bool {
         let normalizedID = model.id.lowercased()
         let normalizedModel = model.model.lowercased()
@@ -412,44 +441,14 @@ struct ComposerBottomBar: View {
             || featuredModelIdentifiers.contains(normalizedModel)
     }
 
-    private var queueBadge: some View {
-        HStack(spacing: 3) {
-            if isQueuePaused {
-                Image(systemName: "pause.fill")
-                    .font(AppFont.system(size: 8, weight: .bold))
-            }
-            Text("\(queuedCount)")
-                .font(AppFont.caption2(weight: .bold))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
-        .background(
-            Capsule().fill(isQueuePaused ? Color(.systemGray3) : Color(.systemGray4))
-        )
-    }
-
-    // MARK: - Shared Label
-
     private func composerMenuLabel(
         title: String,
-        leadingImageName: String? = nil,
-        leadingImageIsSystem: Bool = true
+        leadingImageName: String?
     ) -> some View {
         HStack(spacing: 6) {
             if let leadingImageName {
-                Group {
-                    if leadingImageIsSystem {
-                        Image(systemName: leadingImageName)
-                            .font(metaSymbolFont)
-                    } else {
-                        Image(leadingImageName)
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: metaSymbolSize, height: metaSymbolSize)
-                    }
-                }
+                Image(systemName: leadingImageName)
+                    .font(metaSymbolFont)
             }
 
             Text(title)
@@ -460,11 +459,9 @@ struct ComposerBottomBar: View {
             Image(systemName: "chevron.down")
                 .font(metaChevronFont)
         }
-        .padding(.vertical, metaVerticalPadding)
+        .padding(.vertical, 6)
         .padding(.horizontal, 4)
         .foregroundStyle(metaLabelColor)
-        // Keep adjacent menus from borrowing each other's touch region when the
-        // phone composer gets tight while the keyboard is up.
         .fixedSize(horizontal: true, vertical: false)
         .contentShape(Rectangle())
     }

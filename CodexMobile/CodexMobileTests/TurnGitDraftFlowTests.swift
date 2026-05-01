@@ -103,8 +103,9 @@ final class TurnGitDraftFlowTests: XCTestCase {
         let commitExpectation = expectation(description: "Commit flow completes")
         service.requestTransportOverride = { method, params in
             recordedMethods.append(method)
-            if method == "git/commit" {
-                committedMessage = params?.objectValue?["message"]?.stringValue
+            if method == "git/runStackedAction" {
+                committedMessage = params?.objectValue?["commitMessage"]?.stringValue
+                XCTAssertEqual(params?.objectValue?["action"]?.stringValue, "commit")
                 commitExpectation.fulfill()
             }
 
@@ -119,30 +120,31 @@ final class TurnGitDraftFlowTests: XCTestCase {
                     ]),
                     includeJSONRPC: false
                 )
-            case "git/commit":
+            case "git/runStackedAction":
                 return RPCMessage(
                     id: .string(UUID().uuidString),
                     result: .object([
-                        "hash": .string("abc123"),
-                        "branch": .string("remodex/topic"),
-                        "summary": .string("1 file changed"),
-                    ]),
-                    includeJSONRPC: false
-                )
-            case "git/status":
-                return RPCMessage(
-                    id: .string(UUID().uuidString),
-                    result: .object([
-                        "branch": .string("remodex/topic"),
-                        "tracking": .string("origin/remodex/topic"),
-                        "dirty": .bool(false),
-                        "ahead": .integer(0),
-                        "behind": .integer(0),
-                        "localOnlyCommitCount": .integer(0),
-                        "state": .string("up_to_date"),
-                        "canPush": .bool(false),
-                        "publishedToRemote": .bool(true),
-                        "files": .array([]),
+                        "action": .string("commit"),
+                        "commit": .object([
+                            "status": .string("created"),
+                            "hash": .string("abc123"),
+                            "branch": .string("remodex/topic"),
+                            "summary": .string("1 file changed"),
+                        ]),
+                        "push": .object(["status": .string("skipped_not_requested")]),
+                        "pr": .object(["status": .string("skipped_not_requested")]),
+                        "status": .object([
+                            "branch": .string("remodex/topic"),
+                            "tracking": .string("origin/remodex/topic"),
+                            "dirty": .bool(false),
+                            "ahead": .integer(0),
+                            "behind": .integer(0),
+                            "localOnlyCommitCount": .integer(0),
+                            "state": .string("up_to_date"),
+                            "canPush": .bool(false),
+                            "publishedToRemote": .bool(true),
+                            "files": .array([]),
+                        ]),
                     ]),
                     includeJSONRPC: false
                 )
@@ -163,29 +165,10 @@ final class TurnGitDraftFlowTests: XCTestCase {
 
         await fulfillment(of: [commitExpectation], timeout: 2.0)
 
-        XCTAssertEqual(Array(recordedMethods.prefix(2)), ["git/generateCommitMessage", "git/commit"])
+        XCTAssertEqual(Array(recordedMethods.prefix(2)), ["git/generateCommitMessage", "git/runStackedAction"])
         XCTAssertEqual(
             committedMessage,
             "Update git flow\n\n- Draft a commit message before committing\n- Refresh status after the commit"
-        )
-    }
-
-    func testPullRequestURLIncludesGitHubPrefillQueryParameters() throws {
-        let urlString = remodexBuildPullRequestURL(
-            ownerRepo: "openai/remodex",
-            branch: "feature/topic",
-            base: "main",
-            title: "Improve local git drafts",
-            body: "## Summary\n- Add PR drafting\n\n## Testing\n- Not run\n\n## Notes\n- Uses quick pull"
-        )
-
-        let components = try XCTUnwrap(URLComponents(string: urlString), "URL should be parseable")
-
-        XCTAssertEqual(components.queryItems?.first(where: { $0.name == "quick_pull" })?.value, "1")
-        XCTAssertEqual(components.queryItems?.first(where: { $0.name == "title" })?.value, "Improve local git drafts")
-        XCTAssertEqual(
-            components.queryItems?.first(where: { $0.name == "body" })?.value,
-            "## Summary\n- Add PR drafting\n\n## Testing\n- Not run\n\n## Notes\n- Uses quick pull"
         )
     }
 

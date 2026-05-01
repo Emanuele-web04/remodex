@@ -636,6 +636,26 @@ extension TurnViewModel {
         )
     }
 
+    // Mirrors push side effects for bridge-orchestrated stacked Git actions.
+    func handleSuccessfulStackedGitAction(
+        _ result: GitStackedActionResult,
+        codex: CodexService,
+        workingDirectory: String?,
+        threadID: String
+    ) {
+        if let status = result.status {
+            applyGitRepoSync(status)
+        }
+
+        guard let push = result.push else { return }
+        codex.appendHiddenPushResetMarkers(
+            threadId: threadID,
+            workingDirectory: workingDirectory,
+            branch: push.branch,
+            remote: push.remote
+        )
+    }
+
     func dismissGitSyncAlert() {
         clearPendingGitBranchOperationState()
     }

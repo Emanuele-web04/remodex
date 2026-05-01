@@ -173,6 +173,7 @@ struct TurnView: View {
                 isGitActionEnabled: isGitActionEnabled,
                 disabledGitActions: disabledGitActions,
                 isRunningGitAction: viewModel.isRunningGitAction,
+                gitActionLoadingTitle: viewModel.gitActionLoadingTitle,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
                 onTapMacHandoff: onTapMacHandoff,
@@ -233,6 +234,10 @@ struct TurnView: View {
                 .transition(.opacity)
             }
         }
+        .overlay(alignment: .top) {
+            gitActionToastOverlay
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.88), value: viewModel.gitActionLoadingTitle)
         .fullScreenCover(isPresented: isCameraPresentedBinding) {
             CameraImagePicker { data in
                 viewModel.enqueueCapturedImageData(data, codex: codex)
@@ -605,6 +610,35 @@ struct TurnView: View {
                     codex.lastErrorMessage = error.localizedDescription
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var gitActionToastOverlay: some View {
+        if let action = viewModel.runningGitAction {
+            InAppToastBannerView(
+                title: viewModel.gitActionLoadingTitle ?? "Git action running",
+                subtitle: nil,
+                detailLines: action.loadingSteps(repoSync: viewModel.gitRepoSync),
+                accessibilityHint: nil,
+                isDismissable: false,
+                onTap: nil,
+                onDismiss: nil
+            ) {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: "icloud.and.arrow.up.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.blue)
+
+                    ProgressView()
+                        .controlSize(.mini)
+                        .background(Color(.systemBackground), in: Circle())
+                        .offset(x: 4, y: 4)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 

@@ -71,6 +71,7 @@ struct TurnComposerSecondaryBar: View {
                             onSelectGitBaseBranch: onSelectGitBaseBranch,
                             onRefreshGitBranches: onRefreshGitBranches
                         )
+                        .equatable()
                     }
 
                     statusControlCircle

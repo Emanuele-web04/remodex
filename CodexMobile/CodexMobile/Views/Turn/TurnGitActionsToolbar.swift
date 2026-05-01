@@ -20,6 +20,8 @@ extension TurnGitActionKind {
             return Self.resizedSymbol(named: "arrow.up.circle", size: cgSize)
         case .commitAndPush:
             return Self.resizedAsset(named: "cloud-upload", size: cgSize)
+        case .commitPushCreatePR:
+            return Self.resizedAsset(named: "GitHub_Invertocat_Black", size: cgSize)
         case .createPR:
             return Self.resizedAsset(named: "GitHub_Invertocat_Black", size: cgSize)
         case .discardRuntimeChangesAndSync:
@@ -56,6 +58,7 @@ struct TurnGitActionsToolbarButton: View {
     let isEnabled: Bool
     let disabledActions: Set<TurnGitActionKind>
     let isRunningAction: Bool
+    let loadingTitle: String?
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
     let onSelect: (TurnGitActionKind) -> Void
@@ -110,7 +113,7 @@ struct TurnGitActionsToolbarButton: View {
                 }
 
                 Section("Write") {
-                    ForEach([TurnGitActionKind.commit, .push, .commitAndPush, .createPR], id: \.self) { action in
+                    ForEach([TurnGitActionKind.commit, .push, .commitAndPush, .commitPushCreatePR, .createPR], id: \.self) { action in
                         actionButton(for: action)
                     }
                 }
@@ -124,25 +127,25 @@ struct TurnGitActionsToolbarButton: View {
                 }
             }
         } label: {
-            if isRunningAction {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 24, height: 24)
-            } else {
-                toolbarIcon(for: gitSyncState == "not_initialized" ? .initialize : .commit, size: 24)
-                    .overlay(alignment: .topTrailing) {
-                        if let syncStatusColor {
-                            Circle()
-                                .fill(syncStatusColor)
-                                .frame(width: 8, height: 8)
-                                .overlay {
-                                    Circle()
-                                        .stroke(Color(.systemBackground), lineWidth: 1.5)
-                                }
-                                .offset(x: 2, y: -2)
-                        }
+            toolbarIcon(for: gitSyncState == "not_initialized" ? .initialize : .commit, size: 24)
+                .overlay(alignment: .topTrailing) {
+                    if isRunningAction {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 12, height: 12)
+                            .background(Color(.systemBackground), in: Circle())
+                            .offset(x: 4, y: -4)
+                    } else if let syncStatusColor {
+                        Circle()
+                            .fill(syncStatusColor)
+                            .frame(width: 8, height: 8)
+                            .overlay {
+                                Circle()
+                                    .stroke(Color(.systemBackground), lineWidth: 1.5)
+                            }
+                            .offset(x: 2, y: -2)
                     }
-            }
+                }
         }
         .controlSize(.small)
         .buttonStyle(.plain)
@@ -152,7 +155,7 @@ struct TurnGitActionsToolbarButton: View {
         .contentShape(Circle())
         .adaptiveToolbarItem(in: Circle())
         .accessibilityLabel("Git actions")
-        .accessibilityValue(syncStatusAccessibilityValue ?? "Repository status unavailable")
+        .accessibilityValue(loadingTitle ?? syncStatusAccessibilityValue ?? "Repository status unavailable")
     }
 
     private var recoveryActions: [TurnGitActionKind] {

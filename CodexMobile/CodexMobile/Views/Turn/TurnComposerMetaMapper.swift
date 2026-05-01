@@ -97,7 +97,7 @@ enum TurnComposerMetaMapper {
     }
 }
 
-struct TurnComposerReasoningDisplayOption: Identifiable {
+struct TurnComposerReasoningDisplayOption: Identifiable, Equatable {
     let effort: String
     let title: String
 

@@ -238,6 +238,33 @@ final class GitActionsService {
         return GitPullRequestDraftResult(from: json)
     }
 
+    // Runs bridge-owned Git publishing flows so commit/push/PR decisions stay local to the repo.
+    func runStackedAction(
+        action: String,
+        commitMessage: String? = nil,
+        model: String? = nil,
+        baseBranch: String? = nil,
+        featureBranch: Bool = false
+    ) async throws -> GitStackedActionResult {
+        var params: [String: JSONValue] = ["action": .string(action)]
+        if let commitMessage, !commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["commitMessage"] = .string(commitMessage)
+        }
+        if let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["model"] = .string(model)
+        }
+        if let baseBranch, !baseBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["baseBranch"] = .string(baseBranch)
+        }
+        if featureBranch {
+            params["featureBranch"] = .bool(true)
+        }
+        let json = try await request(method: "git/runStackedAction", params: params)
+        let result = GitStackedActionResult(from: json)
+        rememberRepoRoot(from: result.status)
+        return result
+    }
+
     func branchesWithStatus() async throws -> GitBranchesWithStatusResult {
         let json = try await request(method: "git/branchesWithStatus")
         let result = GitBranchesWithStatusResult(from: json)
