@@ -685,7 +685,7 @@ test("sanitizeThreadHistoryImagesForRelay compacts oversized history before the 
 });
 
 test("sanitizeThreadHistoryImagesForRelay keeps the newest forty turns when compacting", () => {
-  const largeText = "A".repeat(750 * 1024);
+  const largeText = "A".repeat(900 * 1024);
   const turns = Array.from({ length: 45 }, (_, index) => ({
     id: `turn-${index + 1}`,
     items: [
