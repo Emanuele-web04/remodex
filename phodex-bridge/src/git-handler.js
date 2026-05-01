@@ -13,6 +13,8 @@ const { promisify } = require("util");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
+/** Node defaults maxBuffer to 1 MiB; large repo diffs exceed it ("stdout maxBuffer length exceeded"). */
+const GIT_EXEC_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
 const GIT_DRAFT_TIMEOUT_MS = 120_000;
 const GIT_DRAFT_PATCH_MAX_BYTES = 80_000;
 const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -2104,7 +2106,7 @@ async function gitDiffNoIndexNumstat(cwd, filePath) {
     const { stdout } = await execFileAsync(
       "git",
       ["diff", "--no-index", "--numstat", "--", "/dev/null", filePath],
-      { cwd, timeout: GIT_TIMEOUT_MS }
+      { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES }
     );
     return stdout;
   } catch (err) {
@@ -2130,7 +2132,7 @@ async function gitDiffNoIndexPatch(cwd, filePath) {
     const { stdout } = await execFileAsync(
       "git",
       ["diff", "--no-index", "--binary", "--", "/dev/null", filePath],
-      { cwd, timeout: GIT_TIMEOUT_MS }
+      { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES }
     );
     return stdout;
   } catch (err) {
@@ -2145,7 +2147,11 @@ async function gitDiffNoIndexPatch(cwd, filePath) {
 // ─── Helpers ──────────────────────────────────────────────────
 
 function git(cwd, ...args) {
-  return execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS })
+  return execFileAsync("git", args, {
+    cwd,
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES,
+  })
     .then(({ stdout }) => stdout)
     .catch((err) => {
       const msg = (err.stderr || err.message || "").trim();

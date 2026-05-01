@@ -43,6 +43,8 @@ function normalizePairingSession(pairingSessionOrPayload) {
 function printQR(pairingSessionOrPayload) {
   const { pairingPayload, pairingCode } = normalizePairingSession(pairingSessionOrPayload);
   const payload = JSON.stringify(pairingPayload);
+  const sessionId = typeof pairingPayload?.sessionId === "string" ? pairingPayload.sessionId.trim() : "";
+  const sessionIdShort = sessionId.length > 12 ? `${sessionId.slice(0, 8)}…` : sessionId;
 
   console.log("\nScan this QR with the iPhone:\n");
   qrcode.generate(payload, { small: true });
@@ -50,9 +52,12 @@ function printQR(pairingSessionOrPayload) {
     console.log("Or paste this pairing code in the iPhone app:\n");
     console.log(pairingCode);
   }
-  console.log(`\nSession ID: ${pairingPayload.sessionId}`);
+  console.log(`\nSession ID: ${sessionIdShort || "(none)"}`);
   console.log(`Device ID: ${pairingPayload.macDeviceId}`);
   console.log(`Expires: ${new Date(pairingPayload.expiresAt).toISOString()}\n`);
+  // Same bytes as the QR (handy for Android emulator / CI: copy-paste into the in-app debug pairing field).
+  console.log("Pairing JSON (scan target or paste for Remodex Android debug UI):\n");
+  console.log(`${payload}\n`);
 }
 
 module.exports = {

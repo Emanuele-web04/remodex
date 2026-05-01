@@ -553,6 +553,31 @@ test("websocket relay forwards between mac and iphone on the base relay path", a
   });
 });
 
+test("websocket relay forwards between mac and android on the base relay path", async () => {
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-android-1`, {
+      headers: { "x-role": "mac" },
+    });
+    const android = new WebSocket(`ws://127.0.0.1:${port}/relay/session-android-1`, {
+      headers: { "x-role": "android" },
+    });
+
+    await Promise.all([onceOpen(mac), onceOpen(android)]);
+
+    const received = new Promise((resolve) => {
+      android.once("message", (value) => resolve(value.toString("utf8")));
+    });
+    mac.send(JSON.stringify({ ok: true }));
+    assert.equal(await received, "{\"ok\":true}");
+
+    const macClosed = onceClosed(mac);
+    const androidClosed = onceClosed(android);
+    mac.close();
+    android.close();
+    await Promise.all([macClosed, androidClosed]);
+  });
+});
+
 test("relay keeps the iPhone connected briefly but rejects new sends while the mac is absent", async () => {
   await withServer(async ({ port }) => {
     const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-grace`, {
