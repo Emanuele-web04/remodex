@@ -188,28 +188,27 @@ private struct StreamingAssistantMarkdownTextView: View {
     var constrainsToAvailableWidth: Bool = false
 
     @State private var displayedText = ""
+    @State private var displayedSegments: StreamingMarkdownBlockSegments
+
+    init(
+        text: String,
+        enablesSelection: Bool = false,
+        constrainsToAvailableWidth: Bool = false
+    ) {
+        self.text = text
+        self.enablesSelection = enablesSelection
+        self.constrainsToAvailableWidth = constrainsToAvailableWidth
+        _displayedText = State(initialValue: text)
+        _displayedSegments = State(initialValue: StreamingMarkdownBlockSplitter.split(text))
+    }
 
     var body: some View {
-        let effectiveText = displayedText.isEmpty ? text : displayedText
-        let rendered = Text(effectiveText)
-            .font(AppFont.body())
-            .foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
-
-        let selectable = Group {
-            if enablesSelection {
-                rendered.textSelection(.enabled)
-            } else {
-                rendered
-            }
-        }
-
         Group {
             if constrainsToAvailableWidth {
-                selectable
+                renderedSegments(displayedSegments)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                selectable
+                renderedSegments(displayedSegments)
             }
         }
         .onAppear {
@@ -220,17 +219,130 @@ private struct StreamingAssistantMarkdownTextView: View {
         }
     }
 
-    // Keep the streaming row append-oriented; the finalized row returns to Textual markdown.
+    @ViewBuilder
+    private func renderedSegments(_ segments: StreamingMarkdownBlockSegments) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(segments.markdownBlocks) { block in
+                MarkdownTextView(
+                    text: block.text,
+                    profile: .assistantProse,
+                    enablesSelection: enablesSelection,
+                    constrainsToAvailableWidth: constrainsToAvailableWidth
+                )
+            }
+
+            if !segments.liveTail.isEmpty {
+                liveTailText(segments.liveTail)
+            }
+        }
+    }
+
+    private func liveTailText(_ value: String) -> some View {
+        let rendered = Text(value)
+            .font(AppFont.body())
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+
+        return Group {
+            if enablesSelection {
+                rendered.textSelection(.enabled)
+            } else {
+                rendered
+            }
+        }
+    }
+
+    // Keep streaming append-oriented while promoting completed blocks to cached markdown.
     private func reconcileDisplayedText(with nextText: String) {
         guard !nextText.isEmpty else {
+            guard !displayedText.isEmpty else { return }
             displayedText = ""
+            displayedSegments = StreamingMarkdownBlockSplitter.split("")
             return
         }
         if nextText.hasPrefix(displayedText) {
-            displayedText.append(String(nextText.dropFirst(displayedText.count)))
+            let appended = String(nextText.dropFirst(displayedText.count))
+            guard !appended.isEmpty else { return }
+            displayedText.append(appended)
         } else {
+            guard displayedText != nextText else { return }
             displayedText = nextText
         }
+        displayedSegments = StreamingMarkdownBlockSplitter.split(displayedText)
+    }
+}
+
+private struct StreamingMarkdownBlockSegments {
+    let markdownBlocks: [StreamingMarkdownBlock]
+    let liveTail: String
+}
+
+private struct StreamingMarkdownBlock: Identifiable {
+    let id: Int
+    let text: String
+}
+
+private enum StreamingMarkdownBlockSplitter {
+    static func split(_ text: String) -> StreamingMarkdownBlockSegments {
+        var lineStart = text.startIndex
+        var blockStart = text.startIndex
+        var isInsideFence = false
+        var markdownBlocks: [StreamingMarkdownBlock] = []
+
+        while lineStart < text.endIndex {
+            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
+            let nextLineStart = lineEnd < text.endIndex ? text.index(after: lineEnd) : text.endIndex
+            let hasLineBreak = lineEnd < text.endIndex
+            let trimmedLine = String(text[lineStart..<lineEnd])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if isFenceDelimiter(trimmedLine) {
+                isInsideFence.toggle()
+                if !isInsideFence {
+                    appendBlock(in: text, from: blockStart, to: nextLineStart, into: &markdownBlocks)
+                    blockStart = nextLineStart
+                }
+            } else if !isInsideFence, hasLineBreak {
+                if trimmedLine.isEmpty || isStableSingleLineBlock(trimmedLine) {
+                    appendBlock(in: text, from: blockStart, to: nextLineStart, into: &markdownBlocks)
+                    blockStart = nextLineStart
+                }
+            }
+
+            lineStart = nextLineStart
+        }
+
+        return StreamingMarkdownBlockSegments(
+            markdownBlocks: markdownBlocks,
+            liveTail: String(text[blockStart...])
+        )
+    }
+
+    // Emits conservative markdown blocks so previously sealed blocks keep stable identities.
+    private static func appendBlock(
+        in text: String,
+        from start: String.Index,
+        to end: String.Index,
+        into blocks: inout [StreamingMarkdownBlock]
+    ) {
+        guard start < end else { return }
+        blocks.append(
+            StreamingMarkdownBlock(
+                id: blocks.count,
+                text: String(text[start..<end])
+            )
+        )
+    }
+
+    private static func isFenceDelimiter(_ trimmedLine: String) -> Bool {
+        trimmedLine.hasPrefix("```") || trimmedLine.hasPrefix("~~~")
+    }
+
+    private static func isStableSingleLineBlock(_ trimmedLine: String) -> Bool {
+        let headingMarkerCount = trimmedLine.prefix(while: { $0 == "#" }).count
+        let isHeading = (1...6).contains(headingMarkerCount)
+            && trimmedLine.dropFirst(headingMarkerCount).hasPrefix(" ")
+        return isHeading || trimmedLine == "---" || trimmedLine == "***"
     }
 }
 
@@ -784,7 +896,7 @@ private struct AssistantMarkdownImagePreviewButton: View {
                 .foregroundStyle(.secondary)
         }
         .padding(12)
-        .frame(maxWidth: Self.maxWidth, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                 .fill(Color(.secondarySystemBackground))
@@ -1009,9 +1121,8 @@ struct MessageRow: View, Equatable {
                         .padding(.vertical, 12)
                         .padding(.horizontal, 16)
                         .background {
-                            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
                                 .fill(Color(.tertiarySystemFill).opacity(0.8))
-                                .stroke(.secondary.opacity(0.08))
                         }
                 }
 
@@ -1972,13 +2083,20 @@ private struct ThinkingDisclosureView: View {
     }
 
     private func detailText(_ value: String) -> some View {
-        Text(.init(value))
+        Text(runtimeMarkdownText(value))
             .font(AppFont.caption())
             .lineSpacing(2)
             .fontWeight(.regular)
             .foregroundStyle(.secondary.opacity(0.85))
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // Parse folded reasoning as inline markdown without routing through LocalizedStringKey interpolation.
+    private func runtimeMarkdownText(_ value: String) -> AttributedString {
+        var options = AttributedString.MarkdownParsingOptions()
+        options.interpretedSyntax = .inlineOnlyPreservingWhitespace
+        return (try? AttributedString(markdown: value, options: options)) ?? AttributedString(value)
     }
 }
 
