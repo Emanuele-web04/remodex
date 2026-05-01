@@ -132,12 +132,12 @@ async function workspaceReadImage(params) {
     throw workspaceError("image_not_found", "The image file no longer exists on this Mac.");
   }
 
-  const [realRepoRoot, realTempRoots] = await Promise.all([
-    cwd ? resolveRepoRoot(cwd).then(realpathOrNull).catch(() => null) : null,
+  const [realWorkspaceRoot, realTempRoots] = await Promise.all([
+    cwd ? resolveImageWorkspaceRoot(cwd) : null,
     realTemporaryImageRoots(),
   ]);
   const isAllowed =
-    (realRepoRoot && isPathInside(realImagePath, realRepoRoot))
+    (realWorkspaceRoot && isPathInside(realImagePath, realWorkspaceRoot))
     || (realGeneratedImagesRoot && isPathInside(realImagePath, realGeneratedImagesRoot))
     || realTempRoots.some((tempRoot) => isPathInside(realImagePath, tempRoot));
   if (!isAllowed) {
@@ -210,6 +210,26 @@ async function realTemporaryImageRoots() {
     Array.from(new Set(candidates.filter(Boolean))).map((candidate) => realpathOrNull(candidate))
   );
   return Array.from(new Set(roots.filter(Boolean)));
+}
+
+// Image previews are read-only, so non-git Codex scratch workspaces can be scoped to their cwd.
+async function resolveImageWorkspaceRoot(cwd) {
+  const realRepoRoot = await resolveRepoRoot(cwd).then(realpathOrNull).catch(() => null);
+  if (realRepoRoot) {
+    return realRepoRoot;
+  }
+
+  const realCwd = await realpathOrNull(cwd);
+  if (!realCwd || isBroadWorkspaceRoot(realCwd)) {
+    return null;
+  }
+  return realCwd;
+}
+
+function isBroadWorkspaceRoot(candidatePath) {
+  const normalized = path.resolve(candidatePath);
+  return normalized === path.parse(normalized).root
+    || normalized === path.resolve(os.homedir());
 }
 
 async function readPreviewImageData(imagePath, maxPixelDimension, originalByteLength) {

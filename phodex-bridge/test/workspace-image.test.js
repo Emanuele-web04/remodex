@@ -328,6 +328,25 @@ test("workspace/readImage rejects workspace images when cwd is missing", async (
   }
 });
 
+test("workspace/readImage allows images inside non-git workspace cwd", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.homedir(), "remodex-image-"));
+  const imagePath = path.join(tempDir, "preview.png");
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  fs.writeFileSync(imagePath, bytes);
+
+  try {
+    const result = await handleWorkspaceMethod("workspace/readImage", {
+      cwd: tempDir,
+      path: imagePath,
+    });
+
+    assert.equal(result.path, fs.realpathSync(imagePath));
+    assert.equal(result.dataBase64, bytes.toString("base64"));
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("workspace/readImage allows generated images under CODEX_HOME", async (t) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
   const previousCodexHome = process.env.CODEX_HOME;
