@@ -118,7 +118,7 @@ struct UsageStatusSummaryContent: View {
     private var contextSection: some View {
         let displayUsage = contextWindowUsage ?? .zero
 
-        VStack(alignment: .leading, spacing: 12) {
+        return VStack(alignment: .leading, spacing: 12) {
             Text("Context window")
                 .font(AppFont.subheadline(weight: .semibold))
 
