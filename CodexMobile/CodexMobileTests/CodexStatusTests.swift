@@ -105,7 +105,7 @@ final class CodexStatusTests: XCTestCase {
         XCTAssertFalse(service.shouldAutoRefreshUsageStatus(threadId: "thread-new"))
     }
 
-    func testRefreshContextWindowUsageKeepsUsageUnknownWhenRequestFails() async {
+    func testRefreshContextWindowUsageFallsBackToZeroWhenRequestFails() async {
         let service = makeService()
         service.isConnected = true
         service.hasResolvedRateLimitsSnapshot = true
@@ -116,8 +116,8 @@ final class CodexStatusTests: XCTestCase {
 
         await service.refreshContextWindowUsage(threadId: "thread-new")
 
-        XCTAssertNil(service.contextWindowUsageByThread["thread-new"])
-        XCTAssertTrue(service.shouldAutoRefreshUsageStatus(threadId: "thread-new"))
+        XCTAssertEqual(service.contextWindowUsageByThread["thread-new"], .zero)
+        XCTAssertFalse(service.shouldAutoRefreshUsageStatus(threadId: "thread-new"))
     }
 
     func testExtractContextWindowUsageFromTokenCountPayloadPrefersLastUsage() {

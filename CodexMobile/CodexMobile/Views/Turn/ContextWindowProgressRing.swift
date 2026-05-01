@@ -21,6 +21,8 @@ struct ContextWindowProgressRing: View {
     private let tapTargetSize: CGFloat = 36
 
     var body: some View {
+        let displayUsage = usage ?? .zero
+
         Button {
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
             isShowingPopover = true
@@ -29,21 +31,15 @@ struct ContextWindowProgressRing: View {
                 Circle()
                     .stroke(Color(.systemGray5), lineWidth: lineWidth)
 
-                if let usage {
-                    Circle()
-                        .trim(from: 0, to: usage.fractionUsed)
-                        .stroke(ringColor(for: usage), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
+                Circle()
+                    .trim(from: 0, to: displayUsage.fractionUsed)
+                    .stroke(ringColor(for: displayUsage), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
 
-                    Text("\(usage.percentUsed)")
-                        .font(AppFont.system(size: 6, weight: .semibold))
-                        .minimumScaleFactor(0.75)
-                        .foregroundStyle(ringColor(for: usage))
-                } else {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .tint(Color(.systemGray2))
-                }
+                Text("\(displayUsage.percentUsed)")
+                    .font(AppFont.system(size: 6, weight: .semibold))
+                    .minimumScaleFactor(0.75)
+                    .foregroundStyle(ringColor(for: displayUsage))
             }
             .frame(width: ringSize, height: ringSize)
             .frame(width: tapTargetSize, height: tapTargetSize)
@@ -65,7 +61,7 @@ struct ContextWindowProgressRing: View {
 
     private var popoverContent: some View {
         UsageStatusSummaryContent(
-            contextWindowUsage: usage,
+            contextWindowUsage: usage ?? .zero,
             rateLimitBuckets: rateLimitBuckets,
             isLoadingRateLimits: isLoadingRateLimits,
             rateLimitsErrorMessage: rateLimitsErrorMessage,
@@ -83,10 +79,7 @@ struct ContextWindowProgressRing: View {
     }
 
     private var usageAccessibilityValue: String {
-        if let usage {
-            return "\(usage.percentUsed) percent used"
-        }
-        return "Usage unavailable"
+        "\(usage?.percentUsed ?? 0) percent used"
     }
 
     private func ringColor(for usage: ContextWindowUsage) -> Color {

@@ -116,22 +116,20 @@ struct UsageStatusSummaryContent: View {
     }
 
     private var contextSection: some View {
+        let displayUsage = contextWindowUsage ?? .zero
+
         VStack(alignment: .leading, spacing: 12) {
             Text("Context window")
                 .font(AppFont.subheadline(weight: .semibold))
 
-            if let contextWindowUsage {
-                metricRow(
-                    label: "Context",
-                    value: contextValue(for: contextWindowUsage),
-                    detail: contextDetail(for: contextWindowUsage),
-                    monospace: true
-                )
+            metricRow(
+                label: "Context",
+                value: contextValue(for: displayUsage),
+                detail: contextDetail(for: displayUsage),
+                monospace: true
+            )
 
-                progressBar(progress: contextWindowUsage.fractionUsed)
-            } else {
-                metricRow(label: "Context", value: "Unavailable", detail: "Waiting for token usage")
-            }
+            progressBar(progress: displayUsage.fractionUsed)
         }
     }
 

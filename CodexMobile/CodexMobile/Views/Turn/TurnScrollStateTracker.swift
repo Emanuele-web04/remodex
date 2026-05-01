@@ -61,6 +61,44 @@ struct TurnScrollStateTracker {
         return abs(newHeight - previousHeight) > contentHeightCorrectionThreshold
     }
 
+    // Follow-bottom represents app-owned scroll intent; user-owned scrolls switch
+    // to manual before geometry can pull the viewport back to the tail.
+    static func shouldPinDuringGeometryChange(
+        currentMode: TurnAutoScrollMode,
+        isScrolledToBottom: Bool,
+        isAutomaticScrollingPaused: Bool,
+        assistantAnchorTargetExists: Bool
+    ) -> Bool {
+        guard !isAutomaticScrollingPaused else {
+            return false
+        }
+
+        switch currentMode {
+        case .followBottom:
+            return true
+        case .anchorAssistantResponse:
+            return isScrolledToBottom && !assistantAnchorTargetExists
+        case .manual:
+            return false
+        }
+    }
+
+    // Suppresses only the transient false-bottom frame caused by a queued app scroll.
+    static func shouldIgnoreTransientNotBottomGeometry(
+        currentMode: TurnAutoScrollMode,
+        hasPendingFollowBottomScroll: Bool,
+        isAutomaticScrollingPaused: Bool
+    ) -> Bool {
+        currentMode == .followBottom
+            && hasPendingFollowBottomScroll
+            && !isAutomaticScrollingPaused
+    }
+
+    // Once a real not-bottom geometry update is accepted, follow intent becomes user-owned.
+    static func modeAfterAcceptedNotBottomGeometry(currentMode: TurnAutoScrollMode) -> TurnAutoScrollMode {
+        currentMode == .followBottom ? .manual : currentMode
+    }
+
     static func isAutomaticScrollingPaused(
         isUserDragging: Bool,
         cooldownUntil: Date?,

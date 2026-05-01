@@ -52,6 +52,7 @@ extension CodexService {
 
             contextWindowUsageByThread[trimmedThreadID] = usage
         } catch {
+            setDefaultContextWindowUsageIfNeeded(threadId: trimmedThreadID)
             debugSyncLog("thread/contextWindow/read failed (non-fatal): \(error.localizedDescription)")
         }
     }

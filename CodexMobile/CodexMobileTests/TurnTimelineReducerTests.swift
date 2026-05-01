@@ -3551,6 +3551,100 @@ final class TurnScrollStateTrackerTests: XCTestCase {
             )
         )
     }
+
+    func testFollowBottomKeepsPinnedAcrossTransientGeometryDrift() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                currentMode: .followBottom,
+                isScrolledToBottom: false,
+                isAutomaticScrollingPaused: false,
+                assistantAnchorTargetExists: true
+            )
+        )
+    }
+
+    func testIgnoresTransientNotBottomOnlyWhileFollowSnapIsPending() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
+                currentMode: .followBottom,
+                hasPendingFollowBottomScroll: true,
+                isAutomaticScrollingPaused: false
+            )
+        )
+
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
+                currentMode: .followBottom,
+                hasPendingFollowBottomScroll: false,
+                isAutomaticScrollingPaused: false
+            )
+        )
+
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
+                currentMode: .followBottom,
+                hasPendingFollowBottomScroll: true,
+                isAutomaticScrollingPaused: true
+            )
+        )
+    }
+
+    func testAcceptedNotBottomGeometrySwitchesFollowBottomToManual() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .followBottom),
+            .manual
+        )
+
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .manual),
+            .manual
+        )
+
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(currentMode: .anchorAssistantResponse),
+            .anchorAssistantResponse
+        )
+    }
+
+    func testManualAndPausedModesDoNotPinDuringGeometryChange() {
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                currentMode: .manual,
+                isScrolledToBottom: true,
+                isAutomaticScrollingPaused: false,
+                assistantAnchorTargetExists: false
+            )
+        )
+
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                currentMode: .followBottom,
+                isScrolledToBottom: true,
+                isAutomaticScrollingPaused: true,
+                assistantAnchorTargetExists: false
+            )
+        )
+    }
+
+    func testAssistantAnchorPinsOnlyWhileWaitingForAssistantTarget() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                currentMode: .anchorAssistantResponse,
+                isScrolledToBottom: true,
+                isAutomaticScrollingPaused: false,
+                assistantAnchorTargetExists: false
+            )
+        )
+
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                currentMode: .anchorAssistantResponse,
+                isScrolledToBottom: true,
+                isAutomaticScrollingPaused: false,
+                assistantAnchorTargetExists: true
+            )
+        )
+    }
 }
 
 private enum MarkdownSegment {

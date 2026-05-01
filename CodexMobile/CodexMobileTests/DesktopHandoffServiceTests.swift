@@ -82,7 +82,7 @@ final class DesktopHandoffServiceTests: XCTestCase {
         } catch let error as DesktopHandoffError {
             XCTAssertEqual(
                 error.errorDescription,
-                "Reconnect to your Mac or scan a new QR code first."
+                "Reconnect to your paired computer first."
             )
         } catch {
             XCTFail("Unexpected error: \(error)")

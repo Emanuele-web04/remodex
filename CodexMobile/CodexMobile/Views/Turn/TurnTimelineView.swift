@@ -1025,6 +1025,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             return
         }
 
+        // Content growth can briefly report "not bottom" before the queued
+        // follow snap lands; only user scroll phases should make that visible.
+        if !nextValue,
+           TurnScrollStateTracker.shouldIgnoreTransientNotBottomGeometry(
+            currentMode: autoScrollMode,
+            hasPendingFollowBottomScroll: followBottomScrollTask != nil,
+            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
+           ) {
+            return
+        }
+
         if nextValue {
             isScrolledToBottom = true
             if autoScrollMode != .anchorAssistantResponse {
@@ -1033,9 +1044,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             scheduleProgressiveTailRevealIfNeeded()
         } else {
             isScrolledToBottom = false
-            // Only disengage follow-bottom from user scroll gestures, not from
-            // transient geometry changes caused by content growth. The scroll phase
-            // handler already sets .manual when the user actively drags.
+            autoScrollMode = TurnScrollStateTracker.modeAfterAcceptedNotBottomGeometry(
+                currentMode: autoScrollMode
+            )
+            // Cancel queued app snaps once geometry confirms the viewport is away
+            // from bottom; transient content-growth frames are filtered above.
             if autoScrollMode == .manual || autoScrollMode == .anchorAssistantResponse {
                 followBottomScrollTask?.cancel()
                 followBottomScrollTask = nil
@@ -1146,7 +1159,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             proxy.scrollTo(assistantMessageID, anchor: .top)
         }
         shouldAnchorToAssistantResponse = false
-        autoScrollMode = .manual
+        autoScrollMode = .followBottom
         initialRecoverySnapPendingThreadID = nil
         return true
     }
@@ -1191,21 +1204,21 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Keeps the footer/timeline geometry transition stable while waiting for the first
     // assistant row to exist, so sending a message cannot leave a temporarily blank viewport.
     private var shouldPinTimelineToBottomDuringGeometryChange: Bool {
-        guard !shouldPauseAutomaticScrolling, isScrolledToBottom else {
-            return false
-        }
-
-        switch autoScrollMode {
-        case .followBottom:
-            return true
-        case .anchorAssistantResponse:
-            return TurnTimelineReducer.assistantResponseAnchorMessageID(
+        let assistantAnchorTargetExists: Bool
+        if autoScrollMode == .anchorAssistantResponse {
+            assistantAnchorTargetExists = TurnTimelineReducer.assistantResponseAnchorMessageID(
                 in: Array(visibleMessages),
                 activeTurnID: activeTurnID
-            ) == nil
-        case .manual:
-            return false
+            ) != nil
+        } else {
+            assistantAnchorTargetExists = false
         }
+        return TurnScrollStateTracker.shouldPinDuringGeometryChange(
+            currentMode: autoScrollMode,
+            isScrolledToBottom: isScrolledToBottom,
+            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling,
+            assistantAnchorTargetExists: assistantAnchorTargetExists
+        )
     }
 
     /// For each message index, returns the aggregated assistant block text if the message
