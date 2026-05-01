@@ -87,6 +87,7 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
     env: {
       REMODEX_CODEX_ENDPOINT: "ws://localhost:8080",
       REMODEX_REFRESH_ENABLED: "true",
+      REMODEX_DESKTOP_IPC_SOCKET: "/tmp/remodex-ipc.sock",
     },
     platform: "darwin",
     runtimeRoot: "/tmp/remodex-package",
@@ -121,6 +122,7 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(linuxConfig.refreshEnabled, false);
   assert.equal(linuxCommandConfig.refreshEnabled, false);
   assert.equal(explicitOnConfig.refreshEnabled, true);
+  assert.equal(explicitOnConfig.desktopIpcSocketPath, "/tmp/remodex-ipc.sock");
   assert.equal(explicitOffConfig.refreshEnabled, false);
   assert.equal(explicitOffConfig.keepMacAwakeEnabled, false);
 });

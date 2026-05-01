@@ -40,6 +40,10 @@ const {
 } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
+const {
+  createDesktopIpcActionFollower,
+  seedConversationStateFromThreadRead,
+} = require("./desktop-ipc-action-follower");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -173,6 +177,13 @@ function startBridge({
   const rolloutLiveMirror = !config.codexEndpoint
     ? createRolloutLiveMirrorController({
       sendApplicationResponse,
+    })
+    : null;
+  const desktopIpcActionFollower = !config.codexEndpoint
+    ? createDesktopIpcActionFollower({
+      sendApplicationResponse,
+      readConversationState: readDesktopConversationState,
+      socketPath: config.desktopIpcSocketPath || undefined,
     })
     : null;
   let contextUsageWatcher = null;
@@ -410,6 +421,7 @@ function startBridge({
       }
       stopContextUsageWatcher();
       rolloutLiveMirror?.stopAll();
+      desktopIpcActionFollower?.stopAll();
       desktopRefresher.handleTransportReset();
       scheduleRelayReconnect(code);
     });
@@ -464,6 +476,7 @@ function startBridge({
     clearReconnectTimer();
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
+    desktopIpcActionFollower?.stopAll();
     desktopRefresher.handleTransportReset();
     failBridgeManagedCodexRequests(new Error("Codex transport closed before the bridge request completed."));
     forwardedRequestMethodsById.clear();
@@ -526,6 +539,9 @@ function startBridge({
     }
     desktopRefresher.handleInbound(rawMessage);
     rolloutLiveMirror?.observeInbound(rawMessage);
+    if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
+      return;
+    }
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", rawMessage);
     codex.send(rawMessage);
@@ -556,6 +572,15 @@ function startBridge({
         title: name,
       },
     }));
+  }
+
+  // Seeds the desktop IPC follower when it receives patches before a full snapshot.
+  async function readDesktopConversationState(threadId) {
+    const result = await sendCodexRequest("thread/read", {
+      threadId,
+      includeTurns: true,
+    });
+    return seedConversationStateFromThreadRead(result);
   }
 
   // ─── Bridge-owned auth snapshot ─────────────────────────────
