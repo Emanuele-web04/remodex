@@ -7,9 +7,9 @@
 import Foundation
 
 private let minimumBridgePackageUpdateCommand = "npm install -g remodex@latest"
-private let forcedBridgeUpgradeFromVersion = "1.3.7"
-private let forcedBridgeUpgradeTargetVersion = "1.3.8"
-private let forcedBridgeUpgradeCommand = "npm install -g remodex@1.3.8"
+private let forcedBridgeUpgradeFromVersion = "1.3.8"
+private let forcedBridgeUpgradeTargetVersion = "1.3.9"
+private let forcedBridgeUpgradeCommand = "npm install -g remodex@1.3.9"
 
 enum CodexGPTAccountStatus: String, Codable, Sendable {
     case unknown

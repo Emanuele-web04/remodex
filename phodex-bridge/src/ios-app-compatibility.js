@@ -4,8 +4,8 @@
 // Exports: version comparison + bridge/iPhone compatibility helpers
 // Depends on: none
 
-const MINIMUM_SUPPORTED_IOS_APP_VERSION = "1.1";
-const IOS_APP_COMPATIBILITY_GATE_BRIDGE_VERSION = "1.3.8";
+const MINIMUM_SUPPORTED_IOS_APP_VERSION = "1.5";
+const IOS_APP_COMPATIBILITY_GATE_BRIDGE_VERSION = "1.3.9";
 const LEGACY_BRIDGE_VERSION_FOR_IOS_1_0 = "1.3.7";
 const LEGACY_BRIDGE_DOWNGRADE_COMMAND = `npm install -g remodex@${LEGACY_BRIDGE_VERSION_FOR_IOS_1_0}`;
 const NOTICE_BOX_WIDTH = 74;

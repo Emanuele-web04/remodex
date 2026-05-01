@@ -9,6 +9,9 @@ const os = require("os");
 const path = require("path");
 
 const DEFAULT_DIRECTORY_LIMIT = 200;
+const DEFAULT_DIRECTORY_SEARCH_LIMIT = 80;
+const DEFAULT_DIRECTORY_SEARCH_MAX_DEPTH = 8;
+const DEFAULT_DIRECTORY_SEARCH_MAX_VISITED = 5000;
 const DEFAULT_HIDDEN_DIRECTORY_NAMES = new Set(["Library"]);
 
 // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -57,6 +60,8 @@ async function handleProjectMethod(method, params, options = {}) {
       return projectQuickLocations(options);
     case "project/listDirectory":
       return projectListDirectory(params, options);
+    case "project/searchDirectories":
+      return projectSearchDirectories(params, options);
     case "project/validatePath":
       return projectValidatePath(params, options);
     case "project/createDirectory":
@@ -108,6 +113,32 @@ async function projectListDirectory(params, options = {}) {
   return {
     path: directory.path,
     parentPath: parentPathWithinAllowedRoots(directory.path, options),
+    entries,
+  };
+}
+
+async function projectSearchDirectories(params, options = {}) {
+  const requestedPath = readString(params.path) || resolveHomeDir(options);
+  const query = readString(params.query);
+  const directory = await requireUsableDirectory(requestedPath, options);
+  if (!query) {
+    return {
+      path: directory.path,
+      entries: [],
+    };
+  }
+
+  const includeHidden = params.includeHidden === true;
+  const entries = await searchDirectoryEntries(directory.path, query, {
+    ...options,
+    includeHidden,
+    limit: normalizeSearchLimit(params.limit),
+    maxDepth: normalizeSearchDepth(params.maxDepth),
+    maxVisited: normalizeSearchVisitedLimit(params.maxVisited),
+  });
+
+  return {
+    path: directory.path,
     entries,
   };
 }
@@ -179,6 +210,62 @@ async function readDirectoryEntries(directoryPath, options = {}) {
   return entries
     .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" }))
     .slice(0, options.limit || DEFAULT_DIRECTORY_LIMIT);
+}
+
+async function searchDirectoryEntries(rootPath, query, options = {}) {
+  const tokens = searchTokens(query);
+  if (!tokens.length) {
+    return [];
+  }
+
+  const limit = options.limit || DEFAULT_DIRECTORY_SEARCH_LIMIT;
+  const maxDepth = options.maxDepth ?? DEFAULT_DIRECTORY_SEARCH_MAX_DEPTH;
+  const maxVisited = options.maxVisited || DEFAULT_DIRECTORY_SEARCH_MAX_VISITED;
+  const queue = [{ directoryPath: rootPath, depth: 0 }];
+  const visitedDirectories = new Set([realpathSyncIfAvailable(rootPath) || rootPath]);
+  const matches = [];
+  let visitedCount = 0;
+
+  while (queue.length && matches.length < limit && visitedCount < maxVisited) {
+    const { directoryPath, depth } = queue.shift();
+    visitedCount += 1;
+
+    let dirents;
+    try {
+      dirents = await fs.promises.readdir(directoryPath, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const dirent of sortedDirents(dirents)) {
+      if (!options.includeHidden && isHiddenDirectoryName(dirent.name)) {
+        continue;
+      }
+
+      const childPath = path.join(directoryPath, dirent.name);
+      const directory = await directoryEntryForPath(childPath, dirent, options);
+      if (!directory) {
+        continue;
+      }
+
+      if (directoryMatchesSearch(directory, tokens)) {
+        matches.push(directory);
+        if (matches.length >= limit) {
+          break;
+        }
+      }
+
+      if (!dirent.isSymbolicLink() && depth < maxDepth) {
+        const realPath = directory.path;
+        if (!visitedDirectories.has(realPath)) {
+          visitedDirectories.add(realPath);
+          queue.push({ directoryPath: realPath, depth: depth + 1 });
+        }
+      }
+    }
+  }
+
+  return matches;
 }
 
 async function directoryEntryForPath(candidatePath, dirent, options = {}) {
@@ -325,6 +412,52 @@ function normalizeLimit(rawLimit) {
   return Math.min(Math.floor(numericLimit), DEFAULT_DIRECTORY_LIMIT);
 }
 
+function normalizeSearchLimit(rawLimit) {
+  const numericLimit = Number(rawLimit);
+  if (!Number.isFinite(numericLimit) || numericLimit <= 0) {
+    return DEFAULT_DIRECTORY_SEARCH_LIMIT;
+  }
+
+  return Math.min(Math.floor(numericLimit), DEFAULT_DIRECTORY_SEARCH_LIMIT);
+}
+
+function normalizeSearchDepth(rawDepth) {
+  const numericDepth = Number(rawDepth);
+  if (!Number.isFinite(numericDepth) || numericDepth < 0) {
+    return DEFAULT_DIRECTORY_SEARCH_MAX_DEPTH;
+  }
+
+  return Math.min(Math.floor(numericDepth), DEFAULT_DIRECTORY_SEARCH_MAX_DEPTH);
+}
+
+function normalizeSearchVisitedLimit(rawLimit) {
+  const numericLimit = Number(rawLimit);
+  if (!Number.isFinite(numericLimit) || numericLimit <= 0) {
+    return DEFAULT_DIRECTORY_SEARCH_MAX_VISITED;
+  }
+
+  return Math.min(Math.floor(numericLimit), DEFAULT_DIRECTORY_SEARCH_MAX_VISITED);
+}
+
+function sortedDirents(dirents) {
+  return [...dirents].sort((left, right) => (
+    left.name.localeCompare(right.name, undefined, { sensitivity: "base" })
+  ));
+}
+
+function searchTokens(query) {
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function directoryMatchesSearch(directory, tokens) {
+  const haystack = directory.name.toLowerCase();
+  return tokens.every((token) => haystack.includes(token));
+}
+
 function resolveHomeDir(options = {}) {
   return options.homeDir || os.homedir();
 }
@@ -353,6 +486,7 @@ module.exports = {
   handleProjectMethod,
   projectQuickLocations,
   projectListDirectory,
+  projectSearchDirectories,
   projectValidatePath,
   projectCreateDirectory,
   validateDirectory,

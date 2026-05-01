@@ -58,6 +58,23 @@ extension CodexService {
         )
     }
 
+    // Searches folder names under a selected root so the picker can jump across deep trees.
+    func searchProjectDirectories(rootPath: String, query: String) async throws -> [CodexProjectDirectoryEntry] {
+        let response = try await sendRequest(
+            method: "project/searchDirectories",
+            params: .object([
+                "path": .string(rootPath),
+                "query": .string(query),
+                "limit": .integer(80),
+            ])
+        )
+        guard let rawEntries = response.result?.objectValue?["entries"]?.arrayValue else {
+            throw CodexServiceError.invalidResponse("project/searchDirectories response missing entries")
+        }
+
+        return rawEntries.compactMap(Self.decodeProjectDirectoryEntry)
+    }
+
     // Creates a child folder on the Mac and returns the created absolute path.
     func createProjectDirectory(parentPath: String, name: String) async throws -> String {
         let response = try await sendRequest(

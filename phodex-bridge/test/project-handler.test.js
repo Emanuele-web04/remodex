@@ -14,6 +14,7 @@ const {
   handleProjectMethod,
   projectCreateDirectory,
   projectListDirectory,
+  projectSearchDirectories,
   projectValidatePath,
 } = require("../src/project-handler");
 
@@ -61,6 +62,41 @@ test("project/createDirectory creates one child folder under an allowed parent",
 
   assert.equal(result.path, path.join(fs.realpathSync(homeDir), "New App"));
   assert.equal(fs.statSync(result.path).isDirectory(), true);
+});
+
+test("project/searchDirectories finds matching child folders recursively", async () => {
+  const homeDir = makeTempHome();
+  fs.mkdirSync(path.join(homeDir, "Developer"));
+  fs.mkdirSync(path.join(homeDir, "Developer", "ClientApp"));
+  fs.mkdirSync(path.join(homeDir, "Developer", "ClientApp", "ios"));
+  fs.mkdirSync(path.join(homeDir, "Developer", "Other"));
+  fs.writeFileSync(path.join(homeDir, "Developer", "client-notes.txt"), "hello");
+
+  const result = await projectSearchDirectories({
+    path: path.join(homeDir, "Developer"),
+    query: "client",
+  }, { homeDir });
+
+  assert.equal(result.path, fs.realpathSync(path.join(homeDir, "Developer")));
+  assert.deepEqual(
+    result.entries.map((entry) => entry.name),
+    ["ClientApp"]
+  );
+});
+
+test("project/searchDirectories respects depth and hidden folder bounds", async () => {
+  const homeDir = makeTempHome();
+  fs.mkdirSync(path.join(homeDir, "Visible"));
+  fs.mkdirSync(path.join(homeDir, "Visible", "DeepMatch"));
+  fs.mkdirSync(path.join(homeDir, ".match-hidden"));
+
+  const result = await projectSearchDirectories({
+    path: homeDir,
+    query: "match",
+    maxDepth: 0,
+  }, { homeDir });
+
+  assert.deepEqual(result.entries.map((entry) => entry.name), []);
 });
 
 test("project/createDirectory rejects names that escape the selected parent", async () => {
@@ -114,6 +150,10 @@ test("handleProjectRequest responds to project JSON-RPC requests", async () => {
   const previousHome = process.env.HOME;
   process.env.HOME = homeDir;
   let response = "";
+  let resolveResponse;
+  const responsePromise = new Promise((resolve) => {
+    resolveResponse = resolve;
+  });
 
   try {
     const handled = handleProjectRequest(
@@ -124,11 +164,12 @@ test("handleProjectRequest responds to project JSON-RPC requests", async () => {
       }),
       (payload) => {
         response = payload;
+        resolveResponse();
       }
     );
 
     assert.equal(handled, true);
-    await new Promise((resolve) => setImmediate(resolve));
+    await responsePromise;
   } finally {
     if (previousHome == null) {
       delete process.env.HOME;

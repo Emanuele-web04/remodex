@@ -23,6 +23,19 @@ struct SidebarLocalFolderBrowserSheet: View {
     @State private var isShowingNewFolderPrompt = false
     @State private var newFolderName = ""
     @State private var activeLoadRequestID: UUID?
+    @State private var searchText = ""
+    @State private var searchResults: [CodexProjectDirectoryEntry] = []
+    @State private var searchErrorMessage: String?
+    @State private var isSearchingFolders = false
+    @State private var activeSearchRequestID: UUID?
+
+    private var trimmedSearchText: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var folderSearchTaskID: String {
+        "\(currentPath ?? "")\n\(searchText)"
+    }
 
     var body: some View {
         NavigationStack {
@@ -37,11 +50,16 @@ struct SidebarLocalFolderBrowserSheet: View {
                     parentPath: parentPath,
                     entries: entries,
                     isLoading: isLoading,
+                    searchQuery: trimmedSearchText,
+                    searchResults: searchResults,
+                    searchErrorMessage: searchErrorMessage,
+                    isSearchingFolders: isSearchingFolders,
                     onSelect: openDirectory
                 )
             }
             .navigationTitle("Add Local Folder")
             .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $searchText, prompt: "Search folders")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") {
@@ -62,6 +80,9 @@ struct SidebarLocalFolderBrowserSheet: View {
         }
         .task {
             await loadInitialDirectory()
+        }
+        .task(id: folderSearchTaskID) {
+            await updateFolderSearch()
         }
         .alert("New Folder", isPresented: $isShowingNewFolderPrompt) {
             TextField("Folder name", text: $newFolderName)
@@ -87,6 +108,7 @@ struct SidebarLocalFolderBrowserSheet: View {
     }
 
     private func openDirectory(_ path: String) {
+        clearFolderSearch()
         Task { await loadDirectory(path) }
     }
 
@@ -131,6 +153,48 @@ struct SidebarLocalFolderBrowserSheet: View {
             guard activeLoadRequestID == requestID else { return }
             errorMessage = error.localizedDescription
         }
+    }
+
+    // Debounces remote folder-name search under the current browser root.
+    private func updateFolderSearch() async {
+        let query = trimmedSearchText
+        guard !query.isEmpty else {
+            clearFolderSearch()
+            return
+        }
+        guard let currentPath else { return }
+
+        let requestID = UUID()
+        activeSearchRequestID = requestID
+        searchErrorMessage = nil
+        isSearchingFolders = true
+        defer {
+            if activeSearchRequestID == requestID {
+                isSearchingFolders = false
+            }
+        }
+
+        do {
+            try await Task.sleep(nanoseconds: 250_000_000)
+            try Task.checkCancellation()
+            let results = try await codex.searchProjectDirectories(rootPath: currentPath, query: query)
+            guard activeSearchRequestID == requestID else { return }
+            searchResults = results
+        } catch is CancellationError {
+            return
+        } catch {
+            guard activeSearchRequestID == requestID else { return }
+            searchResults = []
+            searchErrorMessage = error.localizedDescription
+        }
+    }
+
+    private func clearFolderSearch() {
+        searchText = ""
+        searchResults = []
+        searchErrorMessage = nil
+        isSearchingFolders = false
+        activeSearchRequestID = nil
     }
 
     // Creates a folder at the current location and immediately opens the new chat there.
@@ -222,46 +286,88 @@ private struct SidebarLocalFolderEntriesSection: View {
     let parentPath: String?
     let entries: [CodexProjectDirectoryEntry]
     let isLoading: Bool
+    let searchQuery: String
+    let searchResults: [CodexProjectDirectoryEntry]
+    let searchErrorMessage: String?
+    let isSearchingFolders: Bool
     let onSelect: (String) -> Void
 
     var body: some View {
-        Section("Folders") {
-            if let parentPath {
-                Button {
-                    onSelect(parentPath)
-                } label: {
-                    SidebarLocalFolderRow(
-                        iconSystemName: "arrow.uturn.left",
-                        title: "Parent Folder",
-                        subtitle: parentPath
-                    )
-                }
+        Section(searchQuery.isEmpty ? "Folders" : "Matching Folders") {
+            if searchQuery.isEmpty {
+                folderBrowserRows
+            } else {
+                folderSearchRows
             }
+        }
+    }
 
-            if isLoading {
-                HStack {
-                    ProgressView()
-                    Text("Loading")
-                        .font(AppFont.body())
-                        .foregroundStyle(.secondary)
-                }
-            } else if entries.isEmpty {
-                Text("No child folders here.")
+    @ViewBuilder
+    private var folderBrowserRows: some View {
+        if let parentPath {
+            Button {
+                onSelect(parentPath)
+            } label: {
+                SidebarLocalFolderRow(
+                    iconSystemName: "arrow.uturn.left",
+                    title: "Parent Folder",
+                    subtitle: parentPath
+                )
+            }
+        }
+
+        if isLoading {
+            HStack {
+                ProgressView()
+                Text("Loading")
                     .font(AppFont.body())
                     .foregroundStyle(.secondary)
-            } else {
-                ForEach(entries) { entry in
-                    Button {
-                        onSelect(entry.path)
-                    } label: {
-                        SidebarLocalFolderRow(
-                            iconSystemName: entry.isSymlink ? "folder.badge.gearshape" : "folder",
-                            title: entry.name,
-                            subtitle: entry.path
-                        )
-                    }
-                }
             }
+        } else if entries.isEmpty {
+            Text("No child folders here.")
+                .font(AppFont.body())
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(entries) { entry in
+                folderButton(entry)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var folderSearchRows: some View {
+        if isSearchingFolders {
+            HStack {
+                ProgressView()
+                Text("Searching folders...")
+                    .font(AppFont.body())
+                    .foregroundStyle(.secondary)
+            }
+        } else if let searchErrorMessage {
+            Text(searchErrorMessage)
+                .font(AppFont.body())
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if searchResults.isEmpty {
+            Text("No matching folders under this folder.")
+                .font(AppFont.body())
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(searchResults) { entry in
+                folderButton(entry)
+            }
+        }
+    }
+
+    private func folderButton(_ entry: CodexProjectDirectoryEntry) -> some View {
+        Button {
+            onSelect(entry.path)
+        } label: {
+            SidebarLocalFolderRow(
+                iconSystemName: entry.isSymlink ? "folder.badge.gearshape" : "folder",
+                title: entry.name,
+                subtitle: entry.path
+            )
         }
     }
 }
