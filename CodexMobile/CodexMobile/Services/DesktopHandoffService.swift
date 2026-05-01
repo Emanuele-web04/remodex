@@ -79,6 +79,13 @@ final class DesktopHandoffService {
             return
         }
 
+        guard codex.canWakePreferredMacDisplay else {
+            throw DesktopHandoffError.bridgeError(
+                code: "saved_pair_required",
+                message: "Reconnect to your paired computer first."
+            )
+        }
+
         guard let reconnectURL = try await preferredReconnectURLForWake() else {
             throw DesktopHandoffError.bridgeError(
                 code: "saved_pair_required",

@@ -440,6 +440,50 @@ extension CodexService {
     }
 }
 
+enum CodexTrustedSessionResolveURLBuilder {
+    // Builds both proxy-relative and root HTTP resolve routes from the remembered WebSocket relay URL.
+    static func candidates(from relayURL: String) -> [URL] {
+        guard var components = URLComponents(string: relayURL) else {
+            return []
+        }
+
+        normalizeRelayResolveComponents(&components)
+
+        var candidates: [URL] = []
+        let pathComponents = components.path.split(separator: "/").map(String.init)
+        if pathComponents.last == "relay" {
+            let prefix = pathComponents.dropLast()
+            components.path = "/" + (prefix + ["v1", "trusted", "session", "resolve"]).joined(separator: "/")
+        } else {
+            components.path = "/v1/trusted/session/resolve"
+        }
+        if let url = components.url {
+            candidates.append(url)
+        }
+
+        if var rootComponents = URLComponents(string: relayURL) {
+            normalizeRelayResolveComponents(&rootComponents)
+            rootComponents.path = "/v1/trusted/session/resolve"
+            if let rootURL = rootComponents.url,
+               !candidates.contains(where: { $0.absoluteString == rootURL.absoluteString }) {
+                candidates.append(rootURL)
+            }
+        }
+
+        return candidates
+    }
+
+    private static func normalizeRelayResolveComponents(_ components: inout URLComponents) {
+        if components.scheme == "wss" {
+            components.scheme = "https"
+        } else if components.scheme == "ws" {
+            components.scheme = "http"
+        }
+        components.query = nil
+        components.fragment = nil
+    }
+}
+
 private extension CodexService {
     // Centralizes the bridge-update guidance so every mismatch shows the same Mac command.
     func presentBridgeUpdatePrompt(message: String) {
@@ -626,11 +670,35 @@ private extension CodexService {
               !relayURL.isEmpty else {
             throw CodexTrustedSessionResolveError.noTrustedMac
         }
-        let resolveURLs = trustedSessionResolveURLs(from: relayURL)
+        let resolveURLs = CodexTrustedSessionResolveURLBuilder.candidates(from: relayURL)
         guard !resolveURLs.isEmpty else {
             throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay URL is invalid.")
         }
 
+        var lastRetriableResolveError: CodexTrustedSessionResolveError?
+        for (index, resolveURL) in resolveURLs.enumerated() {
+            do {
+                return try await sendTrustedSessionResolveRequest(
+                    makeTrustedSessionResolveRequestBody(for: trustedMac),
+                    resolveURL: resolveURL,
+                    relayURL: relayURL
+                )
+            } catch let error as CodexTrustedSessionResolveError {
+                guard shouldTryNextTrustedResolveCandidate(after: error),
+                      index < resolveURLs.count - 1 else {
+                    throw error
+                }
+                lastRetriableResolveError = error
+                continue
+            }
+        }
+
+        throw lastRetriableResolveError ?? CodexTrustedSessionResolveError.unsupportedRelay
+    }
+
+    private func makeTrustedSessionResolveRequestBody(
+        for trustedMac: CodexTrustedMacRecord
+    ) throws -> CodexTrustedSessionResolveRequest {
         let nonce = UUID().uuidString
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         let transcriptBytes = codexTrustedSessionResolveTranscriptBytes(
@@ -645,7 +713,7 @@ private extension CodexService {
         )
         let signature = try phonePrivateKey.signature(for: transcriptBytes).base64EncodedString()
 
-        let requestBody = CodexTrustedSessionResolveRequest(
+        return CodexTrustedSessionResolveRequest(
             macDeviceId: trustedMac.macDeviceId,
             phoneDeviceId: phoneIdentityState.phoneDeviceId,
             phoneIdentityPublicKey: phoneIdentityState.phoneIdentityPublicKey,
@@ -653,26 +721,15 @@ private extension CodexService {
             timestamp: timestamp,
             signature: signature
         )
+    }
 
-        var lastUnsupportedRelayError: CodexTrustedSessionResolveError?
-        for (index, resolveURL) in resolveURLs.enumerated() {
-            do {
-                return try await sendTrustedSessionResolveRequest(
-                    requestBody,
-                    resolveURL: resolveURL,
-                    relayURL: relayURL
-                )
-            } catch let error as CodexTrustedSessionResolveError {
-                guard case .unsupportedRelay = error,
-                      index < resolveURLs.count - 1 else {
-                    throw error
-                }
-                lastUnsupportedRelayError = error
-                continue
-            }
+    private func shouldTryNextTrustedResolveCandidate(after error: CodexTrustedSessionResolveError) -> Bool {
+        switch error {
+        case .unsupportedRelay, .invalidResponse, .network:
+            return true
+        case .macOffline, .rePairRequired, .noTrustedMac:
+            return false
         }
-
-        throw lastUnsupportedRelayError ?? CodexTrustedSessionResolveError.unsupportedRelay
     }
 
     private func sendTrustedSessionResolveRequest(
@@ -769,48 +826,6 @@ private extension CodexService {
             trustedMacRegistry.records[resolved.macDeviceId] = trustedMac
             SecureStore.writeCodable(trustedMacRegistry, for: CodexSecureKeys.trustedMacRegistry)
         }
-    }
-
-    private func trustedSessionResolveURLs(from relayURL: String) -> [URL] {
-        guard var components = URLComponents(string: relayURL) else {
-            return []
-        }
-
-        if components.scheme == "wss" {
-            components.scheme = "https"
-        } else if components.scheme == "ws" {
-            components.scheme = "http"
-        }
-
-        var candidates: [URL] = []
-        let pathComponents = components.path.split(separator: "/").map(String.init)
-        if pathComponents.last == "relay" {
-            let prefix = pathComponents.dropLast()
-            components.path = "/" + (prefix + ["v1", "trusted", "session", "resolve"]).joined(separator: "/")
-        } else {
-            components.path = "/v1/trusted/session/resolve"
-        }
-        if let url = components.url {
-            candidates.append(url)
-        }
-
-        // Some self-hosted or reverse-proxied relays expose the websocket under a
-        // prefixed path but the HTTP resolve route at the host root. Try that route
-        // only after the relay-relative candidate returns a plain unsupported 404.
-        if var rootComponents = URLComponents(string: relayURL) {
-            if rootComponents.scheme == "wss" {
-                rootComponents.scheme = "https"
-            } else if rootComponents.scheme == "ws" {
-                rootComponents.scheme = "http"
-            }
-            rootComponents.path = "/v1/trusted/session/resolve"
-            if let rootURL = rootComponents.url,
-               !candidates.contains(where: { $0.absoluteString == rootURL.absoluteString }) {
-                candidates.append(rootURL)
-            }
-        }
-
-        return candidates
     }
 
     private var preferredPairingCodeRelayURL: String? {

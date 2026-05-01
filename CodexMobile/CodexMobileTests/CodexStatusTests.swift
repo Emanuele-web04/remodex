@@ -84,6 +84,42 @@ final class CodexStatusTests: XCTestCase {
         XCTAssertEqual(service.contextWindowUsageByThread["thread-ctx"]?.tokenLimit, 258_400)
     }
 
+    func testRefreshContextWindowUsageFallsBackToZeroWhenUsageMissing() async {
+        let service = makeService()
+        service.isConnected = true
+        service.hasResolvedRateLimitsSnapshot = true
+
+        service.requestTransportOverride = { _, _ in
+            RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "threadId": .string("thread-new"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.refreshContextWindowUsage(threadId: "thread-new")
+
+        XCTAssertEqual(service.contextWindowUsageByThread["thread-new"], .zero)
+        XCTAssertFalse(service.shouldAutoRefreshUsageStatus(threadId: "thread-new"))
+    }
+
+    func testRefreshContextWindowUsageKeepsUsageUnknownWhenRequestFails() async {
+        let service = makeService()
+        service.isConnected = true
+        service.hasResolvedRateLimitsSnapshot = true
+
+        service.requestTransportOverride = { _, _ in
+            throw CodexServiceError.disconnected
+        }
+
+        await service.refreshContextWindowUsage(threadId: "thread-new")
+
+        XCTAssertNil(service.contextWindowUsageByThread["thread-new"])
+        XCTAssertTrue(service.shouldAutoRefreshUsageStatus(threadId: "thread-new"))
+    }
+
     func testExtractContextWindowUsageFromTokenCountPayloadPrefersLastUsage() {
         let usage = extractContextWindowUsageFromTokenCountPayload([
             "info": .object([

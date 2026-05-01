@@ -213,7 +213,7 @@ extension CodexService {
         }
     }
 
-    // Clears the remembered relay pairing when the remote Mac session is gone for good.
+    // Clears all remembered relay metadata when the pairing itself is no longer trustworthy.
     func clearSavedRelaySession() {
         SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
         SecureStore.deleteValue(for: CodexSecureKeys.relayUrl)
@@ -236,6 +236,26 @@ extension CodexService {
             secureConnectionState = .notPaired
             secureMacFingerprint = nil
         }
+        pendingNotificationOpenThreadID = nil
+        lastPushRegistrationSignature = nil
+        clearTransientConnectionPrompts()
+    }
+
+    // Drops only the per-launch relay session after repeated trusted reconnect failures.
+    func clearStaleSavedRelaySessionForTrustedReconnect() {
+        guard let trustedMac = preferredTrustedMacRecord else {
+            clearSavedRelaySession()
+            return
+        }
+
+        SecureStore.deleteValue(for: CodexSecureKeys.relaySessionId)
+        SecureStore.deleteValue(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq)
+        relaySessionId = nil
+        lastAppliedBridgeOutboundSeq = 0
+        shouldForceQRBootstrapOnNextHandshake = false
+        trustedReconnectFailureCount = 0
+        secureConnectionState = .liveSessionUnresolved
+        secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         pendingNotificationOpenThreadID = nil
         lastPushRegistrationSignature = nil
         clearTransientConnectionPrompts()
@@ -627,13 +647,14 @@ extension CodexService {
         return true
     }
 
-    // Drops only the stale saved relay session after repeated secure reconnect failures.
-    // This preserves the trusted Mac record, but stops looping on a dead session id forever.
+    // Preserves trusted Mac identity while removing only the stale per-launch relay session.
     func recoverTrustedReconnectCandidate() {
         if hasSavedRelaySession {
-            clearSavedRelaySession()
-        } else {
+            clearStaleSavedRelaySessionForTrustedReconnect()
+        } else if preferredTrustedMacRecord != nil {
             secureConnectionState = .liveSessionUnresolved
+        } else {
+            clearSavedRelaySession()
         }
         lastErrorMessage = Self.trustedReconnectRecoveryMessage
     }
@@ -645,8 +666,8 @@ extension CodexService {
     ) -> ReceiveErrorDisposition {
         let shouldClearSavedRelaySession = shouldClearSavedRelaySession(for: relayCloseCode)
         let retryableSessionUnavailableMessage = retryableSessionUnavailableMessage(for: relayCloseCode)
-        // Only relay closes that preserve the saved session should stay on the
-        // auto-reconnect path; dead sessions must fall back to QR recovery.
+        // Only relay closes that preserve the saved session should stay on this socket path;
+        // stale live sessions recover through trusted resolve instead of immediate QR.
         let permanentRelayMessage = shouldClearSavedRelaySession
             ? (permanentRelayDisconnectMessage(for: relayCloseCode)
                 ?? "This relay pairing is no longer valid. Scan a new QR code to reconnect.")

@@ -441,8 +441,10 @@ extension ContentViewModel {
         switch error {
         case .unsupportedRelay:
             if !codex.hasSavedRelaySession {
+                codex.secureConnectionState = .liveSessionUnresolved
                 codex.connectionRecoveryState = .idle
-                codex.lastErrorMessage = "Trusted reconnect is not available from this relay endpoint. Check the relay/proxy, or scan a new QR code."
+                codex.shouldAutoReconnectOnForeground = false
+                codex.lastErrorMessage = "Trusted reconnect is unavailable from this relay endpoint. Update or check the relay/proxy, then reconnect. Scan a new QR code only if this Mac was reset."
                 return .stop
             }
             return .fallbackToSaved
@@ -463,6 +465,7 @@ extension ContentViewModel {
             return .fallbackToSaved
         case .invalidResponse(let message), .network(let message):
             if !codex.hasSavedRelaySession {
+                codex.secureConnectionState = .liveSessionUnresolved
                 codex.lastErrorMessage = message
             }
             return .fallbackToSaved

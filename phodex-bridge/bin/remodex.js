@@ -58,6 +58,7 @@ async function main({
 
   if (command === "up") {
     if (platform === "darwin") {
+      consoleImpl.log("[remodex] Starting bridge and pairing QR...");
       const result = await deps.startMacOSBridgeService({
         waitForPairing: true,
       });
