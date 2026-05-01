@@ -251,6 +251,16 @@ extension CodexService {
         )
     }
 
+    // Tracks the Git checkpoint diff when available, without losing runtime diff fallback coverage.
+    func recordWorkspaceCheckpointChangeSet(threadId: String, turnId: String, diff: String) {
+        recordChangeSetPatch(
+            threadId: threadId,
+            turnId: turnId,
+            patch: diff,
+            source: .workspaceCheckpoint
+        )
+    }
+
     // Tracks a conservative single-patch fallback when no final turn diff is available.
     func recordFallbackFileChangePatch(threadId: String, turnId: String, patch: String) {
         recordChangeSetPatch(
@@ -387,7 +397,7 @@ private extension CodexService {
             source: source
         )
 
-        if source == .fileChangeFallback && changeSet.source == .turnDiff {
+        guard shouldReplaceChangeSetPatch(source: source, existing: changeSet) else {
             return
         }
 
@@ -424,6 +434,31 @@ private extension CodexService {
         persistAIChangeSets()
         invalidateAssistantRevertStates()
     }
+
+    // Keeps assistant-scoped runtime diffs authoritative over repo-wide checkpoint snapshots.
+    func shouldReplaceChangeSetPatch(
+        source: AIChangeSetSource,
+        existing changeSet: AIChangeSet
+    ) -> Bool {
+        if changeSet.forwardUnifiedPatch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+
+        switch source {
+        case .turnDiff:
+            return true
+        case .workspaceCheckpoint:
+            switch changeSet.source {
+            case .turnDiff, .fileChangeFallback:
+                return false
+            case .workspaceCheckpoint:
+                return true
+            }
+        case .fileChangeFallback:
+            return changeSet.source == .fileChangeFallback
+        }
+    }
+
     func finalizeChangeSetIfPossible(changeSetId: String) {
         guard var changeSet = aiChangeSetsByID[changeSetId] else {
             return

@@ -510,6 +510,222 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(final.id, "final-a")
     }
 
+    func testTimelineProjectionSkipsFinalReplaysAndMergedImageArtifactsInPreviousMessages() {
+        let now = Date()
+        let imagePath = "/Users/example/.codex/generated_images/thread/generated-icon.png"
+        let finalText = """
+        Created the icon with `$imagegen` using the built-in image generation mode.
+
+        TL;DR:
+        The icon shows the user as calm, focused, and in control.
+
+        ![Generated image](\(imagePath))
+        """
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Create an app user icon",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "intro",
+                threadID: "thread",
+                role: .assistant,
+                text: "I will use the imagegen skill and inspect the app tone.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "context",
+                threadID: "thread",
+                role: .assistant,
+                text: "The site is for Remodex: an iPhone bridge with a local-first power-user tone.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "leaked-tldr",
+                threadID: "thread",
+                role: .assistant,
+                text: "TL;DR:\nThe icon shows the user as calm, focused, and in control.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                orderIndex: 4
+            ),
+            makeMessage(
+                id: "image-artifact",
+                threadID: "thread",
+                role: .assistant,
+                text: "![Generated image](\(imagePath))",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                orderIndex: 5
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: finalText,
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                orderIndex: 6
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.count, 3)
+        guard case .previousMessages(let previousGroup) = items[1],
+              case .message(let final) = items[2] else {
+            return XCTFail("Expected previous-message disclosure followed by the final answer")
+        }
+
+        XCTAssertEqual(previousGroup.messages.map(\.id), ["intro", "context"])
+        XCTAssertEqual(final.id, "final")
+    }
+
+    func testTimelineProjectionMovesGeneratedImageArtifactToFinalAnswer() {
+        let now = Date()
+        let imagePath = "/Users/example/.codex/generated_images/thread/generated-icon.png"
+        let introText = "Using imagegen for a fresh raster icon concept. I will make it feel calm."
+        let finalText = """
+        TL;DR: The icon shows the user becoming calm, focused, and in control.
+
+        The glowing path/grid represents organized direction.
+        """
+        let imageMarkdown = "![Generated image](\(imagePath))"
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Create an app user icon",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "intro",
+                threadID: "thread",
+                role: .assistant,
+                text: introText,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "image-artifact",
+                threadID: "thread",
+                role: .assistant,
+                text: imageMarkdown,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "\(introText)\n\n\(finalText)",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.count, 3)
+        guard case .previousMessages(let previousGroup) = items[1],
+              case .message(let final) = items[2] else {
+            return XCTFail("Expected one previous prose row followed by a normalized final answer")
+        }
+
+        XCTAssertEqual(previousGroup.messages.map(\.id), ["intro"])
+        XCTAssertFalse(final.text.contains(introText))
+        XCTAssertEqual(
+            final.text,
+            "\(finalText.trimmingCharacters(in: .whitespacesAndNewlines))\n\n\(imageMarkdown)"
+        )
+    }
+
+    func testTimelineProjectionUsesAssistantPhaseForPreviousMessageCount() {
+        let now = Date()
+        let imagePath = "/Users/example/.codex/generated_images/thread/generated-icon.png"
+        let commentary = "Using imagegen because this is a new raster icon concept. I will keep the TLDR tight."
+        let finalText = "TLDR: The icon shows the user becoming calm, focused, and in control."
+        let imageMarkdown = "![Generated image](\(imagePath))"
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Create an icon",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "commentary",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: commentary,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "commentary-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "image",
+                threadID: "thread",
+                role: .assistant,
+                text: imageMarkdown,
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "image-item",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: finalText,
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.count, 3)
+        guard case .previousMessages(let previousGroup) = items[1],
+              case .message(let final) = items[2] else {
+            return XCTFail("Expected commentary behind one previous-message disclosure and final with generated image")
+        }
+
+        XCTAssertEqual(previousGroup.messages.map(\.id), ["commentary"])
+        XCTAssertEqual(final.text, "\(finalText)\n\n\(imageMarkdown)")
+    }
+
     func testTimelineProjectionKeepsPriorityArtifactsVisibleOutsidePreviousMessages() {
         let now = Date()
         let messages = [
@@ -3133,6 +3349,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         threadID: String,
         role: CodexMessageRole,
         kind: CodexMessageKind = .chat,
+        assistantPhase: String? = nil,
         text: String,
         createdAt: Date = Date(),
         turnID: String? = nil,
@@ -3147,6 +3364,7 @@ final class TurnTimelineReducerTests: XCTestCase {
             threadId: threadID,
             role: role,
             kind: kind,
+            assistantPhase: assistantPhase,
             text: text,
             createdAt: createdAt,
             turnId: turnID,

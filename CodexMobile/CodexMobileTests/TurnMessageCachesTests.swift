@@ -184,6 +184,32 @@ final class TurnMessageCachesTests: XCTestCase {
 
         XCTAssertEqual(renderModel.assistantImageReferences.first?.path, "/Users/example/wing.png")
         XCTAssertEqual(renderModel.assistantTextWithoutImageSyntax, "Before\nAfter")
+        XCTAssertTrue(renderModel.assistantInlineContentSegments.isEmpty)
+    }
+
+    func testAssistantMarkdownSegmentsKeepTemporaryImagePosition() {
+        let text = "Before\n![mobile](/tmp/emanuele-mobile.png)\nAfter"
+        let segments = AssistantMarkdownImageReferenceParser.contentSegmentsPreservingTemporaryImages(from: text)
+
+        XCTAssertEqual(segments.count, 3)
+        XCTAssertEqual(segments[0], .text(id: 0, value: "Before\n"))
+        XCTAssertEqual(segments[1], .image(AssistantMarkdownImageReference(
+            path: "/tmp/emanuele-mobile.png",
+            altText: "mobile",
+            occurrenceIndex: 0
+        )))
+        XCTAssertEqual(segments[2], .text(id: 1, value: "\nAfter"))
+    }
+
+    func testAssistantMarkdownSegmentsLeaveGeneratedImageForTrailingPreview() {
+        let text = """
+        Before
+        ![Generated image](/Users/example/.codex/generated_images/thread/wing.png)
+        After
+        """
+        let segments = AssistantMarkdownImageReferenceParser.contentSegmentsPreservingTemporaryImages(from: text)
+
+        XCTAssertEqual(segments, [.text(id: 0, value: "Before\n\nAfter")])
     }
 
     func testMessageRowRenderModelStripsImagesBeforeMermaidParsing() {

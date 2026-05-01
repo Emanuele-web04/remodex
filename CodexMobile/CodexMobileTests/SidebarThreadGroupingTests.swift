@@ -143,7 +143,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups.last?.threads.map(\.id), ["sibling-thread"])
     }
 
-    func testMakeGroupsMarksCodexManagedWorktreesInLabelAndIcon() {
+    func testMakeGroupsMarksCodexManagedWorktreesInLabelAndIcon() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
             makeThread(id: "main-thread", updatedAt: now, cwd: "/Users/me/work/Remodex"),

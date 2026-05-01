@@ -37,6 +37,7 @@ enum AIChangeSetStatus: String, Codable, Hashable, Sendable {
 
 enum AIChangeSetSource: String, Codable, Hashable, Sendable {
     case turnDiff = "turnDiff"
+    case workspaceCheckpoint = "workspaceCheckpoint"
     case fileChangeFallback = "fileChangeFallback"
 }
 

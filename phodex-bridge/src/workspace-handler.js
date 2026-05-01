@@ -11,6 +11,13 @@ const path = require("path");
 const { promisify } = require("util");
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const { gitStatus } = require("./git-handler");
+const {
+  workspaceCheckpointCapture,
+  workspaceCheckpointCopy,
+  workspaceCheckpointDiff,
+  workspaceCheckpointRestoreApply,
+  workspaceCheckpointRestorePreview,
+} = require("./workspace-checkpoints");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
@@ -79,6 +86,16 @@ async function handleWorkspaceMethod(method, params) {
   const repoRoot = await resolveRepoRoot(cwd);
 
   switch (method) {
+    case "workspace/checkpointCapture":
+      return withRepoMutationLock(repoRoot, () => workspaceCheckpointCapture(repoRoot, params));
+    case "workspace/checkpointCopy":
+      return withRepoMutationLock(repoRoot, () => workspaceCheckpointCopy(repoRoot, params));
+    case "workspace/checkpointDiff":
+      return workspaceCheckpointDiff(repoRoot, params);
+    case "workspace/checkpointRestorePreview":
+      return workspaceCheckpointRestorePreview(repoRoot, params);
+    case "workspace/checkpointRestoreApply":
+      return withRepoMutationLock(repoRoot, () => workspaceCheckpointRestoreApply(repoRoot, params));
     case "workspace/revertPatchPreview":
       return workspaceRevertPatchPreview(repoRoot, params);
     case "workspace/revertPatchApply":

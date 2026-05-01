@@ -15,17 +15,14 @@ enum GlassPreference {
 
 private struct AdaptiveGlassModifier<S: Shape>: ViewModifier {
     @AppStorage(GlassPreference.storageKey) private var glassEnabled = true
-    let style: AdaptiveGlassStyle
+    let regularStyle: Bool
     let shape: S
 
     func body(content: Content) -> some View {
         if #available(iOS 26, *), glassEnabled {
-            switch style {
-            case .regular:
+            if regularStyle {
                 content.glassEffect(.regular, in: shape)
-            case .regularInteractive:
-                content.glassEffect(.regular.interactive(), in: shape)
-            case .automatic:
+            } else {
                 content.glassEffect(in: shape)
             }
         } else {
@@ -67,17 +64,15 @@ private struct AdaptiveToolbarItemModifier<S: Shape>: ViewModifier {
 
 enum AdaptiveGlassStyle {
     case regular
-    case regularInteractive
-    case automatic
 }
 
 extension View {
     func adaptiveGlass(_ style: AdaptiveGlassStyle, in shape: some Shape) -> some View {
-        modifier(AdaptiveGlassModifier(style: style, shape: shape))
+        modifier(AdaptiveGlassModifier(regularStyle: true, shape: shape))
     }
 
     func adaptiveGlass(in shape: some Shape) -> some View {
-        modifier(AdaptiveGlassModifier(style: .automatic, shape: shape))
+        modifier(AdaptiveGlassModifier(regularStyle: false, shape: shape))
     }
 
     func adaptiveNavigationBar() -> some View {

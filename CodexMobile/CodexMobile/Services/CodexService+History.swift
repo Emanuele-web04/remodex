@@ -110,6 +110,7 @@ extension CodexService {
                         to: &result,
                         role: .assistant,
                         kind: .chat,
+                        assistantPhase: normalizedAssistantPhase(itemObject["phase"]?.stringValue),
                         text: decodedText,
                         threadId: threadId,
                         turnId: turnID,
@@ -126,6 +127,9 @@ extension CodexService {
                         to: &result,
                         role: mappedRole,
                         kind: .chat,
+                        assistantPhase: mappedRole == .assistant
+                            ? normalizedAssistantPhase(itemObject["phase"]?.stringValue)
+                            : nil,
                         text: decodedText,
                         threadId: threadId,
                         turnId: turnID,
@@ -237,6 +241,7 @@ extension CodexService {
                         to: &result,
                         role: .assistant,
                         kind: .chat,
+                        assistantPhase: normalizedAssistantPhase(itemObject["phase"]?.stringValue),
                         text: reviewText,
                         threadId: threadId,
                         turnId: turnID,
@@ -1316,6 +1321,17 @@ extension CodexService {
             .lowercased()
     }
 
+    func normalizedAssistantPhase(_ rawPhase: String?) -> String? {
+        guard let rawPhase else {
+            return nil
+        }
+        let normalized = rawPhase
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        return normalized.isEmpty ? nil : normalized
+    }
+
     nonisolated static func normalizedCommandExecutionPreviewKey(from text: String) -> String? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -1363,6 +1379,7 @@ extension CodexService {
         to result: inout [CodexMessage],
         role: CodexMessageRole,
         kind: CodexMessageKind = .chat,
+        assistantPhase: String? = nil,
         text: String,
         threadId: String,
         turnId: String?,
@@ -1385,6 +1402,7 @@ extension CodexService {
                 threadId: threadId,
                 role: role,
                 kind: kind,
+                assistantPhase: role == .assistant ? normalizedAssistantPhase(assistantPhase) : nil,
                 text: text,
                 createdAt: createdAt,
                 turnId: turnId,
@@ -1415,6 +1433,7 @@ extension CodexService {
             guard !imageOnlyIndices.isEmpty,
                   let targetIndex = assistantIndices.last(where: { index in
                       !imageOnlyIndices.contains(index)
+                          && result[index].assistantPhase == "final_answer"
                   }) else {
                 continue
             }

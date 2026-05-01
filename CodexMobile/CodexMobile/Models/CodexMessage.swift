@@ -34,6 +34,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
     let threadId: String
     let role: CodexMessageRole
     var kind: CodexMessageKind
+    var assistantPhase: String?
     var text: String
     var fileMentions: [String]
     var createdAt: Date
@@ -57,6 +58,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         threadId: String,
         role: CodexMessageRole,
         kind: CodexMessageKind = .chat,
+        assistantPhase: String? = nil,
         text: String,
         fileMentions: [String] = [],
         createdAt: Date = Date(),
@@ -76,6 +78,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         self.threadId = threadId
         self.role = role
         self.kind = kind
+        self.assistantPhase = assistantPhase
         self.text = text
         self.fileMentions = fileMentions
         self.createdAt = createdAt
@@ -111,6 +114,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         case threadId
         case role
         case kind
+        case assistantPhase
         case text
         case fileMentions
         case createdAt
@@ -133,6 +137,7 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         threadId = try container.decode(String.self, forKey: .threadId)
         role = try container.decode(CodexMessageRole.self, forKey: .role)
         kind = try container.decodeIfPresent(CodexMessageKind.self, forKey: .kind) ?? .chat
+        assistantPhase = try container.decodeIfPresent(String.self, forKey: .assistantPhase)
         text = try container.decode(String.self, forKey: .text)
         fileMentions = try container.decodeIfPresent([String].self, forKey: .fileMentions) ?? []
         createdAt = try container.decode(Date.self, forKey: .createdAt)

@@ -157,7 +157,6 @@ struct TurnView: View {
         .environment(\.inlineCommitAndPushPhase, viewModel.inlineCommitAndPushPhase)
         .navigationTitle(resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar {
             TurnToolbarContent(
                 displayTitle: resolvedThread.displayTitle,
@@ -191,6 +190,11 @@ struct TurnView: View {
             )
         }
         .overlay {
+            if isStartingSiblingChat {
+                NewChatOpeningOverlay()
+                    .transition(.opacity)
+            }
+
             if isShowingWorktreeHandoff {
                 TurnWorktreeHandoffOverlay(
                     mode: .handoff,
@@ -1728,6 +1732,27 @@ struct TurnView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+private struct NewChatOpeningOverlay: View {
+    var body: some View {
+        VStack(spacing: 14) {
+            ProgressView()
+                .controlSize(.regular)
+
+            VStack(spacing: 4) {
+                Text("Starting new chat...")
+                    .font(AppFont.headline())
+                    .foregroundStyle(.primary)
+
+                Text("Preparing an empty conversation.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(.systemBackground))
     }
 }
 

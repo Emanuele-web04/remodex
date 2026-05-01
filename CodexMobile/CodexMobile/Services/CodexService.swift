@@ -443,7 +443,7 @@ final class CodexService {
     @ObservationIgnored var messagePersistenceDebounceTask: Task<Void, Never>?
     // Coalesces high-frequency assistant deltas before they mutate observed timeline state.
     @ObservationIgnored var pendingAssistantDeltaByStreamID: [String: String] = [:]
-    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?)] = [:]
+    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?)] = [:]
     @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
     @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
     let assistantDeltaBatchIntervalNanoseconds: UInt64 = 50_000_000
@@ -568,6 +568,7 @@ final class CodexService {
     var aiChangeSetsByID: [String: AIChangeSet] = [:]
     var aiChangeSetIDByTurnID: [String: String] = [:]
     var aiChangeSetIDByAssistantMessageID: [String: String] = [:]
+    @ObservationIgnored var workspaceCheckpointCopyTaskByTurnID: [String: Task<Void, Never>] = [:]
     // Keeps hot-path thread lookups O(1) instead of rescanning the full sidebar list.
     @ObservationIgnored var threadByID: [String: CodexThread] = [:]
     @ObservationIgnored var threadIndexByID: [String: Int] = [:]

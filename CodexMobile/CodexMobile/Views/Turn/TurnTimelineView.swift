@@ -13,6 +13,7 @@ struct AssistantBlockAccessoryState: Equatable {
     let blockDiffText: String?
     let blockDiffEntries: [TurnFileChangeSummaryEntry]?
     let blockRevertPresentation: AssistantRevertPresentation?
+    let blockRevertMessage: CodexMessage?
 
     func replacingCopyText(_ copyText: String?) -> AssistantBlockAccessoryState {
         AssistantBlockAccessoryState(
@@ -20,7 +21,8 @@ struct AssistantBlockAccessoryState: Equatable {
             showsRunningIndicator: showsRunningIndicator,
             blockDiffText: blockDiffText,
             blockDiffEntries: blockDiffEntries,
-            blockRevertPresentation: blockRevertPresentation
+            blockRevertPresentation: blockRevertPresentation,
+            blockRevertMessage: blockRevertMessage
         )
     }
 }
@@ -424,8 +426,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     /// Heavy-chat staged warmup is temporarily disabled until geometry settles reliably.
     private static var initialWarmTailCount: Int { 0 }
     private static var scrollToLatestButtonLift: CGFloat { 44 + 18 }
-    private static var footerBottomOverlayPadding: CGFloat { 14 }
-    private static var scrollBottomTextBreathingRoom: CGFloat { 28 }
 
     @State private var visibleTailCount: Int = pageSize
     @State private var viewportHeight: CGFloat = 0
@@ -480,11 +480,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private var shouldShowFullTimelineLoader: Bool {
         shouldWarmRecentTailProgressively && visibleTailCount == 0
-    }
-
-    // Leaves only a small transparent tail so message text can travel behind the floating composer.
-    private var scrollBottomOverlaySpacerHeight: CGFloat {
-        Self.scrollBottomTextBreathingRoom
     }
 
     // Keeps larger accessibility text inside a slightly roomier gutter so assistant
@@ -550,8 +545,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     onTapOutsideComposer()
                 }
                 .simultaneousGesture(emptyStateKeyboardDismissGesture)
-                .overlay(alignment: .bottom) {
-                    footerOverlay()
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    footer()
                 }
                 .onAppear {
                     beginScrollSessionIfNeeded()
@@ -598,7 +593,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         // Keep bottom anchor outside the message stack so it is always
                         // reachable by scrollTo regardless of VStack layout timing.
                         Color.clear
-                            .frame(width: contentWidth, height: scrollBottomOverlaySpacerHeight)
+                            .frame(width: contentWidth, height: 1)
                             .padding(.horizontal, timelineHorizontalPadding)
                             .frame(width: viewport.size.width, alignment: .leading)
                             .clipped()
@@ -613,7 +608,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         }
                     }
                     .frame(width: viewport.size.width)
-                    .clipped()
                     .defaultScrollAnchor(.bottom, for: .initialOffset)
                     .defaultScrollAnchor(.bottom, for: .sizeChanges)
                     .scrollDismissesKeyboard(.interactively)
@@ -717,9 +711,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             autoScrollMode = isScrolledToBottom ? .followBottom : .manual
                         }
                     }
-                    // Float the composer above the timeline so rows can scroll underneath it.
-                    .overlay(alignment: .bottom) {
-                        footerOverlay(scrollToBottomAction: {
+                    // Keeps footer pinned to bottom without adding a solid spacer block above it.
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        footer(scrollToBottomAction: {
                             handleScrollToLatestButtonTap(using: proxy)
                         })
                     }
@@ -851,12 +845,6 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             onScrollToLatest: scrollToBottomAction,
             composer: composer
         )
-    }
-
-    // Keeps the footer visually floating; scroll content only gets a tiny transparent tail.
-    private func footerOverlay(scrollToBottomAction: (() -> Void)? = nil) -> some View {
-        footer(scrollToBottomAction: scrollToBottomAction)
-            .padding(.bottom, Self.footerBottomOverlayPadding)
     }
 
     // Restores swipe-to-dismiss in brand-new chats without putting a drag
@@ -1283,10 +1271,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             let blockDiffText = blockDiffPresentation?.bodyText
             let blockDiffEntries = blockDiffPresentation?.entries
 
-            // Use the last assistant revert presentation in this block.
+            // Keep the source assistant row with its presentation so visible system rows can invoke the right change set.
             let blockRevert = messages[blockStart...blockEnd]
                 .reversed()
-                .compactMap { revertStatesByMessageID[$0.id] }
+                .compactMap { message -> (presentation: AssistantRevertPresentation, message: CodexMessage)? in
+                    guard let presentation = revertStatesByMessageID[message.id] else { return nil }
+                    return (presentation, message)
+                }
                 .first
 
             if copyText != nil || showsRunningIndicator || blockDiffEntries != nil || blockRevert != nil {
@@ -1295,7 +1286,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     showsRunningIndicator: showsRunningIndicator,
                     blockDiffText: blockDiffText,
                     blockDiffEntries: blockDiffEntries,
-                    blockRevertPresentation: blockRevert
+                    blockRevertPresentation: blockRevert?.presentation,
+                    blockRevertMessage: blockRevert?.message
                 )
             }
             i = blockStart - 1

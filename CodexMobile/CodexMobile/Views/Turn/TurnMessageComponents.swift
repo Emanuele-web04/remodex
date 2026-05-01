@@ -1558,8 +1558,12 @@ struct MessageRow: View, Equatable {
     @ViewBuilder
     private var turnEndActionButtons: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let revert = assistantBlockAccessoryState?.blockRevertPresentation {
-                assistantRevertButton(presentation: revert)
+            if let accessory = assistantBlockAccessoryState,
+               let revert = accessory.blockRevertPresentation {
+                assistantRevertButton(
+                    presentation: revert,
+                    targetMessage: accessory.blockRevertMessage ?? message
+                )
             }
 
             if let accessory = assistantBlockAccessoryState {
@@ -1627,7 +1631,10 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    private func assistantRevertButton(presentation: AssistantRevertPresentation) -> some View {
+    private func assistantRevertButton(
+        presentation: AssistantRevertPresentation,
+        targetMessage: CodexMessage
+    ) -> some View {
         let iconName: String = {
             switch presentation.riskLevel {
             case .safe:
@@ -1652,7 +1659,7 @@ struct MessageRow: View, Equatable {
         return Button {
             guard presentation.isEnabled else { return }
             HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            assistantRevertAction?(message)
+            assistantRevertAction?(targetMessage)
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: iconName)

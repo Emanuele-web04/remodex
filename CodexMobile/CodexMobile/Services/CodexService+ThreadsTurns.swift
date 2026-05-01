@@ -1071,6 +1071,10 @@ extension CodexService {
         activeThreadId = threadId
         markThreadAsRunning(threadId)
         setProtectedRunningFallback(true, for: threadId)
+        let messageStartCheckpointTask = scheduleMessageStartWorkspaceCheckpointIfPossible(
+            threadId: threadId,
+            messageId: pendingMessageId
+        )
 
         var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
         var includeStructuredMentionItems = supportsStructuredMentionInput && !mentionMentions.isEmpty
@@ -1099,15 +1103,26 @@ extension CodexService {
                     collaborationMode: effectiveCollaborationMode,
                     includeServiceTier: includesServiceTier
                 )
+                // The pre-turn snapshot must settle before the runtime can mutate files.
+                if let messageStartCheckpointTask {
+                    await messageStartCheckpointTask.value
+                }
                 let response = try await sendRequestWithSandboxFallback(
                     method: "turn/start",
                     baseParams: requestParams
                 )
-                handleSuccessfulTurnStartResponse(
+                let resolvedTurnID = handleSuccessfulTurnStartResponse(
                     response,
                     pendingMessageId: pendingMessageId,
                     threadId: threadId
                 )
+                if let resolvedTurnID {
+                    scheduleMessageStartWorkspaceCheckpointCopyIfPossible(
+                        threadId: threadId,
+                        messageId: pendingMessageId,
+                        turnId: resolvedTurnID
+                    )
+                }
                 scheduleAutomaticThreadTitleGenerationIfNeeded(
                     seed: automaticTitleSeed,
                     threadId: threadId,
@@ -1860,11 +1875,12 @@ extension CodexService {
     }
 
     // Handles successful turn/start bookkeeping for both primary and fallback payload schemas.
+    @discardableResult
     func handleSuccessfulTurnStartResponse(
         _ response: RPCMessage,
         pendingMessageId: String,
         threadId: String
-    ) {
+    ) -> String? {
         let turnID = extractTurnID(from: response.result)
         let resolvedTurnID = turnID ?? activeTurnIdByThread[threadId]
         let deliveryState: CodexMessageDeliveryState = (resolvedTurnID == nil) ? .pending : .confirmed
@@ -1888,6 +1904,8 @@ extension CodexService {
             threads[index].syncState = .live
             threads = sortThreads(threads)
         }
+
+        return resolvedTurnID
     }
 
     // Applies steer failure bookkeeping for optimistic user rows without adding an extra system error card.

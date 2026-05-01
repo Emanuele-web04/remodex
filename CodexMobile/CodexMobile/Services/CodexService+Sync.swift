@@ -653,6 +653,8 @@ extension CodexService {
         runningThreadCatchupTaskByThreadID.removeAll()
         forcedRunningCatchupEscalationThreadIDs.removeAll()
         lastForcedRunningResumeAtByThread.removeAll()
+        workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }
+        workspaceCheckpointCopyTaskByTurnID.removeAll()
         canonicalHistoryReconcileRetryTaskByThreadID.values.forEach { $0.cancel() }
         canonicalHistoryReconcileRetryTaskByThreadID.removeAll()
     }

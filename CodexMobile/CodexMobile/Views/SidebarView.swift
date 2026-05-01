@@ -17,6 +17,7 @@ struct SidebarView: View {
     var isVisible: Bool = true
 
     let onClose: () -> Void
+    let onNewChatCreationStateChange: (Bool) -> Void
     let onOpenThread: (CodexThread) -> Void
 
     @State private var searchText = ""
@@ -274,11 +275,15 @@ struct SidebarView: View {
     }
 
     private func handleNewChatTap(preferredProjectPath: String?) {
+        createThreadErrorMessage = nil
+        isCreatingThread = true
+        onNewChatCreationStateChange(true)
         prepareSidebarForChatNavigation()
         Task { @MainActor in
-            createThreadErrorMessage = nil
-            isCreatingThread = true
-            defer { isCreatingThread = false }
+            defer {
+                isCreatingThread = false
+                onNewChatCreationStateChange(false)
+            }
 
             do {
                 let thread = try await WorktreeFlowCoordinator.startNewLocalChat(
@@ -295,11 +300,15 @@ struct SidebarView: View {
     }
 
     private func handleNewWorktreeChatTap(preferredProjectPath: String) {
+        createThreadErrorMessage = nil
+        isCreatingThread = true
+        onNewChatCreationStateChange(true)
         prepareSidebarForChatNavigation()
         Task { @MainActor in
-            createThreadErrorMessage = nil
-            isCreatingThread = true
-            defer { isCreatingThread = false }
+            defer {
+                isCreatingThread = false
+                onNewChatCreationStateChange(false)
+            }
 
             do {
                 let thread = try await WorktreeFlowCoordinator.startNewWorktreeChat(

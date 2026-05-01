@@ -151,6 +151,8 @@ extension CodexService {
         removeAllThreadTimelineState()
         assistantRevertStateCacheByThread.removeAll()
         assistantRevertStateRevision = 0
+        workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }
+        workspaceCheckpointCopyTaskByTurnID.removeAll()
         supportsServiceTier = true
         hasPresentedServiceTierBridgeUpdatePrompt = false
         supportsBridgeVoiceAuth = true
@@ -510,6 +512,8 @@ extension CodexService {
         removeAllThreadTimelineState()
         assistantRevertStateCacheByThread.removeAll()
         assistantRevertStateRevision = 0
+        workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }
+        workspaceCheckpointCopyTaskByTurnID.removeAll()
         supportsServiceTier = true
         hasPresentedServiceTierBridgeUpdatePrompt = false
         supportsBridgeVoiceAuth = true

@@ -530,11 +530,20 @@ extension CodexService {
             noteTurnFinished(turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
             if terminalState == .completed {
+                Task { @MainActor [weak self] in
+                    await self?.captureTurnEndWorkspaceCheckpointIfPossible(
+                        threadId: threadId,
+                        turnId: resolvedTurnID
+                    )
+                }
                 markReadyIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .completed)
             } else if terminalState == .failed {
+                discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
                 markFailedIfUnread(threadId: threadId)
                 notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
+            } else {
+                discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             }
             requestImmediateSync(threadId: threadId)
 
@@ -584,6 +593,7 @@ extension CodexService {
             recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: .failed)
             noteTurnFinished(turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
+            discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             markFailedIfUnread(threadId: threadId)
             notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
         } else {
