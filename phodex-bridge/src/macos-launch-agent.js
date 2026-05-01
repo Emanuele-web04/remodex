@@ -319,6 +319,11 @@ function restartLaunchAgent({
     launchAgentDomain(env),
     plistPath,
   ], { stdio: ["ignore", "ignore", "pipe"] });
+  execFileSyncImpl("launchctl", [
+    "kickstart",
+    "-k",
+    launchAgentLabelDomain(env),
+  ], { stdio: ["ignore", "ignore", "pipe"] });
 }
 
 function bootoutLaunchAgent({
