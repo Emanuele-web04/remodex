@@ -1,0 +1,79 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-unsigned-ipa:
+    name: Build unsigned release IPA
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build unsigned IPA
+        run: |
+          set -euo pipefail
+
+          output_dir="$GITHUB_WORKSPACE/build/unsigned-ipa"
+          archive_path="$output_dir/CodexMobile.xcarchive"
+          ipa_path="$output_dir/remodex-unsigned-release.ipa"
+          build_log_path="$output_dir/xcodebuild.log"
+
+          rm -rf "$output_dir"
+          mkdir -p "$output_dir"
+
+          xcodebuild \
+            -project "$GITHUB_WORKSPACE/CodexMobile/CodexMobile.xcodeproj" \
+            -scheme CodexMobile \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$archive_path" \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            2>&1 | tee "$build_log_path"
+
+          app_path="$(find "$archive_path/Products/Applications" -maxdepth 1 -name '*.app' -print -quit)"
+          if [[ -z "$app_path" ]]; then
+            echo "Unable to locate an .app bundle in $archive_path" >&2
+            exit 1
+          fi
+
+          payload_root="$(mktemp -d "$output_dir/payload.XXXXXX")"
+          trap 'rm -rf "$payload_root"' EXIT
+
+          mkdir -p "$payload_root/Payload"
+          ditto "$app_path" "$payload_root/Payload/$(basename "$app_path")"
+          ditto -c -k --sequesterRsrc --keepParent "$payload_root/Payload" "$ipa_path"
+
+          echo "Unsigned IPA created at $ipa_path"
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: remodex-unsigned-ipa
+          path: build/unsigned-ipa/remodex-unsigned-release.ipa
+          if-no-files-found: error
