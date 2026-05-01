@@ -50,7 +50,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
             return ConnectionRecoverySnapshot(
                 summary: trimmedError?.isEmpty == false
                     ? trimmedError ?? ""
-                    : "Wake the computer screen to keep this chat in sync.",
+                    : "Your computer is not reachable, so this chat is paused.",
                 status: .interrupted,
                 trailingStyle: .action("Wake Screen")
             )

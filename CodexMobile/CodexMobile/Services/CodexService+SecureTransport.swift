@@ -626,7 +626,8 @@ private extension CodexService {
               !relayURL.isEmpty else {
             throw CodexTrustedSessionResolveError.noTrustedMac
         }
-        guard let resolveURL = trustedSessionResolveURL(from: relayURL) else {
+        let resolveURLs = trustedSessionResolveURLs(from: relayURL)
+        guard !resolveURLs.isEmpty else {
             throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay URL is invalid.")
         }
 
@@ -653,6 +654,32 @@ private extension CodexService {
             signature: signature
         )
 
+        var lastUnsupportedRelayError: CodexTrustedSessionResolveError?
+        for (index, resolveURL) in resolveURLs.enumerated() {
+            do {
+                return try await sendTrustedSessionResolveRequest(
+                    requestBody,
+                    resolveURL: resolveURL,
+                    relayURL: relayURL
+                )
+            } catch let error as CodexTrustedSessionResolveError {
+                guard case .unsupportedRelay = error,
+                      index < resolveURLs.count - 1 else {
+                    throw error
+                }
+                lastUnsupportedRelayError = error
+                continue
+            }
+        }
+
+        throw lastUnsupportedRelayError ?? CodexTrustedSessionResolveError.unsupportedRelay
+    }
+
+    private func sendTrustedSessionResolveRequest(
+        _ requestBody: CodexTrustedSessionResolveRequest,
+        resolveURL: URL,
+        relayURL: String
+    ) async throws -> CodexTrustedSessionResolveResponse {
         var request = URLRequest(url: resolveURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 8
@@ -744,9 +771,9 @@ private extension CodexService {
         }
     }
 
-    private func trustedSessionResolveURL(from relayURL: String) -> URL? {
+    private func trustedSessionResolveURLs(from relayURL: String) -> [URL] {
         guard var components = URLComponents(string: relayURL) else {
-            return nil
+            return []
         }
 
         if components.scheme == "wss" {
@@ -755,6 +782,7 @@ private extension CodexService {
             components.scheme = "http"
         }
 
+        var candidates: [URL] = []
         let pathComponents = components.path.split(separator: "/").map(String.init)
         if pathComponents.last == "relay" {
             let prefix = pathComponents.dropLast()
@@ -762,8 +790,27 @@ private extension CodexService {
         } else {
             components.path = "/v1/trusted/session/resolve"
         }
+        if let url = components.url {
+            candidates.append(url)
+        }
 
-        return components.url
+        // Some self-hosted or reverse-proxied relays expose the websocket under a
+        // prefixed path but the HTTP resolve route at the host root. Try that route
+        // only after the relay-relative candidate returns a plain unsupported 404.
+        if var rootComponents = URLComponents(string: relayURL) {
+            if rootComponents.scheme == "wss" {
+                rootComponents.scheme = "https"
+            } else if rootComponents.scheme == "ws" {
+                rootComponents.scheme = "http"
+            }
+            rootComponents.path = "/v1/trusted/session/resolve"
+            if let rootURL = rootComponents.url,
+               !candidates.contains(where: { $0.absoluteString == rootURL.absoluteString }) {
+                candidates.append(rootURL)
+            }
+        }
+
+        return candidates
     }
 
     private var preferredPairingCodeRelayURL: String? {

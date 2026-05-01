@@ -126,7 +126,7 @@ enum TurnTimelineRenderProjection {
         }
 
         flushBufferedToolMessages()
-        return items
+        return mergeAdjacentFileChangeItems(items)
     }
 
     static func collapsedFinalMessageIDs(
@@ -207,6 +207,46 @@ enum TurnTimelineRenderProjection {
             hiddenIndices: hiddenIndices,
             replacementByIndex: replacementByIndex
         )
+    }
+
+    // Late file-change events can land as adjacent cards from neighboring turns.
+    // Present the final submitted file list as one table; duplicate paths are summed by the builder.
+    private static func mergeAdjacentFileChangeItems(
+        _ items: [TurnTimelineRenderItem]
+    ) -> [TurnTimelineRenderItem] {
+        var mergedItems: [TurnTimelineRenderItem] = []
+        var pendingFileChanges: [CodexMessage] = []
+
+        func flushPendingFileChanges() {
+            guard !pendingFileChanges.isEmpty else { return }
+            defer { pendingFileChanges.removeAll(keepingCapacity: true) }
+
+            guard pendingFileChanges.count > 1,
+                  let presentation = FileChangeBlockPresentationBuilder.build(from: pendingFileChanges),
+                  var replacement = pendingFileChanges.last else {
+                mergedItems.append(contentsOf: pendingFileChanges.map(TurnTimelineRenderItem.message))
+                return
+            }
+
+            replacement.text = presentation.bodyText
+            mergedItems.append(.message(replacement))
+        }
+
+        for item in items {
+            guard case .message(let message) = item,
+                  message.role == .system,
+                  message.kind == .fileChange,
+                  !message.isStreaming else {
+                flushPendingFileChanges()
+                mergedItems.append(item)
+                continue
+            }
+
+            pendingFileChanges.append(message)
+        }
+
+        flushPendingFileChanges()
+        return mergedItems
     }
 
     // Finds completed final answers and the same-turn status/tool rows that should sit behind the disclosure.

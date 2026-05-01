@@ -442,7 +442,7 @@ extension ContentViewModel {
         case .unsupportedRelay:
             if !codex.hasSavedRelaySession {
                 codex.connectionRecoveryState = .idle
-                codex.lastErrorMessage = "This relay needs a fresh QR scan before trusted reconnect is available."
+                codex.lastErrorMessage = "Trusted reconnect is not available from this relay endpoint. Check the relay/proxy, or scan a new QR code."
                 return .stop
             }
             return .fallbackToSaved

@@ -910,6 +910,105 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(summary?.entries.map(\.deletions), [1, 0])
     }
 
+    func testTimelineProjectionMergesAdjacentSameFileChangeRows() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "file-change-add",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnTimelineView.swift
+                Kind: update
+                Totals: +6 -0
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-remove",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: CodexMobile/CodexMobile/Views/Turn/TurnTimelineView.swift
+                Kind: update
+                Totals: +0 -6
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["file-change-remove"])
+        guard case .message(let fileChange)? = items.first else {
+            return XCTFail("Expected one merged file-change message")
+        }
+        let summary = TurnFileChangeSummaryParser.parse(from: fileChange.text)
+        XCTAssertEqual(summary?.entries.count, 1)
+        XCTAssertEqual(summary?.entries.first?.path, "CodexMobile/CodexMobile/Views/Turn/TurnTimelineView.swift")
+        XCTAssertEqual(summary?.entries.first?.additions, 6)
+        XCTAssertEqual(summary?.entries.first?.deletions, 6)
+    }
+
+    func testTimelineProjectionMergesAdjacentFinalFileChangeRowsIntoOneTable() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "file-change-a",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-b",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Composer.swift
+                Kind: update
+                Totals: +3 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["file-change-b"])
+        guard case .message(let fileChange)? = items.first else {
+            return XCTFail("Expected one final file-change table")
+        }
+        let summary = TurnFileChangeSummaryParser.parse(from: fileChange.text)
+        XCTAssertEqual(summary?.entries.map(\.path), ["Sources/App.swift", "Sources/Composer.swift"])
+        XCTAssertEqual(summary?.entries.map(\.additions), [2, 3])
+        XCTAssertEqual(summary?.entries.map(\.deletions), [1, 0])
+    }
+
     func testCollapsedFinalDoesNotDuplicateActionsWhenVisibleFileChangeOwnsThem() {
         let now = Date()
         let messages = [

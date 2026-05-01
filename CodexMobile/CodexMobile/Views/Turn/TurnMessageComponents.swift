@@ -39,6 +39,35 @@ func timelineDisplayText(for message: CodexMessage) -> String {
 
 // ─── File-Change Recap UI ─────────────────────────────────────
 
+// MARK: - FileChangeInlineActionRow
+// Keeps live file-change deltas as lightweight status rows while a turn is still streaming.
+private struct FileChangeInlineActionRow: View {
+    let entry: TurnFileChangeSummaryEntry
+    var showActionLabel: Bool = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if showActionLabel {
+                Text(entry.action?.rawValue ?? "Edited")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary.opacity(0.6))
+            }
+
+            HStack(spacing: 6) {
+                Text(entry.compactPath)
+                    .foregroundStyle(Color.blue)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                    .font(AppFont.mono(.caption))
+            }
+            .font(AppFont.body())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // MARK: - FileChangeSummaryBox
 // Renders turn-end file edits as one compact recap instead of chat-like rows.
 private struct FileChangeSummaryBox: View {
@@ -47,12 +76,18 @@ private struct FileChangeSummaryBox: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(title)
-                .font(AppFont.mono(.caption))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.top, 10)
-                .padding(.bottom, entries.isEmpty ? 10 : 8)
+            HStack(spacing: 6) {
+                Image(systemName: "pencil.line")
+                    .font(AppFont.footnote(weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(title)
+                    .font(AppFont.footnote(weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            .padding(.bottom, entries.isEmpty ? 10 : 8)
 
             if !entries.isEmpty {
                 Divider()
@@ -63,7 +98,7 @@ private struct FileChangeSummaryBox: View {
 
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(entry.compactPath)
-                            .font(AppFont.mono(.subheadline))
+                            .font(AppFont.subheadline())
                             .foregroundStyle(.primary)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -93,13 +128,14 @@ private struct FileChangeSummaryBox: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            Color(.secondarySystemBackground).opacity(0.45),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            Color(.secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color(.separator).opacity(0.65), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(.separator).opacity(0.4), lineWidth: 0.5)
         }
+        .padding(4)
     }
 
     private var title: String {
@@ -108,9 +144,9 @@ private struct FileChangeSummaryBox: View {
             return "Files modified"
         }
         if count == 1 {
-            return "1 File modified"
+            return "1 file modified"
         }
-        return "\(count) Files modified"
+        return "\(count) files modified"
     }
 }
 
@@ -145,19 +181,37 @@ private struct CachingMarkdownParser: MarkupParser {
     }
 }
 
+@MainActor
+private struct UncachedMarkdownParser: MarkupParser {
+    static let shared = UncachedMarkdownParser()
+    private let inner: AttributedStringMarkdownParser = .markdown()
+
+    func attributedString(for input: String) throws -> AttributedString {
+        try inner.attributedString(for: input)
+    }
+}
+
 struct MarkdownTextView: View {
     let text: String
     let profile: MarkdownRenderProfile
     var enablesSelection: Bool = false
     var constrainsToAvailableWidth: Bool = false
+    var usesCaches: Bool = true
 
     var body: some View {
-        let transformed = MarkdownTextFormatter.renderableText(from: text, profile: profile)
+        let transformed = MarkdownTextFormatter.renderableText(
+            from: text,
+            profile: profile,
+            usesCache: usesCaches
+        )
+        let parser: any MarkupParser = usesCaches
+            ? CachingMarkdownParser.shared
+            : UncachedMarkdownParser.shared
         // Keep prose on the app font, but let Textual own markdown/code layout to avoid block sizing regressions.
         // Force code-block overflow to wrap instead of scroll so horizontal ScrollViews
         // inside the timeline do not compete with the sidebar swipe gesture or let
         // the chat feel like a pannable canvas.
-        let baseView = StructuredText(transformed, parser: CachingMarkdownParser.shared)
+        let baseView = StructuredText(transformed, parser: parser)
             .font(AppFont.body())
             .textual.structuredTextStyle(.gitHub)
             .textual.overflowMode(.wrap)
@@ -222,32 +276,23 @@ private struct StreamingAssistantMarkdownTextView: View {
     @ViewBuilder
     private func renderedSegments(_ segments: StreamingMarkdownBlockSegments) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(segments.markdownBlocks) { block in
+            ForEach(segments.stableChunks) { chunk in
                 MarkdownTextView(
-                    text: block.text,
+                    text: chunk.text,
                     profile: .assistantProse,
                     enablesSelection: enablesSelection,
                     constrainsToAvailableWidth: constrainsToAvailableWidth
                 )
             }
 
-            if !segments.liveTail.isEmpty {
-                liveTailText(segments.liveTail)
-            }
-        }
-    }
-
-    private func liveTailText(_ value: String) -> some View {
-        let rendered = Text(value)
-            .font(AppFont.body())
-            .foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
-
-        return Group {
-            if enablesSelection {
-                rendered.textSelection(.enabled)
-            } else {
-                rendered
+            if !segments.activeMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownTextView(
+                    text: segments.activeMarkdown,
+                    profile: .assistantProse,
+                    enablesSelection: enablesSelection,
+                    constrainsToAvailableWidth: constrainsToAvailableWidth,
+                    usesCaches: false
+                )
             }
         }
     }
@@ -273,21 +318,23 @@ private struct StreamingAssistantMarkdownTextView: View {
 }
 
 private struct StreamingMarkdownBlockSegments {
-    let markdownBlocks: [StreamingMarkdownBlock]
-    let liveTail: String
+    let stableChunks: [StreamingMarkdownChunk]
+    let activeMarkdown: String
 }
 
-private struct StreamingMarkdownBlock: Identifiable {
+private struct StreamingMarkdownChunk: Identifiable {
     let id: Int
     let text: String
 }
 
 private enum StreamingMarkdownBlockSplitter {
+    private static let stableChunkTargetCharacterCount = 6_000
+
     static func split(_ text: String) -> StreamingMarkdownBlockSegments {
         var lineStart = text.startIndex
-        var blockStart = text.startIndex
+        var chunkStart = text.startIndex
         var isInsideFence = false
-        var markdownBlocks: [StreamingMarkdownBlock] = []
+        var stableChunks: [StreamingMarkdownChunk] = []
 
         while lineStart < text.endIndex {
             let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
@@ -296,40 +343,53 @@ private enum StreamingMarkdownBlockSplitter {
             let trimmedLine = String(text[lineStart..<lineEnd])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
+            var stableBoundary: String.Index?
             if isFenceDelimiter(trimmedLine) {
                 isInsideFence.toggle()
                 if !isInsideFence {
-                    appendBlock(in: text, from: blockStart, to: nextLineStart, into: &markdownBlocks)
-                    blockStart = nextLineStart
+                    stableBoundary = nextLineStart
                 }
             } else if !isInsideFence, hasLineBreak {
                 if trimmedLine.isEmpty || isStableSingleLineBlock(trimmedLine) {
-                    appendBlock(in: text, from: blockStart, to: nextLineStart, into: &markdownBlocks)
-                    blockStart = nextLineStart
+                    stableBoundary = nextLineStart
                 }
+            }
+
+            if let stableBoundary,
+               shouldSealChunk(in: text, from: chunkStart, to: stableBoundary) {
+                appendChunk(in: text, from: chunkStart, to: stableBoundary, into: &stableChunks)
+                chunkStart = stableBoundary
             }
 
             lineStart = nextLineStart
         }
 
         return StreamingMarkdownBlockSegments(
-            markdownBlocks: markdownBlocks,
-            liveTail: String(text[blockStart...])
+            stableChunks: stableChunks,
+            activeMarkdown: String(text[chunkStart...])
         )
     }
 
-    // Emits conservative markdown blocks so previously sealed blocks keep stable identities.
-    private static func appendBlock(
+    // Keep the newest chunk intact so Textual can apply native paragraph/list/code spacing
+    // while old chunks stop reparsing during long streaming responses.
+    private static func shouldSealChunk(in text: String, from start: String.Index, to boundary: String.Index) -> Bool {
+        guard boundary < text.endIndex else { return false }
+        return text.distance(from: start, to: boundary) >= stableChunkTargetCharacterCount
+    }
+
+    private static func appendChunk(
         in text: String,
         from start: String.Index,
         to end: String.Index,
-        into blocks: inout [StreamingMarkdownBlock]
+        into chunks: inout [StreamingMarkdownChunk]
     ) {
         guard start < end else { return }
-        blocks.append(
-            StreamingMarkdownBlock(
-                id: blocks.count,
-                text: String(text[start..<end])
+        let chunkText = String(text[start..<end])
+        guard !chunkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        chunks.append(
+            StreamingMarkdownChunk(
+                id: chunks.count,
+                text: chunkText
             )
         )
     }
@@ -445,19 +505,33 @@ private struct CodeCommentFindingCard: View {
 
 enum MarkdownTextFormatter {
     // Applies lightweight markdown cleanup and turns file paths into link-styled labels.
-    static func renderableText(from raw: String, profile: MarkdownRenderProfile) -> String {
-        MarkdownRenderableTextCache.rendered(raw: raw, profile: profile) {
-            let normalizedSkills = SkillReferenceFormatter.replacingSkillReferences(
-                in: raw,
-                style: .displayName
-            )
-            let headingNormalized = replaceMatches(
-                in: normalizedSkills,
-                regex: TurnMessageRegexCache.heading,
-                template: "**$1**"
-            )
-            return linkifyFileReferenceLines(in: headingNormalized, profile: profile)
+    static func renderableText(
+        from raw: String,
+        profile: MarkdownRenderProfile,
+        usesCache: Bool = true
+    ) -> String {
+        let build = {
+            renderableTextUncached(from: raw, profile: profile)
         }
+
+        if usesCache {
+            return MarkdownRenderableTextCache.rendered(raw: raw, profile: profile, builder: build)
+        }
+
+        return build()
+    }
+
+    private static func renderableTextUncached(from raw: String, profile: MarkdownRenderProfile) -> String {
+        let normalizedSkills = SkillReferenceFormatter.replacingSkillReferences(
+            in: raw,
+            style: .displayName
+        )
+        let headingNormalized = replaceMatches(
+            in: normalizedSkills,
+            regex: TurnMessageRegexCache.heading,
+            template: "**$1**"
+        )
+        return linkifyFileReferenceLines(in: headingNormalized, profile: profile)
     }
 
     private static func linkifyFileReferenceLines(in text: String, profile: MarkdownRenderProfile) -> String {
@@ -1574,6 +1648,7 @@ struct MessageRow: View, Equatable {
         }
     }
 
+    @ViewBuilder
     private func fileChangeSystemView(text: String, renderModel: MessageRowRenderModel) -> some View {
         let renderState = renderModel.fileChangeState ?? FileChangeRenderState(
             summary: nil,
@@ -1585,10 +1660,41 @@ struct MessageRow: View, Equatable {
         let allEntries = hasActionRows ? actionEntries : (renderState.summary?.entries ?? [])
         let fallbackText = renderState.bodyText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return VStack(alignment: .leading, spacing: 8) {
-            FileChangeSummaryBox(entries: allEntries, fallbackText: fallbackText)
+        if message.isStreaming {
+            fileChangeStreamingSystemView(
+                text: text,
+                entries: allEntries,
+                fallbackText: fallbackText
+            )
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                FileChangeSummaryBox(entries: allEntries, fallbackText: fallbackText)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contextMenu {
+                selectableTextActions(text: text, usesMarkdownSelection: false)
+            }
+        }
+    }
 
-            if message.isStreaming && showsStreamingAnimations {
+    private func fileChangeStreamingSystemView(
+        text: String,
+        entries: [TurnFileChangeSummaryEntry],
+        fallbackText: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if entries.isEmpty {
+                Text(fallbackText.isEmpty ? text : fallbackText)
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ForEach(entries) { entry in
+                    FileChangeInlineActionRow(entry: entry)
+                }
+            }
+
+            if showsStreamingAnimations {
                 TypingIndicator()
             }
         }
