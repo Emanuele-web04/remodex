@@ -903,35 +903,25 @@ final class CodexService {
         hasSavedRelaySession || hasTrustedMacReconnectCandidate
     }
 
-    // Chooses the best relay base URL for display-wake recovery, even when only the trusted Mac record remains.
+    // Chooses the relay base URL only when a saved live session can actually carry a wake request.
     var preferredWakeRelayURL: String? {
         guard !isConnected,
-              secureConnectionState != .rePairRequired else {
+              secureConnectionState != .rePairRequired,
+              hasTrustedReconnectContext else {
             return nil
         }
 
-        let candidates = [
-            normalizedRelayURL,
-            preferredTrustedMacRecord?.relayURL?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
-        ]
-
-        for relayURL in candidates {
-            if let relayURL {
-                return relayURL
-            }
-        }
-
-        return nil
+        return normalizedRelayURL
     }
 
-    // Treat any remembered reconnect candidate as wake-capable; the actual wake path will still validate and fail loudly if needed.
+    // Wake needs a concrete live-session URL; trusted-Mac-only recovery should show Reconnect, not Wake Screen.
     var canWakePreferredMacDisplay: Bool {
         guard !isConnected,
               secureConnectionState != .rePairRequired else {
             return false
         }
 
-        return hasReconnectCandidate
+        return preferredWakeRelayURL != nil
     }
 
     // Separates transport readiness from post-connect hydration so the UI can explain delays honestly.

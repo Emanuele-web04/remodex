@@ -123,8 +123,8 @@ struct UsageStatusSummaryContent: View {
             if let contextWindowUsage {
                 metricRow(
                     label: "Context",
-                    value: "\(contextWindowUsage.percentRemaining)% left",
-                    detail: "(\(compactTokenCount(contextWindowUsage.tokensUsed)) used / \(compactTokenCount(contextWindowUsage.tokenLimit)))",
+                    value: contextValue(for: contextWindowUsage),
+                    detail: contextDetail(for: contextWindowUsage),
                     monospace: true
                 )
 
@@ -247,6 +247,15 @@ struct UsageStatusSummaryContent: View {
         default:
             return groupedTokenCount(count)
         }
+    }
+
+    private func contextValue(for usage: ContextWindowUsage) -> String {
+        usage.tokenLimit > 0 ? "\(usage.percentRemaining)% left" : "0 used"
+    }
+
+    private func contextDetail(for usage: ContextWindowUsage) -> String? {
+        guard usage.tokenLimit > 0 else { return nil }
+        return "(\(compactTokenCount(usage.tokensUsed)) used / \(compactTokenCount(usage.tokenLimit)))"
     }
 
     private func groupedTokenCount(_ count: Int) -> String {

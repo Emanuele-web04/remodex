@@ -74,56 +74,55 @@ private struct FileChangeSummaryBox: View {
     let entries: [TurnFileChangeSummaryEntry]
     let fallbackText: String
 
+    // Default to expanded so the recap stays informative without an extra tap;
+    // collapse remains available for long lists or visual decluttering.
+    @State private var isExpanded: Bool = true
+
+    private var canCollapse: Bool {
+        !entries.isEmpty || !fallbackText.isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "pencil.line")
-                    .font(AppFont.footnote(weight: .semibold))
-                    .foregroundStyle(.secondary)
+            header
 
-                Text(title)
-                    .font(AppFont.footnote(weight: .semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, entries.isEmpty ? 10 : 8)
+            if isExpanded {
+                if !entries.isEmpty {
+                    Divider()
 
-            if !entries.isEmpty {
-                Divider()
+                    ForEach(entries.indices, id: \.self) { index in
+                        let entry = entries[index]
+                        let isLastEntry = index == entries.index(before: entries.endIndex)
 
-                ForEach(entries.indices, id: \.self) { index in
-                    let entry = entries[index]
-                    let isLastEntry = index == entries.index(before: entries.endIndex)
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(entry.compactPath)
+                                .font(AppFont.subheadline())
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
 
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(entry.compactPath)
-                            .font(AppFont.subheadline())
-                            .foregroundStyle(.primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                            Spacer(minLength: 8)
 
-                        Spacer(minLength: 8)
+                            if entry.additions > 0 || entry.deletions > 0 {
+                                DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                                    .font(AppFont.mono(.caption))
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
 
-                        if entry.additions > 0 || entry.deletions > 0 {
-                            DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
-                                .font(AppFont.mono(.caption))
+                        if !isLastEntry {
+                            Divider()
+                                .padding(.leading, 12)
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 9)
-
-                    if !isLastEntry {
-                        Divider()
-                            .padding(.leading, 12)
-                    }
+                } else if !fallbackText.isEmpty {
+                    Text(fallbackText)
+                        .font(AppFont.footnote())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 10)
                 }
-            } else if !fallbackText.isEmpty {
-                Text(fallbackText)
-                    .font(AppFont.footnote())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 10)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -135,7 +134,50 @@ private struct FileChangeSummaryBox: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color(.separator).opacity(0.4), lineWidth: 0.5)
         }
-        .padding(4)
+        .padding(2)
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        let content = HStack(spacing: 6) {
+            Image(systemName: "pencil.line")
+                .font(AppFont.footnote(weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Text(title)
+                .font(AppFont.footnote(weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 8)
+
+            if canCollapse {
+                Image(systemName: "chevron.down")
+                    .font(AppFont.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, isExpanded && !entries.isEmpty ? 8 : 10)
+        .contentShape(Rectangle())
+
+        if canCollapse {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(title)
+            .accessibilityHint(isExpanded ? "Collapse list" : "Expand list")
+            .accessibilityAddTraits(.isButton)
+        } else {
+            content
+        }
     }
 
     private var title: String {

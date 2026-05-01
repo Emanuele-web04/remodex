@@ -61,6 +61,46 @@ test("remodex restart reuses the macOS service start flow", async () => {
   ]);
 });
 
+test("remodex up shows a startup indicator while waiting for the pairing QR", async () => {
+  const calls = [];
+  const messages = [];
+
+  await main({
+    argv: ["node", "remodex", "up"],
+    platform: "darwin",
+    consoleImpl: {
+      log(message) {
+        messages.push(message);
+      },
+      error(message) {
+        messages.push(message);
+      },
+    },
+    exitImpl(code) {
+      throw new Error(`unexpected exit ${code}`);
+    },
+    deps: {
+      async startMacOSBridgeService(options) {
+        calls.push(["start-service", options]);
+        return {
+          pairingSession: { pairingPayload: { sessionId: "session-up" } },
+        };
+      },
+      printMacOSBridgePairingQr(options) {
+        calls.push(["print-qr", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(messages, [
+    "[remodex] Starting bridge and pairing QR...",
+  ]);
+  assert.deepEqual(calls, [
+    ["start-service", { waitForPairing: true }],
+    ["print-qr", { pairingSession: { pairingPayload: { sessionId: "session-up" } } }],
+  ]);
+});
+
 test("remodex status --json exposes daemon metadata for companion apps", async () => {
   const writes = [];
   const originalWrite = process.stdout.write;

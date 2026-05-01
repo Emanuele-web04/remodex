@@ -46,6 +46,7 @@ extension CodexService {
 
             guard let usageObject = resultObject["usage"]?.objectValue,
                   let usage = extractContextWindowUsage(from: usageObject) else {
+                setDefaultContextWindowUsageIfNeeded(threadId: trimmedThreadID)
                 return
             }
 
@@ -86,6 +87,13 @@ extension CodexService {
 }
 
 private extension CodexService {
+    // Resolves missing context data so fresh chats show 0 instead of an endless loading state.
+    func setDefaultContextWindowUsageIfNeeded(threadId: String) {
+        if contextWindowUsageByThread[threadId] == nil {
+            contextWindowUsageByThread[threadId] = .zero
+        }
+    }
+
     func normalizedUsageStatusThreadID(_ threadId: String?) -> String? {
         guard let rawThreadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
               !rawThreadId.isEmpty else {
