@@ -24,6 +24,7 @@ const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
 const { handleProjectRequest } = require("./project-handler");
+const { handlePetRequest } = require("./pet-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
 const { createVoiceHandler, resolveVoiceAuth } = require("./voice-handler");
 const {
@@ -518,6 +519,9 @@ function startBridge({
       return;
     }
     if (handleProjectRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
+    if (handlePetRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
     if (notificationsHandler.handleNotificationsRequest(rawMessage, sendApplicationResponse)) {
