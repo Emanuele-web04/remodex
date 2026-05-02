@@ -387,10 +387,6 @@ enum UserBubbleColor: String, CaseIterable, Identifiable {
         }
     }
 
-    var usesSystemDefault: Bool {
-        self == .default
-    }
-
     var swatchColor: Color {
         switch self {
         case .default:
@@ -459,6 +455,6 @@ enum UserBubbleColor: String, CaseIterable, Identifiable {
     }
 
     func mentionForeground(for colorScheme: ColorScheme, fallback: Color) -> Color {
-        usesSystemDefault ? fallback : bubbleForeground(for: colorScheme)
+        self == .default ? fallback : bubbleForeground(for: colorScheme)
     }
 }
