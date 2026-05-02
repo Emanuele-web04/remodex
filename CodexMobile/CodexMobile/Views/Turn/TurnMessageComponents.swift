@@ -1120,6 +1120,9 @@ private struct UserBubbleTextBlock<Content: View>: View {
 
 struct MessageRow: View, Equatable {
 
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
+
     let message: CodexMessage
     let isRetryAvailable: Bool
     let onRetryUserMessage: (String) -> Void
@@ -1215,7 +1218,8 @@ struct MessageRow: View, Equatable {
     }
 
     private func userBubble(text: String) -> some View {
-        HStack {
+        let bubbleColor = selectedUserBubbleColor
+        return HStack {
             Spacer(minLength: 60)
             VStack(alignment: .trailing, spacing: 4) {
                 if !message.attachments.isEmpty {
@@ -1231,14 +1235,15 @@ struct MessageRow: View, Equatable {
                         contentIdentity: message.id,
                         rawText: text
                     ) {
-                        userBubbleText(text)
+                        userBubbleText(text, bubbleColor: bubbleColor)
                             .font(AppFont.body())
+                            .foregroundStyle(bubbleColor.bubbleForeground(for: colorScheme))
                     }
                         .padding(.vertical, 12)
                         .padding(.horizontal, 16)
                         .background {
                             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                .fill(Color(.tertiarySystemFill).opacity(0.8))
+                                .fill(bubbleColor.bubbleBackground(for: colorScheme))
                         }
                 }
 
@@ -1275,9 +1280,13 @@ struct MessageRow: View, Equatable {
         }
     }
 
+    private var selectedUserBubbleColor: UserBubbleColor {
+        UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
+    }
+
     // Renders inline @file/plugin and $skill mentions inside one AttributedString so large
     // messages do not build an arbitrarily deep SwiftUI Text concatenation chain.
-    private func userBubbleText(_ rawText: String) -> Text {
+    private func userBubbleText(_ rawText: String, bubbleColor: UserBubbleColor) -> Text {
         let normalizedRawText = SkillReferenceFormatter.replacingSkillReferences(
             in: rawText,
             style: .mentionToken
@@ -1309,7 +1318,8 @@ struct MessageRow: View, Equatable {
                 from: normalizedRawText,
                 matches: matches,
                 nsText: nsText,
-                confirmedFileMentions: confirmedFileMentions
+                confirmedFileMentions: confirmedFileMentions,
+                bubbleColor: bubbleColor
             )
         )
     }
@@ -1336,7 +1346,8 @@ struct MessageRow: View, Equatable {
         from text: String,
         matches: [NSTextCheckingResult],
         nsText: NSString,
-        confirmedFileMentions: Set<String>
+        confirmedFileMentions: Set<String>,
+        bubbleColor: UserBubbleColor
     ) -> AttributedString {
         var attributed = AttributedString()
         var cursor = 0
@@ -1377,13 +1388,13 @@ struct MessageRow: View, Equatable {
                 if trigger == "@", isConfirmedFileMention {
                     let fileName = (normalizedToken as NSString).lastPathComponent
                     displayName = fileName.isEmpty ? normalizedToken : fileName
-                    color = .blue
+                    color = bubbleColor.mentionForeground(for: colorScheme, fallback: .blue)
                 } else if trigger == "@" {
                     displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
-                    color = .blue
+                    color = bubbleColor.mentionForeground(for: colorScheme, fallback: .blue)
                 } else {
                     displayName = SkillDisplayNameFormatter.displayName(for: normalizedToken)
-                    color = .indigo
+                    color = bubbleColor.mentionForeground(for: colorScheme, fallback: .indigo)
                 }
 
                 var highlightedSegment = AttributedString(displayName)

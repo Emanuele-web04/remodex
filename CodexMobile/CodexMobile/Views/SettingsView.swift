@@ -518,6 +518,7 @@ private struct SettingsUsageCard: View {
 private struct SettingsAppearanceCard: View {
     @Binding var appFontStyle: AppFont.Style
     @AppStorage("codex.useLiquidGlass") private var useLiquidGlass = true
+    @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     private let settingsAccentColor = Color(.plan)
 
     var body: some View {
@@ -539,6 +540,26 @@ private struct SettingsAppearanceCard: View {
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
+            Divider()
+
+            HStack {
+                Text("User bubble")
+                Spacer()
+                Picker("User bubble", selection: userBubbleColorSelection) {
+                    ForEach(UserBubbleColor.allCases) { color in
+                        HStack(spacing: 10) {
+                            Image(systemName: selectedUserBubbleColor == color ? "checkmark.circle.fill" : "circle.fill")
+                                .foregroundStyle(color.swatchColor)
+                            Text(color.title)
+                        }
+                        .tag(color)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(settingsAccentColor)
+            }
+
             if GlassPreference.isSupported {
                 Divider()
 
@@ -552,6 +573,17 @@ private struct SettingsAppearanceCard: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var selectedUserBubbleColor: UserBubbleColor {
+        UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
+    }
+
+    private var userBubbleColorSelection: Binding<UserBubbleColor> {
+        Binding(
+            get: { selectedUserBubbleColor },
+            set: { userBubbleColorRawValue = $0.rawValue }
+        )
     }
 }
 
