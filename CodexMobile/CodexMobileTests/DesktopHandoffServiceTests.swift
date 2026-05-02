@@ -1,5 +1,5 @@
 // FILE: DesktopHandoffServiceTests.swift
-// Purpose: Verifies Mac handoff requests cover the new display-wake flow for connected and saved-pair paths.
+// Purpose: Verifies desktop handoff and display-wake requests use the bridge RPC contract.
 // Layer: Unit Test
 // Exports: DesktopHandoffServiceTests
 // Depends on: XCTest, CodexMobile
@@ -9,6 +9,27 @@ import XCTest
 
 @MainActor
 final class DesktopHandoffServiceTests: XCTestCase {
+    func testContinueOnDesktopUsesPlatformNeutralBridgeMethod() async throws {
+        let service = makeService()
+        var capturedMethod: String?
+        var capturedParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            capturedMethod = method
+            capturedParams = params
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["success": .bool(true)]),
+                includeJSONRPC: false
+            )
+        }
+
+        let handoff = DesktopHandoffService(codex: service)
+        try await handoff.continueOnDesktopApp(threadId: " thread-123 ")
+
+        XCTAssertEqual(capturedMethod, "desktop/continueOnDesktop")
+        XCTAssertEqual(capturedParams?.objectValue?["threadId"]?.stringValue, "thread-123")
+    }
+
     func testWakeDisplayUsesCurrentBridgeConnectionWhenAvailable() async throws {
         let service = makeService()
         service.isConnected = true
@@ -87,6 +108,18 @@ final class DesktopHandoffServiceTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testUnsupportedPlatformMessageIsPlatformNeutral() {
+        let error = DesktopHandoffError.bridgeError(
+            code: "unsupported_platform",
+            message: "Unsupported platform"
+        )
+
+        XCTAssertEqual(
+            error.errorDescription,
+            "Desktop app handoff works only when the bridge is running on a supported desktop platform."
+        )
     }
 
     private func makeService() -> CodexService {

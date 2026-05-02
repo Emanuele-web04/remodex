@@ -37,6 +37,8 @@ const IMAGE_MIME_TYPES_BY_EXTENSION = new Map([
   [".heic", "image/heic"],
   [".heif", "image/heif"],
 ]);
+/** Match git-handler.js: Node default maxBuffer is 1 MiB. */
+const GIT_EXEC_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
 const repoMutationLocks = new Map();
 
 function handleWorkspaceRequest(rawMessage, sendResponse) {
@@ -592,6 +594,7 @@ async function runGitApply(cwd, args, patchText) {
     const { stdout, stderr } = await execFileAsync("git", [...args, tempPatchPath], {
       cwd,
       timeout: GIT_TIMEOUT_MS,
+      maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES,
     });
     return { ok: true, stdout, stderr };
   } catch (err) {
@@ -750,7 +753,11 @@ function workspaceError(errorCode, userMessage) {
 }
 
 function git(cwd, ...args) {
-  return execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT_MS })
+  return execFileAsync("git", args, {
+    cwd,
+    timeout: GIT_TIMEOUT_MS,
+    maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES,
+  })
     .then(({ stdout }) => stdout)
     .catch((err) => {
       const msg = (err.stderr || err.message || "").trim();

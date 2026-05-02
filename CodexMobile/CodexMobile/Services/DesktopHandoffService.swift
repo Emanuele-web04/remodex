@@ -40,6 +40,7 @@ final class DesktopHandoffService {
         self.savedPairConnector = savedPairConnector
     }
 
+    // Uses the platform-neutral desktop handoff RPC so the same iOS action works with macOS and Windows bridges.
     func continueOnDesktopApp(threadId: String) async throws {
         let trimmedThreadID = threadId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedThreadID.isEmpty else {
@@ -54,7 +55,7 @@ final class DesktopHandoffService {
         ])
 
         do {
-            let response = try await codex.sendRequest(method: "desktop/continueOnMac", params: params)
+            let response = try await codex.sendRequest(method: "desktop/continueOnDesktop", params: params)
             guard let resultObject = response.result?.objectValue,
                   resultObject["success"]?.boolValue == true else {
                 throw DesktopHandoffError.invalidResponse
@@ -195,7 +196,7 @@ private extension DesktopHandoffError {
         case "missing_thread_id":
             return "This chat does not have a valid thread id yet."
         case "unsupported_platform":
-            return "Desktop app handoff works only when the bridge is running on macOS."
+            return "Desktop app handoff works only when the bridge is running on a supported desktop platform."
         case "handoff_failed":
             return fallback ?? "Could not relaunch Codex.app on this computer."
         case "wake_display_failed":
