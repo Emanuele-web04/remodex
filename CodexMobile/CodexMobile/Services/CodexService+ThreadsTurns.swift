@@ -1185,6 +1185,27 @@ extension CodexService {
         }
     }
 
+    // Starts the app-server's manual context compaction turn for the selected thread.
+    func compactThread(_ threadId: String) async throws {
+        activeThreadId = threadId
+        markThreadAsRunning(threadId)
+        setProtectedRunningFallback(true, for: threadId)
+
+        do {
+            _ = try await sendRequest(
+                method: "thread/compact/start",
+                params: .object(["threadId": .string(threadId)])
+            )
+            lastErrorMessage = nil
+        } catch {
+            clearRunningState(for: threadId)
+            let errorMessage = userFacingTurnErrorMessage(from: error)
+            lastErrorMessage = errorMessage
+            appendSystemMessage(threadId: threadId, text: "Compact error: \(errorMessage)")
+            throw error
+        }
+    }
+
     // Generates a compact first-turn title without blocking turn/start or overwriting user renames.
     private func scheduleAutomaticThreadTitleGenerationIfNeeded(
         seed: String?,

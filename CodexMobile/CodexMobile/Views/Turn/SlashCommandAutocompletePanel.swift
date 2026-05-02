@@ -303,6 +303,8 @@ struct SlashCommandAutocompletePanel: View {
         switch command {
         case .codeReview:
             return !hasComposerContentConflictingWithReview
+        case .compact:
+            return !isThreadRunning
         case .feedback:
             return true
         case .fork:
@@ -315,7 +317,7 @@ struct SlashCommandAutocompletePanel: View {
     }
 
     private func commandSubtitle(for command: TurnComposerSlashCommand) -> String {
-        if command == .fork, isThreadRunning {
+        if (command == .compact || command == .fork), isThreadRunning {
             return "Wait for the current response to finish first"
         }
 

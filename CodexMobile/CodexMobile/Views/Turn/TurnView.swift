@@ -1725,7 +1725,7 @@ struct TurnView: View {
 
     private var loadingState: some View {
         chatPlaceholderState(
-            title: "Loading chat...",
+            title: Text("Loading chat..."),
             subtitle: "Fetching the latest messages for this conversation."
         )
     }
@@ -1741,12 +1741,27 @@ struct TurnView: View {
 
     private var emptyState: some View {
         chatPlaceholderState(
-            title: "Hi! How can I help you?",
+            title: emptyStateTitle,
             subtitle: "Chats are End-to-end encrypted"
         )
     }
 
-    private func chatPlaceholderState(title: String, subtitle: String) -> some View {
+    private var emptyStateTitle: Text {
+        guard let folder = emptyStateFolderName else {
+            return Text("Hi! How can I help you?")
+        }
+        return Text("What should we do in ")
+            + Text(folder).foregroundStyle(.secondary)
+            + Text("?")
+    }
+
+    private var emptyStateFolderName: String? {
+        guard let cwd = currentResolvedThread.gitWorkingDirectory else { return nil }
+        let component = (cwd as NSString).lastPathComponent
+        return component.isEmpty ? nil : component
+    }
+
+    private func chatPlaceholderState(title: Text, subtitle: String) -> some View {
         VStack(spacing: 12) {
             Spacer()
             Image("AppLogo")
@@ -1755,7 +1770,7 @@ struct TurnView: View {
                 .frame(width: 56, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            Text(title)
+            title
                 .font(AppFont.title2(weight: .semibold))
             Text(subtitle)
                 .font(AppFont.caption())

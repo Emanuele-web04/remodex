@@ -2323,6 +2323,90 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testEnforceIntraTurnOrderTrailsFileChangesInInterleavedDesktopMirrorTurn() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Implement sidechat",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "thinking-1",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Thinking...",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "thinking-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-status",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "I found the local plumbing.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "status-item",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "tool-after-status",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Reading source files",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "tool-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Path: apps/web/src/composerSlashCommands.ts\nKind: update\nTotals: +1 -1",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "file-change-item",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-final",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Implemented sidechat.",
+                createdAt: now.addingTimeInterval(5),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "thinking-1",
+            "assistant-status",
+            "tool-after-status",
+            "assistant-final",
+            "file-change",
+        ])
+    }
+
     func testEnforceIntraTurnOrderKeepsSteerUserNearBottomOfInterleavedTurn() {
         let now = Date()
         var order = 0
@@ -2403,6 +2487,77 @@ final class TurnTimelineReducerTests: XCTestCase {
             "user-steer",
             "thinking-2",
             "assistant-2",
+        ])
+    }
+
+    func testEnforceIntraTurnOrderTrailsFileChangesWhenSteerOccursInSameTurn() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Initial request",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "First pass",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "item-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: "Path: Sources/App.swift\nKind: update\nTotals: +2 -0",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "file-change-item",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-steer",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Also check the Mac mirror",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-final",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Done",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-1",
+                itemID: "item-2",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "assistant-1",
+            "user-steer",
+            "assistant-final",
+            "file-change",
         ])
     }
 

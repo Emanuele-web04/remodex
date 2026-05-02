@@ -200,6 +200,11 @@ struct TurnComposerHostView: View {
                 switch command {
                 case .codeReview:
                     viewModel.onSelectSlashCommand(command)
+                case .compact:
+                    viewModel.onSelectSlashCommand(command)
+                    Task {
+                        try? await codex.compactThread(thread.id)
+                    }
                 case .feedback:
                     viewModel.onSelectSlashCommand(command)
                     onOpenFeedbackMail()

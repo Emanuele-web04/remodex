@@ -950,6 +950,9 @@ final class TurnViewModel {
         case .codeReview:
             removeTrailingSlashCommandTokenFromInputIfNeeded()
             armCodeReviewSelection(command: command, target: nil)
+        case .compact:
+            removeTrailingSlashCommandTokenFromInputIfNeeded()
+            resetSlashCommandState(clearPendingSelection: true)
         case .feedback:
             removeTrailingSlashCommandTokenFromInputIfNeeded()
             resetSlashCommandState(clearPendingSelection: true)

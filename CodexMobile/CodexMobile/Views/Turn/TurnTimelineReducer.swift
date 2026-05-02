@@ -68,7 +68,9 @@ enum TurnTimelineReducer {
                 // Steer can append a later user row into the still-active turn before the
                 // assistant emits another distinct item. Preserve chronology so that user
                 // prompt stays visible near the tail instead of jumping to the turn start.
-                sorted = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+                sorted = movingFileChangesToTurnTail(
+                    in: turnMessages.sorted { $0.orderIndex < $1.orderIndex }
+                )
             } else if hasInterleavedAssistantActivityFlow(turnMessages) {
                 // Multi-item turn: keep the streamed interleaving intact. If the turn has
                 // only one user prompt, we can still float that original opener forward.
@@ -86,12 +88,13 @@ enum TurnTimelineReducer {
                         .id
                     : nil
 
-                sorted = turnMessages.sorted { a, b in
+                let chronological = turnMessages.sorted { a, b in
                     let aIsOpeningUser = openingUserID != nil && a.id == openingUserID
                     let bIsOpeningUser = openingUserID != nil && b.id == openingUserID
                     if aIsOpeningUser != bIsOpeningUser { return aIsOpeningUser }
                     return a.orderIndex < b.orderIndex
                 }
+                sorted = movingFileChangesToTurnTail(in: chronological)
             } else {
                 // Single-item turn: apply normal role-based ordering.
                 sorted = turnMessages.sorted { a, b in
@@ -170,6 +173,18 @@ enum TurnTimelineReducer {
             }
         }
         return false
+    }
+
+    // Mac-started rollout mirrors can interleave many assistant/tool rows before the
+    // final answer; edited-file cards are still turn-end artifacts and must trail it.
+    private static func movingFileChangesToTurnTail(in messages: [CodexMessage]) -> [CodexMessage] {
+        guard messages.contains(where: { $0.role == .system && $0.kind == .fileChange }) else {
+            return messages
+        }
+
+        let nonFileChanges = messages.filter { !($0.role == .system && $0.kind == .fileChange) }
+        let fileChanges = messages.filter { $0.role == .system && $0.kind == .fileChange }
+        return nonFileChanges + fileChanges
     }
 
     private static func isInterleavableSystemActivity(_ message: CodexMessage) -> Bool {

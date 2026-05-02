@@ -2,9 +2,11 @@
 // Purpose: Shared diff sheet UI and repo-patch presentation helpers for turn-level change inspection.
 // Layer: View Component
 // Exports: TurnDiffSheet, TurnDiffPresentation, TurnDiffPresentationBuilder
-// Depends on: SwiftUI, TurnMessageCaches, TurnFileChangeSummaryParser, TurnDiffRenderer
+// Depends on: SwiftUI, UIKit, MarkdownView, TurnMessageCaches, TurnFileChangeSummaryParser
 
+import MarkdownView
 import SwiftUI
+import UIKit
 
 struct TurnDiffPresentation: Identifiable, Equatable {
     let id: String
@@ -323,14 +325,12 @@ private struct TurnDiffFileCard: View {
             }
             .buttonStyle(.plain)
 
-            if isExpanded, !chunk.diffCode.isEmpty {
+            if isExpanded, MarkdownUnifiedDiffBlockView.canRender(diffCode: chunk.diffCode) {
                 Divider()
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    CleanDiffCodeBlockView(code: chunk.diffCode)
-                        .padding(.vertical, 4)
-                }
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                MarkdownUnifiedDiffBlockView(diffCode: chunk.diffCode)
+                    .padding(.vertical, 4)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -352,6 +352,111 @@ private struct TurnDiffFileCard: View {
         case .added: return Color(red: 0.13, green: 0.77, blue: 0.37)
         case .deleted: return Color(red: 0.94, green: 0.27, blue: 0.27)
         case .renamed: return .blue
+        }
+    }
+}
+
+private struct MarkdownUnifiedDiffBlockView: UIViewRepresentable {
+    let diffCode: String
+
+    func makeUIView(context _: Context) -> MarkdownView.MarkdownTextView {
+        let view = MarkdownView.MarkdownTextView()
+        view.backgroundColor = .clear
+        view.isOpaque = false
+        view.theme = Self.theme
+        return view
+    }
+
+    func updateUIView(_ uiView: MarkdownView.MarkdownTextView, context _: Context) {
+        let theme = Self.theme
+        let content = MarkdownView.MarkdownTextView.PreprocessedContent(
+            markdown: renderableDiff,
+            theme: theme
+        )
+        uiView.theme = theme
+        uiView.setMarkdownManually(content)
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        uiView: MarkdownView.MarkdownTextView,
+        context _: Context
+    ) -> CGSize? {
+        guard let width = proposal.width, width > 0 else {
+            return uiView.intrinsicContentSize
+        }
+        let measuredSize = uiView.boundingSize(for: width)
+        return CGSize(width: width, height: measuredSize.height)
+    }
+
+    private var renderableDiff: String {
+        let body = Self.renderableBody(from: diffCode)
+        let fence = Self.markdownFence(for: body)
+        return "\(fence)diff\n\(body)\n\(fence)"
+    }
+
+    static func canRender(diffCode: String) -> Bool {
+        !renderableBody(from: diffCode).isEmpty
+    }
+
+    private static func renderableBody(from diffCode: String) -> String {
+        let originalBody = diffCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !originalBody.isEmpty else { return "" }
+
+        // Metadata-only patches (rename/mode changes) have no code rows, so keep
+        // the original patch instead of rendering an empty expanded diff card.
+        let strippedBody = strippedMetadataPreamble(from: originalBody)
+        return strippedBody.isEmpty ? originalBody : strippedBody
+    }
+
+    private static func strippedMetadataPreamble(from diffCode: String) -> String {
+        diffCode
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { line in
+                !TurnDiffLineKind.classify(line).isMetadataPreamble
+            }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func markdownFence(for body: String) -> String {
+        let longestFence = body
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line in
+                line
+                    .drop(while: { $0 == " " || $0 == "\t" })
+                    .prefix(while: { $0 == "`" })
+                    .count
+            }
+            .max() ?? 0
+
+        return String(repeating: "`", count: max(3, longestFence + 1))
+    }
+
+    private static var theme: MarkdownTheme {
+        var theme = MarkdownTheme.default
+        theme.showsBlockHeaders = false
+        theme.fonts.code = AppFont.monoUIFont(size: 13, textStyle: .callout)
+        theme.colors.body = .label
+        theme.colors.code = .label
+        theme.colors.codeBackground = .clear
+        theme.diff.backgroundColor = .clear
+        theme.diff.borderWidth = 0
+        theme.diff.lineNumberStyle = .single
+        theme.diff.showsChangeMarkers = false
+        theme.diff.scrollBehavior = .horizontalOnly
+        return theme
+    }
+}
+
+private extension TurnDiffLineKind {
+    var isMetadataPreamble: Bool {
+        switch self {
+        case .meta:
+            true
+        case .addition, .deletion, .hunk, .neutral:
+            false
         }
     }
 }
