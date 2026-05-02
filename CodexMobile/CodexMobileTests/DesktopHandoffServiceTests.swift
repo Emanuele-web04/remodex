@@ -110,6 +110,18 @@ final class DesktopHandoffServiceTests: XCTestCase {
         }
     }
 
+    func testUnsupportedPlatformMessageIsPlatformNeutral() {
+        let error = DesktopHandoffError.bridgeError(
+            code: "unsupported_platform",
+            message: "Unsupported platform"
+        )
+
+        XCTAssertEqual(
+            error.errorDescription,
+            "Desktop app handoff works only when the bridge is running on a supported desktop platform."
+        )
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "DesktopHandoffServiceTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

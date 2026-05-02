@@ -196,7 +196,7 @@ private extension DesktopHandoffError {
         case "missing_thread_id":
             return "This chat does not have a valid thread id yet."
         case "unsupported_platform":
-            return "Desktop app handoff works only when the bridge is running on macOS."
+            return "Desktop app handoff works only when the bridge is running on a supported desktop platform."
         case "handoff_failed":
             return fallback ?? "Could not relaunch Codex.app on this computer."
         case "wake_display_failed":
