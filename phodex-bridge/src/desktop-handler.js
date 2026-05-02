@@ -20,6 +20,7 @@ const DEFAULT_APP_BOOT_WAIT_MS = 1_200;
 const DEFAULT_THREAD_MATERIALIZE_WAIT_MS = 4_000;
 const DEFAULT_THREAD_MATERIALIZE_POLL_MS = 250;
 const DEFAULT_WAKE_DISPLAY_DURATION_SECONDS = 30;
+const WINDOWS_BOUNCE_URL = "codex://settings";
 
 function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
   let parsed;
@@ -71,16 +72,39 @@ async function handleDesktopMethod(method, params, options = {}) {
   const threadMaterializeWaitMs = options.threadMaterializeWaitMs ?? DEFAULT_THREAD_MATERIALIZE_WAIT_MS;
   const threadMaterializePollMs = options.threadMaterializePollMs ?? DEFAULT_THREAD_MATERIALIZE_POLL_MS;
 
-  if (platform !== "darwin") {
-    throw desktopError(
-      "unsupported_platform",
-      "Mac handoff is only available when the bridge is running on macOS."
-    );
-  }
-
   switch (method) {
+    case "desktop/continueOnDesktop":
+      if (platform !== "darwin" && platform !== "win32") {
+        throw desktopError(
+          "unsupported_platform",
+          "Desktop handoff is only available when the bridge is running on macOS or Windows."
+        );
+      }
+
+      return continueOnDesktop(params, {
+        platform,
+        bundleId,
+        appPath,
+        executor,
+        env,
+        fsModule,
+        isAppRunning,
+        sleepFn,
+        appBootWaitMs,
+        relaunchWaitMs,
+        threadMaterializeWaitMs,
+        threadMaterializePollMs,
+      });
     case "desktop/continueOnMac":
-      return continueOnMac(params, {
+      if (platform !== "darwin") {
+        throw desktopError(
+          "unsupported_platform",
+          "Mac handoff is only available when the bridge is running on macOS."
+        );
+      }
+
+      return continueOnDesktop(params, {
+        platform,
         bundleId,
         appPath,
         executor,
@@ -106,10 +130,11 @@ async function handleDesktopMethod(method, params, options = {}) {
   }
 }
 
-// Waits for fresh phone-authored chats to materialize locally before deep-linking them on Mac.
-async function continueOnMac(
+// Waits for fresh phone-authored chats to materialize locally before deep-linking them on desktop.
+async function continueOnDesktop(
   params,
   {
+    platform,
     bundleId,
     appPath,
     executor,
@@ -125,11 +150,50 @@ async function continueOnMac(
 ) {
   const threadId = resolveThreadId(params);
   if (!threadId) {
-    throw desktopError("missing_thread_id", "A thread id is required to continue on Mac.");
+    throw desktopError("missing_thread_id", "A thread id is required to continue on desktop.");
   }
 
   const targetUrl = `codex://threads/${threadId}`;
   const desktopKnown = isThreadLikelyKnownOnDesktop(threadId, { env, fsModule });
+
+  if (platform === "win32") {
+    try {
+      if (desktopKnown) {
+        await refreshWindowsCodex(targetUrl, {
+          executor,
+          env,
+          sleepFn,
+          settleMs: relaunchWaitMs,
+        });
+      } else {
+        await openWindowsDeepLink(WINDOWS_BOUNCE_URL, { executor, env });
+        await sleepFn(appBootWaitMs);
+        await waitForThreadMaterialization(threadId, {
+          env,
+          fsModule,
+          sleepFn,
+          timeoutMs: threadMaterializeWaitMs,
+          pollMs: threadMaterializePollMs,
+        });
+        await openWindowsDeepLink(targetUrl, { executor, env });
+      }
+    } catch (error) {
+      throw desktopError(
+        "handoff_failed",
+        "Could not open Codex on this PC.",
+        error
+      );
+    }
+
+    return {
+      success: true,
+      relaunched: false,
+      targetUrl,
+      threadId,
+      desktopKnown,
+    };
+  }
+
   const appRunning = typeof isAppRunning === "function"
     ? await isAppRunning(appPath)
     : await detectRunningCodexApp(appPath, executor);
@@ -370,6 +434,25 @@ async function openCodexApp({ bundleId, appPath, executor }) {
       timeout: HANDOFF_TIMEOUT_MS,
     });
   }
+}
+
+async function openWindowsDeepLink(targetUrl, { executor, env }) {
+  await executor(env?.ComSpec || "cmd.exe", [
+    "/d",
+    "/c",
+    "start",
+    "",
+    targetUrl,
+  ], {
+    timeout: HANDOFF_TIMEOUT_MS,
+    windowsHide: true,
+  });
+}
+
+async function refreshWindowsCodex(targetUrl, { executor, env, sleepFn, settleMs }) {
+  await openWindowsDeepLink(WINDOWS_BOUNCE_URL, { executor, env });
+  await sleepFn(settleMs);
+  await openWindowsDeepLink(targetUrl, { executor, env });
 }
 
 // Gives the desktop a short window to materialize the requested thread before the final deep link.

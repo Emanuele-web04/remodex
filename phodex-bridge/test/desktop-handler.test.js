@@ -119,7 +119,7 @@ test("desktop/continueOnMac relaunches when a desktop-known thread is requested 
   let running = true;
   const fakeFS = {
     existsSync(targetPath) {
-      return targetPath.endsWith("/sessions");
+      return /[\\/]sessions$/.test(targetPath);
     },
     readdirSync() {
       return [{
@@ -192,7 +192,7 @@ test("desktop/continueOnMac boots Codex before deep-linking when the thread alre
   let running = false;
   const fakeFS = {
     existsSync(targetPath) {
-      return targetPath.endsWith("/sessions");
+      return /[\\/]sessions$/.test(targetPath);
     },
     readdirSync() {
       return [{
@@ -241,6 +241,60 @@ test("desktop/continueOnMac boots Codex before deep-linking when the thread alre
   ]);
   assert.equal(responses[0].result?.relaunched, false);
   assert.equal(responses[0].result?.desktopKnown, true);
+});
+
+test("desktop/continueOnDesktop bounces Codex via deep links on Windows", async () => {
+  const executorCalls = [];
+  const responses = [];
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-win-1",
+    method: "desktop/continueOnDesktop",
+    params: {
+      threadId: "thread-win-123",
+    },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "win32",
+    env: { ComSpec: "cmd.exe" },
+    executor: async (...args) => {
+      executorCalls.push(args);
+      return { stdout: "", stderr: "" };
+    },
+    sleepFn: async () => {},
+    threadMaterializeWaitMs: 0,
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(executorCalls.length, 2);
+  assert.equal(executorCalls[0][0], "cmd.exe");
+  assert.deepEqual(executorCalls[0][1], [
+    "/d",
+    "/c",
+    "start",
+    "",
+    "codex://settings",
+  ]);
+  assert.equal(executorCalls[1][0], "cmd.exe");
+  assert.deepEqual(executorCalls[1][1], [
+    "/d",
+    "/c",
+    "start",
+    "",
+    "codex://threads/thread-win-123",
+  ]);
+  assert.deepEqual(responses, [{
+    id: "request-win-1",
+    result: {
+      success: true,
+      relaunched: false,
+      targetUrl: "codex://threads/thread-win-123",
+      threadId: "thread-win-123",
+      desktopKnown: false,
+    },
+  }]);
 });
 
 test("desktop/continueOnMac returns a bridge error when thread id is missing", async () => {

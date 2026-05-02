@@ -359,9 +359,10 @@ if (require.main === module) {
   const enablePushService = readOptionalBooleanEnv(
     ["REMODEX_ENABLE_PUSH_SERVICE", "PHODEX_ENABLE_PUSH_SERVICE"]
   ) ?? false;
+  const bindHost = process.env.RELAY_BIND_HOST || "0.0.0.0";
   const { server } = createRelayServer({ enablePushService, trustProxy });
-  server.listen(port, () => {
-    console.log(`[relay] listening on :${port}`);
+  server.listen(port, bindHost, () => {
+    console.log(`[relay] listening on ${bindHost}:${port}`);
   });
 }
 
