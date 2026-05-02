@@ -21,6 +21,7 @@ const DEFAULT_THREAD_MATERIALIZE_WAIT_MS = 4_000;
 const DEFAULT_THREAD_MATERIALIZE_POLL_MS = 250;
 const DEFAULT_WAKE_DISPLAY_DURATION_SECONDS = 30;
 const WINDOWS_BOUNCE_URL = "codex://settings";
+const DESKTOP_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
 
 function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
   let parsed;
@@ -151,6 +152,9 @@ async function continueOnDesktop(
   const threadId = resolveThreadId(params);
   if (!threadId) {
     throw desktopError("missing_thread_id", "A thread id is required to continue on desktop.");
+  }
+  if (!isValidDesktopThreadId(threadId)) {
+    throw desktopError("invalid_thread_id", "The requested desktop thread id is not valid.");
   }
 
   const targetUrl = `codex://threads/${threadId}`;
@@ -375,6 +379,11 @@ function resolveThreadId(params) {
   return "";
 }
 
+// Keeps desktop deep links to a single safe route segment before handing them to OS launchers.
+function isValidDesktopThreadId(threadId) {
+  return typeof threadId === "string" && DESKTOP_THREAD_ID_PATTERN.test(threadId);
+}
+
 function desktopError(errorCode, userMessage, cause = null) {
   const error = new Error(userMessage);
   error.errorCode = errorCode;
@@ -437,11 +446,8 @@ async function openCodexApp({ bundleId, appPath, executor }) {
 }
 
 async function openWindowsDeepLink(targetUrl, { executor, env }) {
-  await executor(env?.ComSpec || "cmd.exe", [
-    "/d",
-    "/c",
-    "start",
-    "",
+  await executor(env?.SystemRoot ? path.join(env.SystemRoot, "System32", "rundll32.exe") : "rundll32.exe", [
+    "url.dll,FileProtocolHandler",
     targetUrl,
   ], {
     timeout: HANDOFF_TIMEOUT_MS,

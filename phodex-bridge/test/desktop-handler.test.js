@@ -257,7 +257,7 @@ test("desktop/continueOnDesktop bounces Codex via deep links on Windows", async 
     responses.push(JSON.parse(response));
   }, {
     platform: "win32",
-    env: { ComSpec: "cmd.exe" },
+    env: { SystemRoot: "C:\\Windows" },
     executor: async (...args) => {
       executorCalls.push(args);
       return { stdout: "", stderr: "" };
@@ -269,20 +269,14 @@ test("desktop/continueOnDesktop bounces Codex via deep links on Windows", async 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(executorCalls.length, 2);
-  assert.equal(executorCalls[0][0], "cmd.exe");
+  assert.equal(executorCalls[0][0], "C:\\Windows/System32/rundll32.exe");
   assert.deepEqual(executorCalls[0][1], [
-    "/d",
-    "/c",
-    "start",
-    "",
+    "url.dll,FileProtocolHandler",
     "codex://settings",
   ]);
-  assert.equal(executorCalls[1][0], "cmd.exe");
+  assert.equal(executorCalls[1][0], "C:\\Windows/System32/rundll32.exe");
   assert.deepEqual(executorCalls[1][1], [
-    "/d",
-    "/c",
-    "start",
-    "",
+    "url.dll,FileProtocolHandler",
     "codex://threads/thread-win-123",
   ]);
   assert.deepEqual(responses, [{
@@ -295,6 +289,34 @@ test("desktop/continueOnDesktop bounces Codex via deep links on Windows", async 
       desktopKnown: false,
     },
   }]);
+});
+
+test("desktop/continueOnDesktop rejects unsafe thread ids before opening Windows links", async () => {
+  const executorCalls = [];
+  const responses = [];
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-win-injection",
+    method: "desktop/continueOnDesktop",
+    params: {
+      threadId: "thread-win-123 & calc.exe",
+    },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "win32",
+    executor: async (...args) => {
+      executorCalls.push(args);
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(executorCalls.length, 0);
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].id, "request-win-injection");
+  assert.equal(responses[0].error?.data?.errorCode, "invalid_thread_id");
 });
 
 test("desktop/continueOnMac returns a bridge error when thread id is missing", async () => {
