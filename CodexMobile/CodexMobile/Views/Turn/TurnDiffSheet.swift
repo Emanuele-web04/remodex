@@ -411,8 +411,7 @@ private struct MarkdownUnifiedDiffBlockView: UIViewRepresentable {
 
     private static func strippedMetadataPreamble(from diffCode: String) -> String {
         diffCode
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
+            .components(separatedBy: "\n")
             .filter { line in
                 !TurnDiffLineKind.classify(line).isMetadataPreamble
             }
@@ -422,7 +421,7 @@ private struct MarkdownUnifiedDiffBlockView: UIViewRepresentable {
 
     private static func markdownFence(for body: String) -> String {
         let longestFence = body
-            .split(separator: "\n", omittingEmptySubsequences: false)
+            .components(separatedBy: "\n")
             .map { line in
                 line
                     .drop(while: { $0 == " " || $0 == "\t" })

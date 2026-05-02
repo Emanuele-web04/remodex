@@ -1771,7 +1771,9 @@ struct TurnView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             title
-                .font(AppFont.title2(weight: .semibold))
+                .font(AppFont.title2(weight: .regular))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
             Text(subtitle)
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
