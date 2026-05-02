@@ -357,3 +357,104 @@ enum AppFont {
         return .system(size: size, weight: weight)
     }
 }
+
+// User prompt bubble palette shared by Settings and timeline rendering.
+enum UserBubbleColor: String, CaseIterable, Identifiable {
+    case `default`
+    case orange
+    case yellow
+    case green
+    case blue
+    case pink
+    case purple
+    case black
+
+    var id: String { rawValue }
+
+    static var storageKey: String { "codex.userBubbleColor" }
+    static var defaultStoredRawValue: String { UserBubbleColor.default.rawValue }
+
+    var title: String {
+        switch self {
+        case .default: return "Default"
+        case .orange: return "Orange"
+        case .yellow: return "Yellow"
+        case .green: return "Green"
+        case .blue: return "Blue"
+        case .pink: return "Pink"
+        case .purple: return "Purple"
+        case .black: return "Black"
+        }
+    }
+
+    var swatchColor: Color {
+        switch self {
+        case .default:
+            return Color(.systemGray3)
+        case .orange:
+            return Color(red: 0.86, green: 0.22, blue: 0.04)
+        case .yellow:
+            return Color(red: 0.95, green: 0.68, blue: 0.05)
+        case .green:
+            return Color(red: 0.07, green: 0.62, blue: 0.24)
+        case .blue:
+            return Color(red: 0.0, green: 0.45, blue: 0.90)
+        case .pink:
+            return Color(red: 0.86, green: 0.16, blue: 0.50)
+        case .purple:
+            return Color(red: 0.53, green: 0.24, blue: 0.85)
+        case .black:
+            return .black
+        }
+    }
+
+    func bubbleBackground(for colorScheme: ColorScheme) -> Color {
+        switch self {
+        case .default:
+            return Color(.tertiarySystemFill).opacity(0.8)
+        case .orange:
+            return colorScheme == .dark
+                ? Color(red: 0.77, green: 0.18, blue: 0.03)
+                : Color(red: 0.81, green: 0.25, blue: 0.06)
+        case .yellow:
+            return colorScheme == .dark
+                ? Color(red: 0.96, green: 0.71, blue: 0.10)
+                : Color(red: 0.93, green: 0.64, blue: 0.04)
+        case .green:
+            return colorScheme == .dark
+                ? Color(red: 0.06, green: 0.45, blue: 0.20)
+                : Color(red: 0.08, green: 0.50, blue: 0.24)
+        case .blue:
+            return colorScheme == .dark
+                ? Color(red: 0.02, green: 0.34, blue: 0.76)
+                : Color(red: 0.0, green: 0.39, blue: 0.82)
+        case .pink:
+            return colorScheme == .dark
+                ? Color(red: 0.72, green: 0.08, blue: 0.34)
+                : Color(red: 0.76, green: 0.09, blue: 0.38)
+        case .purple:
+            return colorScheme == .dark
+                ? Color(red: 0.42, green: 0.18, blue: 0.74)
+                : Color(red: 0.48, green: 0.23, blue: 0.78)
+        case .black:
+            return colorScheme == .dark
+                ? .white
+                : .black
+        }
+    }
+
+    func bubbleForeground(for colorScheme: ColorScheme) -> Color {
+        switch self {
+        case .default:
+            return .primary
+        case .black:
+            return colorScheme == .dark ? .black : .white
+        default:
+            return .white
+        }
+    }
+
+    func mentionForeground(for colorScheme: ColorScheme, fallback: Color) -> Color {
+        self == .default ? fallback : bubbleForeground(for: colorScheme)
+    }
+}
