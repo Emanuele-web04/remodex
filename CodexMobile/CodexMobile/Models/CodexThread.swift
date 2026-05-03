@@ -434,7 +434,7 @@ extension CodexThread {
             return "cloud"
         }
 
-        return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "laptopcomputer" : "arrow.triangle.branch"
+        return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "folder" : "arrow.triangle.branch"
     }
 
     // Shared path gate for every flow that needs to decide whether a cwd represents a real local project.
