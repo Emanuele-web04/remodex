@@ -66,10 +66,9 @@
     {
       "identity" : "textual",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/gonzalezreal/textual.git",
+      "location" : "https://github.com/devnoname120/textual.git",
       "state" : {
-        "revision" : "5b06b811c0f5313b6b84bbef98c635a630638c38",
-        "version" : "0.3.1"
+        "revision" : "ac751f2fcfc96309d9330ee9a7356840f964e211"
       }
     },
     {
