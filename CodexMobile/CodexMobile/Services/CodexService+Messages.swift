@@ -903,62 +903,9 @@ extension CodexService {
                 }
             }
 
-            // Metadata comes from thread/read without turns; transcript rows come from
-            // thread/turns/list so large chats never require one huge app-server response.
-            let metadataParams: JSONValue = .object([
-                "threadId": .string(threadId),
-                "includeTurns": .bool(false),
-            ])
-
-            let response: RPCMessage
-            do {
-                response = try await sendRequest(
-                    method: "thread/read",
-                    params: metadataParams,
-                    timeoutNanoseconds: ThreadHistoryHydrationPolicy.requestTimeoutNanoseconds
-                )
-            } catch let error as CodexServiceError {
-                if case .rpcError(let rpcError) = error, rpcError.code == -32600 {
-                    // Sidebar/timeline metadata fetches should keep retrying while the child thread
-                    // is still materializing, but full history hydration can stop here.
-                    let shouldMarkHydrated = markHydratedWhenNotMaterialized
-                        && !deferHydratedMarkForNotMaterializedThreadIDs.contains(threadId)
-                    if shouldMarkHydrated {
-                        hydratedThreadIDs.insert(threadId)
-                        initialTurnsLoadedByThreadID.insert(threadId)
-                    }
-                    return .notMaterialized
-                }
-                if shouldDeferThreadHistoryAfterTimeout(error) {
-                    markThreadHistoryDeferredAfterTimeout(threadId: threadId)
-                    debugSyncLog("thread/read timed out for thread=\(threadId); showing local timeline while canonical history is deferred")
-                    return .deferredAfterTimeout
-                }
-                throw error
-            }
-
-            guard !Task.isCancelled,
-                  isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
-                throw CancellationError()
-            }
-
-            guard let resultObject = response.result?.objectValue,
-                  var threadObject = resultObject["thread"]?.objectValue else {
-                throw CodexServiceError.invalidResponse("thread/read response missing thread payload")
-            }
-
-            extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
-
-            // Upsert thread metadata (name, agentNickname, agentRole, model, etc.)
-            // so subagent identity resolves without navigating into the child thread.
-            if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
-               let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
-                upsertThread(decoded, treatAsServerState: true)
-            }
-
             let shouldForceRefresh = forceRefresh || forcedHistoryLoadThreadIDs.contains(threadId)
 
-            // A turn may have started while thread/read was in flight. Normal background
+            // A turn may have started while chat-open work was in flight. Normal background
             // history loads should still stay out of the way, but forced refreshes are
             // used when reopening a running thread and need to merge the latest snapshot.
             if threadHasActiveOrRunningTurn(threadId) && !shouldForceRefresh {
@@ -970,6 +917,7 @@ extension CodexService {
             }
 
             var loadedViaPagination = false
+            var threadObject: RPCObject
             if supportsTurnPagination {
                 do {
                     let turnsPage: ThreadTurnsHistoryPage
@@ -989,7 +937,10 @@ extension CodexService {
                         cursor: turnsPage.nextCursor,
                         isFreshInitialLoad: shouldSeedInitialCursor
                     )
-                    threadObject["turns"] = .array(chronologicalTurnsFromDescendingPage(turnsPage.turns))
+                    threadObject = [
+                        "id": .string(threadId),
+                        "turns": .array(chronologicalTurnsFromDescendingPage(turnsPage.turns)),
+                    ]
                 } catch let error as CodexServiceError {
                     if case .rpcError(let rpcError) = error, rpcError.code == -32600 {
                         let shouldMarkHydrated = markHydratedWhenNotMaterialized
@@ -1026,6 +977,10 @@ extension CodexService {
                             throw legacyError
                         }
                         extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
+                        if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
+                           let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
+                            upsertThread(decoded, treatAsServerState: true)
+                        }
                     } else {
                         throw error
                     }
@@ -1051,6 +1006,10 @@ extension CodexService {
                     throw error
                 }
                 extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
+                if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
+                   let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
+                    upsertThread(decoded, treatAsServerState: true)
+                }
             }
 
             let historyTerminalStates = decodeTurnTerminalStatesFromThreadRead(threadObject)

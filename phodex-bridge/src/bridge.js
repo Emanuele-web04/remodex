@@ -43,7 +43,6 @@ const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
   createDesktopIpcActionFollower,
-  seedConversationStateFromThreadRead,
 } = require("./desktop-ipc-action-follower");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
@@ -183,7 +182,6 @@ function startBridge({
   const desktopIpcActionFollower = !config.codexEndpoint
     ? createDesktopIpcActionFollower({
       sendApplicationResponse,
-      readConversationState: readDesktopConversationState,
       socketPath: config.desktopIpcSocketPath || undefined,
     })
     : null;
@@ -576,15 +574,6 @@ function startBridge({
         title: name,
       },
     }));
-  }
-
-  // Seeds the desktop IPC follower without pulling huge turn history into baseline recovery.
-  async function readDesktopConversationState(threadId) {
-    const result = await sendCodexRequest("thread/read", {
-      threadId,
-      includeTurns: false,
-    });
-    return seedConversationStateFromThreadRead(result);
   }
 
   // ─── Bridge-owned auth snapshot ─────────────────────────────

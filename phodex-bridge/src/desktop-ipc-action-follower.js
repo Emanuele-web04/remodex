@@ -77,7 +77,6 @@ function createDesktopIpcActionFollower({
 
     activeThreadIds.add(threadId);
     ipc.ensureConnected();
-    recoverThreadBaseline(threadId);
     return false;
   }
 
@@ -111,6 +110,19 @@ function createDesktopIpcActionFollower({
     const nextState = applyConversationStateChange(previousState, params.change);
     if (!nextState) {
       if (isPatchChange(params.change)) {
+        const emptyState = createEmptyConversationState();
+        const speculativeState = applyConversationStateChange(emptyState, params.change);
+        const speculativeActions = projectPendingDesktopActions(threadId, speculativeState);
+        if (speculativeActions.length > 0) {
+          rawStatesByThreadId.set(threadId, speculativeState);
+          syncProjectedActions(threadId, speculativeActions);
+          return;
+        }
+
+        if (typeof readConversationState !== "function") {
+          return;
+        }
+
         queueThreadChange(threadId, params.change);
         recoverThreadBaseline(threadId);
       }
@@ -219,8 +231,7 @@ function createDesktopIpcActionFollower({
   }
 
   function recoverThreadBaseline(threadId) {
-    if (typeof readConversationState !== "function"
-      || recoveringThreadIds.has(threadId)
+    if (recoveringThreadIds.has(threadId)
       || rawStatesByThreadId.has(threadId)) {
       return;
     }
@@ -230,25 +241,37 @@ function createDesktopIpcActionFollower({
       .then(() => readConversationState(threadId))
       .then((baselineState) => {
         if (!baselineState || typeof baselineState !== "object") {
+          recoverThreadBaselineFromQueuedChanges(threadId, null);
           return;
         }
 
-        let nextState = cloneJSON(baselineState);
-        const queuedChanges = queuedChangesByThreadId.get(threadId) || [];
-        queuedChangesByThreadId.delete(threadId);
-        for (const change of queuedChanges) {
-          nextState = applyConversationStateChange(nextState, change) || nextState;
-        }
-
-        rawStatesByThreadId.set(threadId, nextState);
-        syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
+        recoverThreadBaselineFromQueuedChanges(threadId, baselineState);
       })
       .catch((error) => {
         console.warn(`${logPrefix} desktop IPC baseline recovery failed for ${threadId}: ${error.message}`);
+        recoverThreadBaselineFromQueuedChanges(threadId, null);
       })
       .finally(() => {
         recoveringThreadIds.delete(threadId);
       });
+  }
+
+  function recoverThreadBaselineFromQueuedChanges(threadId, baselineState) {
+    const queuedChanges = queuedChangesByThreadId.get(threadId) || [];
+    if (queuedChanges.length === 0) {
+      return;
+    }
+
+    queuedChangesByThreadId.delete(threadId);
+    let nextState = baselineState && typeof baselineState === "object"
+      ? cloneJSON(baselineState)
+      : createEmptyConversationState();
+    for (const change of queuedChanges) {
+      nextState = applyConversationStateChange(nextState, change) || nextState;
+    }
+
+    rawStatesByThreadId.set(threadId, nextState);
+    syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
   }
 
   return {
@@ -552,6 +575,13 @@ function seedConversationStateFromThreadRead(response) {
   return {
     turns: Array.isArray(thread.turns) ? cloneJSON(thread.turns) : [],
     requests: Array.isArray(thread.requests) ? cloneJSON(thread.requests) : [],
+  };
+}
+
+function createEmptyConversationState() {
+  return {
+    turns: [],
+    requests: [],
   };
 }
 

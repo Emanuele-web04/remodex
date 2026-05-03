@@ -146,6 +146,7 @@ struct SidebarThreadListView: View {
                 .transition(.opacity)
             }
         }
+        .padding(.top, 6)
     }
 
     private func projectGroupSection(_ group: SidebarThreadGroup) -> some View {

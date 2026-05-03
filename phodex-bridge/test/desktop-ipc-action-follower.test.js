@@ -282,9 +282,10 @@ test("seeds conversation state from thread/read responses for IPC recovery", () 
   );
 });
 
-test("desktop IPC follower recovers a baseline before applying first patch-only action updates", async (t) => {
+test("desktop IPC follower projects first add patch-only action updates without a baseline read", async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-recovery-"));
   const socketPath = path.join(tempDir, "ipc.sock");
+  let baselineReads = 0;
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -316,6 +317,7 @@ test("desktop IPC follower recovers a baseline before applying first patch-only 
       outbound.push(JSON.parse(message));
     },
     async readConversationState() {
+      baselineReads += 1;
       await wait(30);
       return { requests: [] };
     },
@@ -354,10 +356,320 @@ test("desktop IPC follower recovers a baseline before applying first patch-only 
       },
     },
   });
-  await wait(60);
+  await wait(25);
 
+  assert.equal(baselineReads, 0);
   assert.equal(outbound[0].id, "req-patch");
   assert.equal(outbound[0].method, "item/tool/requestUserInput");
+});
+
+test("desktop IPC follower uses baseline recovery for patch-only updates that need existing state", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-replace-recovery-"));
+  const socketPath = path.join(tempDir, "ipc.sock");
+  let baselineReads = 0;
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    async readConversationState() {
+      baselineReads += 1;
+      return {
+        requests: [{
+          id: "req-recovered",
+          method: "item/tool/requestUserInput",
+          completed: true,
+          params: {
+            threadId: "thread-replace",
+            turnId: "turn-replace",
+            itemId: "item-replace",
+            questions: [{ id: "q1", question: "Continue?" }],
+          },
+        }],
+      };
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-replace" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-replace",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["requests", 0, "completed"],
+          value: false,
+        }],
+      },
+    },
+  });
+  await wait(40);
+
+  assert.equal(baselineReads, 1);
+  assert.equal(outbound[0].id, "req-recovered");
+  assert.equal(outbound[0].method, "item/tool/requestUserInput");
+});
+
+test("desktop IPC follower does not issue baseline reads just because a chat opens", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-lazy-recovery-"));
+  const socketPath = path.join(tempDir, "ipc.sock");
+  let baselineReads = 0;
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    async readConversationState() {
+      baselineReads += 1;
+      return { requests: [] };
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-open" },
+  }));
+  await waitFor(() => serverSocket);
+  await wait(40);
+
+  assert.equal(baselineReads, 0);
+});
+
+test("desktop IPC follower waits for a usable snapshot when a first patch needs missing state", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-wait-snapshot-"));
+  const socketPath = path.join(tempDir, "ipc.sock");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-wait-snapshot" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-wait-snapshot",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["requests", 0, "completed"],
+          value: false,
+        }],
+      },
+    },
+  });
+  await wait(25);
+  assert.equal(outbound.length, 0);
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-wait-snapshot",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          requests: [{
+            id: "req-after-snapshot",
+            method: "item/tool/requestUserInput",
+            params: {
+              threadId: "thread-wait-snapshot",
+              turnId: "turn-after-snapshot",
+              itemId: "item-after-snapshot",
+              questions: [{ id: "q1", question: "Continue?" }],
+            },
+          }],
+        },
+      },
+    },
+  });
+  await wait(25);
+
+  assert.equal(outbound[0].id, "req-after-snapshot");
+  assert.equal(outbound[0].method, "item/tool/requestUserInput");
+});
+
+test("desktop IPC follower does not block add patch-only actions on a failing baseline reader", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-recovery-fallback-"));
+  const socketPath = path.join(tempDir, "ipc.sock");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  t.after(() => {
+    console.warn = originalWarn;
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    async readConversationState() {
+      throw new Error("Codex request timed out: thread/read");
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-patch-fallback" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-patch-fallback",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "add",
+          path: ["requests", 0],
+          value: {
+            id: "req-fallback",
+            method: "item/tool/requestUserInput",
+            params: {
+              threadId: "thread-patch-fallback",
+              turnId: "turn-fallback",
+              itemId: "item-fallback",
+              questions: [{ id: "q1", question: "Continue?" }],
+            },
+          },
+        }],
+      },
+    },
+  });
+  await wait(40);
+
+  assert.equal(outbound[0].id, "req-fallback");
+  assert.equal(outbound[0].method, "item/tool/requestUserInput");
+  assert.equal(warnings.length, 0);
 });
 
 test("desktop IPC follower answers client discovery requests as a passive client", async (t) => {

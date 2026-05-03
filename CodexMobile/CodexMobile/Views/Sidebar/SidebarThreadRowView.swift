@@ -69,13 +69,13 @@ struct SidebarThreadRowView: View {
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                                 .foregroundStyle(.primary)
-                                .layoutPriority(1)
 
                             Text(pinnedProjectLabel)
                                 .font(AppFont.footnote())
                                 .foregroundStyle(.tertiary)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
+                                .layoutPriority(1)
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 4) {
