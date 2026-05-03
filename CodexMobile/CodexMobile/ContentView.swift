@@ -361,6 +361,14 @@ struct ContentView: View {
                     mainNavigationLayer
                         .frame(width: proxy.size.width, alignment: .leading)
 
+                    PetCompanionStatusSyncView()
+
+                    PetCompanionOverlay(
+                        isInteractionEnabled: !sidebarVisible,
+                        bottomExclusionHeight: 16
+                    )
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+
                     if sidebarVisible {
                         (colorScheme == .dark ? Color.white : Color.black)
                             .opacity(contentDimOpacity(for: currentSidebarWidth))
