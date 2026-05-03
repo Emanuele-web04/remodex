@@ -84,6 +84,17 @@ test("pet/read rejects unsafe pet ids", async () => {
   );
 });
 
+test("pet/read rejects valid-dimension spritesheets that are too large", async () => {
+  const home = makeTempCodexHome();
+  process.env.CODEX_HOME = home;
+  writePetPackage(home, "too-large", { displayName: "Too Large" }, 16 * 1024 * 1024 + 1);
+
+  await assert.rejects(
+    () => handlePetMethod("pet/read", { id: "custom:too-large" }),
+    { errorCode: "pet_spritesheet_too_large" }
+  );
+});
+
 test("pet/read falls back to a legacy avatar when the matching pet is invalid", async () => {
   const home = makeTempCodexHome();
   process.env.CODEX_HOME = home;
@@ -122,7 +133,7 @@ function makeTempCodexHome() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "remodex-pets-"));
 }
 
-function writePetPackage(home, slug, manifest) {
+function writePetPackage(home, slug, manifest, spritesheetByteLength) {
   const root = path.join(home, "pets", slug);
   fs.mkdirSync(root, { recursive: true });
   fs.writeFileSync(
@@ -135,7 +146,7 @@ function writePetPackage(home, slug, manifest) {
       ...manifest,
     })
   );
-  fs.writeFileSync(path.join(root, "spritesheet.png"), fakePngHeader(1536, 1872));
+  fs.writeFileSync(path.join(root, "spritesheet.png"), fakePngData(1536, 1872, spritesheetByteLength));
 }
 
 function writeAvatarPackage(home, slug, manifest) {
@@ -151,11 +162,11 @@ function writeAvatarPackage(home, slug, manifest) {
       ...manifest,
     })
   );
-  fs.writeFileSync(path.join(root, "spritesheet.png"), fakePngHeader(1536, 1872));
+  fs.writeFileSync(path.join(root, "spritesheet.png"), fakePngData(1536, 1872));
 }
 
-function fakePngHeader(width, height) {
-  const data = Buffer.alloc(33);
+function fakePngData(width, height, byteLength = 33) {
+  const data = Buffer.alloc(byteLength);
   data.writeUInt32BE(0x89504e47, 0);
   data.writeUInt32BE(0x0d0a1a0a, 4);
   data.writeUInt32BE(13, 8);

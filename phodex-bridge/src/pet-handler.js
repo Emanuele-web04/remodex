@@ -10,6 +10,7 @@ const { resolveCodexHome } = require("./codex-home");
 
 const ATLAS_WIDTH = 1536;
 const ATLAS_HEIGHT = 1872;
+const MAX_SPRITESHEET_BYTES = 16 * 1024 * 1024;
 const IMAGE_MIME_TYPES_BY_EXTENSION = new Map([
   [".png", "image/png"],
   [".webp", "image/webp"],
@@ -260,6 +261,9 @@ async function readValidatedSpritesheet(spritesheetPath, { includeData }) {
     return readValidatedSpritesheetMetadata(spritesheetPath, mimeType);
   }
 
+  const stat = await readSpritesheetStat(spritesheetPath);
+  assertSpritesheetByteLength(stat.size);
+
   let data;
   try {
     data = await fs.promises.readFile(spritesheetPath);
@@ -287,6 +291,7 @@ async function readValidatedSpritesheetMetadata(spritesheetPath, mimeType) {
   try {
     file = await fs.promises.open(spritesheetPath, "r");
     const stat = await file.stat();
+    assertSpritesheetByteLength(stat.size);
     const dimensions = await readImageDimensionsFromFile(file, mimeType, stat.size);
     if (!dimensions || dimensions.width !== ATLAS_WIDTH || dimensions.height !== ATLAS_HEIGHT) {
       throw petError("pet_spritesheet_dimensions_invalid", "Pet spritesheets must be exactly 1536x1872 pixels.");
@@ -307,6 +312,24 @@ async function readValidatedSpritesheetMetadata(spritesheetPath, mimeType) {
     throw petError("pet_spritesheet_unreadable", "Could not read the pet spritesheet file.");
   } finally {
     await file?.close();
+  }
+}
+
+// Rejects oversized local packages before base64 expansion can bloat relay payloads.
+async function readSpritesheetStat(spritesheetPath) {
+  try {
+    return await fs.promises.stat(spritesheetPath);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      throw petError("pet_spritesheet_missing", "The pet spritesheet file does not exist.");
+    }
+    throw petError("pet_spritesheet_unreadable", "Could not read the pet spritesheet file.");
+  }
+}
+
+function assertSpritesheetByteLength(byteLength) {
+  if (byteLength > MAX_SPRITESHEET_BYTES) {
+    throw petError("pet_spritesheet_too_large", "Pet spritesheets must be 16 MB or smaller.");
   }
 }
 
