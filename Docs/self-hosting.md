@@ -13,7 +13,7 @@ The public source tree is local-first and self-host friendly:
 
 - there is no public production relay baked into the GitHub source
 - local pairing should work out of the box with `./run-local-remodex.sh`
-- internet-facing setups should pass their own relay URL explicitly with `REMODEX_RELAY`
+- internet-facing manual bridge setups should pass their own relay URL explicitly with `REMODEX_RELAY`; source-checkout launcher setups can pass it with `./run-local-remodex.sh --relay-url`
 - the first QR scan bootstraps trust, then later reconnects can reuse the same trusted Mac through that relay
 - the built-in background daemon for trusted reconnect is currently macOS-only
 
@@ -71,6 +71,22 @@ Pass a hostname or IP address that the phone can actually reach:
 ```sh
 ./run-local-remodex.sh --hostname 192.168.1.10
 ```
+
+If you are using a tunnel or reverse proxy in front of the local relay, pass the public URL instead of a LAN hostname.
+
+For example, with a temporary Cloudflare Tunnel, run this in one terminal:
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:9000
+```
+
+Copy the generated `https://<random>.trycloudflare.com` URL, then start Remodex in another terminal:
+
+```sh
+./run-local-remodex.sh --relay-url https://<random>.trycloudflare.com
+```
+
+The launcher accepts `http://` or `https://` tunnel URLs, converts them to `ws://` or `wss://`, and appends `/relay` when the URL has no path.
 
 ### Health check
 
@@ -153,6 +169,12 @@ On the Mac that runs the bridge:
 
 ```sh
 REMODEX_RELAY="wss://relay.example.com/relay" remodex up
+```
+
+If you are running the source-checkout launcher behind a tunnel or reverse proxy that forwards to the local relay, pass that public URL directly to the launcher:
+
+```sh
+./run-local-remodex.sh --relay-url https://<random>.trycloudflare.com
 ```
 
 Or, if you are running from source:
