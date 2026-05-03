@@ -176,7 +176,9 @@ struct TurnComposerInputTextView: UIViewRepresentable {
 
         private func updateHeight(for textView: UITextView) {
             textView.layoutIfNeeded()
-            textView.layoutManager.ensureLayout(for: textView.textContainer)
+            if let textLayoutManager = textView.textLayoutManager {
+                textLayoutManager.ensureLayout(for: textLayoutManager.documentRange)
+            }
             let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
             let minHeight = lineHeight * minVisibleLines
             let maxHeight = lineHeight * maxVisibleLines

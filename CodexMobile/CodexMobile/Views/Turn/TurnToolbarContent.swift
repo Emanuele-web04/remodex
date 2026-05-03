@@ -325,6 +325,7 @@ struct TurnThreadPathSheet: View {
                                             .renderingMode(.template)
                                             .resizable()
                                             .scaledToFit()
+                                            .scaleEffect(x: -1, y: 1)
                                     }
                                 }
                                 .frame(width: 16, height: 16)

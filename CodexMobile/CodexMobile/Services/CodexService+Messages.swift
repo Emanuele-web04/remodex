@@ -762,6 +762,41 @@ extension CodexService {
         return true
     }
 
+    // A freshly started thread has metadata but no server history until the
+    // first user message materializes it. Treat that as an empty composer state.
+    func shouldTreatAsEmptyUnmaterializedThreadHistory(
+        _ error: CodexServiceError,
+        threadId: String,
+        markHydratedWhenNotMaterialized: Bool
+    ) -> Bool {
+        guard case .rpcError(let rpcError) = error else {
+            return false
+        }
+
+        let message = rpcError.message.lowercased()
+        guard message.contains("not materialized")
+                && message.contains("before first user message")
+                && shouldShowImmediateEmptyPlaceholder(
+                    threadId: threadId,
+                    hasVisibleMessages: !messages(for: threadId).isEmpty,
+                    isThreadRunning: threadHasActiveOrRunningTurn(threadId)
+                ) else {
+            return false
+        }
+
+        if markHydratedWhenNotMaterialized
+            && !deferHydratedMarkForNotMaterializedThreadIDs.contains(threadId) {
+            hydratedThreadIDs.insert(threadId)
+            initialTurnsLoadedByThreadID.insert(threadId)
+        }
+        olderHistoryLoadErrorByThreadID.removeValue(forKey: threadId)
+        if activeThreadId == threadId {
+            lastErrorMessage = nil
+        }
+        refreshThreadTimelineState(for: threadId)
+        return true
+    }
+
     // Prefers the locally persisted transcript when a non-running thread is already huge.
     // The active sync loop can still refresh lighter chats, but giant histories should not
     // block first paint or crash the device just because the user tapped the row.
@@ -856,6 +891,18 @@ extension CodexService {
         if forceRefresh {
             forcedHistoryLoadThreadIDs.insert(threadId)
         }
+        if shouldShowImmediateEmptyPlaceholder(
+            threadId: threadId,
+            hasVisibleMessages: !messages(for: threadId).isEmpty,
+            isThreadRunning: threadHasActiveOrRunningTurn(threadId)
+        ) {
+            forcedHistoryLoadThreadIDs.remove(threadId)
+            hydratedThreadIDs.insert(threadId)
+            initialTurnsLoadedByThreadID.insert(threadId)
+            olderHistoryLoadErrorByThreadID.removeValue(forKey: threadId)
+            refreshThreadTimelineState(for: threadId)
+            return .alreadyHydrated
+        }
         if !forceRefresh,
            hydratedThreadIDs.contains(threadId),
            hasSatisfiedInitialThreadHistoryLoad(threadId: threadId) {
@@ -942,6 +989,13 @@ extension CodexService {
                         "turns": .array(chronologicalTurnsFromDescendingPage(turnsPage.turns)),
                     ]
                 } catch let error as CodexServiceError {
+                    if shouldTreatAsEmptyUnmaterializedThreadHistory(
+                        error,
+                        threadId: threadId,
+                        markHydratedWhenNotMaterialized: markHydratedWhenNotMaterialized
+                    ) {
+                        return .notMaterialized
+                    }
                     if case .rpcError(let rpcError) = error, rpcError.code == -32600 {
                         let shouldMarkHydrated = markHydratedWhenNotMaterialized
                             && !deferHydratedMarkForNotMaterializedThreadIDs.contains(threadId)
@@ -989,6 +1043,13 @@ extension CodexService {
                 do {
                     threadObject = try await fetchLegacyThreadHistoryObject(threadId: threadId)
                 } catch let error as CodexServiceError {
+                    if shouldTreatAsEmptyUnmaterializedThreadHistory(
+                        error,
+                        threadId: threadId,
+                        markHydratedWhenNotMaterialized: markHydratedWhenNotMaterialized
+                    ) {
+                        return .notMaterialized
+                    }
                     if case .rpcError(let rpcError) = error, rpcError.code == -32600 {
                         let shouldMarkHydrated = markHydratedWhenNotMaterialized
                             && !deferHydratedMarkForNotMaterializedThreadIDs.contains(threadId)
