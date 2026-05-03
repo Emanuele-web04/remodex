@@ -361,12 +361,18 @@ enum AppFont {
 // User prompt bubble palette shared by Settings and timeline rendering.
 enum UserBubbleColor: String, CaseIterable, Identifiable {
     case `default`
+    case red
     case orange
     case yellow
     case green
+    case mint
     case blue
+    case indigo
+    case teal
+    case cyan
     case pink
     case purple
+    case brown
     case black
 
     var id: String { rawValue }
@@ -377,78 +383,86 @@ enum UserBubbleColor: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .default: return "Default"
+        case .red: return "Red"
         case .orange: return "Orange"
         case .yellow: return "Yellow"
         case .green: return "Green"
+        case .mint: return "Mint"
         case .blue: return "Blue"
+        case .indigo: return "Indigo"
+        case .teal: return "Teal"
+        case .cyan: return "Cyan"
         case .pink: return "Pink"
         case .purple: return "Purple"
-        case .black: return "Black"
+        case .brown: return "Brown"
+        case .black: return "Primary"
         }
     }
 
     var swatchColor: Color {
+        Color(uiColor: uiColor)
+    }
+
+    var uiColor: UIColor {
         switch self {
         case .default:
-            return Color(.systemGray3)
+            return .systemGray3
+        case .red:
+            return .systemRed
         case .orange:
-            return Color(red: 0.86, green: 0.22, blue: 0.04)
+            return .systemOrange
         case .yellow:
-            return Color(red: 0.95, green: 0.68, blue: 0.05)
+            return .systemYellow
         case .green:
-            return Color(red: 0.07, green: 0.62, blue: 0.24)
+            return .systemGreen
+        case .mint:
+            return .systemMint
         case .blue:
-            return Color(red: 0.0, green: 0.45, blue: 0.90)
+            return .systemBlue
+        case .indigo:
+            return .systemIndigo
+        case .teal:
+            return .systemTeal
+        case .cyan:
+            return .systemCyan
         case .pink:
-            return Color(red: 0.86, green: 0.16, blue: 0.50)
+            return UIColor { traitCollection in
+                traitCollection.userInterfaceStyle == .dark
+                    ? UIColor(red: 1.0, green: 0.32, blue: 0.70, alpha: 1.0)
+                    : UIColor(red: 1.0, green: 0.18, blue: 0.62, alpha: 1.0)
+            }
         case .purple:
-            return Color(red: 0.53, green: 0.24, blue: 0.85)
+            return .systemPurple
+        case .brown:
+            return .systemBrown
         case .black:
-            return .black
+            return .label
         }
+    }
+
+    // UIKit menu actions template SF Symbols by default, so provide an original-rendered swatch.
+    var menuSwatchImage: UIImage {
+        let configuration = UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        let image = UIImage(systemName: "circle.fill", withConfiguration: configuration) ?? UIImage()
+        return image.withTintColor(uiColor, renderingMode: .alwaysOriginal)
     }
 
     func bubbleBackground(for colorScheme: ColorScheme) -> Color {
         switch self {
         case .default:
             return Color(.tertiarySystemFill).opacity(0.8)
-        case .orange:
-            return colorScheme == .dark
-                ? Color(red: 0.77, green: 0.18, blue: 0.03)
-                : Color(red: 0.81, green: 0.25, blue: 0.06)
-        case .yellow:
-            return colorScheme == .dark
-                ? Color(red: 0.96, green: 0.71, blue: 0.10)
-                : Color(red: 0.93, green: 0.64, blue: 0.04)
-        case .green:
-            return colorScheme == .dark
-                ? Color(red: 0.06, green: 0.45, blue: 0.20)
-                : Color(red: 0.08, green: 0.50, blue: 0.24)
-        case .blue:
-            return colorScheme == .dark
-                ? Color(red: 0.02, green: 0.34, blue: 0.76)
-                : Color(red: 0.0, green: 0.39, blue: 0.82)
-        case .pink:
-            return colorScheme == .dark
-                ? Color(red: 0.72, green: 0.08, blue: 0.34)
-                : Color(red: 0.76, green: 0.09, blue: 0.38)
-        case .purple:
-            return colorScheme == .dark
-                ? Color(red: 0.42, green: 0.18, blue: 0.74)
-                : Color(red: 0.48, green: 0.23, blue: 0.78)
-        case .black:
-            return colorScheme == .dark
-                ? .white
-                : .black
+        default:
+            let color = Color(uiColor: uiColor)
+            return colorScheme == .dark ? color.opacity(0.8) : color
         }
     }
 
-    func bubbleForeground(for colorScheme: ColorScheme) -> Color {
+    func bubbleForeground(for _: ColorScheme) -> Color {
         switch self {
         case .default:
             return .primary
         case .black:
-            return colorScheme == .dark ? .black : .white
+            return Color(.systemBackground)
         default:
             return .white
         }

@@ -7,15 +7,7 @@ import SwiftUI
 import UIKit
 
 struct SettingsView: View {
-    @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
-
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
-    @State private var isShowingComputerNameSheet = false
-
-    private let runtimeAutoValue = "__AUTO__"
-    private let runtimeNormalValue = "__NORMAL__"
-    private let settingsAccentColor = Color(.plan)
 
     var body: some View {
         ScrollView {
@@ -26,30 +18,15 @@ struct SettingsView: View {
                 SettingsGPTAccountCard()
                 SettingsSubscriptionCard()
                 SettingsBridgeVersionCard()
-                runtimeDefaultsSection
+                SettingsRuntimeDefaultsCard()
                 SettingsAboutCard()
                 SettingsUsageCard()
-                connectionSection
+                SettingsConnectionCard()
             }
             .padding()
         }
         .font(AppFont.body())
         .navigationTitle("Settings")
-        .sheet(isPresented: $isShowingComputerNameSheet) {
-            if let trustedPairPresentation = codex.trustedPairPresentation {
-                SettingsComputerNameSheet(
-                    nickname: sidebarComputerNicknameBinding(for: trustedPairPresentation),
-                    currentName: trustedPairPresentation.name,
-                    systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
-                )
-            }
-        }
-        .task {
-            guard subscriptions.bootstrapState == .idle else {
-                return
-            }
-            await subscriptions.bootstrap()
-        }
     }
 
     private var appFontStyleBinding: Binding<AppFont.Style> {
@@ -58,22 +35,16 @@ struct SettingsView: View {
             set: { appFontStyleRawValue = $0.rawValue }
         )
     }
+}
 
-    private var keepMacAwakeWhileBridgeRunsBinding: Binding<Bool> {
-        Binding(
-            get: { codex.keepMacAwakeWhileBridgeRuns },
-            set: { nextValue in
-                codex.setKeepMacAwakeWhileBridgeRunsPreference(nextValue)
-                Task { @MainActor in
-                    await codex.syncBridgeKeepMacAwakePreferenceIfNeeded(showFailureInUI: true)
-                }
-            }
-        )
-    }
+private struct SettingsRuntimeDefaultsCard: View {
+    @Environment(CodexService.self) private var codex
 
-    // MARK: - Runtime defaults
+    private let runtimeAutoValue = "__AUTO__"
+    private let runtimeNormalValue = "__NORMAL__"
+    private let settingsAccentColor = Color(.plan)
 
-    @ViewBuilder private var runtimeDefaultsSection: some View {
+    var body: some View {
         SettingsCard(title: "Runtime defaults") {
             HStack {
                 Text("Model")
@@ -157,9 +128,71 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Connection
+    private var runtimeModelOptions: [CodexModelOption] {
+        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+    }
 
-    @ViewBuilder private var connectionSection: some View {
+    private var runtimeReasoningOptions: [TurnComposerReasoningDisplayOption] {
+        TurnComposerMetaMapper.reasoningDisplayOptions(
+            from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+        )
+    }
+
+    private var runtimeModelSelection: Binding<String> {
+        Binding(
+            get: { codex.selectedModelOption()?.id ?? runtimeAutoValue },
+            set: { selection in
+                codex.setSelectedModelId(selection == runtimeAutoValue ? nil : selection)
+            }
+        )
+    }
+
+    private var runtimeReasoningSelection: Binding<String> {
+        Binding(
+            get: { codex.selectedReasoningEffort ?? runtimeAutoValue },
+            set: { selection in
+                codex.setSelectedReasoningEffort(selection == runtimeAutoValue ? nil : selection)
+            }
+        )
+    }
+
+    private var runtimeAccessSelection: Binding<CodexAccessMode> {
+        Binding(
+            get: { codex.selectedAccessMode },
+            set: { codex.setSelectedAccessMode($0) }
+        )
+    }
+
+    private var runtimeServiceTierSelection: Binding<String> {
+        Binding(
+            get: { codex.selectedServiceTier?.rawValue ?? runtimeNormalValue },
+            set: { selection in
+                codex.setSelectedServiceTier(
+                    selection == runtimeNormalValue ? nil : CodexServiceTier(rawValue: selection)
+                )
+            }
+        )
+    }
+
+    private var gitWriterModelOptions: [CodexModelOption] {
+        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+    }
+
+    private var gitWriterModelSelection: Binding<String> {
+        Binding(
+            get: { codex.selectedGitWriterModelOption()?.id ?? gitWriterModelOptions.first?.id ?? "" },
+            set: { codex.setSelectedGitWriterModelId($0.isEmpty ? nil : $0) }
+        )
+    }
+}
+
+private struct SettingsConnectionCard: View {
+    @Environment(CodexService.self) private var codex
+    @State private var isShowingComputerNameSheet = false
+
+    private let settingsAccentColor = Color(.plan)
+
+    var body: some View {
         SettingsCard(title: "Connection") {
             if let trustedPairPresentation = codex.trustedPairPresentation {
                 SettingsTrustedComputerCard(
@@ -228,6 +261,27 @@ struct SettingsView: View {
                 }
             }
         }
+        .sheet(isPresented: $isShowingComputerNameSheet) {
+            if let trustedPairPresentation = codex.trustedPairPresentation {
+                SettingsComputerNameSheet(
+                    nickname: sidebarComputerNicknameBinding(for: trustedPairPresentation),
+                    currentName: trustedPairPresentation.name,
+                    systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
+                )
+            }
+        }
+    }
+
+    private var keepMacAwakeWhileBridgeRunsBinding: Binding<Bool> {
+        Binding(
+            get: { codex.keepMacAwakeWhileBridgeRuns },
+            set: { nextValue in
+                codex.setKeepMacAwakeWhileBridgeRunsPreference(nextValue)
+                Task { @MainActor in
+                    await codex.syncBridgeKeepMacAwakePreferenceIfNeeded(showFailureInUI: true)
+                }
+            }
+        )
     }
 
     private var connectionPhaseShowsProgress: Bool {
@@ -274,65 +328,6 @@ struct SettingsView: View {
             await codex.disconnect()
             codex.clearSavedRelaySession()
         }
-    }
-
-    // MARK: - Runtime bindings
-
-    private var runtimeModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
-    }
-
-    private var runtimeReasoningOptions: [TurnComposerReasoningDisplayOption] {
-        TurnComposerMetaMapper.reasoningDisplayOptions(
-            from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
-        )
-    }
-
-    private var runtimeModelSelection: Binding<String> {
-        Binding(
-            get: { codex.selectedModelOption()?.id ?? runtimeAutoValue },
-            set: { selection in
-                codex.setSelectedModelId(selection == runtimeAutoValue ? nil : selection)
-            }
-        )
-    }
-
-    private var runtimeReasoningSelection: Binding<String> {
-        Binding(
-            get: { codex.selectedReasoningEffort ?? runtimeAutoValue },
-            set: { selection in
-                codex.setSelectedReasoningEffort(selection == runtimeAutoValue ? nil : selection)
-            }
-        )
-    }
-
-    private var runtimeAccessSelection: Binding<CodexAccessMode> {
-        Binding(
-            get: { codex.selectedAccessMode },
-            set: { codex.setSelectedAccessMode($0) }
-        )
-    }
-
-    private var runtimeServiceTierSelection: Binding<String> {
-        Binding(
-            get: { codex.selectedServiceTier?.rawValue ?? runtimeNormalValue },
-            set: { selection in
-                codex.setSelectedServiceTier(
-                    selection == runtimeNormalValue ? nil : CodexServiceTier(rawValue: selection)
-                )
-            }
-        )
-    }
-
-    private var gitWriterModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
-    }
-
-    private var gitWriterModelSelection: Binding<String> {
-        Binding(
-            get: { codex.selectedGitWriterModelOption()?.id ?? gitWriterModelOptions.first?.id ?? "" },
-            set: { codex.setSelectedGitWriterModelId($0.isEmpty ? nil : $0) }
-        )
     }
 
     // Writes nicknames against the active trusted computer so switching pairs does not reuse the wrong alias.
@@ -386,6 +381,12 @@ private struct SettingsSubscriptionCard: View {
         }
         .sheet(isPresented: $isPresentingPaywall) {
             RevenueCatPaywallView()
+        }
+        .task {
+            guard subscriptions.bootstrapState == .idle else {
+                return
+            }
+            await subscriptions.bootstrap()
         }
     }
 }
@@ -536,27 +537,35 @@ private struct SettingsAppearanceCard: View {
                 .tint(settingsAccentColor)
             }
 
-            Text(appFontStyle.subtitle)
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-
             Divider()
 
             HStack {
-                Text("User bubble")
-                Spacer()
-                Picker("User bubble", selection: userBubbleColorSelection) {
+                Text("Message Bubble")
+                Menu {
                     ForEach(UserBubbleColor.allCases) { color in
-                        HStack(spacing: 10) {
-                            Image(systemName: selectedUserBubbleColor == color ? "checkmark.circle.fill" : "circle.fill")
-                                .foregroundStyle(color.swatchColor)
-                            Text(color.title)
+                        Button {
+                            userBubbleColorRawValue = color.rawValue
+                        } label: {
+                            Label {
+                                Text(color.title)
+                            } icon: {
+                                Image(uiImage: color.menuSwatchImage)
+                                    .renderingMode(.original)
+                            }
                         }
-                        .tag(color)
                     }
+                } label: {
+                    HStack {
+                        Spacer()
+                        Circle()
+                            .fill(selectedUserBubbleColor.swatchColor)
+                            .frame(width: 14, height: 14)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 28, alignment: .trailing)
+                    .contentShape(Rectangle())
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
+                .accessibilityLabel("Message Bubble color")
+                .accessibilityValue(selectedUserBubbleColor.title)
                 .tint(settingsAccentColor)
             }
 
@@ -565,25 +574,12 @@ private struct SettingsAppearanceCard: View {
 
                 Toggle("Liquid Glass", isOn: $useLiquidGlass)
                     .tint(settingsAccentColor)
-
-                Text(useLiquidGlass
-                     ? "Liquid Glass effects are enabled."
-                     : "Using solid material fallback.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
             }
         }
     }
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
-    }
-
-    private var userBubbleColorSelection: Binding<UserBubbleColor> {
-        Binding(
-            get: { selectedUserBubbleColor },
-            set: { userBubbleColorRawValue = $0.rawValue }
-        )
     }
 }
 
