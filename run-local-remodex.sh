@@ -16,6 +16,7 @@ RELAY_SERVER_MODULE="${RELAY_DIR}/server.js"
 RELAY_BIND_HOST="${RELAY_BIND_HOST:-0.0.0.0}"
 RELAY_PORT="${RELAY_PORT:-9000}"
 RELAY_HOSTNAME="${RELAY_HOSTNAME:-}"
+RELAY_URL="${RELAY_URL:-}"
 RELAY_BRIDGE_HOST=""
 RELAY_PID=""
 BRIDGE_PID=""
@@ -35,6 +36,7 @@ Usage: ./run-local-remodex.sh [options]
 
 Options:
   --hostname HOSTNAME   Hostname or IP the iPhone should use to reach the relay
+  --relay-url URL       Full relay URL to advertise, for tunnels or reverse proxies
   --bind-host HOST      Interface/address the local relay should listen on
   --port PORT           Relay port to listen on
   --help                Show this help text
@@ -43,6 +45,7 @@ Defaults:
   --bind-host           0.0.0.0
   --port                9000
   --hostname            macOS LocalHostName.local, then hostname, then localhost
+  --relay-url           auto-built as ws://<hostname>:<port>/relay
 EOF
 }
 
@@ -58,6 +61,11 @@ parse_args() {
       --hostname)
         require_value "--hostname" "$#"
         RELAY_HOSTNAME="$2"
+        shift 2
+        ;;
+      --relay-url)
+        require_value "--relay-url" "$#"
+        RELAY_URL="$2"
         shift 2
         ;;
       --bind-host)
@@ -157,6 +165,69 @@ ensure_prerequisites() {
   require_command npm
   require_command curl
   ensure_node_version
+}
+
+validate_hostname_argument() {
+  local hostname="$1"
+  [[ -n "${hostname}" ]] || die "Hostname cannot be empty."
+
+  # Expect just a host/IP value. A URL cannot be converted into a valid
+  # ws:// relay endpoint by this local-only helper.
+  if [[ "${hostname}" == *"://"* ]] || [[ "${hostname}" == */* ]]; then
+    die "Invalid --hostname '${hostname}'. Pass only a LAN hostname or IP address (for example: --hostname 192.168.1.101)."
+  fi
+}
+
+normalize_relay_url() {
+  local raw_url="$1"
+
+  node -e '
+const rawUrl = process.argv[1];
+
+try {
+  const url = new URL(rawUrl);
+  if (url.username || url.password) {
+    throw new Error("credentials are not supported in relay URLs");
+  }
+  if (url.search || url.hash) {
+    throw new Error("query strings and fragments are not supported in relay URLs");
+  }
+
+  switch (url.protocol) {
+    case "ws:":
+    case "wss:":
+      break;
+    case "http:":
+      url.protocol = "ws:";
+      break;
+    case "https:":
+      url.protocol = "wss:";
+      break;
+    default:
+      throw new Error("expected ws://, wss://, http://, or https://");
+  }
+
+  if (url.pathname === "" || url.pathname === "/") {
+    url.pathname = "/relay";
+  }
+
+  console.log(url.toString());
+} catch (error) {
+  console.error((error && error.message) || "invalid URL");
+  process.exit(1);
+}
+' "${raw_url}"
+}
+
+configure_relay_url() {
+  if [[ -n "${RELAY_URL}" ]]; then
+    RELAY_URL="$(normalize_relay_url "${RELAY_URL}")" || die "Invalid --relay-url '${RELAY_URL}'. Pass ws(s)://.../relay, or paste an http(s) tunnel URL."
+    return
+  fi
+
+  validate_hostname_argument "${RELAY_HOSTNAME}"
+  ensure_hostname_belongs_to_this_mac
+  RELAY_URL="ws://${RELAY_HOSTNAME}:${RELAY_PORT}/relay"
 }
 
 # Validates the advertised host before boot so the QR cannot point at another machine by mistake.
@@ -289,7 +360,7 @@ print_summary() {
   Relay port      : ${RELAY_PORT}
   Relay hostname  : ${RELAY_HOSTNAME}
   Bridge host     : ${RELAY_BRIDGE_HOST}
-  Relay URL       : ws://${RELAY_HOSTNAME}:${RELAY_PORT}/relay
+  Relay URL       : ${RELAY_URL}
 EOF
 }
 
@@ -299,7 +370,7 @@ start_bridge() {
   # This local helper should print the QR in the current terminal immediately.
   # Use the foreground bridge path instead of the macOS launchd wrapper so QR
   # rendering does not depend on daemon state being written back first.
-  REMODEX_RELAY="ws://${RELAY_HOSTNAME}:${RELAY_PORT}/relay" node ./bin/remodex.js run &
+  REMODEX_RELAY="${RELAY_URL}" node ./bin/remodex.js run &
   BRIDGE_PID=$!
 }
 
@@ -330,7 +401,7 @@ RELAY_BRIDGE_HOST="$(healthcheck_host)"
 ensure_prerequisites
 ensure_package_dependencies "${BRIDGE_DIR}"
 ensure_package_dependencies "${RELAY_DIR}"
-ensure_hostname_belongs_to_this_mac
+configure_relay_url
 ensure_port_available
 print_summary
 start_embedded_relay

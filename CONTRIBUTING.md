@@ -60,6 +60,18 @@ This launcher:
 3. Points the bridge at that relay
 4. Prints a QR code in your terminal for the initial trust bootstrap
 
+For a temporary public tunnel to that local relay, start the tunnel in one terminal:
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:9000
+```
+
+Then pass the generated URL to the launcher in another terminal:
+
+```sh
+./run-local-remodex.sh --relay-url https://<random>.trycloudflare.com
+```
+
 If you only want the bridge process:
 
 ```sh
@@ -100,7 +112,7 @@ The app uses SwiftUI and the current project target is iOS 18.6. No CocoaPods or
 
 ### Environment variables
 
-For OSS/local development, prefer the launcher above. If you want to point the bridge at your own relay manually, export `REMODEX_RELAY` in your shell:
+For OSS/local development, prefer the launcher above. If you want to point the bridge process at your own relay manually without the launcher, export `REMODEX_RELAY` in your shell:
 
 ```sh
 # Connect to an existing Codex instance instead of spawning one
@@ -160,6 +172,6 @@ remodex/
 
 - The first QR pairing is possession-based: it contains the relay URL and a live session ID.
 - After that first handshake, the iPhone stores a trusted Mac record and can ask the relay for the Mac's current live session again.
-- Set `REMODEX_RELAY` to a relay you control when you are not using the local launcher. Use `wss://` when you want TLS in transit.
+- Set `REMODEX_RELAY` to a relay you control when you are not using the local launcher, or pass the relay URL to the launcher with `--relay-url`. Use `wss://` when you want TLS in transit.
 - Remodex uses an authenticated end-to-end encrypted transport after pairing completes. The relay code is public for inspection, but deployed relay details should stay in private config.
 - The built-in daemon / background service path is currently macOS-only. Linux and Windows can still run the bridge, but contributors should treat the daemon logic as platform-specific.
