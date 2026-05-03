@@ -11,6 +11,7 @@ const os = require("node:os");
 const path = require("node:path");
 const {
   buildHeartbeatBridgeStatus,
+  clampRelayThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
   hasRelayConnectionGoneStale,
   persistBridgePreferences,
@@ -101,6 +102,53 @@ test("buildHeartbeatBridgeStatus leaves fresh or already-disconnected snapshots 
     lastError: "",
   };
   assert.deepEqual(buildHeartbeatBridgeStatus(disconnectedStatus, 1_000), disconnectedStatus);
+});
+
+test("clampRelayThreadTurnsListRequest caps oversized turns-list page requests", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-turns-list",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-large",
+      limit: 20,
+      sortDirection: "desc",
+      cursor: "cursor-1",
+    },
+  });
+
+  const clamped = JSON.parse(clampRelayThreadTurnsListRequest(rawMessage));
+
+  assert.equal(clamped.id, "req-turns-list");
+  assert.equal(clamped.method, "thread/turns/list");
+  assert.deepEqual(clamped.params, {
+    threadId: "thread-large",
+    limit: 5,
+    sortDirection: "desc",
+    cursor: "cursor-1",
+  });
+});
+
+test("clampRelayThreadTurnsListRequest leaves small and unrelated requests unchanged", () => {
+  const olderPageRequest = JSON.stringify({
+    id: "req-turns-list-older",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-large",
+      limit: 5,
+      sortDirection: "desc",
+    },
+  });
+  const threadReadRequest = JSON.stringify({
+    id: "req-thread-read",
+    method: "thread/read",
+    params: {
+      threadId: "thread-large",
+      includeTurns: true,
+    },
+  });
+
+  assert.equal(clampRelayThreadTurnsListRequest(olderPageRequest), olderPageRequest);
+  assert.equal(clampRelayThreadTurnsListRequest(threadReadRequest), threadReadRequest);
 });
 
 test("sanitizeThreadHistoryImagesForRelay replaces inline history images with lightweight references", () => {
@@ -697,10 +745,60 @@ test("sanitizeThreadHistoryImagesForRelay compacts oversized turns pages", () =>
   const item = sanitized.result.items[0].items[0];
 
   assert.equal(sanitized.result.remodexPageCompactedForRelay, true);
+  assert.deepEqual(
+    sanitized.result.items.map((turn) => turn.id),
+    ["turn-1"]
+  );
+  assert.equal(
+    sanitized.result.items.some((turn) => turn.id.startsWith("remodex-history-compacted-")),
+    false
+  );
   assert.equal(sanitized.result.items[0].remodexPageCompactedForRelay, true);
   assert.equal(item.relayPayloadTruncated, true);
   assert.equal(item.text.startsWith("…\n"), true);
   assert.equal(item.text.length < 120_000, true);
+});
+
+test("sanitizeThreadHistoryImagesForRelay preserves oversized turns pages instead of replacing them with a marker", () => {
+  const turns = Array.from({ length: 5 }, (_, turnIndex) => ({
+    id: `turn-${turnIndex + 1}`,
+    items: Array.from({ length: 900 }, (_, itemIndex) => ({
+      id: `item-${turnIndex + 1}-${itemIndex + 1}`,
+      type: "function_call_output",
+      role: "tool",
+      itemId: `call-${turnIndex + 1}-${itemIndex + 1}`,
+      text: "C".repeat(1_500),
+      payload: {
+        blob: "D".repeat(1_200),
+      },
+    })),
+  }));
+  const rawMessage = JSON.stringify({
+    id: "req-turns-list-impossible",
+    result: {
+      data: turns,
+      nextCursor: "cursor-after-huge-page",
+    },
+  });
+
+  const sanitizedRaw = sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/turns/list");
+  const sanitized = JSON.parse(sanitizedRaw);
+
+  assert.equal(Buffer.byteLength(sanitizedRaw, "utf8") <= 4 * 1024 * 1024, true);
+  assert.deepEqual(
+    sanitized.result.data.map((turn) => turn.id),
+    turns.map((turn) => turn.id)
+  );
+  assert.equal(
+    sanitized.result.data.some((turn) => turn.id.startsWith("remodex-history-compacted-")),
+    false
+  );
+  assert.equal(sanitized.result.nextCursor, "cursor-after-huge-page");
+  assert.equal(sanitized.result.data.every((turn) => turn.items.length === 900), true);
+  assert.equal(
+    sanitized.result.data.every((turn) => turn.items.every((item) => item.relayPayloadTruncated === true)),
+    true
+  );
 });
 
 test("sanitizeThreadHistoryImagesForRelay compacts oversized history before the newest turn tail", () => {

@@ -63,6 +63,7 @@ const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
 const RELAY_HISTORY_RECENT_TURN_TARGET = 40;
+const RELAY_TURNS_LIST_FORWARD_LIMIT = 5;
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -545,9 +546,10 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
       return;
     }
-    rememberForwardedRequestMethod(rawMessage);
-    rememberThreadFromMessage("phone", rawMessage);
-    codex.send(rawMessage);
+    const forwardedMessage = clampRelayThreadTurnsListRequest(rawMessage);
+    rememberForwardedRequestMethod(forwardedMessage);
+    rememberThreadFromMessage("phone", forwardedMessage);
+    codex.send(forwardedMessage);
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
@@ -1376,6 +1378,34 @@ function normalizeNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
+function clampRelayThreadTurnsListRequest(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return rawMessage;
+  }
+
+  if (parsed.method !== "thread/turns/list") {
+    return rawMessage;
+  }
+
+  const params = parsed.params;
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return rawMessage;
+  }
+
+  if (!Number.isInteger(params.limit) || params.limit <= RELAY_TURNS_LIST_FORWARD_LIMIT) {
+    return rawMessage;
+  }
+
+  return JSON.stringify({
+    ...parsed,
+    params: {
+      ...params,
+      limit: RELAY_TURNS_LIST_FORWARD_LIMIT,
+    },
+  });
+}
+
 // Shrinks thread history snapshots/pages for mobile relay delivery.
 // This elides bulky blobs and replaces oversized older history with a compact marker.
 function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
@@ -1933,6 +1963,7 @@ function trimTurnsListPayloadForRelay(parsed, turnsKey, originalRawMessage = nul
     return originalRawMessage ?? encoded;
   }
 
+  let fallbackCompactedPayload = null;
   for (const maxChars of [
     RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS,
     Math.floor(RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS / 4),
@@ -1948,20 +1979,13 @@ function trimTurnsListPayloadForRelay(parsed, turnsKey, originalRawMessage = nul
         remodexPageCompactedForRelay: true,
       },
     });
+    fallbackCompactedPayload = compactedPayload;
     if (Buffer.byteLength(compactedPayload, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
       return compactedPayload;
     }
   }
 
-  const markerTurn = buildRelayHistoryCompactionTurn(turns.length, 0, turns[0]);
-  return JSON.stringify({
-    ...parsed,
-    result: {
-      ...result,
-      [turnsKey]: markerTurn ? [markerTurn] : [],
-      remodexPageCompactedForRelay: true,
-    },
-  });
+  return fallbackCompactedPayload ?? (originalRawMessage ?? encoded);
 }
 
 function compactTurnsListTurnForRelay(turn, maxChars) {
@@ -2103,7 +2127,7 @@ function compactHistoryItemForRelay(item, maxChars) {
     itemId: typeof item?.itemId === "string" ? item.itemId : undefined,
     relayPayloadTruncated: true,
   };
-  const tailText = firstRelayTextTail(item, maxChars);
+  const tailText = maxChars > 0 ? firstRelayTextTail(item, maxChars) : "";
   if (tailText) {
     compactItem.text = tailText;
   }
@@ -2204,6 +2228,7 @@ function persistBridgePreferences(
 
 module.exports = {
   buildHeartbeatBridgeStatus,
+  clampRelayThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
   hasRelayConnectionGoneStale,
   persistBridgePreferences,
