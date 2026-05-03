@@ -156,6 +156,7 @@ extension CodexService {
         }
 
         do {
+            // Poll recent metadata only; full sidebar hydration happens in listThreads().
             let activeThreads = try await fetchServerThreads(limit: recentActiveThreadListLimit)
 
             // Also fetch server-archived threads so they survive app restarts.

@@ -167,8 +167,9 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         preview = try container.decodeIfPresent(String.self, forKey: .preview)
         createdAt = try Self.decodeDateIfPresent(from: container, keys: [.createdAt, .createdAtSnake])
         updatedAt = try Self.decodeDateIfPresent(from: container, keys: [.updatedAt, .updatedAtSnake])
-        cwd = Self.decodeStringIfPresent(from: container, keys: [.cwd, .cwdSnake, .cwdWorkingDirectory])
         metadata = try container.decodeIfPresent([String: JSONValue].self, forKey: .metadata)
+        cwd = Self.decodeStringIfPresent(from: container, keys: [.cwd, .cwdSnake, .cwdWorkingDirectory])
+            ?? Self.decodeProjectPath(from: metadata)
         forkedFromThreadId = Self.decodeThreadIdentity(
             from: container,
             metadata: metadata,
@@ -314,6 +315,21 @@ extension CodexThread {
                 continue
             }
             return trimmed
+        }
+
+        return nil
+    }
+
+    // Some thread/list payloads carry cwd inside metadata instead of as a top-level field.
+    private static func decodeProjectPath(from metadata: [String: JSONValue]?) -> String? {
+        guard let metadata else {
+            return nil
+        }
+
+        for key in ["cwd", "current_working_directory", "working_directory", "projectPath", "project_path"] {
+            if let normalized = normalizeProjectPath(metadata[key]?.stringValue) {
+                return normalized
+            }
         }
 
         return nil

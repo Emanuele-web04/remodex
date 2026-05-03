@@ -12,8 +12,7 @@ private enum ThreadTurnStateSnapshotPolicy {
 }
 
 extension CodexService {
-    // Keeps sidebar/project loading focused on recent live conversations while
-    // retaining a smaller archived slice for restart/recovery flows.
+    // Polling keeps recent metadata fresh; full list loads are reserved for bootstrap/explicit refresh.
     var recentActiveThreadListLimit: Int { 70 }
     var recentArchivedThreadListLimit: Int { 10 }
 
@@ -58,13 +57,12 @@ extension CodexService {
         isLoadingThreads = true
         defer { isLoadingThreads = false }
 
-        let activeLimit = limit ?? recentActiveThreadListLimit
-        let archivedLimit = limit ?? recentArchivedThreadListLimit
-        let activeThreads = try await fetchServerThreads(limit: activeLimit)
+        // Sidebar metadata must be complete: capping thread/list hides older project chats.
+        let activeThreads = try await fetchServerThreads(limit: limit)
 
         var archivedThreads: [CodexThread] = []
         do {
-            archivedThreads = try await fetchServerThreads(limit: archivedLimit, archived: true)
+            archivedThreads = try await fetchServerThreads(limit: limit, archived: true)
         } catch {
             debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
         }

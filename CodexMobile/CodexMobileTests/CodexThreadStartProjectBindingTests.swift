@@ -90,6 +90,20 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertEqual(thread.gitWorkingDirectory, "/Users/me/work/project")
     }
 
+    func testDecoderUsesMetadataCwdWhenTopLevelCwdIsMissing() throws {
+        let payload: JSONValue = .object([
+            "id": .string("thread-1"),
+            "metadata": .object([
+                "cwd": .string("/Users/me/work/project///"),
+            ]),
+        ])
+
+        let data = try JSONEncoder().encode(payload)
+        let thread = try JSONDecoder().decode(CodexThread.self, from: data)
+
+        XCTAssertEqual(thread.gitWorkingDirectory, "/Users/me/work/project")
+    }
+
     func testGitWorkingDirectoryIsNilForUnboundThread() {
         let thread = CodexThread(id: "thread-1", cwd: "   ")
 
