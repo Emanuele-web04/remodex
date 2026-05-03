@@ -63,7 +63,24 @@ const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
 const RELAY_HISTORY_RECENT_TURN_TARGET = 40;
-const RELAY_TURNS_LIST_FORWARD_LIMIT = 5;
+const RELAY_TURNS_LIST_TARGET_BUDGET_MS = 5_500;
+const RELAY_TURNS_LIST_BUDGET_RESERVE_MS = 1_000;
+const RELAY_TURNS_LIST_RESULT_KEYS = ["data", "items", "turns"];
+const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
+  "nextCursor",
+  "next_cursor",
+  "cursor",
+  "hasNextCursor",
+  "has_next_cursor",
+  "hasNextPage",
+  "has_next_page",
+  "hasMore",
+  "has_more",
+  "prevCursor",
+  "prev_cursor",
+  "previousCursor",
+  "previous_cursor",
+];
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -546,10 +563,12 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
       return;
     }
-    const forwardedMessage = clampRelayThreadTurnsListRequest(rawMessage);
-    rememberForwardedRequestMethod(forwardedMessage);
-    rememberThreadFromMessage("phone", forwardedMessage);
-    codex.send(forwardedMessage);
+    if (handleBridgeManagedThreadTurnsListRequest(rawMessage)) {
+      return;
+    }
+    rememberForwardedRequestMethod(rawMessage);
+    rememberThreadFromMessage("phone", rawMessage);
+    codex.send(rawMessage);
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
@@ -577,6 +596,35 @@ function startBridge({
         title: name,
       },
     }));
+  }
+
+  function handleBridgeManagedThreadTurnsListRequest(rawMessage) {
+    const request = parseAdaptiveThreadTurnsListRequest(rawMessage);
+    if (!request) {
+      return false;
+    }
+
+    rememberThreadFromMessage("phone", rawMessage);
+    (async () => {
+      try {
+        const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
+          fetchPage: (params) => sendCodexRequest("thread/turns/list", params),
+        });
+        relaySanitizedResponseMethodsById.set(String(request.id), {
+          method: "thread/turns/list",
+          createdAt: Date.now(),
+        });
+        sendApplicationResponse(JSON.stringify(response));
+      } catch (error) {
+        sendApplicationResponse(createJsonRpcErrorResponse(
+          request.id,
+          error,
+          "thread_turns_list_failed"
+        ));
+      }
+    })();
+
+    return true;
   }
 
   // ─── Bridge-owned auth snapshot ─────────────────────────────
@@ -1378,32 +1426,219 @@ function normalizeNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-function clampRelayThreadTurnsListRequest(rawMessage) {
+function parseAdaptiveThreadTurnsListRequest(rawMessage) {
   const parsed = parseBridgeJSON(rawMessage);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return rawMessage;
+    return null;
   }
 
   if (parsed.method !== "thread/turns/list") {
-    return rawMessage;
+    return null;
+  }
+
+  if (parsed.id == null) {
+    return null;
   }
 
   const params = parsed.params;
   if (!params || typeof params !== "object" || Array.isArray(params)) {
-    return rawMessage;
+    return null;
   }
 
-  if (!Number.isInteger(params.limit) || params.limit <= RELAY_TURNS_LIST_FORWARD_LIMIT) {
-    return rawMessage;
+  if (!Number.isInteger(params.limit) || params.limit <= 0) {
+    return null;
   }
 
-  return JSON.stringify({
-    ...parsed,
-    params: {
-      ...params,
-      limit: RELAY_TURNS_LIST_FORWARD_LIMIT,
+  return parsed;
+}
+
+async function fetchAdaptiveThreadTurnsListForRelay(request, {
+  fetchPage,
+  now = Date.now,
+  targetBudgetMs = RELAY_TURNS_LIST_TARGET_BUDGET_MS,
+  budgetReserveMs = RELAY_TURNS_LIST_BUDGET_RESERVE_MS,
+  rawPageSoftLimitBytes = RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES,
+  payloadSoftLimitBytes = RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES,
+  sanitizeForRelay = sanitizeThreadHistoryImagesForRelay,
+} = {}) {
+  if (typeof fetchPage !== "function") {
+    throw new Error("fetchPage is required for adaptive turns-list pagination.");
+  }
+
+  const params = request?.params;
+  const requestedLimit = Number.isInteger(params?.limit) && params.limit > 0
+    ? params.limit
+    : 1;
+  const startedAt = now();
+  let nextCursor = params?.cursor;
+  let turnsKey = null;
+  let firstResult = null;
+  let lastResult = null;
+  let combinedTurns = [];
+  let response = null;
+
+  while (combinedTurns.length < requestedLimit) {
+    const remaining = requestedLimit - combinedTurns.length;
+    const pageLimit = selectAdaptiveTurnsListBatchLimit(combinedTurns.length, remaining);
+    const pageParams = buildAdaptiveTurnsListPageParams(params, pageLimit, nextCursor);
+    let page;
+
+    try {
+      page = await fetchMeasuredAdaptiveTurnsListPage(fetchPage, pageParams, now);
+    } catch (error) {
+      if (response) {
+        return response;
+      }
+      throw error;
+    }
+
+    const pageResult = page.result;
+    const pageTurnsKey = findTurnsListResultKey(pageResult);
+    if (!pageTurnsKey) {
+      if (!response) {
+        return {
+          id: request.id,
+          result: pageResult ?? null,
+        };
+      }
+      return response;
+    }
+
+    if (!turnsKey) {
+      turnsKey = pageTurnsKey;
+    }
+    if (!firstResult) {
+      firstResult = pageResult;
+    }
+    lastResult = pageResult;
+
+    const pageTurns = pageResult[pageTurnsKey];
+    combinedTurns = combinedTurns.concat(pageTurns);
+    response = {
+      id: request.id,
+      result: buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, combinedTurns),
+    };
+
+    nextCursor = readTurnsListNextCursor(pageResult);
+    if (combinedTurns.length >= requestedLimit || !hasRelayCursor(nextCursor) || pageTurns.length === 0) {
+      break;
+    }
+
+    const rawPageBytes = jsonByteLength(pageResult);
+    const sanitizedResponseBytes = measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay);
+    const elapsedMs = Math.max(0, now() - startedAt);
+    const remainingBudgetMs = Math.max(0, targetBudgetMs - elapsedMs);
+    if (
+      rawPageBytes >= rawPageSoftLimitBytes
+      || sanitizedResponseBytes >= payloadSoftLimitBytes
+      || page.elapsedMs >= Math.max(0, targetBudgetMs - budgetReserveMs)
+      || remainingBudgetMs <= budgetReserveMs
+    ) {
+      break;
+    }
+  }
+
+  return response ?? {
+    id: request.id,
+    result: {
+      data: [],
     },
-  });
+  };
+}
+
+async function fetchMeasuredAdaptiveTurnsListPage(fetchPage, params, now) {
+  const startedAt = now();
+  const result = await fetchPage(params);
+  const elapsedMs = Math.max(0, now() - startedAt);
+  return {
+    result,
+    elapsedMs,
+  };
+}
+
+function selectAdaptiveTurnsListBatchLimit(fetchedTurnCount, remainingTurnCount) {
+  if (fetchedTurnCount <= 0) {
+    return Math.min(1, remainingTurnCount);
+  }
+  if (fetchedTurnCount <= 1) {
+    return Math.min(4, remainingTurnCount);
+  }
+  return remainingTurnCount;
+}
+
+function buildAdaptiveTurnsListPageParams(baseParams, limit, cursor) {
+  const params = {
+    ...baseParams,
+    limit,
+  };
+  if (hasRelayCursor(cursor)) {
+    params.cursor = cursor;
+  } else {
+    delete params.cursor;
+  }
+  return params;
+}
+
+function findTurnsListResultKey(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return null;
+  }
+  return RELAY_TURNS_LIST_RESULT_KEYS.find((key) => Array.isArray(result[key])) || null;
+}
+
+function buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, turns) {
+  const result = {
+    ...firstResult,
+  };
+  for (const key of RELAY_TURNS_LIST_RESULT_KEYS) {
+    delete result[key];
+  }
+  result[turnsKey] = turns;
+
+  for (const key of RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(lastResult, key)) {
+      result[key] = lastResult[key];
+    } else {
+      delete result[key];
+    }
+  }
+
+  return result;
+}
+
+function readTurnsListNextCursor(result) {
+  if (!result || typeof result !== "object") {
+    return undefined;
+  }
+  if (hasRelayCursor(result.nextCursor)) {
+    return result.nextCursor;
+  }
+  if (hasRelayCursor(result.next_cursor)) {
+    return result.next_cursor;
+  }
+  return undefined;
+}
+
+function hasRelayCursor(cursor) {
+  return cursor !== undefined && cursor !== null && cursor !== "";
+}
+
+function jsonByteLength(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay) {
+  try {
+    const rawResponse = JSON.stringify(response);
+    const sanitizedResponse = sanitizeForRelay(rawResponse, "thread/turns/list");
+    return Buffer.byteLength(sanitizedResponse, "utf8");
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
 }
 
 // Shrinks thread history snapshots/pages for mobile relay delivery.
@@ -2228,8 +2463,8 @@ function persistBridgePreferences(
 
 module.exports = {
   buildHeartbeatBridgeStatus,
-  clampRelayThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
+  fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   persistBridgePreferences,
   sanitizeLiveGeneratedImageMessageForRelay,

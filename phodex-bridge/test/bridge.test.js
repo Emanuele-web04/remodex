@@ -11,8 +11,8 @@ const os = require("node:os");
 const path = require("node:path");
 const {
   buildHeartbeatBridgeStatus,
-  clampRelayThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
+  fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   persistBridgePreferences,
   sanitizeLiveGeneratedImageMessageForRelay,
@@ -104,51 +104,239 @@ test("buildHeartbeatBridgeStatus leaves fresh or already-disconnected snapshots 
   assert.deepEqual(buildHeartbeatBridgeStatus(disconnectedStatus, 1_000), disconnectedStatus);
 });
 
-test("clampRelayThreadTurnsListRequest caps oversized turns-list page requests", () => {
-  const rawMessage = JSON.stringify({
+function makeTurns(start, count) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `turn-${start + index}`,
+    items: [
+      {
+        id: `item-${start + index}`,
+        type: "assistant_message",
+        text: `message ${start + index}`,
+      },
+    ],
+  }));
+}
+
+test("fetchAdaptiveThreadTurnsListForRelay expands small turns-list pages to the requested limit", async () => {
+  const request = {
     id: "req-turns-list",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-small",
+      limit: 20,
+      sortDirection: "desc",
+    },
+  };
+  const fetches = [];
+  const pages = [
+    { data: makeTurns(1, 1), nextCursor: "cursor-after-1", stableMeta: "first-page" },
+    { data: makeTurns(2, 4), nextCursor: "cursor-after-5", stableMeta: "second-page" },
+    { data: makeTurns(6, 15), nextCursor: "cursor-after-20", stableMeta: "third-page" },
+  ];
+
+  const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
+    fetchPage: async (params) => {
+      fetches.push(params);
+      return pages.shift();
+    },
+  });
+
+  assert.equal(response.id, "req-turns-list");
+  assert.equal(response.result.data.length, 20);
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    makeTurns(1, 20).map((turn) => turn.id)
+  );
+  assert.equal(
+    response.result.data.some((turn) => turn.id.startsWith("remodex-history-compacted-")),
+    false
+  );
+  assert.equal(response.result.stableMeta, "first-page");
+  assert.equal(response.result.nextCursor, "cursor-after-20");
+  assert.deepEqual(
+    fetches.map((params) => ({ limit: params.limit, cursor: params.cursor })),
+    [
+      { limit: 1, cursor: undefined },
+      { limit: 4, cursor: "cursor-after-1" },
+      { limit: 15, cursor: "cursor-after-5" },
+    ]
+  );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay stops at one turn for a huge first turns-list page", async () => {
+  const request = {
+    id: "req-turns-list-large-first",
     method: "thread/turns/list",
     params: {
       threadId: "thread-large",
       limit: 20,
       sortDirection: "desc",
-      cursor: "cursor-1",
+    },
+  };
+  const fetches = [];
+
+  const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
+    fetchPage: async (params) => {
+      fetches.push(params);
+      return {
+        data: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "item-1",
+                type: "function_call_output",
+                text: "A".repeat(4 * 1024 * 1024),
+              },
+            ],
+          },
+        ],
+        nextCursor: "cursor-after-1",
+      };
     },
   });
 
-  const clamped = JSON.parse(clampRelayThreadTurnsListRequest(rawMessage));
-
-  assert.equal(clamped.id, "req-turns-list");
-  assert.equal(clamped.method, "thread/turns/list");
-  assert.deepEqual(clamped.params, {
-    threadId: "thread-large",
-    limit: 5,
-    sortDirection: "desc",
-    cursor: "cursor-1",
-  });
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    ["turn-1"]
+  );
+  assert.equal(response.result.nextCursor, "cursor-after-1");
+  assert.equal(fetches.length, 1);
 });
 
-test("clampRelayThreadTurnsListRequest leaves small and unrelated requests unchanged", () => {
-  const olderPageRequest = JSON.stringify({
+test("fetchAdaptiveThreadTurnsListForRelay stops after a huge second turns-list batch", async () => {
+  const request = {
+    id: "req-turns-list-large-second",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-mixed",
+      limit: 20,
+      sortDirection: "desc",
+    },
+  };
+  const fetches = [];
+  const pages = [
+    { data: makeTurns(1, 1), nextCursor: "cursor-after-1" },
+    {
+      data: makeTurns(2, 4).map((turn) => ({
+        ...turn,
+        items: [
+          {
+            id: `${turn.id}-item`,
+            type: "function_call_output",
+            text: "B".repeat(1024 * 1024),
+          },
+        ],
+      })),
+      nextCursor: "cursor-after-5",
+    },
+  ];
+
+  const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
+    fetchPage: async (params) => {
+      fetches.push(params);
+      return pages.shift();
+    },
+  });
+
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    makeTurns(1, 5).map((turn) => turn.id)
+  );
+  assert.equal(response.result.nextCursor, "cursor-after-5");
+  assert.deepEqual(
+    fetches.map((params) => params.limit),
+    [1, 4]
+  );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay forwards input and returned cursors", async () => {
+  const request = {
     id: "req-turns-list-older",
     method: "thread/turns/list",
     params: {
       threadId: "thread-large",
-      limit: 5,
+      limit: 6,
       sortDirection: "desc",
+      cursor: "cursor-before-page",
     },
-  });
-  const threadReadRequest = JSON.stringify({
-    id: "req-thread-read",
-    method: "thread/read",
-    params: {
-      threadId: "thread-large",
-      includeTurns: true,
+  };
+  const fetches = [];
+  const pages = [
+    { items: makeTurns(1, 1), nextCursor: "cursor-after-first" },
+    { items: makeTurns(2, 4), nextCursor: "cursor-after-second" },
+    { items: makeTurns(6, 1), nextCursor: "cursor-after-third" },
+  ];
+
+  const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
+    fetchPage: async (params) => {
+      fetches.push(params);
+      return pages.shift();
     },
   });
 
-  assert.equal(clampRelayThreadTurnsListRequest(olderPageRequest), olderPageRequest);
-  assert.equal(clampRelayThreadTurnsListRequest(threadReadRequest), threadReadRequest);
+  assert.equal(response.result.items.length, 6);
+  assert.equal(response.result.nextCursor, "cursor-after-third");
+  assert.deepEqual(
+    fetches.map((params) => ({ limit: params.limit, cursor: params.cursor })),
+    [
+      { limit: 1, cursor: "cursor-before-page" },
+      { limit: 4, cursor: "cursor-after-first" },
+      { limit: 1, cursor: "cursor-after-second" },
+    ]
+  );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay preserves turns-list response array shapes", async () => {
+  for (const turnsKey of ["data", "items", "turns"]) {
+    const response = await fetchAdaptiveThreadTurnsListForRelay({
+      id: `req-${turnsKey}`,
+      method: "thread/turns/list",
+      params: {
+        threadId: `thread-${turnsKey}`,
+        limit: 1,
+      },
+    }, {
+      fetchPage: async () => ({
+        [turnsKey]: makeTurns(1, 1),
+        nextCursor: `cursor-${turnsKey}`,
+      }),
+    });
+
+    assert.equal(Array.isArray(response.result[turnsKey]), true);
+    assert.equal(response.result[turnsKey][0].id, "turn-1");
+    for (const otherKey of ["data", "items", "turns"].filter((key) => key !== turnsKey)) {
+      assert.equal(response.result[otherKey], undefined);
+    }
+    assert.equal(response.result.nextCursor, `cursor-${turnsKey}`);
+  }
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay returns fetched turns when a later batch fails", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-later-error",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-later-error",
+      limit: 5,
+    },
+  }, {
+    fetchPage: async (params) => {
+      if (params.cursor === "cursor-after-first") {
+        throw new Error("app-server failed");
+      }
+      return {
+        data: makeTurns(1, 1),
+        nextCursor: "cursor-after-first",
+      };
+    },
+  });
+
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    ["turn-1"]
+  );
+  assert.equal(response.result.nextCursor, "cursor-after-first");
 });
 
 test("sanitizeThreadHistoryImagesForRelay replaces inline history images with lightweight references", () => {
