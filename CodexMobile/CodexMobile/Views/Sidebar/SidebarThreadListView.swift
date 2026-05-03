@@ -30,6 +30,7 @@ struct SidebarThreadListView: View {
     @State private var knownProjectGroupIDs: Set<String> = []
     @State private var hasInitializedProjectGroupExpansion = false
     @State private var isArchivedExpanded = false
+    @State private var isPinnedExpanded = true
     @State private var expandedSubagentParentIDs: Set<String> = []
     // Tracks project sections whose preview cap was manually lifted with Show more.
     @State private var revealedProjectGroupIDs: Set<String> = []
@@ -102,30 +103,48 @@ struct SidebarThreadListView: View {
         let hierarchy = SidebarSubagentHierarchy(groupThreads: group.threads)
 
         return VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: "pin")
-                    .font(AppFont.body(weight: .medium))
-                    .foregroundStyle(.primary)
-                Text(group.label)
-                    .font(AppFont.body(weight: .medium))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isPinnedExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "pin")
+                        .font(AppFont.body(weight: .medium))
+                        .foregroundStyle(.primary)
+                    Text(group.label)
+                        .font(AppFont.body(weight: .medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isPinnedExpanded ? 90 : 0))
+                        .animation(.easeInOut(duration: 0.2), value: isPinnedExpanded)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .padding(.horizontal, 16)
             .padding(.top, 6)
             .padding(.bottom, 10)
 
-            VStack(spacing: 4) {
-                ForEach(hierarchy.rootThreads) { thread in
-                    threadRowTree(
-                        thread,
-                        childrenByParentID: hierarchy.childrenByParentID,
-                        pinnedRootThreadIDs: Set(hierarchy.rootThreads.map(\.id))
-                    )
+            if isPinnedExpanded {
+                VStack(spacing: 2) {
+                    ForEach(hierarchy.rootThreads) { thread in
+                        threadRowTree(
+                            thread,
+                            childrenByParentID: hierarchy.childrenByParentID,
+                            pinnedRootThreadIDs: Set(hierarchy.rootThreads.map(\.id))
+                        )
+                    }
                 }
+                .padding(.bottom, 14)
+                .transition(.opacity)
             }
-            .padding(.bottom, 10)
         }
     }
 
@@ -393,6 +412,7 @@ struct SidebarThreadListView: View {
         for group in groups {
             switch group.kind {
             case .pinned:
+                guard isPinnedExpanded else { continue }
                 let hierarchy = SidebarSubagentHierarchy(groupThreads: group.threads)
                 for rootThread in hierarchy.rootThreads {
                     collectVisibleSubagentThreadIDs(

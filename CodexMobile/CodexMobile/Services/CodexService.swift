@@ -578,6 +578,8 @@ final class CodexService {
     // Canonical repo roots keyed by observed working directories from bridge git/status responses.
     var repoRootByWorkingDirectory: [String: String] = [:]
     var knownRepoRoots: Set<String> = []
+    // Phase callbacks for in-flight `git/runStackedAction` calls keyed by progressId.
+    @ObservationIgnored var gitStackedActionProgressHandlers: [String: (TurnGitActionPhase, TurnGitActionPhaseStatus) -> Void] = [:]
     // Service-owned per-thread UI state keeps the active chat isolated from unrelated thread mutations.
     @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
     @ObservationIgnored var forkedFromThreadIDByThreadID: [String: String] = [:]

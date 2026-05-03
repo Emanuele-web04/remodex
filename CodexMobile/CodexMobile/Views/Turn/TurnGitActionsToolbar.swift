@@ -129,13 +129,8 @@ struct TurnGitActionsToolbarButton: View {
         } label: {
             toolbarIcon(for: gitSyncState == "not_initialized" ? .initialize : .commit, size: 24)
                 .overlay(alignment: .topTrailing) {
-                    if isRunningAction {
-                        ProgressView()
-                            .controlSize(.mini)
-                            .frame(width: 12, height: 12)
-                            .background(Color(.systemBackground), in: Circle())
-                            .offset(x: 4, y: -4)
-                    } else if let syncStatusColor {
+                    // Skip the dot while a git action runs; the in-app toast already shows live progress.
+                    if !isRunningAction, let syncStatusColor {
                         Circle()
                             .fill(syncStatusColor)
                             .frame(width: 8, height: 8)

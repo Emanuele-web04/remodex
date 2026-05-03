@@ -51,7 +51,20 @@ function handleGitRequest(rawMessage, sendResponse, options = {}) {
   const id = parsed.id;
   const params = parsed.params || {};
 
-  handleGitMethod(method, params, options)
+  // Lets long-running git flows push interim progress events to the phone.
+  const sendNotification = (notificationMethod, notificationParams) => {
+    if (typeof notificationMethod !== "string" || !notificationMethod) {
+      return;
+    }
+    sendResponse(JSON.stringify({
+      method: notificationMethod,
+      params: notificationParams ?? {},
+    }));
+  };
+
+  const methodOptions = { ...options, sendNotification };
+
+  handleGitMethod(method, params, methodOptions)
     .then((result) => {
       sendResponse(JSON.stringify({ id, result }));
       if (method === "thread/name/set") {
@@ -979,8 +992,26 @@ async function gitRunStackedAction(cwd, params, options = {}) {
   const wantsCommit = action === "commit" || action === "commit_push" || action === "commit_push_pr";
   const wantsPr = action === "create_pr" || action === "commit_push_pr";
 
+  // Emits phase progress events on the same wire used by JSON-RPC responses
+  // so the iOS toast can reflect the live step (commit/push/PR) of a stacked action.
+  const progressId = typeof params.progressId === "string" && params.progressId.trim()
+    ? params.progressId.trim()
+    : null;
+  const emitPhase = (phase, status) => {
+    if (!progressId || typeof options.sendNotification !== "function") {
+      return;
+    }
+    options.sendNotification("git/stackedAction/progress", {
+      progressId,
+      phase,
+      status,
+    });
+  };
+
   if (params.featureBranch === true) {
+    emitPhase("branch", "started");
     await gitCreateFeatureBranch(cwd, params);
+    emitPhase("branch", "completed");
   }
 
   const branch = await currentBranchName(cwd);
@@ -1006,6 +1037,7 @@ async function gitRunStackedAction(cwd, params, options = {}) {
   if (wantsCommit) {
     const statusBeforeCommit = await gitStatus(cwd);
     if (statusBeforeCommit.dirty) {
+      emitPhase("commit", "started");
       const commitResult = await gitCommit(cwd, {
         message: params.commitMessage || params.message,
       });
@@ -1015,10 +1047,12 @@ async function gitRunStackedAction(cwd, params, options = {}) {
         commitSha: commitResult.hash,
         subject: firstCommitMessageLine(params.commitMessage || params.message),
       };
+      emitPhase("commit", "completed");
     } else if (action === "commit") {
       throw gitError("nothing_to_commit", "Nothing to commit.");
     } else {
       result.commit = { status: "skipped_clean" };
+      emitPhase("commit", "skipped");
     }
   }
 
@@ -1039,17 +1073,21 @@ async function gitRunStackedAction(cwd, params, options = {}) {
     if (statusBeforePush.dirty) {
       throw gitError("dirty_worktree", "Commit or stash local changes before pushing.");
     }
+    emitPhase("push", "started");
     result.push = {
       state: "pushed",
       ...(await gitPush(cwd)),
     };
+    emitPhase("push", "completed");
   }
 
   if (wantsPr) {
+    emitPhase("createPR", "started");
     result.pr = await gitCreatePullRequest(cwd, {
       ...params,
       pushBeforeCreate: false,
     }, options);
+    emitPhase("createPR", "completed");
   }
 
   result.status = await gitStatus(cwd);

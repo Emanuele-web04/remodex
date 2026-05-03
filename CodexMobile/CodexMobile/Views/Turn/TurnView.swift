@@ -238,6 +238,7 @@ struct TurnView: View {
             gitActionToastOverlay
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.88), value: viewModel.gitActionLoadingTitle)
+        .animation(.spring(response: 0.35, dampingFraction: 0.88), value: viewModel.gitActionSuccess?.id)
         .fullScreenCover(isPresented: isCameraPresentedBinding) {
             CameraImagePicker { data in
                 viewModel.enqueueCapturedImageData(data, codex: codex)
@@ -615,30 +616,88 @@ struct TurnView: View {
 
     @ViewBuilder
     private var gitActionToastOverlay: some View {
-        if let action = viewModel.runningGitAction {
+        if let success = viewModel.gitActionSuccess {
             InAppToastBannerView(
-                title: viewModel.gitActionLoadingTitle ?? "Git action running",
+                title: success.title,
+                subtitle: gitSuccessSubtitle(for: success),
+                accessibilityHint: gitSuccessAccessibilityHint(for: success),
+                isDismissable: true,
+                onTap: nil,
+                onDismiss: { viewModel.dismissGitActionSuccess() },
+                trailingAction: gitSuccessAction(for: success)
+            ) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.white, Color.green)
+                    .symbolRenderingMode(.palette)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .id(success.id)
+        } else if let progress = viewModel.gitActionProgress {
+            InAppToastBannerView(
+                title: progress.activeTitle,
                 subtitle: nil,
-                detailLines: action.loadingSteps(repoSync: viewModel.gitRepoSync),
+                detailLines: gitProgressDetailLines(progress),
                 accessibilityHint: nil,
                 isDismissable: false,
                 onTap: nil,
                 onDismiss: nil
             ) {
-                ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: "icloud.and.arrow.up.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.blue)
-
-                    ProgressView()
-                        .controlSize(.mini)
-                        .background(Color(.systemBackground), in: Circle())
-                        .offset(x: 4, y: 4)
-                }
+                ProgressView()
+                    .controlSize(.regular)
+                    .tint(.primary)
             }
             .padding(.horizontal, 16)
             .padding(.top, 10)
             .transition(.move(edge: .top).combined(with: .opacity))
+        }
+    }
+
+    private func gitProgressDetailLines(_ progress: TurnGitActionProgress) -> [String] {
+        guard progress.plannedPhases.count > 1 else { return [] }
+        return progress.plannedPhases.map { phase in
+            switch progress.status(for: phase) {
+            case .completed:
+                return "✓ \(phase.completedTitle)"
+            case .skipped:
+                return "– \(phase.completedTitle)"
+            case .active:
+                return "• \(phase.activeTitle)"
+            case .pending:
+                return "○ \(phase.pendingTitle)"
+            }
+        }
+    }
+
+    private func gitSuccessSubtitle(for success: TurnGitActionSuccess) -> String? {
+        guard let subtitle = success.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !subtitle.isEmpty else {
+            return nil
+        }
+        return subtitle
+    }
+
+    private func gitSuccessAccessibilityHint(for success: TurnGitActionSuccess) -> String? {
+        switch success.kind {
+        case .pullRequest where success.pullRequestURL != nil:
+            return "Tap View PR to open the pull request."
+        default:
+            return nil
+        }
+    }
+
+    private func gitSuccessAction(for success: TurnGitActionSuccess) -> InAppToastBannerAction? {
+        switch success.kind {
+        case .pullRequest:
+            guard let url = success.pullRequestURL else { return nil }
+            return InAppToastBannerAction(title: "View PR") {
+                UIApplication.shared.open(url)
+                viewModel.dismissGitActionSuccess()
+            }
+        case .commit, .push:
+            return nil
         }
     }
 

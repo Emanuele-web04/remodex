@@ -63,16 +63,34 @@ final class TurnViewModelGitActionAvailabilityTests: XCTestCase {
         XCTAssertFalse(aheadViewModel.disabledGitActions.contains(.commitAndPush))
     }
 
-    func testGitActionLoadingTitlesExplainBridgeWork() {
+    func testGitActionPlannedPhasesReflectBridgeWork() {
         let aheadStatus = makeRepoSync(dirty: false, ahead: 1, canPush: true)
         let cleanStatus = makeRepoSync(dirty: false, ahead: 0, canPush: false)
 
-        XCTAssertEqual(TurnGitActionKind.commit.loadingTitle(repoSync: cleanStatus), "Committing...")
-        XCTAssertEqual(TurnGitActionKind.push.loadingTitle(repoSync: aheadStatus), "Pushing...")
-        XCTAssertEqual(TurnGitActionKind.commitAndPush.loadingSteps(repoSync: aheadStatus), ["Committing...", "Pushing..."])
-        XCTAssertEqual(TurnGitActionKind.commitPushCreatePR.loadingSteps(repoSync: aheadStatus), ["Committing...", "Pushing...", "Creating PR..."])
-        XCTAssertEqual(TurnGitActionKind.createPR.loadingSteps(repoSync: aheadStatus), ["Pushing...", "Creating PR..."])
-        XCTAssertEqual(TurnGitActionKind.createPR.loadingSteps(repoSync: cleanStatus), ["Creating PR..."])
+        XCTAssertEqual(
+            TurnGitActionKind.commit.plannedPhases(repoSync: cleanStatus, hasCustomCommitMessage: false, willCreateFeatureBranch: false),
+            [.generatingCommit, .commit]
+        )
+        XCTAssertEqual(
+            TurnGitActionKind.push.plannedPhases(repoSync: aheadStatus, hasCustomCommitMessage: true, willCreateFeatureBranch: false),
+            [.push]
+        )
+        XCTAssertEqual(
+            TurnGitActionKind.commitAndPush.plannedPhases(repoSync: aheadStatus, hasCustomCommitMessage: false, willCreateFeatureBranch: false, hasWorkingTreeChanges: false),
+            [.push]
+        )
+        XCTAssertEqual(
+            TurnGitActionKind.commitPushCreatePR.plannedPhases(repoSync: aheadStatus, hasCustomCommitMessage: false, willCreateFeatureBranch: true, hasWorkingTreeChanges: false),
+            [.branch, .push, .createPR]
+        )
+        XCTAssertEqual(
+            TurnGitActionKind.createPR.plannedPhases(repoSync: aheadStatus, hasCustomCommitMessage: true, willCreateFeatureBranch: false),
+            [.push, .createPR]
+        )
+        XCTAssertEqual(
+            TurnGitActionKind.createPR.plannedPhases(repoSync: cleanStatus, hasCustomCommitMessage: true, willCreateFeatureBranch: false),
+            [.createPR]
+        )
     }
 
     private func makeRepoSync(dirty: Bool, ahead: Int, canPush: Bool) -> GitRepoSyncResult {

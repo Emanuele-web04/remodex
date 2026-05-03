@@ -55,33 +55,52 @@ struct SidebarThreadRowView: View {
                 leadingIndicatorSlot
 
                 // Keep trailing metadata inside the main stack so long titles truncate before it.
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        if isPinned && !thread.isSubagent {
-                            Image(systemName: "pin.fill")
-                                .font(AppFont.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        Text(thread.displayTitle)
-                            .font(AppFont.body())
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .foregroundStyle(.primary)
-                    }
-
+                Group {
                     if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
-                        Text(pinnedProjectLabel)
-                            .font(AppFont.footnote())
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    } else if thread.syncState == .archivedLocal {
-                        Text("Stored locally")
-                            .font(AppFont.footnote())
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                        HStack(spacing: 6) {
+                            if isPinned && !thread.isSubagent {
+                                Image(systemName: "pin.fill")
+                                    .font(AppFont.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Text(thread.displayTitle)
+                                .font(AppFont.body())
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .foregroundStyle(.primary)
+                                .layoutPriority(1)
+
+                            Text(pinnedProjectLabel)
+                                .font(AppFont.footnote())
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                if isPinned && !thread.isSubagent {
+                                    Image(systemName: "pin.fill")
+                                        .font(AppFont.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Text(thread.displayTitle)
+                                    .font(AppFont.body())
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                    .foregroundStyle(.primary)
+                            }
+
+                            if thread.syncState == .archivedLocal {
+                                Text("Stored locally")
+                                    .font(AppFont.footnote())
+                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

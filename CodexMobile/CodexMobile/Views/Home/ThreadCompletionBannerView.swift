@@ -6,6 +6,11 @@
 
 import SwiftUI
 
+struct InAppToastBannerAction {
+    let title: String
+    let action: () -> Void
+}
+
 struct InAppToastBannerView<LeadingIcon: View>: View {
     let title: String
     let subtitle: String?
@@ -14,6 +19,7 @@ struct InAppToastBannerView<LeadingIcon: View>: View {
     let isDismissable: Bool
     let onTap: (() -> Void)?
     let onDismiss: (() -> Void)?
+    let trailingAction: InAppToastBannerAction?
     let leadingIcon: () -> LeadingIcon
 
     private let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -26,6 +32,7 @@ struct InAppToastBannerView<LeadingIcon: View>: View {
         isDismissable: Bool,
         onTap: (() -> Void)?,
         onDismiss: (() -> Void)?,
+        trailingAction: InAppToastBannerAction? = nil,
         @ViewBuilder leadingIcon: @escaping () -> LeadingIcon
     ) {
         self.title = title
@@ -35,6 +42,7 @@ struct InAppToastBannerView<LeadingIcon: View>: View {
         self.isDismissable = isDismissable
         self.onTap = onTap
         self.onDismiss = onDismiss
+        self.trailingAction = trailingAction
         self.leadingIcon = leadingIcon
     }
 
@@ -53,6 +61,7 @@ struct InAppToastBannerView<LeadingIcon: View>: View {
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
 
                 if !detailLines.isEmpty {
@@ -69,6 +78,21 @@ struct InAppToastBannerView<LeadingIcon: View>: View {
             }
 
             Spacer(minLength: 8)
+
+            if let trailingAction {
+                Button(action: trailingAction.action) {
+                    Text(trailingAction.title)
+                        .font(AppFont.caption(weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            Capsule().fill(Color.primary.opacity(0.08))
+                        )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(trailingAction.title)
+            }
 
             if isDismissable, let onDismiss {
                 Button(action: onDismiss) {

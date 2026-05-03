@@ -239,12 +239,15 @@ final class GitActionsService {
     }
 
     // Runs bridge-owned Git publishing flows so commit/push/PR decisions stay local to the repo.
+    // When `onProgress` is supplied, the bridge streams `git/stackedAction/progress` events
+    // (one per phase boundary) so the UI can reflect the current step in real time.
     func runStackedAction(
         action: String,
         commitMessage: String? = nil,
         model: String? = nil,
         baseBranch: String? = nil,
-        featureBranch: Bool = false
+        featureBranch: Bool = false,
+        onProgress: ((TurnGitActionPhase, TurnGitActionPhaseStatus) -> Void)? = nil
     ) async throws -> GitStackedActionResult {
         var params: [String: JSONValue] = ["action": .string(action)]
         if let commitMessage, !commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -259,6 +262,23 @@ final class GitActionsService {
         if featureBranch {
             params["featureBranch"] = .bool(true)
         }
+
+        let progressId: String?
+        if let onProgress {
+            let id = UUID().uuidString
+            params["progressId"] = .string(id)
+            codex.registerGitStackedActionProgressHandler(progressId: id, handler: onProgress)
+            progressId = id
+        } else {
+            progressId = nil
+        }
+
+        defer {
+            if let progressId {
+                codex.unregisterGitStackedActionProgressHandler(progressId: progressId)
+            }
+        }
+
         let json = try await request(method: "git/runStackedAction", params: params)
         let result = GitStackedActionResult(from: json)
         rememberRepoRoot(from: result.status)

@@ -168,9 +168,16 @@ final class TurnViewModel {
     // MARK: - Git state
 
     var runningGitAction: TurnGitActionKind? = nil
-    var gitActionLoadingTitle: String? = nil
+    // Real-time progress for the in-flight git action; drives the toast title and checklist.
+    var gitActionProgress: TurnGitActionProgress? = nil
+    // Brief success state shown after the action completes; carries optional CTAs (e.g. View PR).
+    var gitActionSuccess: TurnGitActionSuccess? = nil
     var inlineCommitAndPushPhase: InlineCommitAndPushPhase? = nil
     var isRunningGitAction: Bool { runningGitAction != nil }
+    var gitActionLoadingTitle: String? {
+        gitActionProgress?.activeTitle
+    }
+    @ObservationIgnored private var gitActionSuccessDismissTask: Task<Void, Never>?
     var isShowingNothingToCommitAlert = false
     var gitSyncAlert: TurnGitSyncAlert? = nil
     var isLoadingGitBranchTargets = false
@@ -2377,13 +2384,13 @@ final class TurnViewModel {
     ) {
         guard !isRunningGitAction else { return }
         runningGitAction = action
-        gitActionLoadingTitle = action.loadingTitle(repoSync: gitRepoSync)
+        beginGitActionProgress(action)
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
                 self.runningGitAction = nil
-                self.gitActionLoadingTitle = nil
+                self.gitActionProgress = nil
             }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
@@ -2426,6 +2433,11 @@ final class TurnViewModel {
                         model: gitWriterModel
                     )
                     if let status = result.status { applyGitRepoSync(status) }
+                    presentGitActionSuccess(.init(
+                        kind: .commit,
+                        title: "Committed",
+                        subtitle: result.status?.currentBranch
+                    ))
 
                 case .push:
                     let result = try await runStackedGitAction(
@@ -2439,6 +2451,11 @@ final class TurnViewModel {
                         workingDirectory: workingDirectory,
                         threadID: threadID
                     )
+                    presentGitActionSuccess(.init(
+                        kind: .push,
+                        title: "Pushed",
+                        subtitle: result.status?.currentBranch
+                    ))
 
                 case .commitAndPush:
                     guard gitRepoSync?.hasPushRemote == true else {
@@ -2453,6 +2470,11 @@ final class TurnViewModel {
                         model: gitWriterModel
                     )
                     handleSuccessfulStackedGitAction(result, codex: codex, workingDirectory: workingDirectory, threadID: threadID)
+                    presentGitActionSuccess(.init(
+                        kind: .push,
+                        title: "Commit & push complete",
+                        subtitle: result.status?.currentBranch
+                    ))
 
                 case .commitPushCreatePR:
                     let result = try await runStackedGitAction(
@@ -2461,9 +2483,11 @@ final class TurnViewModel {
                         model: gitWriterModel
                     )
                     handleSuccessfulStackedGitAction(result, codex: codex, workingDirectory: workingDirectory, threadID: threadID)
-                    if let urlString = result.pullRequest.url, let url = URL(string: urlString) {
-                        await UIApplication.shared.open(url)
-                    }
+                    presentGitActionSuccess(.init(
+                        kind: .pullRequest(url: result.pullRequest.url),
+                        title: "Pull request opened",
+                        subtitle: result.pullRequest.url
+                    ))
 
                 case .createPR:
                     if let validationMessage = createPullRequestValidationMessage {
@@ -2475,9 +2499,11 @@ final class TurnViewModel {
                         model: gitWriterModel
                     )
                     handleSuccessfulStackedGitAction(result, codex: codex, workingDirectory: workingDirectory, threadID: threadID)
-                    if let urlString = result.pullRequest.url, let url = URL(string: urlString) {
-                        await UIApplication.shared.open(url)
-                    }
+                    presentGitActionSuccess(.init(
+                        kind: .pullRequest(url: result.pullRequest.url),
+                        title: "Pull request opened",
+                        subtitle: result.pullRequest.url
+                    ))
 
                 case .discardRuntimeChangesAndSync:
                     let unpushedCommitWarning: String
@@ -2520,34 +2546,36 @@ final class TurnViewModel {
     func inlineCommitAndPush(codex: CodexService, workingDirectory: String?, threadID: String) {
         guard !isRunningGitAction else { return }
         runningGitAction = .commitAndPush
-        gitActionLoadingTitle = TurnGitActionKind.commitAndPush.loadingTitle(repoSync: gitRepoSync)
+        beginGitActionProgress(.commitAndPush)
         inlineCommitAndPushPhase = .committing
 
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
                 self.runningGitAction = nil
-                self.gitActionLoadingTitle = nil
+                self.gitActionProgress = nil
                 self.inlineCommitAndPushPhase = nil
             }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
             let gitWriterModel = codex.gitWriterModelIdentifier()
             do {
-                _ = try await gitService.commit(
-                    message: await generatedGitCommitMessageOrNil(
-                        gitService: gitService,
-                        model: gitWriterModel
-                    )
+                let result = try await runStackedGitAction(
+                    .commitAndPush,
+                    gitService: gitService,
+                    model: gitWriterModel
                 )
-                inlineCommitAndPushPhase = .pushing
-                let pushResult = try await gitService.push()
-                handleSuccessfulPush(
-                    pushResult,
+                handleSuccessfulStackedGitAction(
+                    result,
                     codex: codex,
                     workingDirectory: workingDirectory,
                     threadID: threadID
                 )
+                presentGitActionSuccess(.init(
+                    kind: .push,
+                    title: "Commit & push complete",
+                    subtitle: result.status?.currentBranch
+                ))
             } catch let error as GitActionsError {
                 switch error {
                 case .bridgeError(let code, _) where code == "nothing_to_commit":
@@ -2570,6 +2598,7 @@ final class TurnViewModel {
     }
 
     // Centralizes the mobile-to-bridge mapping for stacked Git publishing actions.
+    // Drives `gitActionProgress` so the toast can reflect the live phase reported by the bridge.
     private func runStackedGitAction(
         _ action: TurnGitActionKind,
         gitService: GitActionsService,
@@ -2580,24 +2609,142 @@ final class TurnViewModel {
         }
 
         let baseBranch = gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        let branch = (gitRepoSync?.currentBranch ?? currentGitBranch).trimmingCharacters(in: .whitespacesAndNewlines)
+        let latestRepoSync = (try? await gitService.status()) ?? gitRepoSync
+        if let latestRepoSync {
+            applyGitRepoSync(latestRepoSync)
+        }
+        let branch = (latestRepoSync?.currentBranch ?? currentGitBranch).trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldCreateFeatureBranch = action == .commitPushCreatePR && (baseBranch.map { branch == $0 } ?? false)
+
+        let hasWorkingTreeChanges = latestRepoSync?.isDirty ?? true
+        let wantsCommitStep = action == .commit || ((action == .commitAndPush || action == .commitPushCreatePR) && hasWorkingTreeChanges)
+        let needsCommitMessageGeneration = wantsCommitStep
+        // Recompute the plan now that we know the feature-branch decision and commit-message intent.
+        recomputeGitActionPlannedPhases(
+            for: action,
+            hasCustomCommitMessage: !needsCommitMessageGeneration,
+            willCreateFeatureBranch: shouldCreateFeatureBranch,
+            hasWorkingTreeChanges: hasWorkingTreeChanges
+        )
+
         let commitMessage: String?
-        if action == .commit || action == .commitAndPush || action == .commitPushCreatePR {
-            gitActionLoadingTitle = "Preparing commit..."
+        if needsCommitMessageGeneration {
+            advanceGitActionPhase(to: .generatingCommit)
             commitMessage = await generatedGitCommitMessageOrNil(gitService: gitService, model: model)
+            completeGitActionPhase(.generatingCommit)
         } else {
             commitMessage = nil
         }
-        gitActionLoadingTitle = action.loadingTitle(repoSync: gitRepoSync)
 
         return try await gitService.runStackedAction(
             action: actionIdentifier,
             commitMessage: commitMessage,
             model: model,
             baseBranch: baseBranch,
-            featureBranch: shouldCreateFeatureBranch
+            featureBranch: shouldCreateFeatureBranch,
+            onProgress: { [weak self] phase, status in
+                self?.applyGitActionProgressEvent(phase: phase, status: status)
+            }
         )
+    }
+
+    // MARK: Progress + success helpers
+
+    private func beginGitActionProgress(_ action: TurnGitActionKind) {
+        gitActionSuccessDismissTask?.cancel()
+        gitActionSuccessDismissTask = nil
+        gitActionSuccess = nil
+        let phases = action.plannedPhases(
+            repoSync: gitRepoSync,
+            hasCustomCommitMessage: false,
+            willCreateFeatureBranch: false,
+            hasWorkingTreeChanges: gitRepoSync?.isDirty
+        )
+        gitActionProgress = TurnGitActionProgress(action: action, plannedPhases: phases)
+    }
+
+    private func recomputeGitActionPlannedPhases(
+        for action: TurnGitActionKind,
+        hasCustomCommitMessage: Bool,
+        willCreateFeatureBranch: Bool,
+        hasWorkingTreeChanges: Bool? = nil
+    ) {
+        guard var progress = gitActionProgress, progress.action == action else { return }
+        let phases = action.plannedPhases(
+            repoSync: gitRepoSync,
+            hasCustomCommitMessage: hasCustomCommitMessage,
+            willCreateFeatureBranch: willCreateFeatureBranch,
+            hasWorkingTreeChanges: hasWorkingTreeChanges
+        )
+        progress = TurnGitActionProgress(
+            action: action,
+            plannedPhases: phases,
+            currentPhase: progress.currentPhase,
+            completedPhases: progress.completedPhases.intersection(phases),
+            skippedPhases: progress.skippedPhases.intersection(phases)
+        )
+        gitActionProgress = progress
+    }
+
+    private func advanceGitActionPhase(to phase: TurnGitActionPhase) {
+        guard var progress = gitActionProgress else { return }
+        progress.currentPhase = phase
+        gitActionProgress = progress
+    }
+
+    private func completeGitActionPhase(_ phase: TurnGitActionPhase) {
+        guard var progress = gitActionProgress else { return }
+        progress.completedPhases.insert(phase)
+        if progress.currentPhase == phase {
+            progress.currentPhase = nil
+        }
+        gitActionProgress = progress
+    }
+
+    private func applyGitActionProgressEvent(
+        phase: TurnGitActionPhase,
+        status: TurnGitActionPhaseStatus
+    ) {
+        guard var progress = gitActionProgress else { return }
+        switch status {
+        case .started:
+            progress.currentPhase = phase
+            // Mirror the bridge's commit phase to the inline button title.
+            if phase == .commit {
+                inlineCommitAndPushPhase = .committing
+            } else if phase == .push {
+                inlineCommitAndPushPhase = .pushing
+            }
+        case .completed:
+            progress.completedPhases.insert(phase)
+            progress.skippedPhases.remove(phase)
+            if progress.currentPhase == phase {
+                progress.currentPhase = nil
+            }
+        case .skipped:
+            progress.skippedPhases.insert(phase)
+            if progress.currentPhase == phase {
+                progress.currentPhase = nil
+            }
+        }
+        gitActionProgress = progress
+    }
+
+    private func presentGitActionSuccess(_ success: TurnGitActionSuccess) {
+        gitActionSuccess = success
+        gitActionSuccessDismissTask?.cancel()
+        gitActionSuccessDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 6_000_000_000)
+            guard !Task.isCancelled else { return }
+            guard let self, self.gitActionSuccess?.id == success.id else { return }
+            self.gitActionSuccess = nil
+        }
+    }
+
+    func dismissGitActionSuccess() {
+        gitActionSuccessDismissTask?.cancel()
+        gitActionSuccessDismissTask = nil
+        gitActionSuccess = nil
     }
 
     // AI writing is a polish layer; Git actions must still work when the writer is unavailable.
