@@ -11,6 +11,10 @@ private enum ThreadTurnStateSnapshotPolicy {
     static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
 }
 
+private enum ThreadListHydrationPolicy {
+    static let requestTimeoutNanoseconds: UInt64 = 12_000_000_000
+}
+
 extension CodexService {
     // Polling keeps recent metadata fresh; full list loads are reserved for bootstrap/explicit refresh.
     var recentActiveThreadListLimit: Int { 70 }
@@ -58,13 +62,16 @@ extension CodexService {
         defer { isLoadingThreads = false }
 
         // Sidebar metadata must be complete: capping thread/list hides older project chats.
-        let activeThreads = try await fetchServerThreads(limit: limit)
+        async let activeThreadsFetch = fetchServerThreads(limit: limit)
+        async let archivedThreadsFetch = fetchServerThreads(limit: limit, archived: true)
 
-        var archivedThreads: [CodexThread] = []
+        let activeThreads = try await activeThreadsFetch
+        let archivedThreads: [CodexThread]
         do {
-            archivedThreads = try await fetchServerThreads(limit: limit, archived: true)
+            archivedThreads = try await archivedThreadsFetch
         } catch {
             debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
+            archivedThreads = []
         }
 
         reconcileLocalThreadsWithServer(activeThreads, serverArchivedThreads: archivedThreads)
@@ -754,7 +761,12 @@ extension CodexService {
                 params["archived"] = .bool(true)
             }
 
-            let response = try await sendRequest(method: "thread/list", params: .object(params))
+            let response = try await sendRequest(
+                method: "thread/list",
+                params: .object(params),
+                timeoutNanoseconds: ThreadListHydrationPolicy.requestTimeoutNanoseconds,
+                timeoutMessage: "thread/list timed out while syncing chats."
+            )
 
             guard let resultObject = response.result?.objectValue else {
                 throw CodexServiceError.invalidResponse("thread/list response missing payload")

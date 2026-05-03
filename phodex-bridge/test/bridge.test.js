@@ -633,6 +633,76 @@ test("sanitizeThreadHistoryImagesForRelay strips bulky compaction replacement hi
   });
 });
 
+test("sanitizeThreadHistoryImagesForRelay strips bulky compaction history from turns pages", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-turns-list",
+    result: {
+      data: [
+        {
+          id: "turn-1",
+          items: [
+            {
+              id: "item-compacted",
+              type: "compacted",
+              message: "",
+              replacement_history: [
+                {
+                  type: "message",
+                  role: "assistant",
+                  content: [{ type: "output_text", text: "A".repeat(2 * 1024 * 1024) }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      nextCursor: "cursor-2",
+    },
+  });
+
+  const sanitizedRaw = sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/turns/list");
+  const sanitized = JSON.parse(sanitizedRaw);
+
+  assert.equal(Buffer.byteLength(sanitizedRaw, "utf8") < 16 * 1024, true);
+  assert.deepEqual(sanitized.result.data[0].items[0], {
+    id: "item-compacted",
+    type: "compacted",
+    message: "",
+  });
+  assert.equal(sanitized.result.nextCursor, "cursor-2");
+});
+
+test("sanitizeThreadHistoryImagesForRelay compacts oversized turns pages", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-turns-list-large",
+    result: {
+      items: [
+        {
+          id: "turn-1",
+          items: [
+            {
+              id: "item-1",
+              type: "assistant_message",
+              text: "B".repeat(4 * 1024 * 1024),
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/turns/list")
+  );
+  const item = sanitized.result.items[0].items[0];
+
+  assert.equal(sanitized.result.remodexPageCompactedForRelay, true);
+  assert.equal(sanitized.result.items[0].remodexPageCompactedForRelay, true);
+  assert.equal(item.relayPayloadTruncated, true);
+  assert.equal(item.text.startsWith("…\n"), true);
+  assert.equal(item.text.length < 120_000, true);
+});
+
 test("sanitizeThreadHistoryImagesForRelay compacts oversized history before the newest turn tail", () => {
   const largeText = "A".repeat(4 * 1024 * 1024);
   const rawMessage = JSON.stringify({

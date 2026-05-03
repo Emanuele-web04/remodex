@@ -90,10 +90,10 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         try await service.listThreads()
 
         XCTAssertEqual(capturedParams.count, 2)
-        XCTAssertNil(capturedParams[0]["limit"])
-        XCTAssertNil(capturedParams[0]["archived"]?.boolValue)
-        XCTAssertNil(capturedParams[1]["limit"])
-        XCTAssertEqual(capturedParams[1]["archived"]?.boolValue, true)
+        let activeParams = try XCTUnwrap(capturedParams.first { $0["archived"]?.boolValue != true })
+        let archivedParams = try XCTUnwrap(capturedParams.first { $0["archived"]?.boolValue == true })
+        XCTAssertNil(activeParams["limit"])
+        XCTAssertNil(archivedParams["limit"])
     }
 
     func testDecodeSkillsListParsesBucketedDataShape() {

@@ -15,6 +15,8 @@ extension CodexService {
     private static let permanentRelayCloseCodeRawValues: Set<UInt16> = [4000, 4001, 4003]
     private static let explicitRelayDropCloseCodeRawValues: Set<UInt16> = [4004]
     private static let maxTrustedReconnectFailures = 3
+    private static let connectionBootstrapRequestTimeoutNanoseconds: UInt64 = 12_000_000_000
+    private static let planModeProbeTimeoutNanoseconds: UInt64 = 5_000_000_000
     private static let trustedReconnectRecoveryMessage =
         "Secure reconnect could not be restored from the saved session. Try reconnecting again."
 
@@ -94,10 +96,10 @@ extension CodexService {
             try await performSecureHandshake()
 
             isConnected = true
-            shouldAutoReconnectOnForeground = false
-            connectionRecoveryState = .idle
             lastErrorMessage = nil
             try await initializeSession()
+            shouldAutoReconnectOnForeground = false
+            connectionRecoveryState = .idle
             trustedReconnectFailureCount = 0
             if secureSession != nil {
                 secureConnectionState = .encrypted
@@ -318,7 +320,12 @@ extension CodexService {
         ])
 
         do {
-            let initializeResponse = try await sendRequest(method: "initialize", params: modernParams)
+            let initializeResponse = try await sendRequest(
+                method: "initialize",
+                params: modernParams,
+                timeoutNanoseconds: Self.connectionBootstrapRequestTimeoutNanoseconds,
+                timeoutMessage: "Connection timed out while reconnecting. Try again."
+            )
             learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
             // A successful modern initialize means the runtime accepted the experimental
             // capability negotiation. Keep plan-mode sends enabled unless the runtime
@@ -346,7 +353,12 @@ extension CodexService {
                 "clientInfo": clientInfo,
             ])
             do {
-                let initializeResponse = try await sendRequest(method: "initialize", params: legacyParams)
+                let initializeResponse = try await sendRequest(
+                    method: "initialize",
+                    params: legacyParams,
+                    timeoutNanoseconds: Self.connectionBootstrapRequestTimeoutNanoseconds,
+                    timeoutMessage: "Connection timed out while reconnecting. Try again."
+                )
                 learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
             } catch {
                 if let incompatibleAppVersionError = incompatibleBridgeAppVersionError(from: error) {
@@ -483,8 +495,9 @@ extension CodexService {
 
     // Runs the post-connect sync work that is useful but not required to mark the socket usable.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
-        try? await listModels()
+        // Thread metadata drives the visible app shell, so do it before slower runtime option sync.
         try? await listThreads()
+        try? await listModels()
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
             return
         }
@@ -741,7 +754,9 @@ extension CodexService {
         do {
             let response = try await sendRequest(
                 method: "collaborationMode/list",
-                params: .object([:])
+                params: .object([:]),
+                timeoutNanoseconds: Self.planModeProbeTimeoutNanoseconds,
+                timeoutMessage: "collaborationMode/list timed out while checking runtime capabilities."
             )
             return responseContainsPlanCollaborationMode(response)
         } catch {

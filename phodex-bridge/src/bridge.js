@@ -145,6 +145,7 @@ function startBridge({
   const relaySanitizedRequestMethods = new Set([
     "thread/read",
     "thread/resume",
+    "thread/turns/list",
   ]);
   const forwardedRequestMethodTTLms = 2 * 60_000;
   const pendingAuthLogin = {
@@ -1375,9 +1376,13 @@ function normalizeNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
 
-// Shrinks `thread/read` and `thread/resume` snapshots for mobile relay delivery.
+// Shrinks thread history snapshots/pages for mobile relay delivery.
 // This elides bulky blobs and replaces oversized older history with a compact marker.
 function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
+  if (requestMethod === "thread/turns/list") {
+    return sanitizeThreadTurnsListForRelay(rawMessage);
+  }
+
   if (requestMethod !== "thread/read" && requestMethod !== "thread/resume") {
     return rawMessage;
   }
@@ -1388,68 +1393,10 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
     return rawMessage;
   }
 
-  let didSanitize = false;
-  const sanitizedTurns = thread.turns.map((turn) => {
-    if (!turn || typeof turn !== "object" || !Array.isArray(turn.items)) {
-      return turn;
-    }
-
-    let turnDidChange = false;
-    const threadId = normalizeNonEmptyString(thread.id)
-      || normalizeNonEmptyString(thread.threadId)
-      || normalizeNonEmptyString(thread.thread_id);
-
-    const sanitizedItems = turn.items.map((item) => {
-      if (!item || typeof item !== "object") {
-        return item;
-      }
-
-      let itemDidChange = false;
-      let sanitizedItem = annotateImageGenerationHistoryItem(item, threadId);
-      if (sanitizedItem !== item) {
-        itemDidChange = true;
-      }
-
-      if (Array.isArray(item.content)) {
-        const sanitizedContent = item.content.map((contentItem) => {
-          const sanitizedEntry = sanitizeInlineHistoryImageContentItem(contentItem);
-          if (sanitizedEntry !== contentItem) {
-            itemDidChange = true;
-          }
-          return sanitizedEntry;
-        });
-
-        if (itemDidChange) {
-          sanitizedItem = {
-            ...sanitizedItem,
-            content: sanitizedContent,
-          };
-        }
-      }
-
-      const sanitizedCompactionItem = sanitizeCompactionHistoryItem(sanitizedItem);
-      if (sanitizedCompactionItem !== sanitizedItem) {
-        sanitizedItem = sanitizedCompactionItem;
-        itemDidChange = true;
-      }
-
-      if (itemDidChange) {
-        turnDidChange = true;
-      }
-
-      return itemDidChange ? sanitizedItem : item;
-    });
-
-    if (!turnDidChange) {
-      return turn;
-    }
-
-    didSanitize = true;
-    return {
-      ...turn,
-      items: sanitizedItems,
-    };
-  });
+  const threadId = normalizeNonEmptyString(thread.id)
+    || normalizeNonEmptyString(thread.threadId)
+    || normalizeNonEmptyString(thread.thread_id);
+  const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(thread.turns, threadId);
 
   if (!didSanitize) {
     const trimmedPayload = trimThreadPayloadForRelay(parsed, thread);
@@ -1468,6 +1415,108 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod) {
   });
 
   return trimThreadPayloadForRelay(parseBridgeJSON(sanitizedPayload), null) ?? sanitizedPayload;
+}
+
+function sanitizeThreadTurnsListForRelay(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  const result = parsed?.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return rawMessage;
+  }
+
+  const turnsKey = ["data", "items", "turns"].find((key) => Array.isArray(result[key]));
+  if (!turnsKey) {
+    return rawMessage;
+  }
+
+  const threadId = normalizeNonEmptyString(result.threadId)
+    || normalizeNonEmptyString(result.thread_id)
+    || normalizeNonEmptyString(result.thread?.id)
+    || normalizeNonEmptyString(result.thread?.threadId)
+    || normalizeNonEmptyString(result.thread?.thread_id);
+  const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(result[turnsKey], threadId);
+  const sanitizedParsed = didSanitize
+    ? {
+      ...parsed,
+      result: {
+        ...result,
+        [turnsKey]: sanitizedTurns,
+      },
+    }
+    : parsed;
+
+  return trimTurnsListPayloadForRelay(sanitizedParsed, turnsKey, didSanitize ? null : rawMessage);
+}
+
+function sanitizeRelayHistoryTurns(turns, threadId = "") {
+  let didSanitize = false;
+  const sanitizedTurns = turns.map((turn) => {
+    const sanitizedTurn = sanitizeRelayHistoryTurn(turn, threadId);
+    if (sanitizedTurn !== turn) {
+      didSanitize = true;
+    }
+    return sanitizedTurn;
+  });
+
+  return { turns: sanitizedTurns, didSanitize };
+}
+
+function sanitizeRelayHistoryTurn(turn, threadId = "") {
+  if (!turn || typeof turn !== "object" || !Array.isArray(turn.items)) {
+    return turn;
+  }
+
+  let turnDidChange = false;
+  const turnThreadId = normalizeNonEmptyString(threadId)
+    || normalizeNonEmptyString(turn.threadId)
+    || normalizeNonEmptyString(turn.thread_id);
+  const sanitizedItems = turn.items.map((item) => {
+    if (!item || typeof item !== "object") {
+      return item;
+    }
+
+    let itemDidChange = false;
+    let sanitizedItem = annotateImageGenerationHistoryItem(item, turnThreadId);
+    if (sanitizedItem !== item) {
+      itemDidChange = true;
+    }
+
+    if (Array.isArray(sanitizedItem.content)) {
+      const sanitizedContent = sanitizedItem.content.map((contentItem) => {
+        const sanitizedEntry = sanitizeInlineHistoryImageContentItem(contentItem);
+        if (sanitizedEntry !== contentItem) {
+          itemDidChange = true;
+        }
+        return sanitizedEntry;
+      });
+
+      if (itemDidChange) {
+        sanitizedItem = {
+          ...sanitizedItem,
+          content: sanitizedContent,
+        };
+      }
+    }
+
+    const sanitizedCompactionItem = sanitizeCompactionHistoryItem(sanitizedItem);
+    if (sanitizedCompactionItem !== sanitizedItem) {
+      sanitizedItem = sanitizedCompactionItem;
+      itemDidChange = true;
+    }
+
+    if (itemDidChange) {
+      turnDidChange = true;
+    }
+
+    return itemDidChange ? sanitizedItem : item;
+  });
+
+  return turnDidChange
+    ? {
+      ...turn,
+      items: sanitizedItems,
+    }
+    : turn;
 }
 
 // Annotates live image-generation notifications so the phone can render a local-file
@@ -1870,6 +1919,61 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
     1
   );
   return encodeRelayThreadPayload(parsed, candidateThread);
+}
+
+function trimTurnsListPayloadForRelay(parsed, turnsKey, originalRawMessage = null) {
+  const result = parsed?.result;
+  const turns = result?.[turnsKey];
+  if (!parsed || !result || !Array.isArray(turns)) {
+    return originalRawMessage ?? JSON.stringify(parsed);
+  }
+
+  const encoded = JSON.stringify(parsed);
+  if (Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+    return originalRawMessage ?? encoded;
+  }
+
+  for (const maxChars of [
+    RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS,
+    Math.floor(RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS / 4),
+    1_000,
+    0,
+  ]) {
+    const compactedTurns = turns.map((turn) => compactTurnsListTurnForRelay(turn, maxChars));
+    const compactedPayload = JSON.stringify({
+      ...parsed,
+      result: {
+        ...result,
+        [turnsKey]: compactedTurns,
+        remodexPageCompactedForRelay: true,
+      },
+    });
+    if (Buffer.byteLength(compactedPayload, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+      return compactedPayload;
+    }
+  }
+
+  const markerTurn = buildRelayHistoryCompactionTurn(turns.length, 0, turns[0]);
+  return JSON.stringify({
+    ...parsed,
+    result: {
+      ...result,
+      [turnsKey]: markerTurn ? [markerTurn] : [],
+      remodexPageCompactedForRelay: true,
+    },
+  });
+}
+
+function compactTurnsListTurnForRelay(turn, maxChars) {
+  if (!turn || typeof turn !== "object" || !Array.isArray(turn.items)) {
+    return turn;
+  }
+
+  return {
+    ...turn,
+    items: turn.items.map((item) => compactHistoryItemForRelay(item, maxChars)),
+    remodexPageCompactedForRelay: true,
+  };
 }
 
 function buildRelayHistoryCompactedThread(thread, turns, omittedTurnCount, keptTurnCount) {
