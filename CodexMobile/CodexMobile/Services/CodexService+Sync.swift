@@ -854,6 +854,13 @@ extension CodexService {
         let shouldPreferDeferredClosedHydration = shouldDeferHeavyDisplayHydration(threadId: threadId)
             || threadsNeedingCanonicalHistoryReconcile.contains(threadId)
 
+        if !wasRunning,
+           hydratedThreadIDs.contains(threadId),
+           hasSatisfiedInitialThreadHistoryLoad(threadId: threadId),
+           !threadsNeedingCanonicalHistoryReconcile.contains(threadId) {
+            return
+        }
+
         // Long closed chats already have usable local rows. Avoid forcing a full thread/read
         // every sync tick after selection, which can reproduce the same open-chat crash.
         if !wasRunning, shouldPreferDeferredClosedHydration {

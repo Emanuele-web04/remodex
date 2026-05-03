@@ -41,9 +41,13 @@ extension CodexService {
         let sourceModelIdentifier = sourceThread.model?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         do {
+            var baseParams: RPCObject = ["threadId": .string(normalizedSourceThreadId)]
+            if supportsTurnPagination {
+                baseParams["excludeTurns"] = .bool(true)
+            }
             let response = try await sendRequestWithApprovalPolicyFallback(
                 method: "thread/fork",
-                baseParams: ["threadId": .string(normalizedSourceThreadId)],
+                baseParams: baseParams,
                 context: "minimal"
             )
             let forkedThread = try await handleThreadForkResponse(
@@ -57,6 +61,23 @@ extension CodexService {
             requestImmediateSync(threadId: forkedThread.id)
             return forkedThread
         } catch {
+            if supportsTurnPagination, consumeUnsupportedTurnPagination(error) {
+                let response = try await sendRequestWithApprovalPolicyFallback(
+                    method: "thread/fork",
+                    baseParams: ["threadId": .string(normalizedSourceThreadId)],
+                    context: "minimal"
+                )
+                let forkedThread = try await handleThreadForkResponse(
+                    response,
+                    sourceThreadId: normalizedSourceThreadId,
+                    targetProjectPath: resolvedProjectPath,
+                    sourceModelIdentifier: (sourceModelIdentifier?.isEmpty == false) ? sourceModelIdentifier : nil
+                )
+                activeThreadId = forkedThread.id
+                markThreadAsViewed(forkedThread.id)
+                requestImmediateSync(threadId: forkedThread.id)
+                return forkedThread
+            }
             if consumeUnsupportedThreadFork(error) {
                 throw CodexServiceError.invalidInput(
                     "This computer bridge does not support native thread forks yet. Update Remodex on your computer and retry."

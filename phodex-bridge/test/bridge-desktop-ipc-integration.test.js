@@ -103,6 +103,12 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
     params: { threadId: "thread-ipc" },
   }));
 
+  const baselineRead = await waitForMessage(fakeCodex.sent, (message) => message.method === "thread/read");
+  assert.deepEqual(baselineRead.params, {
+    threadId: "thread-ipc",
+    includeTurns: false,
+  });
+
   await waitFor(() => ipcServerSocket);
   writeFrame(ipcServerSocket, {
     type: "broadcast",

@@ -111,6 +111,12 @@ struct TurnView: View {
                 currentWorkingDirectory: gitWorkingDirectory,
                 errorMessage: codex.lastErrorMessage,
                 composerRecoveryAccessory: composerRecoveryAccessory,
+                hasRemoteEarlierMessages: renderSnapshot.hasRemoteOlderHistory,
+                hasLocallyProjectedEarlierMessages: renderSnapshot.hasLocallyProjectedOlderHistory,
+                usesPaginatedHistory: renderSnapshot.usesPaginatedHistory,
+                initialTurnsLoaded: renderSnapshot.initialTurnsLoaded,
+                isLoadingRemoteEarlierMessages: renderSnapshot.isLoadingOlderHistory,
+                olderHistoryLoadErrorMessage: renderSnapshot.olderHistoryLoadErrorMessage,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
@@ -140,6 +146,20 @@ struct TurnView: View {
                 },
                 onTapSubagent: { subagent in
                     openThread(subagent.threadId)
+                },
+                onRevealEarlierMessages: { pageSize in
+                    codex.noteThreadHistoryRevealRequested(threadId: thread.id, pageSize: pageSize)
+                },
+                onLoadRemoteEarlierMessages: {
+                    Task { @MainActor in
+                        await codex.loadOlderThreadHistoryPage(threadId: thread.id)
+                    }
+                },
+                onRetryEarlierMessages: { completion in
+                    Task { @MainActor in
+                        defer { completion() }
+                        _ = try? await codex.loadThreadHistoryIfNeeded(threadId: thread.id, forceRefresh: true)
+                    }
                 },
                 onTapOutsideComposer: {
                     guard isInputFocused else { return }

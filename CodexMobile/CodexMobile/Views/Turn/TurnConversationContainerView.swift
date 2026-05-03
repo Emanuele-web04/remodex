@@ -22,6 +22,12 @@ struct TurnConversationContainerView: View {
     let currentWorkingDirectory: String?
     let errorMessage: String?
     let composerRecoveryAccessory: AnyView?
+    let hasRemoteEarlierMessages: Bool
+    let hasLocallyProjectedEarlierMessages: Bool
+    let usesPaginatedHistory: Bool
+    let initialTurnsLoaded: Bool
+    let isLoadingRemoteEarlierMessages: Bool
+    let olderHistoryLoadErrorMessage: String?
     let shouldAnchorToAssistantResponse: Binding<Bool>
     let isScrolledToBottom: Binding<Bool>
     let isComposerFocused: Bool
@@ -35,6 +41,9 @@ struct TurnConversationContainerView: View {
     let onRetryUserMessage: (String) -> Void
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
+    let onRevealEarlierMessages: (Int) -> Void
+    let onLoadRemoteEarlierMessages: () -> Void
+    let onRetryEarlierMessages: (@escaping () -> Void) -> Void
     let onTapOutsideComposer: () -> Void
 
     @State private var isShowingPinnedPlanSheet = false
@@ -101,6 +110,12 @@ struct TurnConversationContainerView: View {
                 isRetryAvailable: !isThreadRunning,
                 errorMessage: errorMessage,
                 hidesErrorMessage: composerRecoveryAccessory != nil,
+                hasRemoteEarlierMessages: hasRemoteEarlierMessages,
+                hasLocallyProjectedEarlierMessages: hasLocallyProjectedEarlierMessages,
+                usesPaginatedHistory: usesPaginatedHistory,
+                initialTurnsLoaded: initialTurnsLoaded,
+                isLoadingRemoteEarlierMessages: isLoadingRemoteEarlierMessages,
+                olderHistoryLoadErrorMessage: olderHistoryLoadErrorMessage,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
                 isScrolledToBottom: isScrolledToBottom,
                 isComposerFocused: isComposerFocused,
@@ -108,6 +123,9 @@ struct TurnConversationContainerView: View {
                 onRetryUserMessage: onRetryUserMessage,
                 onTapAssistantRevert: onTapAssistantRevert,
                 onTapSubagent: onTapSubagent,
+                onRevealEarlierMessages: onRevealEarlierMessages,
+                onLoadRemoteEarlierMessages: onLoadRemoteEarlierMessages,
+                onRetryEarlierMessages: onRetryEarlierMessages,
                 onTapOutsideComposer: onTapOutsideComposer
             ) {
                 timelineEmptyState

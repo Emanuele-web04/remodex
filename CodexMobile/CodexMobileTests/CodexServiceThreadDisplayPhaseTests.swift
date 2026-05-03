@@ -1,5 +1,5 @@
 // FILE: CodexServiceThreadDisplayPhaseTests.swift
-// Purpose: Verifies the empty-thread placeholder does not regress into a loading flash.
+// Purpose: Verifies thread display gates and pagination state do not regress loading UX.
 // Layer: Unit Test
 // Exports: CodexServiceThreadDisplayPhaseTests
 // Depends on: XCTest, CodexMobile
@@ -59,6 +59,37 @@ final class CodexServiceThreadDisplayPhaseTests: XCTestCase {
         service.loadingThreadIDs.insert(threadID)
 
         XCTAssertEqual(service.threadDisplayPhase(threadId: threadID), .empty)
+    }
+
+    func testFreshInitialPageDoesNotReviveOlderCursorAfterAuthoritativeStart() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.markThreadLocalHistoryStartAuthoritative(threadID, clearRemoteCursor: true)
+        service.updateOlderThreadHistoryCursorFromInitialPage(
+            threadId: threadID,
+            cursor: .string("next-page"),
+            isFreshInitialLoad: true
+        )
+
+        XCTAssertTrue(service.hasAuthoritativeLocalHistoryStart(threadId: threadID))
+        XCTAssertFalse(service.hasRemoteOlderThreadHistoryCursor(threadId: threadID))
+        XCTAssertFalse(service.canLoadOlderThreadHistory(threadId: threadID))
+    }
+
+    func testFreshInitialPageSeedsOlderCursorWhenStartIsUnknown() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.updateOlderThreadHistoryCursorFromInitialPage(
+            threadId: threadID,
+            cursor: .string("next-page"),
+            isFreshInitialLoad: true
+        )
+
+        XCTAssertFalse(service.hasAuthoritativeLocalHistoryStart(threadId: threadID))
+        XCTAssertTrue(service.hasRemoteOlderThreadHistoryCursor(threadId: threadID))
+        XCTAssertTrue(service.canLoadOlderThreadHistory(threadId: threadID))
     }
 
     private func makeService() -> CodexService {

@@ -6,6 +6,11 @@
 
 import Foundation
 
+private enum ThreadTurnStateSnapshotPolicy {
+    static let recentTurnLimit = 8
+    static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
+}
+
 extension CodexService {
     // Keeps sidebar/project loading focused on recent live conversations while
     // retaining a smaller archived slice for restart/recovery flows.
@@ -140,6 +145,7 @@ extension CodexService {
                 // render can skip the transient loading state while the empty composer
                 // is already the right answer.
                 resumedThreadIDs.insert(thread.id)
+                initialTurnsLoadedByThreadID.insert(thread.id)
                 upsertThread(thread, treatAsServerState: true)
                 if let normalizedProjectPath = thread.normalizedProjectPath,
                    CodexThread.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch" {
@@ -885,7 +891,22 @@ extension CodexService {
             if let modelIdentifier = requestedSignature.modelIdentifier {
                 params["model"] = .string(modelIdentifier)
             }
-            let response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            if supportsTurnPagination {
+                params["excludeTurns"] = .bool(true)
+            }
+            var didRequestExcludedTurns = params["excludeTurns"] != nil
+            let response: RPCMessage
+            do {
+                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            } catch {
+                guard didRequestExcludedTurns, consumeUnsupportedTurnPagination(error) else {
+                    throw error
+                }
+
+                params.removeValue(forKey: "excludeTurns")
+                didRequestExcludedTurns = false
+                response = try await sendRequestWithSandboxFallback(method: "thread/resume", baseParams: params)
+            }
             guard !Task.isCancelled,
                   isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                 throw CancellationError()
@@ -897,6 +918,7 @@ extension CodexService {
             }
 
             var resumedThread: CodexThread?
+            var didReceiveEmbeddedHistory = false
             if let threadValue = resultObject["thread"],
                var decodedThread = decodeModel(CodexThread.self, from: threadValue) {
                 decodedThread.syncState = .live
@@ -904,9 +926,20 @@ extension CodexService {
                 resumedThread = decodedThread
 
                 if let threadObject = threadValue.objectValue {
+                    if didRequestExcludedTurns,
+                       threadObject["turns"]?.arrayValue?.isEmpty == false {
+                        markTurnPaginationUnsupportedForCurrentRuntime()
+                        didRequestExcludedTurns = false
+                    }
                     let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
                     registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
                     if !historyMessages.isEmpty {
+                        didReceiveEmbeddedHistory = true
+                        initialTurnsLoadedByThreadID.insert(threadId)
+                        updateThreadTimelineProjectionForEmbeddedHistory(
+                            threadId: threadId,
+                            decodedMessageCount: historyMessages.count
+                        )
                         let existingMessages = messagesByThread[threadId] ?? []
                         let activeThreadIDs = Set(activeTurnIdByThread.keys)
                         let runningIDs = runningThreadIDs
@@ -915,6 +948,9 @@ extension CodexService {
                                 existingCount: existingMessages.count,
                                 historyCount: historyMessages.count
                             )
+                        if !usedRecentWindow {
+                            markThreadLocalHistoryStartAuthoritative(threadId, clearRemoteCursor: true)
+                        }
                         if usedRecentWindow {
                             markThreadNeedingCanonicalHistoryReconcile(threadId)
                         }
@@ -954,7 +990,12 @@ extension CodexService {
                   isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
                 throw CancellationError()
             }
-            hydratedThreadIDs.insert(threadId)
+            if !didRequestExcludedTurns || didReceiveEmbeddedHistory {
+                hydratedThreadIDs.insert(threadId)
+                if !supportsTurnPagination {
+                    initialTurnsLoadedByThreadID.insert(threadId)
+                }
+            }
             resumedThreadIDs.insert(threadId)
             return resumedThread
         }
@@ -2149,7 +2190,7 @@ extension CodexService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    // Resolves the currently interruptible turn id from thread/read when local state becomes stale.
+    // Resolves the currently interruptible turn id from the latest turn page when local state is stale.
     // If the runtime reports "running" without an id yet, surface that instead of falling
     // back to the latest completed turn and interrupting the wrong run.
     func resolveInFlightTurnID(threadId: String) async throws -> String? {
@@ -2173,7 +2214,7 @@ extension CodexService {
         return nil
     }
 
-    // Parses turn status values from thread/read turn objects.
+    // Parses turn status values from app-server turn objects.
     func normalizedInterruptTurnStatus(from turnObject: [String: JSONValue]) -> String? {
         let status = turnObject["status"]?.stringValue
             ?? turnObject["turnStatus"]?.stringValue
@@ -2231,12 +2272,42 @@ extension CodexService {
         return hints.contains { message.contains($0) }
     }
 
-    // Reads thread/read(includeTurns=true) and extracts both running and latest turn metadata.
+    // Reads only the latest turn page when supported, then falls back for older runtimes.
     func readThreadTurnStateSnapshot(threadId: String) async throws -> (
         interruptibleTurnID: String?,
         hasInterruptibleTurnWithoutID: Bool,
         latestTurnID: String?
     ) {
+        if supportsTurnPagination {
+            do {
+                let response = try await sendRequest(
+                    method: "thread/turns/list",
+                    params: .object([
+                        "threadId": .string(threadId),
+                        "limit": .integer(ThreadTurnStateSnapshotPolicy.recentTurnLimit),
+                        "sortDirection": .string("desc"),
+                    ]),
+                    timeoutNanoseconds: ThreadTurnStateSnapshotPolicy.requestTimeoutNanoseconds
+                )
+
+                guard let resultObject = response.result?.objectValue else {
+                    return (nil, false, nil)
+                }
+
+                let turnObjects = (
+                    resultObject["data"]?.arrayValue
+                        ?? resultObject["items"]?.arrayValue
+                        ?? resultObject["turns"]?.arrayValue
+                        ?? []
+                ).compactMap { $0.objectValue }
+                return turnStateSnapshot(from: turnObjects, newestFirst: true)
+            } catch {
+                guard consumeUnsupportedTurnPagination(error, attemptedMethod: "thread/turns/list") else {
+                    throw error
+                }
+            }
+        }
+
         let response: RPCMessage
         do {
             response = try await sendRequest(
@@ -2244,7 +2315,8 @@ extension CodexService {
                 params: .object([
                     "threadId": .string(threadId),
                     "includeTurns": .bool(true),
-                ])
+                ]),
+                timeoutNanoseconds: ThreadTurnStateSnapshotPolicy.requestTimeoutNanoseconds
             )
         } catch {
             guard shouldRetryThreadReadTurnSnapshotWithSnakeCase(error) else {
@@ -2256,20 +2328,31 @@ extension CodexService {
                 params: .object([
                     "thread_id": .string(threadId),
                     "include_turns": .bool(true),
-                ])
+                ]),
+                timeoutNanoseconds: ThreadTurnStateSnapshotPolicy.requestTimeoutNanoseconds
             )
         }
 
-        guard let threadObject = response.result?.objectValue?["thread"]?.objectValue else {
-            return (nil, false, nil)
-        }
+        let turnObjects = response.result?.objectValue?["thread"]?.objectValue?["turns"]?.arrayValue?
+            .compactMap { $0.objectValue } ?? []
+        return turnStateSnapshot(from: turnObjects, newestFirst: false)
+    }
 
-        let turnObjects = threadObject["turns"]?.arrayValue?.compactMap { $0.objectValue } ?? []
+    // Parses latest/running turn metadata from either descending pages or chronological legacy arrays.
+    func turnStateSnapshot(
+        from turnObjects: [RPCObject],
+        newestFirst: Bool
+    ) -> (
+        interruptibleTurnID: String?,
+        hasInterruptibleTurnWithoutID: Bool,
+        latestTurnID: String?
+    ) {
         guard !turnObjects.isEmpty else {
             return (nil, false, nil)
         }
 
-        let latestTurnID = turnObjects.reversed().compactMap { turnObject in
+        let newestTurnObjects = newestFirst ? turnObjects : Array(turnObjects.reversed())
+        let latestTurnID = newestTurnObjects.compactMap { turnObject in
             normalizedInterruptIdentifier(
                 turnObject["id"]?.stringValue
                     ?? turnObject["turnId"]?.stringValue
@@ -2277,11 +2360,9 @@ extension CodexService {
             )
         }.first
 
-        // Some thread/read payloads can include a newer completed turn after the currently
-        // running one, so scan backwards for the most recent interruptible turn instead of
-        // assuming the array tail is always the active run.
+        // Newest-first scanning avoids interrupting an older completed turn when recovery is stale.
         var hasInterruptibleTurnWithoutID = false
-        for turnObject in turnObjects.reversed() {
+        for turnObject in newestTurnObjects {
             let turnStatus = normalizedInterruptTurnStatus(from: turnObject)
             guard isInterruptibleTurnStatus(turnStatus) else {
                 continue

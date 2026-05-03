@@ -200,8 +200,8 @@ enum MarkdownParseCacheReset {
 }
 
 // Wraps the default Textual markdown parser with a bounded AttributedString
-// cache so Foundation's markdown parser is not re-run when LazyVStack
-// recycles a cell on upward scroll.
+// cache so Foundation's markdown parser is not re-run during timeline redraws
+// or when a future lazy container recycles a row on upward scroll.
 @MainActor
 private struct CachingMarkdownParser: MarkupParser {
     static let shared = CachingMarkdownParser()
@@ -2073,8 +2073,8 @@ private struct SelectableMessageTextSheet: View {
 // Centralizes the inline reasoning row so thinking-specific spacing, fonts, and
 // disclosure behavior are easy to tweak without hunting through MessageRow.
 // Kept as one flat struct (no sub-view nesting) to minimise per-cell view-tree
-// depth inside the LazyVStack — extra struct layers cost allocation + diffing on
-// every scroll frame.
+// depth in the scrolling timeline; extra struct layers cost allocation + diffing
+// on every scroll frame.
 private struct ThinkingSystemBlock: View {
     let messageID: String
     let isStreaming: Bool

@@ -64,7 +64,7 @@ extension CodexService {
         }
     }
 
-    // Decodes thread/read(includeTurns=true) payload into chronological message timeline.
+    // Decodes app-server turn arrays into a chronological message timeline.
     func decodeMessagesFromThreadRead(threadId: String, threadObject: [String: JSONValue]) -> [CodexMessage] {
         let baseDate = decodeHistoryBaseDate(from: threadObject)
         let turns = threadObject["turns"]?.arrayValue ?? []
