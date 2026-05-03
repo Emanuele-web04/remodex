@@ -7,7 +7,8 @@
 import SwiftUI
 
 struct OnboardingView: View {
-    let onContinue: () -> Void
+    let onScanQRCode: () -> Void
+    let onPairWithCode: () -> Void
     @State private var currentPage = 0
     @State private var isShowingCodexInstallReminder = false
 
@@ -85,12 +86,7 @@ struct OnboardingView: View {
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: currentPage)
 
-            // CTA button
-            PrimaryCapsuleButton(
-                title: buttonTitle,
-                systemImage: currentPage == pageCount - 1 ? "qrcode" : nil,
-                action: handleContinue
-            )
+            finalPageActions
 
             OpenSourceBadge(style: .light)
         }
@@ -110,11 +106,59 @@ struct OnboardingView: View {
 
     // MARK: - State
 
+    @ViewBuilder
+    private var finalPageActions: some View {
+        if currentPage == pageCount - 1 {
+            VStack(spacing: 10) {
+                PrimaryCapsuleButton(
+                    title: "Scan with QR Code",
+                    systemImage: "qrcode",
+                    action: handleContinue
+                )
+
+                secondaryCapsuleButton(
+                    title: "Pair with Code",
+                    systemImage: "keyboard",
+                    action: onPairWithCode
+                )
+            }
+        } else {
+            PrimaryCapsuleButton(
+                title: buttonTitle,
+                action: handleContinue
+            )
+        }
+    }
+
+    // Offers the first-run manual pairing path without competing visually with the primary QR flow.
+    private func secondaryCapsuleButton(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+
+                Text(title)
+                    .font(AppFont.body(weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 54)
+            .background(
+                Capsule()
+                    .fill(Color.white.opacity(0.1))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     private var buttonTitle: String {
         switch currentPage {
         case 0: return "Get Started"
         case 1: return "Set Up"
-        case pageCount - 1: return "Scan QR Code"
         default: return "Continue"
         }
     }
@@ -129,7 +173,7 @@ struct OnboardingView: View {
         if currentPage < pageCount - 1 {
             advanceToNextPage()
         } else {
-            onContinue()
+            onScanQRCode()
         }
     }
 
@@ -143,14 +187,24 @@ struct OnboardingView: View {
 // MARK: - Previews
 
 #Preview("Full Flow") {
-    OnboardingView {
-        print("Continue tapped")
-    }
+    OnboardingView(
+        onScanQRCode: {
+            print("Scan tapped")
+        },
+        onPairWithCode: {
+            print("Code tapped")
+        }
+    )
 }
 
 #Preview("Light Override") {
-    OnboardingView {
-        print("Continue tapped")
-    }
+    OnboardingView(
+        onScanQRCode: {
+            print("Scan tapped")
+        },
+        onPairWithCode: {
+            print("Code tapped")
+        }
+    )
     .preferredColorScheme(.light)
 }

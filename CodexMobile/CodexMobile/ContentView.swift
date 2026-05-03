@@ -271,9 +271,10 @@ struct ContentView: View {
     @ViewBuilder
     private var rootContent: some View {
         if !hasSeenOnboarding {
-            OnboardingView {
-                finishOnboardingAndShowScanner()
-            }
+            OnboardingView(
+                onScanQRCode: finishOnboardingAndShowScanner,
+                onPairWithCode: finishOnboardingAndShowPairingCode
+            )
         } else if subscriptions.bootstrapState == .failed && !subscriptions.hasAppAccess {
             SubscriptionBootstrapFailureView()
         } else if !subscriptions.hasAppAccess {
@@ -295,6 +296,14 @@ struct ContentView: View {
             hasDismissedAutomaticScanner = false
             scannerCanReturnToOnboarding = true
         }
+    }
+
+    // Opens code entry over the last onboarding page; a valid code completes onboarding after resolution.
+    private func finishOnboardingAndShowPairingCode() {
+        codex.shouldAutoReconnectOnForeground = false
+        codex.connectionRecoveryState = .idle
+        codex.lastErrorMessage = nil
+        presentManualPairingEntryAfterStoppingReconnect()
     }
 
     // Lets the scanner step back into onboarding on first run, or into the empty state later on.
@@ -1332,6 +1341,12 @@ struct ContentView: View {
                 let pairingPayload = try await codex.resolvePairingCode(pendingCode)
                 isShowingManualPairingEntry = false
                 manualPairingCode = ""
+                withAnimation {
+                    hasSeenOnboarding = true
+                    isShowingManualScanner = false
+                    hasDismissedAutomaticScanner = true
+                    scannerCanReturnToOnboarding = false
+                }
                 await viewModel.connectToRelay(
                     pairingPayload: pairingPayload,
                     codex: codex
