@@ -378,7 +378,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
     private var compactRuntimeTitle: String {
         if selectedModelID == nil {
-            return "Loading…"
+            return isLoadingModels ? "Loading…" : "Select model"
         }
         return "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
     }

@@ -496,7 +496,7 @@ struct TurnView: View {
             return nil
         }
 
-        if isConnectionRecoveryFooterNoise(message) {
+        if isConnectionRecoveryFooterNoise(message) || isBackgroundHistoryRetryNoise(message) {
             return nil
         }
 
@@ -509,6 +509,10 @@ struct TurnView: View {
             || normalizedMessage.hasPrefix("connection was interrupted")
             || normalizedMessage.hasPrefix("connection timed out")
             || normalizedMessage.hasPrefix("trying to reconnect")
+    }
+
+    private func isBackgroundHistoryRetryNoise(_ message: String) -> Bool {
+        message.lowercased() == "couldn't load this chat yet. retrying in the background."
     }
 
     private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {

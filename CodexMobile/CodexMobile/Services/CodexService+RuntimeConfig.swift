@@ -17,6 +17,11 @@ private enum RuntimeConfigLoadingPolicy {
     static let modelListTimeoutNanoseconds: UInt64 = 8_000_000_000
 }
 
+private enum RuntimeSelectionDefaults {
+    static let modelId = "gpt-5.5"
+    static let reasoningEffort = "medium"
+}
+
 extension CodexService {
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
@@ -226,7 +231,7 @@ extension CodexService {
 
     func selectedReasoningEffortForSelectedModel(threadId: String? = nil) -> String? {
         guard let model = selectedModelOption() else {
-            return nil
+            return selectedReasoningEffort ?? RuntimeSelectionDefaults.reasoningEffort
         }
 
         let supported = Set(model.supportedReasoningEfforts.map { $0.reasoningEffort })
@@ -259,7 +264,7 @@ extension CodexService {
     }
 
     func runtimeModelIdentifierForTurn() -> String? {
-        selectedModelOption()?.model
+        selectedModelOption()?.model ?? selectedModelId ?? RuntimeSelectionDefaults.modelId
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
@@ -457,6 +462,8 @@ private extension CodexService {
 
     func normalizeRuntimeSelectionsAfterModelsUpdate() {
         guard !availableModels.isEmpty else {
+            selectedModelId = selectedModelId ?? RuntimeSelectionDefaults.modelId
+            selectedReasoningEffort = selectedReasoningEffort ?? RuntimeSelectionDefaults.reasoningEffort
             persistRuntimeSelections()
             return
         }

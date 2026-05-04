@@ -276,10 +276,6 @@ private struct TurnDiffFileCard: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 10)
 
-                        Image(systemName: actionIcon)
-                            .font(AppFont.system(size: 12))
-                            .foregroundStyle(actionColor)
-
                         Text(chunk.compactPath)
                             .font(AppFont.mono(.subheadline))
                             .fontWeight(.medium)
@@ -335,15 +331,6 @@ private struct TurnDiffFileCard: View {
         }
         .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var actionIcon: String {
-        switch chunk.action {
-        case .edited: return "pencil"
-        case .added: return "plus"
-        case .deleted: return "minus"
-        case .renamed: return "arrow.right"
-        }
     }
 
     private var actionColor: Color {
