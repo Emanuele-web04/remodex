@@ -256,7 +256,7 @@ struct TurnComposerView: View {
     }
 
     private var placeholderText: String {
-        isEmptyThread ? "Ask anything... @plugins, $skills, /commands" : "Ask for a follow-up"
+        isEmptyThread ? "Ask anything... @plugins, $skills, /commands" : "Ask for follow-up changes"
     }
 
 }

@@ -2395,6 +2395,7 @@ final class TurnViewModel {
             defer {
                 self.runningGitAction = nil
                 self.gitActionProgress = nil
+                self.inlineCommitAndPushPhase = nil
             }
 
             let gitService = GitActionsService(codex: codex, workingDirectory: workingDirectory)
@@ -2658,6 +2659,7 @@ final class TurnViewModel {
         gitActionSuccessDismissTask?.cancel()
         gitActionSuccessDismissTask = nil
         gitActionSuccess = nil
+        inlineCommitAndPushPhase = nil
         let phases = action.plannedPhases(
             repoSync: gitRepoSync,
             hasCustomCommitMessage: false,

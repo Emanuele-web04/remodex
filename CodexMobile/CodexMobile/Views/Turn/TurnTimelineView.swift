@@ -28,6 +28,9 @@ struct AssistantBlockAccessoryState: Equatable {
 }
 
 private struct TurnTimelineMessageRow: View {
+    @Environment(\.inlineCommitAndPushAction) private var inlineCommitAndPushAction
+    @Environment(\.inlineCommitAndPushPhase) private var inlineCommitAndPushPhase
+
     let message: CodexMessage
     let isRetryAvailable: Bool
     let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
@@ -57,6 +60,8 @@ private struct TurnTimelineMessageRow: View {
             planMatchingFingerprint: planMatchingFingerprint,
             showsStreamingAnimations: autoScrollMode == .followBottom
                 && message.id == newestStreamingMessageID,
+            inlineCommitAndPushAction: inlineCommitAndPushAction,
+            inlineCommitAndPushPhase: inlineCommitAndPushPhase,
             assistantRevertAction: onTapAssistantRevert,
             subagentOpenAction: onTapSubagent
         )

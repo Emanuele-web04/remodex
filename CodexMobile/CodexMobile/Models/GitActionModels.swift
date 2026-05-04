@@ -577,7 +577,7 @@ struct TurnGitActionProgress: Equatable, Sendable {
     }
 }
 
-enum InlineCommitAndPushPhase: Sendable {
+enum InlineCommitAndPushPhase: Equatable, Sendable {
     case committing
     case pushing
 

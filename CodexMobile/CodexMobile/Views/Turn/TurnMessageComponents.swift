@@ -1157,8 +1157,9 @@ struct MessageRow: View, Equatable {
     var planMatchingFingerprint: Int = 0
     // Disables timer-driven adornments while the user reads older content.
     var showsStreamingAnimations: Bool = true
-    // Passed as init params instead of @Environment so .equatable() can short-circuit
-    // without environment rebinding forcing a body re-evaluation on scroll-up cell reuse.
+    // Passed as init params so .equatable() can invalidate only for row-visible action state.
+    var inlineCommitAndPushAction: (() -> Void)? = nil
+    var inlineCommitAndPushPhase: InlineCommitAndPushPhase? = nil
     var assistantRevertAction: ((CodexMessage) -> Void)? = nil
     var subagentOpenAction: ((CodexSubagentThreadPresentation) -> Void)? = nil
     @State private var previewImage: PreviewImagePayload?
@@ -1177,6 +1178,8 @@ struct MessageRow: View, Equatable {
             && lhs.currentWorkingDirectory == rhs.currentWorkingDirectory
             && lhs.planMatchingFingerprint == rhs.planMatchingFingerprint
             && lhs.showsStreamingAnimations == rhs.showsStreamingAnimations
+            && (lhs.inlineCommitAndPushAction != nil) == (rhs.inlineCommitAndPushAction != nil)
+            && lhs.inlineCommitAndPushPhase == rhs.inlineCommitAndPushPhase
     }
 
     // Computed once per body evaluation and reused by all sub-views.
@@ -1830,8 +1833,6 @@ struct MessageRow: View, Equatable {
         }
     }
 
-    @Environment(\.inlineCommitAndPushAction) private var inlineCommitAction
-    @Environment(\.inlineCommitAndPushPhase) private var inlineCommitAndPushPhase
     @State private var isShowingBlockDiffSheet = false
 
     private var hasTurnEndActions: Bool {
@@ -1890,7 +1891,7 @@ struct MessageRow: View, Equatable {
                         }
                     }
 
-                    if let action = inlineCommitAction {
+                    if let action = inlineCommitAndPushAction {
                         Button {
                             HapticFeedback.shared.triggerImpactFeedback(style: .light)
                             action()
