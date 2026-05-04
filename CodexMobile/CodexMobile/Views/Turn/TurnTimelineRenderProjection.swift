@@ -404,7 +404,9 @@ enum TurnTimelineRenderProjection {
             switch message.kind {
             case .fileChange, .subagentAction, .userInputPrompt:
                 return true
-            case .thinking, .toolActivity, .commandExecution, .chat, .plan:
+            case .plan:
+                return message.shouldDisplayInlinePlanResult
+            case .thinking, .toolActivity, .commandExecution, .chat:
                 return false
             }
         }

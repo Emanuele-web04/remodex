@@ -1645,6 +1645,42 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertTrue(activePlan.shouldDisplayPinnedPlanAccessory)
     }
 
+    func testCompletedNativePlanItemRendersInlineUntilTurnTerminalStateResolves() {
+        let pendingResultPlan = CodexMessage(
+            threadId: "thread-\(UUID().uuidString)",
+            role: .system,
+            kind: .plan,
+            text: """
+            # Small Plan
+
+            - Keep the focused source edits.
+            - Remove generated build output.
+            - Run the focused verification.
+            """,
+            itemId: "plan-item-\(UUID().uuidString)",
+            isStreaming: false,
+            planPresentation: .resultCompletedItem
+        )
+
+        XCTAssertFalse(pendingResultPlan.shouldDisplayPinnedPlanAccessory)
+        XCTAssertTrue(pendingResultPlan.shouldDisplayInlinePlanResult)
+    }
+
+    func testCompletedNativePlanPlaceholderDoesNotRenderInline() {
+        let placeholderPlan = CodexMessage(
+            threadId: "thread-\(UUID().uuidString)",
+            role: .system,
+            kind: .plan,
+            text: "Planning...",
+            itemId: "plan-item-\(UUID().uuidString)",
+            isStreaming: false,
+            planPresentation: .resultCompletedItem
+        )
+
+        XCTAssertFalse(placeholderPlan.shouldDisplayPinnedPlanAccessory)
+        XCTAssertFalse(placeholderPlan.shouldDisplayInlinePlanResult)
+    }
+
     func testCompletedSystemPlanWithEmbeddedProposedPlanDoesNotMasqueradeAsFinalPlan() {
         let completedPlan = CodexMessage(
             threadId: "thread-\(UUID().uuidString)",

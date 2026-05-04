@@ -891,6 +891,72 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(previousGroup.messages.map(\.id), ["thinking", "assistant-status", "tool", "post-tool"])
     }
 
+    func testTimelineProjectionKeepsCompletedPlanItemOutsidePreviousMessages() {
+        let now = Date()
+        var planMessage = makeMessage(
+            id: "plan",
+            threadID: "thread",
+            role: .system,
+            kind: .plan,
+            text: """
+            # Small Plan
+
+            - Keep the focused source edits.
+            - Remove generated build output.
+            - Run the focused verification.
+            """,
+            createdAt: now.addingTimeInterval(2),
+            turnID: "turn-1",
+            itemID: "plan-item",
+            orderIndex: 3
+        )
+        planMessage.planPresentation = .resultCompletedItem
+
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Review this change",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "thinking",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Inspecting files",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            planMessage,
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The focused changes are ready to verify.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "previous-messages:final", "plan", "final"])
+        guard case .previousMessages(let previousGroup) = items[1] else {
+            return XCTFail("Expected previous messages disclosure before the visible plan")
+        }
+        XCTAssertEqual(previousGroup.messages.map(\.id), ["thinking"])
+    }
+
     func testTimelineProjectionCollapsesTurnFileChangesIntoOneRenderedTable() {
         let now = Date()
         let messages = [
