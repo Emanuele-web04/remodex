@@ -327,6 +327,46 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(messageIDs, toolMessages.map(\.id))
     }
 
+    func testTimelineRenderProjectionSkipsPlaceholderOnlyThinkingRows() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "tool-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git status",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "tool-1"
+            ),
+            makeMessage(
+                id: "thinking-placeholder",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Thinking...",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "thinking-1",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "tool-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed git show --stat",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "tool-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+        XCTAssertEqual(items.map(\.id), ["tool-1", "tool-2"])
+    }
+
     func testTimelineRenderProjectionSplitsToolRunsAcrossStableTurnIDs() {
         let now = Date()
         let messages = [
@@ -399,6 +439,18 @@ final class TurnTimelineReducerTests: XCTestCase {
                 orderIndex: 3
             ),
             makeMessage(
+                id: "thinking-placeholder",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Thinking...",
+                createdAt: now.addingTimeInterval(2.5),
+                turnID: "turn-1",
+                itemID: "thinking-item",
+                isStreaming: true,
+                orderIndex: 4
+            ),
+            makeMessage(
                 id: "final",
                 threadID: "thread",
                 role: .assistant,
@@ -406,7 +458,7 @@ final class TurnTimelineReducerTests: XCTestCase {
                 createdAt: now.addingTimeInterval(3),
                 turnID: "turn-1",
                 itemID: "final-item",
-                orderIndex: 4
+                orderIndex: 5
             ),
         ]
 

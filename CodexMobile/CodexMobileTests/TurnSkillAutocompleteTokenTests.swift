@@ -14,6 +14,15 @@ final class TurnSkillAutocompleteTokenTests: XCTestCase {
         XCTAssertEqual(token?.query, "rev")
     }
 
+    func testBareDollarParsesToOpenSkillList() {
+        let token = TurnViewModel.trailingSkillAutocompleteToken(in: "$")
+        XCTAssertEqual(token?.query, "")
+    }
+
+    func testPureNumericDollarTokenDoesNotParseAsSkill() {
+        XCTAssertNil(TurnViewModel.trailingSkillAutocompleteToken(in: "$100"))
+    }
+
     func testTrailingTokenDoesNotParseWhenDollarTokenIsNotFinal() {
         XCTAssertNil(TurnViewModel.trailingSkillAutocompleteToken(in: "run $rev now"))
     }

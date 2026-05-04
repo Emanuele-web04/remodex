@@ -19,7 +19,7 @@ enum ThreadHistoryHydrationPolicy {
     // Match Litter's cursor-driven paging: hydrate a tiny recent window, then prepend on demand.
     static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
     static let initialPageSoftTimeoutNanoseconds: UInt64 = 8_000_000_000
-    static let initialTurnPageSize = 20
+    static let initialTurnPageSize = 10
     static let olderTurnPageSize = 5
     static let duplicateOlderPageSkipLimit = 12
 }

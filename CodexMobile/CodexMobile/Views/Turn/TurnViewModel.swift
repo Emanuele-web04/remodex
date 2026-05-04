@@ -672,22 +672,17 @@ final class TurnViewModel {
         resetSlashCommandState(clearPendingSelection: true)
 
         let query = token.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard query.count >= 2 else {
-            skillAutocompleteDebounceTask?.cancel()
-            skillAutocompleteDebounceTask = nil
-            skillAutocompleteItems = []
-            skillAutocompleteQuery = query
-            isSkillAutocompleteLoading = false
-            isSkillAutocompleteVisible = false
-            return
-        }
-
         let normalizedRoot = root
         skillAutocompleteQuery = query
         isSkillAutocompleteVisible = true
         let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[normalizedRoot] != nil
         let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(normalizedRoot)
         isSkillAutocompleteLoading = !hasCachedSkillIndex && !rootIsUnsupported
+        if let cachedIndex = cachedSkillSearchIndexByRoot[normalizedRoot] {
+            skillAutocompleteItems = filteredSkillAutocompleteItems(for: query, indexedSkills: cachedIndex)
+        } else {
+            skillAutocompleteItems = []
+        }
         skillAutocompleteDebounceTask?.cancel()
 
         let expectedQuery = query
@@ -1481,12 +1476,12 @@ final class TurnViewModel {
 
     // Extracts only a final `$query` token at the end of composer text.
     static func trailingSkillAutocompleteToken(in text: String) -> TurnTrailingSkillAutocompleteToken? {
-        guard let token = trailingToken(in: text, trigger: "$") else {
+        guard let token = trailingToken(in: text, trigger: "$", allowsEmptyQuery: true) else {
             return nil
         }
 
         // Reject pure-numeric queries like `$100`, `$42` — not skill names.
-        guard token.query.contains(where: { $0.isLetter }) else {
+        guard token.query.isEmpty || token.query.contains(where: { $0.isLetter }) else {
             return nil
         }
 
@@ -1783,7 +1778,8 @@ final class TurnViewModel {
     // Shared parser for final-token autocomplete triggers (`@`, `$`).
     private static func trailingToken(
         in text: String,
-        trigger: Character
+        trigger: Character,
+        allowsEmptyQuery: Bool = false
     ) -> TurnTrailingToken? {
         guard !text.isEmpty else {
             return nil
@@ -1807,7 +1803,7 @@ final class TurnViewModel {
         let queryStart = text.index(after: tokenStart)
         let query = String(text[queryStart..<text.endIndex])
         guard !query.contains(where: { $0.isWhitespace }),
-              !query.isEmpty else {
+              (allowsEmptyQuery || !query.isEmpty) else {
             return nil
         }
 
@@ -2808,11 +2804,12 @@ private struct TurnSkillSearchIndexEntry: Equatable {
     init(skill: CodexSkillMetadata) {
         self.skill = skill
         let name = skill.name.lowercased()
+        let displayName = SkillDisplayNameFormatter.displayName(for: skill.name).lowercased()
         let description = skill.description?.lowercased() ?? ""
         if description.isEmpty {
-            self.searchBlob = name
+            self.searchBlob = "\(name)\n\(displayName)"
         } else {
-            self.searchBlob = "\(name)\n\(description)"
+            self.searchBlob = "\(name)\n\(displayName)\n\(description)"
         }
     }
 }

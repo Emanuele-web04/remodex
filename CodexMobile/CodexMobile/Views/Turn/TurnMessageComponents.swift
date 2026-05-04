@@ -71,6 +71,8 @@ private struct FileChangeInlineActionRow: View {
 // MARK: - FileChangeSummaryBox
 // Renders turn-end file edits as one compact recap instead of chat-like rows.
 private struct FileChangeSummaryBox: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     let entries: [TurnFileChangeSummaryEntry]
     let fallbackText: String
 
@@ -127,7 +129,7 @@ private struct FileChangeSummaryBox: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            Color(.secondarySystemBackground),
+            UserBubbleColor.default.bubbleBackground(for: colorScheme),
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .overlay {
