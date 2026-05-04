@@ -100,7 +100,12 @@ extension CodexService {
 
     func setSelectedModelId(_ modelId: String?) {
         let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        selectedModelId = (normalized?.isEmpty == false) ? normalized : nil
+        if normalized?.isEmpty == false {
+            selectedModelId = normalized
+        } else {
+            selectedModelId = RuntimeSelectionDefaults.modelId
+            selectedReasoningEffort = RuntimeSelectionDefaults.reasoningEffort
+        }
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 

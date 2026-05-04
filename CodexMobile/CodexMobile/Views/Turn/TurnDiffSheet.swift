@@ -180,12 +180,15 @@ struct TurnDiffSheet: View {
     let entries: [TurnFileChangeSummaryEntry]
     let bodyText: String
     let messageID: String
+    var restrictToPath: String? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var expandedFileIDs: Set<String> = []
 
     private var chunks: [PerFileDiffChunk] {
-        PerFileDiffChunkCache.chunks(messageID: messageID, bodyText: bodyText, entries: entries)
+        let all = PerFileDiffChunkCache.chunks(messageID: messageID, bodyText: bodyText, entries: entries)
+        guard let restrictToPath else { return all }
+        return all.filter { FileChangePathIdentity.representsSameFile($0.path, restrictToPath) }
     }
 
     private var allExpanded: Bool {

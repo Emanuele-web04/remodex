@@ -117,7 +117,7 @@ struct TurnComposerHostView: View {
             isEmptyThread: isEmptyThread,
             isWorktreeProject: isWorktreeProject,
             orderedModelOptions: orderedModelOptions,
-            selectedModelID: codex.selectedModelOption()?.id,
+            selectedModelID: codex.selectedModelOption()?.id ?? codex.selectedModelId,
             selectedModelTitle: selectedModelTitle,
             isLoadingModels: codex.isLoadingModels,
             runtimeState: runtimeState,

@@ -75,10 +75,12 @@ private struct FileChangeSummaryBox: View {
 
     let entries: [TurnFileChangeSummaryEntry]
     let fallbackText: String
+    let messageID: String
 
     // Default to expanded so the recap stays informative without an extra tap;
     // collapse remains available for long lists or visual decluttering.
     @State private var isExpanded: Bool = true
+    @State private var selectedEntry: TurnFileChangeSummaryEntry?
 
     private var canCollapse: Bool {
         !entries.isEmpty || !fallbackText.isEmpty
@@ -96,22 +98,28 @@ private struct FileChangeSummaryBox: View {
                         let entry = entries[index]
                         let isLastEntry = index == entries.index(before: entries.endIndex)
 
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(entry.compactPath)
-                                .font(AppFont.subheadline())
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                        Button {
+                            selectedEntry = entry
+                        } label: {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(entry.compactPath)
+                                    .font(AppFont.subheadline())
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
 
-                            Spacer(minLength: 8)
+                                Spacer(minLength: 8)
 
-                            if entry.additions > 0 || entry.deletions > 0 {
-                                DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
-                                    .font(AppFont.mono(.caption))
+                                if entry.additions > 0 || entry.deletions > 0 {
+                                    DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                                        .font(AppFont.mono(.caption))
+                                }
                             }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .contentShape(Rectangle())
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
+                        .buttonStyle(.plain)
 
                         if !isLastEntry {
                             Divider()
@@ -137,6 +145,15 @@ private struct FileChangeSummaryBox: View {
                 .stroke(Color(.separator).opacity(0.4), lineWidth: 0.5)
         }
         .padding(2)
+        .sheet(item: $selectedEntry) { entry in
+            TurnDiffSheet(
+                title: entry.compactPath,
+                entries: [entry],
+                bodyText: fallbackText,
+                messageID: messageID,
+                restrictToPath: entry.path
+            )
+        }
     }
 
     @ViewBuilder
@@ -1723,7 +1740,11 @@ struct MessageRow: View, Equatable {
             )
         } else {
             VStack(alignment: .leading, spacing: 8) {
-                FileChangeSummaryBox(entries: allEntries, fallbackText: fallbackText)
+                FileChangeSummaryBox(
+                    entries: allEntries,
+                    fallbackText: fallbackText,
+                    messageID: message.id
+                )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu {
