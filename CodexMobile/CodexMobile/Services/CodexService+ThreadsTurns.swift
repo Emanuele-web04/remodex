@@ -301,7 +301,7 @@ extension CodexService {
                    activeTurnID(for: normalizedThreadID) == nil {
                     demoteVisibleRunningStateToProtectedFallback(for: normalizedThreadID)
                 }
-                lastErrorMessage = userFacingTurnErrorMessage(from: error)
+                lastErrorMessage = userFacingTurnErrorMessageForFooter(from: error)
                 throw error
             }
         }
@@ -323,6 +323,7 @@ extension CodexService {
                 threadId: resolvedThreadID,
                 useSnakeCaseParams: false
             )
+            lastErrorMessage = nil
             return
         } catch {
             var finalError: Error = error
@@ -334,6 +335,7 @@ extension CodexService {
                         threadId: resolvedThreadID,
                         useSnakeCaseParams: true
                     )
+                    lastErrorMessage = nil
                     return
                 } catch {
                     finalError = error
@@ -352,6 +354,7 @@ extension CodexService {
                     )
                     setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
                     threadIdByTurnID[refreshedTurnID] = resolvedThreadID
+                    lastErrorMessage = nil
                     return
                 } catch {
                     finalError = error
@@ -364,6 +367,7 @@ extension CodexService {
                             )
                             setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
                             threadIdByTurnID[refreshedTurnID] = resolvedThreadID
+                            lastErrorMessage = nil
                             return
                         } catch {
                             finalError = error
@@ -372,7 +376,7 @@ extension CodexService {
                 }
             }
 
-            lastErrorMessage = userFacingTurnErrorMessage(from: finalError)
+            lastErrorMessage = userFacingTurnErrorMessageForFooter(from: finalError)
             throw finalError
         }
     }
@@ -1518,6 +1522,10 @@ extension CodexService {
     }
 
     func userFacingTurnErrorMessage(from error: Error) -> String {
+        if isCancellationLikeError(error) {
+            return ""
+        }
+
         if shouldTreatSendFailureAsDisconnect(error)
             || isRetryableSavedSessionConnectError(error)
             || isRecoverableTransientConnectionError(error)
@@ -1528,6 +1536,9 @@ extension CodexService {
         if let serviceError = error as? CodexServiceError {
             switch serviceError {
             case .rpcError(let rpcError):
+                if let mappedMessage = userFacingRuntimeMessage(for: rpcError.message) {
+                    return mappedMessage
+                }
                 let trimmed = rpcError.message.trimmingCharacters(in: .whitespacesAndNewlines)
                 return trimmed.isEmpty ? serviceError.localizedDescription : trimmed
             default:
@@ -1538,6 +1549,111 @@ extension CodexService {
 
         let trimmed = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "Error while sending message" : trimmed
+    }
+
+    // Returns nil for internal/transient runtime noise that should not occupy the red footer.
+    func userFacingTurnErrorMessageForFooter(from error: Error) -> String? {
+        if isCancellationLikeError(error) || shouldSuppressRuntimeErrorInChat(error) {
+            return nil
+        }
+
+        let message = userFacingTurnErrorMessage(from: error)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return message.isEmpty ? nil : message
+    }
+
+    // Converts raw app-server/runtime text into short user-facing copy.
+    func userFacingRuntimeMessage(for rawMessage: String) -> String? {
+        let normalizedMessage = rawMessage
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !normalizedMessage.isEmpty else {
+            return nil
+        }
+
+        if isRuntimeMaterializationMessage(normalizedMessage) {
+            return "The run is still starting. Try again in a moment."
+        }
+
+        if isStaleTurnRuntimeMessage(normalizedMessage) {
+            return "That run already finished."
+        }
+
+        if isInternalRuntimeCompatibilityMessage(normalizedMessage) {
+            return "The paired runtime rejected this request. Reconnect and try again."
+        }
+
+        return nil
+    }
+
+    // Hides compatibility/materialization internals from chat history and footer surfaces.
+    func shouldSuppressRuntimeErrorInChat(_ error: Error) -> Bool {
+        if isCancellationLikeError(error) {
+            return true
+        }
+
+        guard let rawMessage = rawRPCMessage(from: error) else {
+            return false
+        }
+
+        return shouldSuppressRuntimeMessageInChat(rawMessage)
+    }
+
+    func shouldSuppressRuntimeMessageInChat(_ rawMessage: String) -> Bool {
+        let normalizedMessage = rawMessage.lowercased()
+        return isRuntimeMaterializationMessage(normalizedMessage)
+            || isInternalRuntimeCompatibilityMessage(normalizedMessage)
+    }
+
+    func rawRPCMessage(from error: Error) -> String? {
+        guard let serviceError = error as? CodexServiceError,
+              case .rpcError(let rpcError) = serviceError else {
+            return nil
+        }
+
+        let trimmedMessage = rpcError.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedMessage.isEmpty ? nil : trimmedMessage
+    }
+
+    func isCancellationLikeError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
+    }
+
+    func isRuntimeMaterializationMessage(_ normalizedMessage: String) -> Bool {
+        normalizedMessage.contains("not materialized")
+            || normalizedMessage.contains("not yet materialized")
+    }
+
+    func isStaleTurnRuntimeMessage(_ normalizedMessage: String) -> Bool {
+        normalizedMessage.contains("turn already completed")
+            || normalizedMessage.contains("already completed")
+            || normalizedMessage.contains("already finished")
+            || normalizedMessage.contains("turn not found")
+            || normalizedMessage.contains("no active turn")
+            || normalizedMessage.contains("not in progress")
+            || normalizedMessage.contains("not running")
+            || normalizedMessage.contains("not active")
+    }
+
+    func isInternalRuntimeCompatibilityMessage(_ normalizedMessage: String) -> Bool {
+        if normalizedMessage.contains("method not found")
+            || normalizedMessage.contains("unknown method")
+            || normalizedMessage.contains("unknown field")
+            || normalizedMessage.contains("unrecognized field") {
+            return true
+        }
+
+        return normalizedMessage.contains("thread/turns/list")
+            && (
+                normalizedMessage.contains("unavailable")
+                    || normalizedMessage.contains("unsupported")
+                    || normalizedMessage.contains("not found")
+            )
     }
 
     // Normalizes outgoing turn input so we can support mixed text + image messages.
@@ -1941,9 +2057,15 @@ extension CodexService {
             throw error
         }
 
-        let errorMessage = userFacingTurnErrorMessage(from: error)
-        lastErrorMessage = errorMessage
-        appendSystemMessage(threadId: threadId, text: "Send error: \(errorMessage)")
+        if let footerMessage = userFacingTurnErrorMessageForFooter(from: error) {
+            lastErrorMessage = footerMessage
+        } else {
+            lastErrorMessage = nil
+        }
+        if !shouldSuppressRuntimeErrorInChat(error),
+           let errorMessage = userFacingTurnErrorMessageForFooter(from: error) {
+            appendSystemMessage(threadId: threadId, text: "Send error: \(errorMessage)")
+        }
         throw error
     }
 
@@ -1972,6 +2094,8 @@ extension CodexService {
             beginAssistantMessage(threadId: threadId, turnId: turnID)
         }
 
+        lastErrorMessage = nil
+
         if let index = threadIndex(for: threadId) {
             threads[index].updatedAt = Date()
             threads[index].syncState = .live
@@ -1988,7 +2112,7 @@ extension CodexService {
         threadId: String
     ) {
         markMessageDeliveryState(threadId: threadId, messageId: pendingMessageId, state: .failed)
-        lastErrorMessage = userFacingTurnErrorMessage(from: error)
+        lastErrorMessage = userFacingTurnErrorMessageForFooter(from: error)
     }
 
     // Some server versions expect `image_url` instead of `url` for image items.
@@ -2313,8 +2437,12 @@ extension CodexService {
                 ).compactMap { $0.objectValue }
                 return turnStateSnapshot(from: turnObjects, newestFirst: true)
             } catch {
-                guard consumeUnsupportedTurnPagination(error, attemptedMethod: "thread/turns/list") else {
-                    throw error
+                if shouldFallbackTurnSnapshotToThreadRead(error) {
+                    debugSyncLog("thread/turns/list unavailable for fresh thread=\(threadId); resolving stop state via thread/read")
+                } else {
+                    guard consumeUnsupportedTurnPagination(error, attemptedMethod: "thread/turns/list") else {
+                        throw error
+                    }
                 }
             }
         }
@@ -2347,6 +2475,17 @@ extension CodexService {
         let turnObjects = response.result?.objectValue?["thread"]?.objectValue?["turns"]?.arrayValue?
             .compactMap { $0.objectValue } ?? []
         return turnStateSnapshot(from: turnObjects, newestFirst: false)
+    }
+
+    // Freshly-created chats can reject thread/turns/list until the first user turn is materialized.
+    func shouldFallbackTurnSnapshotToThreadRead(_ error: Error) -> Bool {
+        guard let serviceError = error as? CodexServiceError,
+              case .rpcError(let rpcError) = serviceError else {
+            return false
+        }
+
+        let message = rpcError.message.lowercased()
+        return isRuntimeMaterializationMessage(message)
     }
 
     // Parses latest/running turn metadata from either descending pages or chronological legacy arrays.

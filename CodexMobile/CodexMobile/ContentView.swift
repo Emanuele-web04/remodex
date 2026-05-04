@@ -763,7 +763,7 @@ struct ContentView: View {
                     codex.activeThreadId = restoredThread.id
                 }
             } catch {
-                codex.lastErrorMessage = error.localizedDescription
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
 
             codex.requestImmediateActiveThreadSync(threadId: thread.id)

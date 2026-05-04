@@ -801,6 +801,7 @@ final class CodexService {
         } else {
             self.terminalStateByTurnID = [:]
         }
+        rehydrateLegacyFallbackChangeSetsFromPersistedMessages()
 
         if let savedThreadHistoryPaginationState = defaults.data(
             forKey: Self.threadHistoryPaginationStateDefaultsKey

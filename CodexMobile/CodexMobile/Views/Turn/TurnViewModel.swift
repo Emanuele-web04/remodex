@@ -1244,12 +1244,17 @@ final class TurnViewModel {
                     fileMentions: confirmedFileMentionPaths(from: nextDraft.rawFileMentions),
                     collaborationMode: nextDraft.collaborationMode
                 )
+                codex.lastErrorMessage = nil
             } catch {
                 shouldAnchorToAssistantResponse = false
                 prependQueuedDraft(nextDraft, codex: codex, threadID: threadID)
                 let queueErrorMessage = codex.userFacingTurnErrorMessage(from: error)
                 setQueuePauseState(.paused(errorMessage: queueErrorMessage), codex: codex, threadID: threadID)
-                codex.lastErrorMessage = "Queue paused: \(queueErrorMessage)"
+                if let footerMessage = codex.userFacingTurnErrorMessageForFooter(from: error) {
+                    codex.lastErrorMessage = "Queue paused: \(footerMessage)"
+                } else {
+                    codex.lastErrorMessage = nil
+                }
             }
         }
     }
@@ -1320,13 +1325,16 @@ final class TurnViewModel {
                     matchingText: draft.text,
                     matchingAttachments: draft.attachments
                 )
-                codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }
     }
 
     func resumeQueueAndFlushIfPossible(codex: CodexService, threadID: String) {
         setQueuePauseState(.active, codex: codex, threadID: threadID)
+        if codex.lastErrorMessage?.hasPrefix("Queue paused:") == true {
+            codex.lastErrorMessage = nil
+        }
         flushQueueIfPossible(codex: codex, threadID: threadID)
     }
 
@@ -2072,9 +2080,9 @@ final class TurnViewModel {
                shouldRearmPlanModeAfterSendFailure(error) {
                 isPlanModeArmed = true
             }
-            let fallbackMessage = codex.userFacingTurnErrorMessage(from: error)
+            let fallbackMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             if (codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-                && !fallbackMessage.isEmpty {
+                && !(fallbackMessage?.isEmpty ?? true) {
                 codex.lastErrorMessage = fallbackMessage
             }
         }

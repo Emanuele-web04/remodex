@@ -211,7 +211,7 @@ extension CodexService {
             )
         } catch {
             if showFailureInUI {
-                lastErrorMessage = error.localizedDescription
+                lastErrorMessage = userFacingTurnErrorMessageForFooter(from: error)
             }
         }
     }

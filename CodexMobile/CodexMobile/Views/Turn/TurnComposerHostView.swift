@@ -82,7 +82,7 @@ struct TurnComposerHostView: View {
         )
         let accessoryState = TurnComposerAccessoryState(
             queuedDrafts: viewModel.queuedDraftsList(codex: codex, threadID: thread.id),
-            canSteerQueuedDrafts: isThreadRunning,
+            canSteerQueuedDrafts: isThreadRunning && activeTurnID != nil,
             canRestoreQueuedDrafts: viewModel.canRestoreQueuedDrafts,
             steeringDraftID: viewModel.steeringDraftID,
             composerAttachments: viewModel.composerAttachments,

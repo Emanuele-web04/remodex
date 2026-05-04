@@ -418,7 +418,7 @@ extension ContentViewModel {
             return .stop
         } catch {
             if !codex.hasSavedRelaySession {
-                codex.lastErrorMessage = error.localizedDescription
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
             return .fallbackToSaved
         }

@@ -156,6 +156,40 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertEqual(service.userFacingTurnErrorMessage(from: error), "")
     }
 
+    func testCancellationErrorIsHiddenFromTurnFooter() {
+        let service = CodexService()
+
+        XCTAssertEqual(service.userFacingTurnErrorMessage(from: CancellationError()), "")
+        XCTAssertNil(service.userFacingTurnErrorMessageForFooter(from: CancellationError()))
+        XCTAssertTrue(service.shouldSuppressRuntimeErrorInChat(CancellationError()))
+    }
+
+    func testTurnStartCancellationDoesNotAppendEmptySendError() {
+        let service = CodexService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let pendingMessageID = "message-\(UUID().uuidString)"
+        service.messagesByThread[threadID] = [
+            CodexMessage(
+                id: pendingMessageID,
+                threadId: threadID,
+                role: .user,
+                text: "hello",
+                deliveryState: .pending
+            )
+        ]
+
+        XCTAssertThrowsError(
+            try service.handleTurnStartFailure(
+                CancellationError(),
+                pendingMessageId: pendingMessageID,
+                threadId: threadID
+            )
+        )
+
+        XCTAssertNil(service.lastErrorMessage)
+        XCTAssertFalse(service.messages(for: threadID).contains { $0.text == "Send error: " })
+    }
+
     func testConnectTimeSessionUnavailableCloseIsRetryable() {
         let service = CodexService()
         let error = CodexServiceError.invalidInput("WebSocket closed during connect (4002)")

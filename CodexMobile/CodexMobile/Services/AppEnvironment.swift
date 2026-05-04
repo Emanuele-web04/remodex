@@ -50,12 +50,24 @@ enum AppEnvironment {
 
     // Powers in-app feedback actions so every entry point targets the same inbox.
     static var feedbackMailtoURL: URL {
+        feedbackMailtoURL()
+    }
+
+    static func feedbackMailtoURL(
+        errorMessage: String? = nil,
+        threadId: String? = nil,
+        isConnected: Bool? = nil
+    ) -> URL {
         var components = URLComponents()
         components.scheme = "mailto"
         components.path = supportEmailAddress
-        components.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "subject", value: "Share Feedback on Remodex with the Developer")
         ]
+        if let body = feedbackBody(errorMessage: errorMessage, threadId: threadId, isConnected: isConnected) {
+            queryItems.append(URLQueryItem(name: "body", value: body))
+        }
+        components.queryItems = queryItems
         return components.url!
     }
 }
@@ -76,5 +88,69 @@ private extension AppEnvironment {
         }
 
         return trimmedValue
+    }
+
+    static func feedbackBody(errorMessage: String?, threadId: String?, isConnected: Bool?) -> String? {
+        guard let errorMessage = errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !errorMessage.isEmpty else {
+            return nil
+        }
+
+        var lines = [
+            "I hit this Remodex error:",
+            "",
+            "Error:",
+            sanitizedFeedbackError(errorMessage),
+            "",
+            "Context:",
+            "- Time: \(ISO8601DateFormatter().string(from: Date()))"
+        ]
+
+        if let threadId = redactedThreadId(threadId) {
+            lines.append("- Thread: \(threadId)")
+        }
+        if let isConnected {
+            lines.append("- Connected: \(isConnected ? "yes" : "no")")
+        }
+        lines.append("- App: \(appVersionSummary())")
+        lines.append("")
+        lines.append("Notes:")
+        return lines.joined(separator: "\n")
+    }
+
+    static func sanitizedFeedbackError(_ message: String) -> String {
+        let singleLineMessage = message
+            .replacingOccurrences(of: "\r", with: "\n")
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        let redactedHome = NSHomeDirectory()
+        let withoutHome = singleLineMessage.replacingOccurrences(of: redactedHome, with: "~")
+        return String(withoutHome.prefix(600))
+    }
+
+    static func redactedThreadId(_ threadId: String?) -> String? {
+        guard let threadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              threadId.count > 12 else {
+            return nil
+        }
+
+        return "\(threadId.prefix(8))...\(threadId.suffix(4))"
+    }
+
+    static func appVersionSummary() -> String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        switch (version, build) {
+        case let (version?, build?):
+            return "\(version) (\(build))"
+        case let (version?, nil):
+            return version
+        case let (nil, build?):
+            return "build \(build)"
+        default:
+            return "unknown"
+        }
     }
 }

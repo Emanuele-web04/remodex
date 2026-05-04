@@ -554,12 +554,16 @@ extension CodexService {
                 return
             }
 
-            lastErrorMessage = turnFailureMessage
-            appendSystemMessage(
-                threadId: threadId,
-                text: "Turn error: \(turnFailureMessage)",
-                turnId: completedTurnID
-            )
+            let userFacingFailureMessage = userFacingRuntimeMessage(for: turnFailureMessage)
+                ?? turnFailureMessage
+            lastErrorMessage = shouldSuppressRuntimeMessageInChat(turnFailureMessage) ? nil : userFacingFailureMessage
+            if !shouldSuppressRuntimeMessageInChat(turnFailureMessage) {
+                appendSystemMessage(
+                    threadId: threadId,
+                    text: "Turn error: \(userFacingFailureMessage)",
+                    turnId: completedTurnID
+                )
+            }
             return
         }
 
@@ -568,7 +572,9 @@ extension CodexService {
         guard let turnFailureMessage else {
             return
         }
-        lastErrorMessage = turnFailureMessage
+        lastErrorMessage = shouldSuppressRuntimeMessageInChat(turnFailureMessage)
+            ? nil
+            : (userFacingRuntimeMessage(for: turnFailureMessage) ?? turnFailureMessage)
     }
 
     private func handleErrorNotification(_ paramsObject: IncomingParamsObject?) {
@@ -587,12 +593,16 @@ extension CodexService {
             firstStringValue(in: eventErrorObject, keys: ["message"]),
             firstStringValue(in: nestedEventObject, keys: ["message"]),
         ]) ?? "Server error"
-        lastErrorMessage = errorMessage
+        let shouldSuppressErrorMessage = shouldSuppressRuntimeMessageInChat(errorMessage)
+        let userFacingErrorMessage = userFacingRuntimeMessage(for: errorMessage) ?? errorMessage
+        lastErrorMessage = shouldSuppressErrorMessage ? nil : userFacingErrorMessage
 
         let turnId = extractTurnID(from: paramsObject)
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: turnId) {
             let resolvedTurnID = turnId ?? activeTurnIdByThread[threadId]
-            appendSystemMessage(threadId: threadId, text: "Error: \(errorMessage)", turnId: turnId)
+            if !shouldSuppressErrorMessage {
+                appendSystemMessage(threadId: threadId, text: "Error: \(userFacingErrorMessage)", turnId: turnId)
+            }
             recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: .failed)
             noteTurnFinished(turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)

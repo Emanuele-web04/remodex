@@ -302,7 +302,7 @@ struct SidebarView: View {
                 )
                 onOpenThread(thread)
             } catch {
-                let message = error.localizedDescription
+                guard let message = codex.userFacingTurnErrorMessageForFooter(from: error) else { return }
                 codex.lastErrorMessage = message
                 createThreadErrorMessage = message.isEmpty ? "Unable to create a chat right now." : message
             }
@@ -327,7 +327,7 @@ struct SidebarView: View {
                 )
                 onOpenThread(thread)
             } catch {
-                let message = error.localizedDescription
+                guard let message = codex.userFacingTurnErrorMessageForFooter(from: error) else { return }
                 codex.lastErrorMessage = message
                 createThreadErrorMessage = message.isEmpty ? "Unable to create a worktree chat right now." : message
             }

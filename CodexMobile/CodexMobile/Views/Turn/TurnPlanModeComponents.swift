@@ -222,7 +222,7 @@ struct InferredPlanQuestionnaireCard: View {
             } catch {
                 isSubmitting = false
                 hasSubmittedResponse = false
-                codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }
     }
@@ -308,7 +308,7 @@ struct ProposedPlanResultCard: View {
             } catch {
                 isImplementing = false
                 hasStartedImplementation = false
-                codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }
     }
@@ -412,7 +412,7 @@ struct StructuredUserInputCard: View {
             } catch {
                 isSubmitting = false
                 hasSubmittedResponse = false
-                codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }
     }

@@ -88,7 +88,7 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
-            // Voice → Stop → Send
+            // Voice -> Stop -> Send. Stop accepts nil while recovery resolves the active turn.
             Button {
                 HapticFeedback.shared.triggerImpactFeedback()
                 onTapVoice()
@@ -109,6 +109,7 @@ struct ComposerBottomBar: View {
                         .frame(width: 32, height: 32)
                         .background(Color(.label), in: Circle())
                 }
+                .accessibilityLabel("Stop current run")
             }
 
             Button {

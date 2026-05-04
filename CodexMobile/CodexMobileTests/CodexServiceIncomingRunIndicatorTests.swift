@@ -403,6 +403,31 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.lastErrorMessage, "boom")
     }
 
+    func testMaterializationFailureDoesNotAppendRedRuntimeText() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let rawMessage = "thread \(threadID) is not materialized yet; thread/turns/list is unavailable before first user message"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        sendTurnCompletedFailure(service: service, threadID: threadID, turnID: turnID, message: rawMessage)
+
+        XCTAssertNil(service.lastErrorMessage)
+        XCTAssertFalse(service.messages(for: threadID).contains { $0.text.contains("thread/turns/list") })
+    }
+
+    func testStaleTurnFailureUsesFriendlyMessage() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        sendTurnFailed(service: service, threadID: threadID, turnID: turnID, message: "turn already completed")
+
+        XCTAssertEqual(service.lastErrorMessage, "That run already finished.")
+        XCTAssertTrue(service.messages(for: threadID).contains { $0.text.contains("That run already finished.") })
+    }
+
     func testMarkThreadAsViewedClearsReadyAndFailedBadges() {
         let service = makeService()
         let readyThreadID = "thread-ready-\(UUID().uuidString)"

@@ -337,6 +337,42 @@ extension CodexService {
 
         return rawPatch.hasSuffix("\n") ? rawPatch : rawPatch + "\n"
     }
+
+    // Recovers old multi-file fallback ledgers from persisted file-change message diff fences.
+    func rehydrateLegacyFallbackChangeSetsFromPersistedMessages() {
+        var didChange = false
+
+        for changeSetId in aiChangeSetsByID.keys {
+            guard var changeSet = aiChangeSetsByID[changeSetId],
+                  changeSet.source == .fileChangeFallback,
+                  changeSet.fallbackPatchBatches.isEmpty,
+                  changeSet.status != .reverted else {
+                continue
+            }
+
+            let patches = persistedFileChangePatches(threadId: changeSet.threadId, turnId: changeSet.turnId)
+            guard !patches.isEmpty else { continue }
+
+            for patch in patches {
+                let analysis = AIUnifiedPatchParser.analyze(patch)
+                appendFallbackPatchBatch(
+                    patch: patch,
+                    analysis: analysis,
+                    to: &changeSet
+                )
+            }
+
+            changeSet.status = .collecting
+            aiChangeSetsByID[changeSetId] = changeSet
+            finalizeChangeSetIfPossible(changeSetId: changeSetId)
+            didChange = true
+        }
+
+        if didChange {
+            persistAIChangeSets()
+            invalidateAssistantRevertStatesWithoutRefresh()
+        }
+    }
 }
 
 // ─── Private helpers ───────────────────────────────────────────────
@@ -611,6 +647,52 @@ private extension CodexService {
         messagesByThread[threadId]?.last(where: { message in
             message.role == .assistant && message.turnId == turnId
         })?.id
+    }
+
+    func persistedFileChangePatches(threadId: String, turnId: String) -> [String] {
+        let messages = messagesByThread[threadId] ?? []
+        return messages
+            .filter { message in
+                message.kind == .fileChange && message.turnId == turnId
+            }
+            .sorted { lhs, rhs in
+                lhs.orderIndex < rhs.orderIndex
+            }
+            .flatMap { message in
+                unifiedDiffCodeBlocks(in: message.text)
+            }
+    }
+
+    func unifiedDiffCodeBlocks(in text: String) -> [String] {
+        var blocks: [String] = []
+        var currentLines: [String] = []
+        var isCollectingDiff = false
+
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedLine.hasPrefix("```") {
+                if isCollectingDiff {
+                    let patch = currentLines.joined(separator: "\n")
+                    if patch.contains("diff --git"),
+                       let normalizedPatch = normalizedUnifiedPatchPayload(patch) {
+                        blocks.append(normalizedPatch)
+                    }
+                    currentLines = []
+                    isCollectingDiff = false
+                    continue
+                }
+
+                let fenceLanguage = trimmedLine.dropFirst(3).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                isCollectingDiff = fenceLanguage == "diff" || fenceLanguage == "patch"
+                continue
+            }
+
+            if isCollectingDiff {
+                currentLines.append(line)
+            }
+        }
+
+        return blocks
     }
 
     func normalizedWorkingDirectory(_ rawValue: String?) -> String? {

@@ -496,7 +496,10 @@ struct TurnView: View {
             return nil
         }
 
-        if isConnectionRecoveryFooterNoise(message) || isBackgroundHistoryRetryNoise(message) {
+        if isConnectionRecoveryFooterNoise(message)
+            || isBackgroundHistoryRetryNoise(message)
+            || isUnmaterializedThreadFooterNoise(message)
+            || isCancellationFooterNoise(message) {
             return nil
         }
 
@@ -513,6 +516,23 @@ struct TurnView: View {
 
     private func isBackgroundHistoryRetryNoise(_ message: String) -> Bool {
         message.lowercased() == "couldn't load this chat yet. retrying in the background."
+    }
+
+    private func isUnmaterializedThreadFooterNoise(_ message: String) -> Bool {
+        let normalizedMessage = message.lowercased()
+        return normalizedMessage.contains("not materialized")
+            || normalizedMessage.contains("not yet materialized")
+            || (
+                normalizedMessage.contains("thread/turns/list")
+                    && normalizedMessage.contains("unavailable")
+            )
+    }
+
+    private func isCancellationFooterNoise(_ message: String) -> Bool {
+        let normalizedMessage = message.lowercased()
+        return normalizedMessage.contains("cancellationerror")
+            || normalizedMessage.contains("cancelled")
+            || normalizedMessage.contains("canceled")
     }
 
     private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {
@@ -653,8 +673,9 @@ struct TurnView: View {
             do {
                 _ = try await codex.startThreadIfReady(preferredProjectPath: resolvedProjectPathForFollowUpThread())
             } catch {
-                if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                    codex.lastErrorMessage = error.localizedDescription
+                if let message = codex.userFacingTurnErrorMessageForFooter(from: error),
+                   codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                    codex.lastErrorMessage = message
                 }
             }
         }
@@ -1165,8 +1186,9 @@ struct TurnView: View {
                 )
                 openThread(forkedThread.id)
             } catch {
-                if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                    codex.lastErrorMessage = error.localizedDescription
+                if let message = codex.userFacingTurnErrorMessageForFooter(from: error),
+                   codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                    codex.lastErrorMessage = message
                 }
             }
         }
@@ -1238,8 +1260,9 @@ struct TurnView: View {
                 )
                 viewModel.clearComposerReviewSelection()
             } catch {
-                if codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
-                    codex.lastErrorMessage = error.localizedDescription
+                if let message = codex.userFacingTurnErrorMessageForFooter(from: error),
+                   codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                    codex.lastErrorMessage = message
                 }
             }
         }
@@ -1458,7 +1481,11 @@ struct TurnView: View {
                     handleWorktreeHandoffTap(currentThread: currentThread)
                 },
                 onOpenFeedbackMail: {
-                    openURL(AppEnvironment.feedbackMailtoURL)
+                    openURL(AppEnvironment.feedbackMailtoURL(
+                        errorMessage: codex.lastErrorMessage,
+                        threadId: thread.id,
+                        isConnected: codex.isConnected
+                    ))
                 },
                 onShowStatus: presentStatusSheet,
                 voiceButtonPresentation: voiceButtonPresentation,

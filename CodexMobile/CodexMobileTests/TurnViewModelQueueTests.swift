@@ -129,11 +129,13 @@ final class TurnViewModelQueueTests: XCTestCase {
         let viewModel = makeViewModel()
         service.queuedTurnDraftsByThread["thread-queue"] = [makeDraft(text: "queued")]
         service.queuePauseStateByThread["thread-queue"] = .paused(errorMessage: "temporary")
+        service.lastErrorMessage = "Queue paused: temporary"
 
         viewModel.resumeQueueAndFlushIfPossible(codex: service, threadID: "thread-queue")
 
         XCTAssertFalse(viewModel.isQueuePaused(codex: service, threadID: "thread-queue"))
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
+        XCTAssertNil(service.lastErrorMessage)
     }
 
     func testQueuedDraftsPersistAcrossViewModelRecreationForSameThread() {
@@ -493,7 +495,7 @@ final class TurnViewModelQueueTests: XCTestCase {
 
         XCTAssertEqual(service.queuedTurnDraftsByThread["thread-queue"]?.map(\.id), [draft.id])
         XCTAssertFalse(viewModel.isQueuePaused(codex: service, threadID: "thread-queue"))
-        XCTAssertEqual(service.lastErrorMessage, "turn already completed")
+        XCTAssertEqual(service.lastErrorMessage, "That run already finished.")
         XCTAssertTrue(service.messagesByThread["thread-queue"]?.isEmpty ?? true)
     }
 
@@ -762,6 +764,58 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(recordedMethods, ["thread/read"])
         XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
         XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains("thread-queue"))
+    }
+
+    func testInterruptTurnFallsBackToThreadReadWhenFreshThreadTurnsListIsNotMaterialized() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.supportsTurnPagination = true
+        service.runningThreadIDs.insert("thread-queue")
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            switch method {
+            case "thread/turns/list":
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, "thread-queue")
+                throw CodexServiceError.rpcError(
+                    RPCError(
+                        code: -32600,
+                        message: "thread thread-queue is not materialized yet; thread/turns/list is unavailable before first user message"
+                    )
+                )
+            case "thread/read":
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, "thread-queue")
+                XCTAssertEqual(params?.objectValue?["includeTurns"]?.boolValue, true)
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "turns": .array([
+                                .object([
+                                    "id": .string("turn-fresh"),
+                                    "status": .string("in_progress"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "turn/interrupt":
+                XCTAssertEqual(params?.objectValue?["turnId"]?.stringValue, "turn-fresh")
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, "thread-queue")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        try await service.interruptTurn(turnId: nil, threadId: "thread-queue")
+
+        XCTAssertEqual(recordedMethods, ["thread/turns/list", "thread/read", "turn/interrupt"])
+        XCTAssertTrue(service.supportsTurnPagination)
+        XCTAssertNil(service.lastErrorMessage)
     }
 
     func testSteerQueuedDraftIsNoOpWhenThreadIsNotRunning() async {
