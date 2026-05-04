@@ -453,7 +453,7 @@ enum UserBubbleColor: String, CaseIterable, Identifiable {
             return Color(.tertiarySystemFill).opacity(0.8)
         default:
             let color = Color(uiColor: uiColor)
-            return colorScheme == .dark ? color.opacity(0.8) : color
+            return colorScheme == .dark ? color.opacity(0.9) : color
         }
     }
 

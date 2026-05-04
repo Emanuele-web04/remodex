@@ -109,7 +109,7 @@ struct TurnView: View {
                 allowsAssistantPlanFallbackRecovery: planSessionSource == .compatibilityFallback,
                 threadMessagesForPlanMatching: renderSnapshot.planMatchingMessages,
                 currentWorkingDirectory: gitWorkingDirectory,
-                errorMessage: codex.lastErrorMessage,
+                errorMessage: timelineFooterErrorMessage,
                 composerRecoveryAccessory: composerRecoveryAccessory,
                 hasRemoteEarlierMessages: renderSnapshot.hasRemoteOlderHistory,
                 hasLocallyProjectedEarlierMessages: renderSnapshot.hasLocallyProjectedOlderHistory,
@@ -487,6 +487,28 @@ struct TurnView: View {
                 handleConnectionRecoveryAction()
             }
         )
+    }
+
+    // Keeps reconnect prompts out of the red footer error slot; recovery UI owns that state.
+    private var timelineFooterErrorMessage: String? {
+        guard let message = codex.lastErrorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !message.isEmpty else {
+            return nil
+        }
+
+        if isConnectionRecoveryFooterNoise(message) {
+            return nil
+        }
+
+        return message
+    }
+
+    private func isConnectionRecoveryFooterNoise(_ message: String) -> Bool {
+        let normalizedMessage = message.lowercased()
+        return normalizedMessage.contains("tap reconnect")
+            || normalizedMessage.hasPrefix("connection was interrupted")
+            || normalizedMessage.hasPrefix("connection timed out")
+            || normalizedMessage.hasPrefix("trying to reconnect")
     }
 
     private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {

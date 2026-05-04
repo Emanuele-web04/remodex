@@ -97,6 +97,45 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         XCTAssertTrue(service.hydratedThreadIDs.contains(threadID))
     }
 
+    func testForcedHistorySkipsFreshFirstTurnWhileThreadIsStillMaterializing() async throws {
+        let service = makeService()
+        let threadID = "thread-first-turn-materializing"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.upsertThread(CodexThread(id: threadID, title: "Hi"))
+        service.initialTurnsLoadedByThreadID.insert(threadID)
+        service.runningThreadIDs.insert(threadID)
+        service.messagesByThread[threadID] = [
+            CodexMessage(
+                threadId: threadID,
+                role: .user,
+                text: "hi",
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                threadId: threadID,
+                role: .assistant,
+                kind: .thinking,
+                text: "",
+                isStreaming: true
+            ),
+        ]
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            XCTFail("First running turn should not hydrate history before the runtime materializes it")
+            return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+        }
+
+        let outcome = try await service.loadThreadHistoryIfNeeded(threadId: threadID, forceRefresh: true)
+
+        XCTAssertEqual(outcome, .skippedForRunningThread)
+        XCTAssertTrue(recordedMethods.isEmpty)
+    }
+
     func testRunningCatchupEscalatesExistingLightweightTaskIntoForcedResume() async {
         let service = makeService()
         let threadID = "thread-running"

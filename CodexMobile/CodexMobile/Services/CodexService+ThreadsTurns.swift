@@ -150,6 +150,7 @@ extension CodexService {
                 // render can skip the transient loading state while the empty composer
                 // is already the right answer.
                 resumedThreadIDs.insert(thread.id)
+                hydratedThreadIDs.insert(thread.id)
                 initialTurnsLoadedByThreadID.insert(thread.id)
                 upsertThread(thread, treatAsServerState: true)
                 if let normalizedProjectPath = thread.normalizedProjectPath,

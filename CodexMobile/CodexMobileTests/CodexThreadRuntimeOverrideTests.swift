@@ -109,6 +109,8 @@ final class CodexThreadRuntimeOverrideTests: XCTestCase {
         XCTAssertEqual(thread.id, "thread-new")
         XCTAssertEqual(capturedThreadStartParams.first?.objectValue?["serviceTier"]?.stringValue, "fast")
         XCTAssertEqual(service.effectiveServiceTier(for: "thread-new"), .fast)
+        XCTAssertTrue(service.hydratedThreadIDs.contains("thread-new"))
+        XCTAssertTrue(service.initialTurnsLoadedByThreadID.contains("thread-new"))
     }
 
     func testStartThreadDropsFastRuntimeOverrideWhenSelectedModelDoesNotSupportFastMode() async throws {

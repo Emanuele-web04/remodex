@@ -797,6 +797,31 @@ extension CodexService {
         return true
     }
 
+    // The first turn can be running before Codex has persisted a readable
+    // history page. During that window, live events own the timeline.
+    func shouldDeferRunningThreadHistoryHydration(threadId: String, forceRefresh: Bool) -> Bool {
+        guard threadHasActiveOrRunningTurn(threadId) else {
+            return false
+        }
+        guard forceRefresh else {
+            return true
+        }
+
+        let threadMessages = messagesByThread[threadId] ?? []
+        let userMessageCount = threadMessages.filter { $0.role == .user }.count
+        let hasAssistantOutput = threadMessages.contains { message in
+            message.role == .assistant
+                && message.kind != .thinking
+                && !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+
+        return initialTurnsLoadedByThreadID.contains(threadId)
+            && !hasRemoteOlderThreadHistoryCursor(threadId: threadId)
+            && !hasKnownLocalHistoryStart(threadId: threadId)
+            && userMessageCount <= 1
+            && !hasAssistantOutput
+    }
+
     // Prefers the locally persisted transcript when a non-running thread is already huge.
     // The active sync loop can still refresh lighter chats, but giant histories should not
     // block first paint or crash the device just because the user tapped the row.
@@ -933,11 +958,7 @@ extension CodexService {
         let task = Task<ThreadHistoryLoadOutcome, Error> { @MainActor in
             let hadInitialTurnsLoadedBeforeRefresh = initialTurnsLoadedByThreadID.contains(threadId)
             let hadAuthoritativeLocalStartBeforeRefresh = hasAuthoritativeLocalHistoryStart(threadId: threadId)
-            let initialTurnsTask = supportsTurnPagination
-                ? Task { @MainActor in
-                    try await self.fetchInitialThreadTurnsHistoryPage(threadId: threadId)
-                }
-                : nil
+            var initialTurnsTask: Task<ThreadTurnsHistoryPage, Error>?
             loadingThreadIDs.insert(threadId)
             defer {
                 initialTurnsTask?.cancel()
@@ -955,12 +976,21 @@ extension CodexService {
             // A turn may have started while chat-open work was in flight. Normal background
             // history loads should still stay out of the way, but forced refreshes are
             // used when reopening a running thread and need to merge the latest snapshot.
-            if threadHasActiveOrRunningTurn(threadId) && !shouldForceRefresh {
+            if shouldDeferRunningThreadHistoryHydration(
+                threadId: threadId,
+                forceRefresh: shouldForceRefresh
+            ) {
                 hydratedThreadIDs.insert(threadId)
                 if !supportsTurnPagination {
                     initialTurnsLoadedByThreadID.insert(threadId)
                 }
                 return .skippedForRunningThread
+            }
+
+            if supportsTurnPagination {
+                initialTurnsTask = Task { @MainActor in
+                    try await self.fetchInitialThreadTurnsHistoryPage(threadId: threadId)
+                }
             }
 
             var loadedViaPagination = false

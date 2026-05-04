@@ -377,7 +377,10 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     }
 
     private var compactRuntimeTitle: String {
-        "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
+        if selectedModelID == nil {
+            return "Loading…"
+        }
+        return "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
     }
 
     // Keeps the family suffix visible while shortening the common GPT prefix.
