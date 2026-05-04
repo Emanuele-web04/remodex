@@ -21,6 +21,7 @@ struct ComposerBottomBar: View {
     let remainingAttachmentSlots: Int
     let isComposerInteractionLocked: Bool
     let isSendDisabled: Bool
+    let isSending: Bool
     let isPlanModeArmed: Bool
     let queuedCount: Int
     let isQueuePaused: Bool
@@ -90,7 +91,7 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
-            // Voice -> Stop -> Send. Stop accepts nil while recovery resolves the active turn.
+            // Voice -> Stop/loading -> Send. New sends can look running before the turn id is interruptible.
             Button {
                 HapticFeedback.shared.triggerImpactFeedback()
                 onTapVoice()
@@ -100,7 +101,12 @@ struct ComposerBottomBar: View {
             .disabled(voiceButtonPresentation.isDisabled)
             .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
 
-            if isThreadRunning {
+            if isThreadRunning && isSending && activeTurnID == nil {
+                ProgressView()
+                    .tint(Color(.label))
+                    .frame(width: 32, height: 32)
+                    .accessibilityLabel("Starting run")
+            } else if isThreadRunning {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback()
                     onStopTurn(activeTurnID)

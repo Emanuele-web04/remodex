@@ -113,6 +113,7 @@ struct TurnComposerHostView: View {
             remainingAttachmentSlots: viewModel.remainingAttachmentSlots,
             isComposerInteractionLocked: viewModel.isComposerInteractionLocked(activeTurnID: activeTurnID),
             isSendDisabled: viewModel.isSendDisabled(isConnected: codex.isConnected, activeTurnID: activeTurnID),
+            isSending: viewModel.isSending,
             isPlanModeArmed: viewModel.isPlanModeArmed,
             queuedCount: viewModel.queuedCount(codex: codex, threadID: thread.id),
             isQueuePaused: viewModel.isQueuePaused(codex: codex, threadID: thread.id),

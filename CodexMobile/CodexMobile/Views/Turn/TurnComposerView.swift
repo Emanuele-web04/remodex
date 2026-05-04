@@ -16,6 +16,7 @@ struct TurnComposerView: View {
     let remainingAttachmentSlots: Int
     let isComposerInteractionLocked: Bool
     let isSendDisabled: Bool
+    let isSending: Bool
     let isPlanModeArmed: Bool
     let queuedCount: Int
     let isQueuePaused: Bool
@@ -166,6 +167,7 @@ struct TurnComposerView: View {
                     remainingAttachmentSlots: remainingAttachmentSlots,
                     isComposerInteractionLocked: isComposerInteractionLocked,
                     isSendDisabled: isSendDisabled,
+                    isSending: isSending,
                     isPlanModeArmed: isPlanModeArmed,
                     queuedCount: queuedCount,
                     isQueuePaused: isQueuePaused,
@@ -693,6 +695,7 @@ private struct ComposerPreviewContent: View {
             remainingAttachmentSlots: 4,
             isComposerInteractionLocked: false,
             isSendDisabled: false,
+            isSending: false,
             isPlanModeArmed: isPlanModeArmed,
             queuedCount: queuedCount,
             isQueuePaused: false,
