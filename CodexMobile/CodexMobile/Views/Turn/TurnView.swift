@@ -115,7 +115,8 @@ struct TurnView: View {
                     openURL(AppEnvironment.feedbackMailtoURL(
                         errorMessage: errorMessage,
                         threadId: thread.id,
-                        isConnected: codex.isConnected
+                        isConnected: codex.isConnected,
+                        cliVersion: codex.bridgeInstalledVersion
                     ))
                 },
                 onDismissError: {
@@ -1494,7 +1495,8 @@ struct TurnView: View {
                     openURL(AppEnvironment.feedbackMailtoURL(
                         errorMessage: codex.lastErrorMessage,
                         threadId: thread.id,
-                        isConnected: codex.isConnected
+                        isConnected: codex.isConnected,
+                        cliVersion: codex.bridgeInstalledVersion
                     ))
                 },
                 onShowStatus: presentStatusSheet,

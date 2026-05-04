@@ -56,7 +56,8 @@ enum AppEnvironment {
     static func feedbackMailtoURL(
         errorMessage: String? = nil,
         threadId: String? = nil,
-        isConnected: Bool? = nil
+        isConnected: Bool? = nil,
+        cliVersion: String? = nil
     ) -> URL {
         var components = URLComponents()
         components.scheme = "mailto"
@@ -64,7 +65,12 @@ enum AppEnvironment {
         var queryItems = [
             URLQueryItem(name: "subject", value: "Share Feedback on Remodex with the Developer")
         ]
-        if let body = feedbackBody(errorMessage: errorMessage, threadId: threadId, isConnected: isConnected) {
+        if let body = feedbackBody(
+            errorMessage: errorMessage,
+            threadId: threadId,
+            isConnected: isConnected,
+            cliVersion: cliVersion
+        ) {
             queryItems.append(URLQueryItem(name: "body", value: body))
         }
         components.queryItems = queryItems
@@ -90,7 +96,12 @@ private extension AppEnvironment {
         return trimmedValue
     }
 
-    static func feedbackBody(errorMessage: String?, threadId: String?, isConnected: Bool?) -> String? {
+    static func feedbackBody(
+        errorMessage: String?,
+        threadId: String?,
+        isConnected: Bool?,
+        cliVersion: String?
+    ) -> String? {
         guard let errorMessage = errorMessage?.trimmingCharacters(in: .whitespacesAndNewlines),
               !errorMessage.isEmpty else {
             return nil
@@ -113,10 +124,21 @@ private extension AppEnvironment {
             lines.append("- Connected: \(isConnected ? "yes" : "no")")
         }
         lines.append("- App: \(appVersionSummary())")
+        if let cliVersion = sanitizedCLIVersion(cliVersion) {
+            lines.append("- Remodex CLI: \(cliVersion)")
+        }
         lines.append("")
         lines.append("Notes:")
         lines.append("Write what caused this issue for a better understanding of the bug:")
         return lines.joined(separator: "\n")
+    }
+
+    static func sanitizedCLIVersion(_ rawValue: String?) -> String? {
+        guard let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return String(trimmed.prefix(40))
     }
 
     static func sanitizedFeedbackError(_ message: String) -> String {
