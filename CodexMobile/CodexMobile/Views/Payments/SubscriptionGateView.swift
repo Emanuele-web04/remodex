@@ -2,8 +2,9 @@
 // Purpose: Locked shell shown before app access when Remodex Pro is required.
 // Layer: View
 // Exports: SubscriptionGateView
-// Depends on: SwiftUI, SubscriptionService, RevenueCatPaywallView
+// Depends on: StoreKit, SwiftUI, SubscriptionService, RevenueCatPaywallView
 
+import StoreKit
 import SwiftUI
 
 private struct SubscriptionGateFeature: Identifiable {
@@ -36,6 +37,7 @@ struct SubscriptionGateView: View {
     @Environment(SubscriptionService.self) private var subscriptions
 
     @State private var isPresentingPaywall = false
+    @State private var isPresentingOfferCodeRedemption = false
 
     private let previewPlans: [SubscriptionGatePreviewPlan]?
     private let previewIsLoading: Bool
@@ -73,6 +75,9 @@ struct SubscriptionGateView: View {
         }
         .fullScreenCover(isPresented: $isPresentingPaywall) {
             RevenueCatPaywallView()
+        }
+        .offerCodeRedemption(isPresented: $isPresentingOfferCodeRedemption) { result in
+            handleOfferCodeRedemptionCompletion(result)
         }
     }
 
@@ -315,6 +320,13 @@ struct SubscriptionGateView: View {
 
                 Text(" · ").foregroundStyle(secondaryTextColor)
 
+                Button("Redeem Code") {
+                    isPresentingOfferCodeRedemption = true
+                }
+                .disabled(isPurchasing || isRestoring)
+
+                Text(" · ").foregroundStyle(secondaryTextColor)
+
                 Button("Privacy") {
                     UIApplication.shared.open(AppEnvironment.privacyPolicyURL)
                 }
@@ -436,6 +448,20 @@ struct SubscriptionGateView: View {
 
     private var ctaForegroundColor: Color {
         colorScheme == .dark ? .black : .white
+    }
+
+    private func handleOfferCodeRedemptionCompletion(_ result: Result<Void, any Error>) {
+        guard !isPreviewMode else {
+            return
+        }
+
+        Task {
+            if case .failure = result {
+                await subscriptions.refreshCustomerInfoSilently()
+            } else {
+                await subscriptions.syncPurchasesAfterOfferCodeRedemption()
+            }
+        }
     }
 }
 

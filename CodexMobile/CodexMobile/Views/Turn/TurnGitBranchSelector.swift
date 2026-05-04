@@ -86,7 +86,7 @@ struct TurnGitBranchSelector: View, Equatable {
     @State private var activePickerMode: TurnGitBranchPickerMode?
 
     private let branchLabelColor = Color(.secondaryLabel)
-    private var branchSymbolSize: CGFloat { 12 }
+    private var branchSymbolSize: CGFloat { 16 }
     private var branchChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
     private var branchControlsDisabled: Bool { !isEnabled || isLoadingGitBranchTargets || isSwitchingGitBranch }
     private var normalizedDefaultBranch: String? {

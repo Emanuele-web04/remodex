@@ -29,7 +29,29 @@ test("health is minimal by default and detailed only when enabled", async () => 
   assert.equal(detailed.ok, true);
   assert.ok(detailed.relay);
   assert.ok(detailed.push);
+  assert.ok(detailed.runtime);
+  assert.equal(typeof detailed.runtime.eventLoopDelayMs.max, "number");
   assert.equal(detailed.push.enabled, false);
+});
+
+test("detailed health exposes relay pressure counters", async () => {
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-health`, {
+      headers: { "x-role": "mac" },
+    });
+    await onceOpen(mac);
+
+    const response = await fetch(`http://127.0.0.1:${port}/health`);
+    const body = await response.json();
+    assert.equal(body.relay.sessionsWithOpenMac, 1);
+    assert.equal(body.relay.sessionsWithStaleMac, 0);
+    assert.equal(body.relay.sessionsWithClients, 0);
+    assert.equal(typeof body.relay.heartbeatTerminations, "number");
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+  }, { exposeDetailedHealth: true });
 });
 
 test("push routes stay disabled until explicitly enabled", async () => {

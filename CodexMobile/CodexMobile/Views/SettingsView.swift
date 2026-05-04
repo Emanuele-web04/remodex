@@ -4,6 +4,7 @@
 // Exports: SettingsView
 
 import SwiftUI
+import StoreKit
 import UIKit
 
 struct SettingsView: View {
@@ -342,6 +343,7 @@ private struct SettingsConnectionCard: View {
 private struct SettingsSubscriptionCard: View {
     @Environment(SubscriptionService.self) private var subscriptions
     @State private var isPresentingPaywall = false
+    @State private var isPresentingOfferCodeRedemption = false
 
     var body: some View {
         SettingsCard(title: "Remodex Pro") {
@@ -366,6 +368,11 @@ private struct SettingsSubscriptionCard: View {
                 isPresentingPaywall = true
             }
 
+            SettingsButton("Redeem Code") {
+                isPresentingOfferCodeRedemption = true
+            }
+            .disabled(subscriptions.isPurchasing || subscriptions.isRestoring)
+
             SettingsButton(subscriptions.isRestoring ? "Restoring..." : "Restore Purchases", isLoading: subscriptions.isRestoring) {
                 Task {
                     await subscriptions.restorePurchases()
@@ -381,6 +388,15 @@ private struct SettingsSubscriptionCard: View {
         }
         .sheet(isPresented: $isPresentingPaywall) {
             RevenueCatPaywallView()
+        }
+        .offerCodeRedemption(isPresented: $isPresentingOfferCodeRedemption) { result in
+            Task {
+                if case .failure = result {
+                    await subscriptions.refreshCustomerInfoSilently()
+                } else {
+                    await subscriptions.syncPurchasesAfterOfferCodeRedemption()
+                }
+            }
         }
         .task {
             guard subscriptions.bootstrapState == .idle else {

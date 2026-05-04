@@ -20,6 +20,14 @@ private enum RuntimeConfigLoadingPolicy {
 private enum RuntimeSelectionDefaults {
     static let modelId = "gpt-5.5"
     static let reasoningEffort = "medium"
+
+    static func reasoningEffort(for unresolvedModelId: String?) -> String? {
+        guard let unresolvedModelId,
+              unresolvedModelId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == modelId else {
+            return nil
+        }
+        return reasoningEffort
+    }
 }
 
 extension CodexService {
@@ -236,7 +244,9 @@ extension CodexService {
 
     func selectedReasoningEffortForSelectedModel(threadId: String? = nil) -> String? {
         guard let model = selectedModelOption() else {
-            return selectedReasoningEffort ?? RuntimeSelectionDefaults.reasoningEffort
+            return RuntimeSelectionDefaults.reasoningEffort(for: selectedModelId)
+                ?? selectedReasoningEffort
+                ?? RuntimeSelectionDefaults.reasoningEffort
         }
 
         let supported = Set(model.supportedReasoningEfforts.map { $0.reasoningEffort })
