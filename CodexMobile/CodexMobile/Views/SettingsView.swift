@@ -611,8 +611,21 @@ private struct SettingsPetCompanionSection: View {
 
     var body: some View {
         Group {
-            Toggle("Companion Pet", isOn: petEnabledBinding)
-                .tint(settingsAccentColor)
+            Toggle(isOn: petEnabledBinding) {
+                HStack(spacing: 8) {
+                    Text("Companion Pet")
+                    Text("BETA")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.5)
+                        .foregroundStyle(settingsAccentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            Capsule().fill(settingsAccentColor.opacity(0.15))
+                        )
+                }
+            }
+            .tint(settingsAccentColor)
 
             if petStore.isEnabled {
                 if petStore.availablePets.isEmpty {
