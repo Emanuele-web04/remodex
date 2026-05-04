@@ -22,6 +22,8 @@ struct TurnConversationContainerView: View {
     let currentWorkingDirectory: String?
     let errorMessage: String?
     let composerRecoveryAccessory: AnyView?
+    let onReportError: (String) -> Void
+    let onDismissError: () -> Void
     let hasRemoteEarlierMessages: Bool
     let hasLocallyProjectedEarlierMessages: Bool
     let usesPaginatedHistory: Bool
@@ -110,6 +112,8 @@ struct TurnConversationContainerView: View {
                 isRetryAvailable: !isThreadRunning,
                 errorMessage: errorMessage,
                 hidesErrorMessage: composerRecoveryAccessory != nil,
+                onReportError: onReportError,
+                onDismissError: onDismissError,
                 hasRemoteEarlierMessages: hasRemoteEarlierMessages,
                 hasLocallyProjectedEarlierMessages: hasLocallyProjectedEarlierMessages,
                 usesPaginatedHistory: usesPaginatedHistory,

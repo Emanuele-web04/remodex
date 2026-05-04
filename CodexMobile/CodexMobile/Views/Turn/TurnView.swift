@@ -111,6 +111,16 @@ struct TurnView: View {
                 currentWorkingDirectory: gitWorkingDirectory,
                 errorMessage: timelineFooterErrorMessage,
                 composerRecoveryAccessory: composerRecoveryAccessory,
+                onReportError: { errorMessage in
+                    openURL(AppEnvironment.feedbackMailtoURL(
+                        errorMessage: errorMessage,
+                        threadId: thread.id,
+                        isConnected: codex.isConnected
+                    ))
+                },
+                onDismissError: {
+                    codex.lastErrorMessage = nil
+                },
                 hasRemoteEarlierMessages: renderSnapshot.hasRemoteOlderHistory,
                 hasLocallyProjectedEarlierMessages: renderSnapshot.hasLocallyProjectedOlderHistory,
                 usesPaginatedHistory: renderSnapshot.usesPaginatedHistory,

@@ -115,6 +115,7 @@ private extension AppEnvironment {
         lines.append("- App: \(appVersionSummary())")
         lines.append("")
         lines.append("Notes:")
+        lines.append("Write what caused this issue for a better understanding of the bug:")
         return lines.joined(separator: "\n")
     }
 
