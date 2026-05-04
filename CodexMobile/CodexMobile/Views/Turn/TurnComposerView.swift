@@ -118,7 +118,7 @@ struct TurnComposerView: View {
 
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
-                        Text("Ask anything... @plugins, $skills, /commands")
+                        Text(placeholderText)
                             .font(AppFont.body())
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
@@ -251,6 +251,10 @@ struct TurnComposerView: View {
         .padding(.bottom, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.easeInOut(duration: 0.18), value: isInputFocused.wrappedValue)
+    }
+
+    private var placeholderText: String {
+        isEmptyThread ? "Ask anything... @plugins, $skills, /commands" : "Ask for a follow-up"
     }
 
 }

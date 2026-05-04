@@ -57,6 +57,34 @@ struct AIRevertMetadata: Codable, Hashable, Sendable {
     }
 }
 
+struct AIPatchBatch: Identifiable, Codable, Hashable, Sendable {
+    let id: String
+    let createdAt: Date
+    let source: AIChangeSetSource
+    let forwardUnifiedPatch: String
+    let patchHash: String
+    let fileChanges: [AIFileChange]
+    let unsupportedReasons: [String]
+
+    init(
+        id: String = UUID().uuidString,
+        createdAt: Date = Date(),
+        source: AIChangeSetSource = .fileChangeFallback,
+        forwardUnifiedPatch: String,
+        patchHash: String,
+        fileChanges: [AIFileChange],
+        unsupportedReasons: [String]
+    ) {
+        self.id = id
+        self.createdAt = createdAt
+        self.source = source
+        self.forwardUnifiedPatch = forwardUnifiedPatch
+        self.patchHash = patchHash
+        self.fileChanges = fileChanges
+        self.unsupportedReasons = unsupportedReasons
+    }
+}
+
 struct AIChangeSet: Identifiable, Codable, Hashable, Sendable {
     let id: String
     var repoRoot: String?
@@ -74,6 +102,7 @@ struct AIChangeSet: Identifiable, Codable, Hashable, Sendable {
     var unsupportedReasons: [String]
     var revertMetadata: AIRevertMetadata
     var fallbackPatchCount: Int
+    var fallbackPatchBatches: [AIPatchBatch]
 
     init(
         id: String = UUID().uuidString,
@@ -91,7 +120,8 @@ struct AIChangeSet: Identifiable, Codable, Hashable, Sendable {
         fileChanges: [AIFileChange] = [],
         unsupportedReasons: [String] = [],
         revertMetadata: AIRevertMetadata = AIRevertMetadata(),
-        fallbackPatchCount: Int = 0
+        fallbackPatchCount: Int = 0,
+        fallbackPatchBatches: [AIPatchBatch] = []
     ) {
         self.id = id
         self.repoRoot = repoRoot
@@ -109,6 +139,70 @@ struct AIChangeSet: Identifiable, Codable, Hashable, Sendable {
         self.unsupportedReasons = unsupportedReasons
         self.revertMetadata = revertMetadata
         self.fallbackPatchCount = fallbackPatchCount
+        self.fallbackPatchBatches = fallbackPatchBatches
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case repoRoot
+        case threadId
+        case turnId
+        case assistantMessageId
+        case createdAt
+        case finalizedAt
+        case status
+        case source
+        case forwardUnifiedPatch
+        case inverseUnifiedPatch
+        case patchHash
+        case fileChanges
+        case unsupportedReasons
+        case revertMetadata
+        case fallbackPatchCount
+        case fallbackPatchBatches
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.repoRoot = try container.decodeIfPresent(String.self, forKey: .repoRoot)
+        self.threadId = try container.decode(String.self, forKey: .threadId)
+        self.turnId = try container.decode(String.self, forKey: .turnId)
+        self.assistantMessageId = try container.decodeIfPresent(String.self, forKey: .assistantMessageId)
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.finalizedAt = try container.decodeIfPresent(Date.self, forKey: .finalizedAt)
+        self.status = try container.decode(AIChangeSetStatus.self, forKey: .status)
+        self.source = try container.decode(AIChangeSetSource.self, forKey: .source)
+        self.forwardUnifiedPatch = try container.decode(String.self, forKey: .forwardUnifiedPatch)
+        self.inverseUnifiedPatch = try container.decodeIfPresent(String.self, forKey: .inverseUnifiedPatch)
+        self.patchHash = try container.decode(String.self, forKey: .patchHash)
+        self.fileChanges = try container.decode([AIFileChange].self, forKey: .fileChanges)
+        self.unsupportedReasons = try container.decode([String].self, forKey: .unsupportedReasons)
+        self.revertMetadata = try container.decode(AIRevertMetadata.self, forKey: .revertMetadata)
+        self.fallbackPatchCount = try container.decodeIfPresent(Int.self, forKey: .fallbackPatchCount) ?? 0
+        // Older ledgers predate ordered fallback batches; keep them readable and let single-patch state stand.
+        self.fallbackPatchBatches = try container.decodeIfPresent([AIPatchBatch].self, forKey: .fallbackPatchBatches) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(repoRoot, forKey: .repoRoot)
+        try container.encode(threadId, forKey: .threadId)
+        try container.encode(turnId, forKey: .turnId)
+        try container.encodeIfPresent(assistantMessageId, forKey: .assistantMessageId)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(finalizedAt, forKey: .finalizedAt)
+        try container.encode(status, forKey: .status)
+        try container.encode(source, forKey: .source)
+        try container.encode(forwardUnifiedPatch, forKey: .forwardUnifiedPatch)
+        try container.encodeIfPresent(inverseUnifiedPatch, forKey: .inverseUnifiedPatch)
+        try container.encode(patchHash, forKey: .patchHash)
+        try container.encode(fileChanges, forKey: .fileChanges)
+        try container.encode(unsupportedReasons, forKey: .unsupportedReasons)
+        try container.encode(revertMetadata, forKey: .revertMetadata)
+        try container.encode(fallbackPatchCount, forKey: .fallbackPatchCount)
+        try container.encode(fallbackPatchBatches, forKey: .fallbackPatchBatches)
     }
 }
 

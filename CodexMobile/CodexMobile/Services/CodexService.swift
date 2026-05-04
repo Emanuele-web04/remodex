@@ -332,6 +332,7 @@ struct AssistantRevertStateCacheEntry {
     let messageRevision: Int
     let busyRepoRevision: Int
     let revertStateRevision: Int
+    let workingDirectory: String?
     let statesByMessageID: [String: AssistantRevertPresentation]
 }
 

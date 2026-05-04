@@ -870,6 +870,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         hasher.combine(latestTurnTerminalState)
         hasher.combine(completedTurnIDs)
         hasher.combine(stoppedTurnIDs)
+        hasher.combine(assistantRevertStatesByMessageID)
 
         for message in messages {
             hasher.combine(message.id)

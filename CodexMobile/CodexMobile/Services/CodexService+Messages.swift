@@ -4521,10 +4521,13 @@ extension CodexService {
         messageRevision: Int,
         revertStateRevision: Int
     ) -> [String: AssistantRevertPresentation] {
+        let trimmedWorkingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cacheWorkingDirectory = trimmedWorkingDirectory?.isEmpty == false ? trimmedWorkingDirectory : nil
         if let cached = assistantRevertStateCacheByThread[threadId],
            cached.messageRevision == messageRevision,
            cached.busyRepoRevision == busyRepoRootsRevision,
-           cached.revertStateRevision == revertStateRevision {
+           cached.revertStateRevision == revertStateRevision,
+           cached.workingDirectory == cacheWorkingDirectory {
             return cached.statesByMessageID
         }
 
@@ -4542,6 +4545,7 @@ extension CodexService {
             messageRevision: messageRevision,
             busyRepoRevision: busyRepoRootsRevision,
             revertStateRevision: revertStateRevision,
+            workingDirectory: cacheWorkingDirectory,
             statesByMessageID: statesByMessageID
         )
         return statesByMessageID
