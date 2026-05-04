@@ -7,6 +7,7 @@
 import SwiftUI
 
 private let whatsNewItems: [String] = [
+    "New Remodex CLI v1.5.0",
     "New message bubble colors",
     "Image Gen is now available",
     "Plugin mentions in the composer",
