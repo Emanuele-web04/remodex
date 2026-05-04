@@ -28,6 +28,7 @@ struct TurnComposerView: View {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isRuntimeSelectionLoading: Bool
 
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
@@ -159,6 +160,7 @@ struct TurnComposerView: View {
                     selectedModelID: selectedModelID,
                     selectedModelTitle: selectedModelTitle,
                     isLoadingModels: isLoadingModels,
+                    isRuntimeSelectionLoading: isRuntimeSelectionLoading,
                     runtimeState: runtimeState,
                     runtimeActions: runtimeActions,
                     remainingAttachmentSlots: remainingAttachmentSlots,
@@ -702,6 +704,7 @@ private struct ComposerPreviewContent: View {
             selectedModelID: "gpt-5.5",
             selectedModelTitle: "GPT-5.5",
             isLoadingModels: false,
+            isRuntimeSelectionLoading: false,
             runtimeState: TurnComposerRuntimeState(
                 reasoningDisplayOptions: reasoningOptions,
                 effectiveReasoningEffort: "high",

@@ -15,6 +15,7 @@ struct ComposerBottomBar: View {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isRuntimeSelectionLoading: Bool
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     let remainingAttachmentSlots: Int
@@ -62,6 +63,7 @@ struct ComposerBottomBar: View {
                 selectedModelID: selectedModelID,
                 selectedModelTitle: selectedModelTitle,
                 isLoadingModels: isLoadingModels,
+                isRuntimeSelectionLoading: isRuntimeSelectionLoading,
                 runtimeState: runtimeState,
                 runtimeActions: runtimeActions,
                 showsAllModelsSheet: $showsAllModelsSheet
@@ -273,6 +275,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isRuntimeSelectionLoading: Bool
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     @Binding var showsAllModelsSheet: Bool
@@ -287,6 +290,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
             && lhs.selectedModelID == rhs.selectedModelID
             && lhs.selectedModelTitle == rhs.selectedModelTitle
             && lhs.isLoadingModels == rhs.isLoadingModels
+            && lhs.isRuntimeSelectionLoading == rhs.isRuntimeSelectionLoading
             && lhs.runtimeState == rhs.runtimeState
     }
 
@@ -379,7 +383,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
     private var compactRuntimeTitle: String {
         if selectedModelID == nil {
-            return isLoadingModels ? "Loading…" : "5.5 Medium"
+            return isRuntimeSelectionLoading ? "Loading…" : "5.5 Medium"
         }
         return "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
     }

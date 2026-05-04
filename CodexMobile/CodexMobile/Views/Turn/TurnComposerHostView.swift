@@ -100,6 +100,10 @@ struct TurnComposerHostView: View {
             reasoningDisplayOptions: reasoningDisplayOptions
         )
         let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
+        // Keep the runtime pill in a loading state until both chat metadata and models finish hydrating.
+        let isRuntimeSelectionLoading = codex.isBootstrappingConnectionSync
+            || codex.isLoadingThreads
+            || codex.isLoadingModels
 
         TurnComposerView(
             input: $viewModel.input,
@@ -117,9 +121,10 @@ struct TurnComposerHostView: View {
             isEmptyThread: isEmptyThread,
             isWorktreeProject: isWorktreeProject,
             orderedModelOptions: orderedModelOptions,
-            selectedModelID: codex.isLoadingModels ? nil : (codex.selectedModelOption()?.id ?? codex.selectedModelId),
+            selectedModelID: isRuntimeSelectionLoading ? nil : (codex.selectedModelOption()?.id ?? codex.selectedModelId),
             selectedModelTitle: selectedModelTitle,
             isLoadingModels: codex.isLoadingModels,
+            isRuntimeSelectionLoading: isRuntimeSelectionLoading,
             runtimeState: runtimeState,
             runtimeActions: runtimeActions,
             voiceButtonPresentation: voiceButtonPresentation,
