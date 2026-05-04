@@ -7,9 +7,6 @@
 import Foundation
 
 private let minimumBridgePackageUpdateCommand = "npm install -g remodex@latest"
-private let forcedBridgeUpgradeFromVersion = "1.3.8"
-private let forcedBridgeUpgradeTargetVersion = "1.3.9"
-private let forcedBridgeUpgradeCommand = "npm install -g remodex@1.3.9"
 
 enum CodexGPTAccountStatus: String, Codable, Sendable {
     case unknown
@@ -30,8 +27,6 @@ struct CodexGPTAccountSnapshot: Codable, Equatable, Sendable {
     var email: String?
     var displayName: String?
     var planType: String?
-    var hostPlatform: CodexBridgeHostPlatform?
-    var hostCapabilities: CodexBridgeHostCapabilities?
     var loginInFlight: Bool
     var needsReauth: Bool
     var expiresAt: Date?
@@ -99,40 +94,6 @@ struct CodexGPTAccountSnapshot: Codable, Equatable, Sendable {
     }()
 }
 
-enum CodexBridgeHostPlatform: String, Codable, Sendable {
-    case macOS = "macos"
-    case linux
-    case windows
-    case unknown
-
-    var displayName: String {
-        switch self {
-        case .macOS:
-            return "Mac"
-        case .linux:
-            return "Linux computer"
-        case .windows:
-            return "Windows computer"
-        case .unknown:
-            return "computer"
-        }
-    }
-}
-
-struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
-    var desktopHandoff: Bool = false
-    var displayWake: Bool = false
-    var keepAwake: Bool = false
-    var hostBrowserLogin: Bool = false
-
-    static let legacyMacOS = CodexBridgeHostCapabilities(
-        desktopHandoff: true,
-        displayWake: true,
-        keepAwake: true,
-        hostBrowserLogin: true
-    )
-}
-
 func codexGPTAccountInitialSnapshot() -> CodexGPTAccountSnapshot {
     CodexGPTAccountSnapshot(
         status: .unknown,
@@ -140,8 +101,6 @@ func codexGPTAccountInitialSnapshot() -> CodexGPTAccountSnapshot {
         email: nil,
         displayName: nil,
         planType: nil,
-        hostPlatform: nil,
-        hostCapabilities: nil,
         loginInFlight: false,
         needsReauth: false,
         expiresAt: nil,
@@ -173,26 +132,6 @@ struct CodexGPTLoginStartResult: Equatable, Sendable {
 extension CodexService {
     static let legacyGPTLoginCallbackEnabled = true
 
-    // Refreshes bridge-managed account + package metadata together for foreground/reconnect flows.
-    func refreshBridgeManagedState(allowAvailableBridgeUpdatePrompt: Bool = false) async {
-        guard isConnected else {
-            applyGPTAccountConnectionFallback()
-            return
-        }
-
-        do {
-            let bridgeState = try await fetchBridgeManagedStatusSnapshot()
-            applyBridgePackageStatus(
-                from: bridgeState.payload,
-                allowMissingVersionPrompt: bridgeState.allowMissingVersionPrompt,
-                allowAvailableBridgeUpdatePrompt: allowAvailableBridgeUpdatePrompt
-            )
-            applyBridgeManagedAccountSnapshot(from: bridgeState.payload)
-        } catch {
-            handleBridgeManagedAccountRefreshFailure()
-        }
-    }
-
     // Refreshes the bridge-owned account snapshot without ever fetching GPT tokens on iPhone.
     func refreshGPTAccountState() async {
         guard isConnected else {
@@ -201,28 +140,35 @@ extension CodexService {
         }
 
         do {
-            let bridgeState = try await fetchBridgeManagedStatusSnapshot()
-            applyBridgeManagedAccountSnapshot(from: bridgeState.payload)
-        } catch {
-            handleBridgeManagedAccountRefreshFailure()
-        }
-    }
+            let bridgeState = try await fetchBridgeGPTAccountState()
+            guard let payload = bridgeState.response.result?.objectValue else {
+                throw CodexServiceError.invalidResponse("bridge account status response missing payload")
+            }
 
-    // Refreshes only the bridge package version state so Remodex updates stay independent from GPT UX.
-    func refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: Bool = false) async {
-        guard isConnected else {
-            return
-        }
-
-        do {
-            let bridgeState = try await fetchBridgeManagedStatusSnapshot()
-            applyBridgePackageStatus(
-                from: bridgeState.payload,
-                allowMissingVersionPrompt: bridgeState.allowMissingVersionPrompt,
-                allowAvailableBridgeUpdatePrompt: allowAvailableBridgeUpdatePrompt
+            bridgeInstalledVersion = firstStringValue(
+                in: payload,
+                keys: ["bridgeVersion", "bridge_version", "bridgePackageVersion", "bridge_package_version"]
             )
+            latestBridgePackageVersion = firstStringValue(
+                in: payload,
+                keys: ["bridgeLatestVersion", "bridge_latest_version", "bridgePublishedVersion", "bridge_published_version"]
+            )
+            evaluateRequiredBridgePackageVersion(
+                from: payload,
+                allowMissingVersionPrompt: bridgeState.allowMissingVersionPrompt
+            )
+            applyGPTAccountSnapshot(decodeBridgeGPTAccountSnapshot(from: payload))
+            if currentPendingGPTLogin() != nil,
+               (gptAccountSnapshot.hasActiveLogin || (gptAccountSnapshot.isAuthenticated && !gptAccountSnapshot.isVoiceTokenReady)) {
+                startGPTLoginSyncIfNeeded()
+            }
+            if gptAccountSnapshot.isAuthenticated || gptAccountSnapshot.status == .notLoggedIn {
+                gptAccountErrorMessage = nil
+            }
         } catch {
-            // Keep the last-known bridge version info when the status read fails transiently.
+            if gptAccountSnapshot.status == .unknown {
+                gptAccountSnapshot = disconnectedGPTAccountSnapshot()
+            }
         }
     }
 
@@ -338,7 +284,7 @@ extension CodexService {
                 retaining: gptAccountSnapshot
             )
         )
-        gptAccountErrorMessage = "ChatGPT voice needs a fresh sign-in on your paired computer."
+        gptAccountErrorMessage = "ChatGPT voice needs a fresh sign-in on this iPhone."
     }
 
     // Stores an incoming deep-link callback and completes the pending login when the bridge is reachable.
@@ -635,100 +581,20 @@ extension CodexService {
         syncPendingGPTLoginStateIfNeeded()
     }
 
-    private func fetchBridgeManagedStatusSnapshot() async throws -> (
-        payload: IncomingParamsObject,
+    private func fetchBridgeGPTAccountState() async throws -> (
+        response: RPCMessage,
         allowMissingVersionPrompt: Bool
     ) {
         do {
-            let response = try await sendRequest(method: "account/status/read", params: nil)
-            guard let payload = response.result?.objectValue else {
-                throw CodexServiceError.invalidResponse("bridge account status response missing payload")
-            }
             return (
-                payload: payload,
+                response: try await sendRequest(method: "account/status/read", params: nil),
                 allowMissingVersionPrompt: true
             )
         } catch {
-            let response = try await sendRequest(method: "getAuthStatus", params: nil)
-            guard let payload = response.result?.objectValue else {
-                throw CodexServiceError.invalidResponse("bridge account status response missing payload")
-            }
             return (
-                payload: payload,
+                response: try await sendRequest(method: "getAuthStatus", params: nil),
                 allowMissingVersionPrompt: shouldTreatAsUnsupportedBridgeManagedAccountStatus(error)
             )
-        }
-    }
-
-    // Applies the bridge-owned ChatGPT snapshot after a shared managed-status fetch.
-    private func applyBridgeManagedAccountSnapshot(from payloadObject: IncomingParamsObject) {
-        applyGPTAccountSnapshot(decodeBridgeGPTAccountSnapshot(from: payloadObject))
-        if currentPendingGPTLogin() != nil,
-           (gptAccountSnapshot.hasActiveLogin || (gptAccountSnapshot.isAuthenticated && !gptAccountSnapshot.isVoiceTokenReady)) {
-            startGPTLoginSyncIfNeeded()
-        }
-        if gptAccountSnapshot.isAuthenticated || gptAccountSnapshot.status == .notLoggedIn {
-            gptAccountErrorMessage = nil
-        }
-    }
-
-    // Applies bridge package versions and prompts independently from GPT account state.
-    private func applyBridgePackageStatus(
-        from payloadObject: IncomingParamsObject,
-        allowMissingVersionPrompt: Bool,
-        allowAvailableBridgeUpdatePrompt: Bool
-    ) {
-        let previousTransportMode = codexTransportMode
-        codexTransportMode = decodeCodexTransportMode(
-            from: firstStringValue(
-                in: payloadObject,
-                keys: ["codexTransportMode", "codex_transport_mode", "transportMode", "transport_mode"]
-            )
-        )
-        reconcileNativePlanSessionSources(
-            previousTransportMode: previousTransportMode,
-            nextTransportMode: codexTransportMode
-        )
-        bridgeInstalledVersion = firstStringValue(
-            in: payloadObject,
-            keys: ["bridgeVersion", "bridge_version", "bridgePackageVersion", "bridge_package_version"]
-        )
-        latestBridgePackageVersion = firstStringValue(
-            in: payloadObject,
-            keys: ["bridgeLatestVersion", "bridge_latest_version", "bridgePublishedVersion", "bridge_published_version"]
-        )
-        applyBridgeHostMetadata(from: payloadObject)
-        evaluateRequiredBridgePackageVersion(
-            from: payloadObject,
-            allowMissingVersionPrompt: allowMissingVersionPrompt
-        )
-        if allowAvailableBridgeUpdatePrompt {
-            evaluateAvailableBridgePackageVersionPromptIfNeeded()
-        }
-    }
-
-    private func decodeCodexTransportMode(from rawValue: String?) -> CodexRuntimeTransportMode {
-        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !rawValue.isEmpty else {
-            return .unknown
-        }
-
-        return CodexRuntimeTransportMode(rawValue: rawValue) ?? .unknown
-    }
-
-    private func applyBridgeHostMetadata(from payloadObject: IncomingParamsObject) {
-        gptAccountSnapshot.hostPlatform = decodeBridgeHostPlatform(
-            from: firstStringValue(
-                in: payloadObject,
-                keys: ["hostPlatform", "host_platform", "bridgeHostPlatform", "bridge_host_platform"]
-            )
-        )
-        gptAccountSnapshot.hostCapabilities = decodeBridgeHostCapabilities(from: payloadObject)
-    }
-
-    private func handleBridgeManagedAccountRefreshFailure() {
-        if gptAccountSnapshot.status == .unknown {
-            gptAccountSnapshot = disconnectedGPTAccountSnapshot()
         }
     }
 
@@ -800,85 +666,16 @@ extension CodexService {
         if let currentVersion = currentVersion?.trimmingCharacters(in: .whitespacesAndNewlines),
            !currentVersion.isEmpty {
             message =
-                "This computer bridge is running Remodex \(currentVersion), but this iPhone app requires Remodex \(CodexService.minimumSupportedBridgePackageVersion) or newer. Update the npm package on your computer, then reconnect."
+                "This Mac bridge is running Remodex \(currentVersion), but this iPhone app requires Remodex \(CodexService.minimumSupportedBridgePackageVersion) or newer. Update the npm package on your Mac, then reconnect."
         } else {
             message =
-                "This computer bridge is too old for this version of Remodex iPhone. Update the Remodex npm package on your computer to \(CodexService.minimumSupportedBridgePackageVersion) or newer, then reconnect."
+                "This Mac bridge is too old for this version of Remodex iPhone. Update the Remodex npm package on your Mac to \(CodexService.minimumSupportedBridgePackageVersion) or newer, then reconnect."
         }
 
         return CodexBridgeUpdatePrompt(
-            title: "Update Remodex on your computer to reconnect",
+            title: "Update Remodex on your Mac to reconnect",
             message: message,
             command: minimumBridgePackageUpdateCommand
-        )
-    }
-
-    // Surfaces a softer "npm update available" prompt without overriding stricter compatibility prompts.
-    private func evaluateAvailableBridgePackageVersionPromptIfNeeded() {
-        guard isAppInForeground else {
-            return
-        }
-
-        guard bridgeUpdatePrompt == nil else {
-            return
-        }
-
-        guard let installedVersion = normalizedBridgePackageVersion(bridgeInstalledVersion) else {
-            return
-        }
-
-        if installedVersion == forcedBridgeUpgradeFromVersion {
-            guard lastPresentedAvailableBridgePackageVersion != forcedBridgeUpgradeTargetVersion else {
-                return
-            }
-
-            lastPresentedAvailableBridgePackageVersion = forcedBridgeUpgradeTargetVersion
-            bridgeUpdatePrompt = forcedBridgePackageUpdatePrompt(currentVersion: installedVersion)
-            return
-        }
-
-        guard let latestVersion = normalizedBridgePackageVersion(latestBridgePackageVersion),
-              installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending else {
-            return
-        }
-
-        guard lastPresentedAvailableBridgePackageVersion != latestVersion else {
-            return
-        }
-
-        lastPresentedAvailableBridgePackageVersion = latestVersion
-        bridgeUpdatePrompt = availableBridgePackageUpdatePrompt(
-            currentVersion: installedVersion,
-            latestVersion: latestVersion
-        )
-    }
-
-    // Keeps version comparisons and prompt copy on one normalized representation.
-    private func normalizedBridgePackageVersion(_ value: String?) -> String? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
-        }
-
-        return trimmed
-    }
-
-    private func availableBridgePackageUpdatePrompt(
-        currentVersion: String,
-        latestVersion: String
-    ) -> CodexBridgeUpdatePrompt {
-        CodexBridgeUpdatePrompt(
-            title: "A newer Remodex update is available on your computer",
-            message: "This computer bridge is running Remodex \(currentVersion), and npm now has Remodex \(latestVersion). Update the package on your computer when you're ready, then reconnect to start using the newer build.",
-            command: minimumBridgePackageUpdateCommand
-        )
-    }
-
-    private func forcedBridgePackageUpdatePrompt(currentVersion: String) -> CodexBridgeUpdatePrompt {
-        CodexBridgeUpdatePrompt(
-            title: "Update Remodex on your computer to reconnect",
-            message: "This computer bridge is running Remodex \(currentVersion). Update the Remodex CLI on your computer to \(forcedBridgeUpgradeTargetVersion), then reconnect.",
-            command: forcedBridgeUpgradeCommand
         )
     }
 
@@ -961,13 +758,6 @@ extension CodexService {
             email: firstStringValue(in: payloadObject, keys: ["email"]),
             displayName: nil,
             planType: firstStringValue(in: payloadObject, keys: ["planType", "plan_type"]),
-            hostPlatform: decodeBridgeHostPlatform(
-                from: firstStringValue(
-                    in: payloadObject,
-                    keys: ["hostPlatform", "host_platform", "bridgeHostPlatform", "bridge_host_platform"]
-                )
-            ),
-            hostCapabilities: decodeBridgeHostCapabilities(from: payloadObject),
             loginInFlight: hasPendingLogin,
             needsReauth: escalatedNeedsReauth,
             expiresAt: firstDateValue(in: payloadObject, keys: ["expiresAt", "expires_at"]),
@@ -1006,8 +796,6 @@ extension CodexService {
             email: gptAccountSnapshot.email,
             displayName: gptAccountSnapshot.displayName,
             planType: gptAccountSnapshot.planType,
-            hostPlatform: gptAccountSnapshot.hostPlatform,
-            hostCapabilities: gptAccountSnapshot.hostCapabilities,
             loginInFlight: currentPendingGPTLogin() != nil,
             needsReauth: false,
             expiresAt: currentPendingGPTLogin()?.expiresAt,
@@ -1027,8 +815,6 @@ extension CodexService {
             email: snapshot.email,
             displayName: snapshot.displayName,
             planType: snapshot.planType,
-            hostPlatform: snapshot.hostPlatform,
-            hostCapabilities: snapshot.hostCapabilities,
             loginInFlight: true,
             needsReauth: false,
             expiresAt: expiresAt,
@@ -1049,8 +835,6 @@ extension CodexService {
             email: needsReauth ? snapshot.email : nil,
             displayName: needsReauth ? snapshot.displayName : nil,
             planType: needsReauth ? snapshot.planType : nil,
-            hostPlatform: snapshot.hostPlatform,
-            hostCapabilities: snapshot.hostCapabilities,
             loginInFlight: false,
             needsReauth: needsReauth,
             expiresAt: nil,
@@ -1066,11 +850,9 @@ extension CodexService {
         needsReauth: Bool,
         hasLegacyAuthToken: Bool = false
     ) -> Bool {
-        if let tokenReady = firstBoolValue(in: payloadObject, keys: ["tokenReady", "token_ready"]) {
-            return tokenReady
-        }
-
-        return hasLegacyAuthToken && status == .authenticated && !needsReauth
+        firstBoolValue(in: payloadObject, keys: ["tokenReady", "token_ready"])
+            ?? (hasLegacyAuthToken && status == .authenticated && !needsReauth)
+            ?? (status == .authenticated && !needsReauth)
     }
 
     func resolvedTokenUnavailableSince(
@@ -1145,33 +927,6 @@ extension CodexService {
         default:
             return nil
         }
-    }
-
-    func decodeBridgeHostPlatform(from value: String?) -> CodexBridgeHostPlatform? {
-        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-              !value.isEmpty else {
-            return nil
-        }
-
-        return CodexBridgeHostPlatform(rawValue: value) ?? .unknown
-    }
-
-    func decodeBridgeHostCapabilities(from payloadObject: IncomingParamsObject) -> CodexBridgeHostCapabilities? {
-        let capabilitiesObject = payloadObject["hostCapabilities"]?.objectValue
-            ?? payloadObject["host_capabilities"]?.objectValue
-            ?? payloadObject["bridgeHostCapabilities"]?.objectValue
-            ?? payloadObject["bridge_host_capabilities"]?.objectValue
-
-        guard let capabilitiesObject else {
-            return nil
-        }
-
-        return CodexBridgeHostCapabilities(
-            desktopHandoff: firstBoolValue(in: capabilitiesObject, keys: ["desktopHandoff", "desktop_handoff"]) ?? false,
-            displayWake: firstBoolValue(in: capabilitiesObject, keys: ["displayWake", "display_wake"]) ?? false,
-            keepAwake: firstBoolValue(in: capabilitiesObject, keys: ["keepAwake", "keep_awake"]) ?? false,
-            hostBrowserLogin: firstBoolValue(in: capabilitiesObject, keys: ["hostBrowserLogin", "host_browser_login"]) ?? false
-        )
     }
 
     func firstStringValue(in object: IncomingParamsObject?, keys: [String]) -> String? {

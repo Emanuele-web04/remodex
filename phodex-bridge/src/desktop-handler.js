@@ -1,5 +1,5 @@
 // FILE: desktop-handler.js
-// Purpose: Handles explicit desktop handoff, display wake, and bridge preference RPCs for Codex.app.
+// Purpose: Handles explicit desktop-handoff bridge actions for Codex.app.
 // Layer: Bridge handler
 // Exports: handleDesktopRequest
 // Depends on: child_process, fs, os, path, ./rollout-watch
@@ -19,7 +19,6 @@ const DEFAULT_RELAUNCH_WAIT_MS = 300;
 const DEFAULT_APP_BOOT_WAIT_MS = 1_200;
 const DEFAULT_THREAD_MATERIALIZE_WAIT_MS = 4_000;
 const DEFAULT_THREAD_MATERIALIZE_POLL_MS = 250;
-const DEFAULT_WAKE_DISPLAY_DURATION_SECONDS = 30;
 
 function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
   let parsed;
@@ -93,14 +92,6 @@ async function handleDesktopMethod(method, params, options = {}) {
         threadMaterializeWaitMs,
         threadMaterializePollMs,
       });
-    case "desktop/wakeDisplay":
-      return wakeDisplay({
-        executor,
-      });
-    case "desktop/preferences/read":
-      return readBridgePreferences(options);
-    case "desktop/preferences/update":
-      return updateBridgePreferences(params, options);
     default:
       throw desktopError("unknown_method", `Unknown desktop method: ${method}`);
   }
@@ -138,21 +129,7 @@ async function continueOnMac(
   // real device switch: close, reopen, then focus the requested thread.
   if (desktopKnown && !appRunning) {
     try {
-      // Cold-launch the desktop app first, then deep-link the thread once the
-      // router is ready. A single `open codex://threads/...` can land on the
-      // default new-chat route when Codex.app is not fully booted yet.
-      await openCodexApp({ bundleId, appPath, executor });
-      await sleepFn(appBootWaitMs);
-      await openWhenThreadReady(threadId, targetUrl, {
-        bundleId,
-        appPath,
-        executor,
-        env,
-        fsModule,
-        sleepFn,
-        waitMs: threadMaterializeWaitMs,
-        pollMs: threadMaterializePollMs,
-      });
+      await openCodexTarget(targetUrl, { bundleId, appPath, executor });
     } catch (error) {
       throw desktopError(
         "handoff_failed",
@@ -238,58 +215,6 @@ async function continueOnMac(
     threadId,
     desktopKnown,
   };
-}
-
-// Sends a stronger display wake pulse: mark user activity and hold the display awake briefly
-// so a sleeping panel has time to relight before the Mac drifts back into idle display sleep.
-async function wakeDisplay({ executor }) {
-  try {
-    await executor("/usr/bin/caffeinate", ["-d", "-u", "-t", String(DEFAULT_WAKE_DISPLAY_DURATION_SECONDS)], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  } catch (error) {
-    throw desktopError(
-      "wake_display_failed",
-      "Could not wake your Mac display right now.",
-      error
-    );
-  }
-
-  return {
-    success: true,
-    durationSeconds: DEFAULT_WAKE_DISPLAY_DURATION_SECONDS,
-  };
-}
-
-function readBridgePreferences(options = {}) {
-  if (typeof options.readBridgePreferences !== "function") {
-    throw desktopError(
-      "unsupported_bridge_preferences",
-      "This bridge does not support preference sync yet."
-    );
-  }
-
-  return options.readBridgePreferences();
-}
-
-async function updateBridgePreferences(params, options = {}) {
-  if (typeof options.updateBridgePreferences !== "function") {
-    throw desktopError(
-      "unsupported_bridge_preferences",
-      "This bridge does not support preference sync yet."
-    );
-  }
-
-  if (!params || typeof params !== "object" || typeof params.keepMacAwake !== "boolean") {
-    throw desktopError(
-      "invalid_bridge_preferences",
-      "The bridge preference payload is invalid."
-    );
-  }
-
-  return options.updateBridgePreferences({
-    keepMacAwake: params.keepMacAwake,
-  });
 }
 
 function resolveThreadId(params) {

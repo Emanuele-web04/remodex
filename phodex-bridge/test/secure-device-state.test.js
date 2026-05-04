@@ -11,8 +11,6 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   loadOrCreateBridgeDeviceState,
-  readBridgeDeviceState,
-  rememberLastSeenPhoneAppVersion,
   rememberTrustedPhone,
   resetBridgeDeviceState,
   resolveBridgeRelaySession,
@@ -49,18 +47,6 @@ test("rememberTrustedPhone stores the trusted phone identity", () => {
   });
 });
 
-test("rememberLastSeenPhoneAppVersion stores the latest App Store version", () => {
-  const state = makeDeviceState();
-
-  const nextState = rememberLastSeenPhoneAppVersion(
-    state,
-    "1.0",
-    { persist: false }
-  );
-
-  assert.equal(nextState.lastSeenPhoneAppVersion, "1.0");
-});
-
 test("loadOrCreateBridgeDeviceState writes and reloads the canonical file state", () => {
   withTempDeviceStateEnv(() => {
     const firstState = loadOrCreateBridgeDeviceState();
@@ -68,12 +54,6 @@ test("loadOrCreateBridgeDeviceState writes and reloads the canonical file state"
 
     assert.deepEqual(secondState, firstState);
     assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(firstState));
-  });
-});
-
-test("readBridgeDeviceState returns null before the first pairing state exists", () => {
-  withTempDeviceStateEnv(() => {
-    assert.equal(readBridgeDeviceState(), null);
   });
 });
 
@@ -94,23 +74,15 @@ test("loadOrCreateBridgeDeviceState migrates a valid Keychain mirror into the ca
   });
 });
 
-test("loadOrCreateBridgeDeviceState replaces a corrupted legacy Keychain mirror with a fresh canonical state", () => {
+test("loadOrCreateBridgeDeviceState throws when only the legacy Keychain mirror is corrupted", () => {
   withTempDeviceStateEnv(({ keychainMirrorFile, canonicalStateFile }) => {
     fs.writeFileSync(keychainMirrorFile, "{ definitely-not-json", "utf8");
 
-    const loadedState = loadOrCreateBridgeDeviceState();
-
-    assert.equal(loadedState.version, 1);
-    assert.ok(loadedState.macDeviceId);
-    assert.ok(loadedState.macIdentityPublicKey);
-    assert.ok(loadedState.macIdentityPrivateKey);
-    assert.deepEqual(loadedState.trustedPhones, {});
-    assert.deepEqual(readCanonicalStateFromDisk(), stripUndefined(loadedState));
-    assert.deepEqual(
-      JSON.parse(fs.readFileSync(keychainMirrorFile, "utf8")),
-      stripUndefined(loadedState)
+    assert.throws(
+      () => loadOrCreateBridgeDeviceState(),
+      /saved Remodex pairing state in legacy Keychain bridge state is unreadable/i
     );
-    assert.equal(fs.existsSync(canonicalStateFile), true);
+    assert.equal(fs.existsSync(canonicalStateFile), false);
   });
 });
 
@@ -164,19 +136,6 @@ test("resolveBridgeRelaySession does not persist the fresh launch session id", (
   });
 });
 
-test("rememberLastSeenPhoneAppVersion persists across reloads", () => {
-  withTempDeviceStateEnv(() => {
-    rememberLastSeenPhoneAppVersion(
-      makeDeviceState(),
-      "1.1",
-      { persist: true }
-    );
-
-    const reloaded = loadOrCreateBridgeDeviceState();
-    assert.equal(reloaded.lastSeenPhoneAppVersion, "1.1");
-  });
-});
-
 test("resetBridgeDeviceState removes both canonical and mirrored pairing state", () => {
   withTempDeviceStateEnv(({ keychainMirrorFile, canonicalStateFile }) => {
     const state = makeDeviceState({
@@ -203,7 +162,6 @@ function makeDeviceState(overrides = {}) {
     macIdentityPublicKey: "mac-public-key",
     macIdentityPrivateKey: "mac-private-key",
     trustedPhones: {},
-    lastSeenPhoneAppVersion: null,
     ...overrides,
   };
 }

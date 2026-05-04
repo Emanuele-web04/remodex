@@ -22,9 +22,9 @@ enum TurnWorktreeOverlayMode {
     var message: String {
         switch self {
         case .handoff:
-            return "Create and check out a branch in a new worktree to continue in parallel. The branch is normalized with the remodex/ prefix."
+            return "Create and check out a branch in a new worktree to continue working in parallel. Tracked local changes move there too, while ignored files stay in Local."
         case .fork:
-            return "Create and check out a branch in a new worktree, then fork this conversation into that checkout as a new chat."
+            return "Create and check out a branch in a new worktree, then fork this conversation into the new checkout. Tracked local changes are copied there too, while the current thread and Local checkout stay exactly where they are."
         }
     }
 
@@ -47,7 +47,6 @@ struct TurnWorktreeHandoffOverlay: View {
     let onSubmit: (String, String) -> Void
 
     @State private var branchName = ""
-    @State private var baseBranch = ""
     @FocusState private var isBranchNameFocused: Bool
 
     private var normalizedBranchName: String {
@@ -55,7 +54,7 @@ struct TurnWorktreeHandoffOverlay: View {
     }
 
     private var trimmedBaseBranch: String {
-        baseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        preferredBaseBranch.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var body: some View {
@@ -64,28 +63,20 @@ struct TurnWorktreeHandoffOverlay: View {
                 .ignoresSafeArea()
                 .onTapGesture(perform: onClose)
 
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 24) {
                 header
                 content
                 submitButton
             }
-            .padding(20)
-            .frame(maxWidth: 400)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .padding(24)
+            .frame(maxWidth: 460)
+            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
             .shadow(color: Color.black.opacity(0.2), radius: 30, y: 12)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, 20)
         }
         .task {
-            if baseBranch.isEmpty {
-                baseBranch = preferredBaseBranch
-            }
             guard !isSubmitting else { return }
             isBranchNameFocused = true
-        }
-        .onChange(of: preferredBaseBranch) { _, newValue in
-            if trimmedBaseBranch.isEmpty {
-                baseBranch = newValue
-            }
         }
         .onChange(of: isHandoffAvailable) { _, newValue in
             // If a run starts while the dialog is open, close it instead of leaving a dead-end submit affordance onscreen.
@@ -97,40 +88,42 @@ struct TurnWorktreeHandoffOverlay: View {
     private var header: some View {
         HStack(alignment: .top) {
             ZStack {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .fill(Color.primary.opacity(0.06))
-                    .frame(width: 40, height: 40)
+                    .frame(width: 56, height: 56)
 
-                CodexWorktreeIcon(pointSize: 16, weight: .semibold)
+                CodexWorktreeIcon(pointSize: 20, weight: .semibold)
                     .foregroundStyle(.primary)
             }
 
-            Spacer(minLength: 12)
+            Spacer(minLength: 16)
 
             Button(action: onClose) {
                 Image(systemName: "xmark")
-                    .font(AppFont.system(size: 15, weight: .medium))
+                    .font(AppFont.system(size: 18, weight: .medium))
                     .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 32, height: 32)
             }
             .buttonStyle(.plain)
         }
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(mode.title)
-                .font(AppFont.headline())
-                .foregroundStyle(.primary)
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(mode.title)
+                    .font(AppFont.title2(weight: .semibold))
+                    .foregroundStyle(.primary)
 
-            Text(mode.message)
-                .font(AppFont.footnote())
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text(mode.message)
+                    .font(AppFont.body())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text("Branch name")
-                    .font(AppFont.subheadline(weight: .semibold))
+                    .font(AppFont.body(weight: .semibold))
                     .foregroundStyle(.primary)
 
                 TextField("feature-name", text: $branchName)
@@ -138,14 +131,14 @@ struct TurnWorktreeHandoffOverlay: View {
                     .autocorrectionDisabled()
                     .focused($isBranchNameFocused)
                     .font(AppFont.body(weight: .medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 18)
                     .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
                             .fill(Color.primary.opacity(0.03))
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
                             .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                     )
 
@@ -154,31 +147,6 @@ struct TurnWorktreeHandoffOverlay: View {
                         .font(AppFont.mono(.caption))
                         .foregroundStyle(.secondary)
                 }
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Base branch")
-                    .font(AppFont.subheadline(weight: .semibold))
-                    .foregroundStyle(.primary)
-
-                TextField("main", text: $baseBranch)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .font(AppFont.body(weight: .medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.primary.opacity(0.03))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-                    )
-
-                Text("Starts from this base branch.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -199,8 +167,8 @@ struct TurnWorktreeHandoffOverlay: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 46)
-            .background(Color.white, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .frame(height: 58)
+            .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!isHandoffAvailable || isSubmitting || normalizedBranchName.isEmpty || trimmedBaseBranch.isEmpty)

@@ -5,6 +5,4 @@
 // Exports: none
 // Depends on: ./remodex
 
-const { main } = require("./remodex");
-
-void main();
+require("./remodex");

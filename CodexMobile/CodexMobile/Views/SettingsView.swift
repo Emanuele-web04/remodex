@@ -1,5 +1,5 @@
 // FILE: SettingsView.swift
-// Purpose: Settings for Local Mode (Codex runs on the paired computer, relay WebSocket).
+// Purpose: Settings for Local Mode (Codex runs on user's Mac, relay WebSocket).
 // Layer: View
 // Exports: SettingsView
 
@@ -8,10 +8,9 @@ import UIKit
 
 struct SettingsView: View {
     @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
 
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
-    @State private var isShowingComputerNameSheet = false
+    @State private var isShowingMacNameSheet = false
 
     private let runtimeAutoValue = "__AUTO__"
     private let runtimeNormalValue = "__NORMAL__"
@@ -24,7 +23,6 @@ struct SettingsView: View {
                 SettingsAppearanceCard(appFontStyle: appFontStyleBinding)
                 SettingsNotificationsCard()
                 SettingsGPTAccountCard()
-                SettingsSubscriptionCard()
                 SettingsBridgeVersionCard()
                 runtimeDefaultsSection
                 SettingsAboutCard()
@@ -35,20 +33,14 @@ struct SettingsView: View {
         }
         .font(AppFont.body())
         .navigationTitle("Settings")
-        .sheet(isPresented: $isShowingComputerNameSheet) {
+        .sheet(isPresented: $isShowingMacNameSheet) {
             if let trustedPairPresentation = codex.trustedPairPresentation {
-                SettingsComputerNameSheet(
-                    nickname: sidebarComputerNicknameBinding(for: trustedPairPresentation),
+                SettingsMacNameSheet(
+                    nickname: sidebarMacNicknameBinding(for: trustedPairPresentation),
                     currentName: trustedPairPresentation.name,
                     systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
                 )
             }
-        }
-        .task {
-            guard subscriptions.bootstrapState == .idle else {
-                return
-            }
-            await subscriptions.bootstrap()
         }
     }
 
@@ -56,18 +48,6 @@ struct SettingsView: View {
         Binding(
             get: { AppFont.Style(rawValue: appFontStyleRawValue) ?? AppFont.defaultStyle },
             set: { appFontStyleRawValue = $0.rawValue }
-        )
-    }
-
-    private var keepMacAwakeWhileBridgeRunsBinding: Binding<Bool> {
-        Binding(
-            get: { codex.keepMacAwakeWhileBridgeRuns },
-            set: { nextValue in
-                codex.setKeepMacAwakeWhileBridgeRunsPreference(nextValue)
-                Task { @MainActor in
-                    await codex.syncBridgeKeepMacAwakePreferenceIfNeeded(showFailureInUI: true)
-                }
-            }
         )
     }
 
@@ -105,20 +85,18 @@ struct SettingsView: View {
                 .disabled(runtimeReasoningOptions.isEmpty)
             }
 
-            if codex.selectedModelSupportsServiceTier(.fast) {
-                HStack {
-                    Text("Speed")
-                    Spacer()
-                    Picker("Speed", selection: runtimeServiceTierSelection) {
-                        Text("Normal").tag(runtimeNormalValue)
-                        ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
-                            Text(tier.displayName).tag(tier.rawValue)
-                        }
+            HStack {
+                Text("Speed")
+                Spacer()
+                Picker("Speed", selection: runtimeServiceTierSelection) {
+                    Text("Normal").tag(runtimeNormalValue)
+                    ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
+                        Text(tier.displayName).tag(tier.rawValue)
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .tint(settingsAccentColor)
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .tint(settingsAccentColor)
             }
 
             HStack {
@@ -133,27 +111,6 @@ struct SettingsView: View {
                 .labelsHidden()
                 .tint(settingsAccentColor)
             }
-
-            Divider()
-
-            HStack {
-                Text("Git writer model")
-                Spacer()
-                Picker("Git writer model", selection: gitWriterModelSelection) {
-                    ForEach(gitWriterModelOptions, id: \.id) { model in
-                        Text(TurnComposerMetaMapper.modelTitle(for: model))
-                            .tag(model.id)
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .tint(settingsAccentColor)
-                .disabled(gitWriterModelOptions.isEmpty)
-            }
-
-            Text("Used for AI-generated commit messages and PR drafts. Defaults to GPT-5.4 Mini when available.")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
         }
     }
 
@@ -162,15 +119,15 @@ struct SettingsView: View {
     @ViewBuilder private var connectionSection: some View {
         SettingsCard(title: "Connection") {
             if let trustedPairPresentation = codex.trustedPairPresentation {
-                SettingsTrustedComputerCard(
+                SettingsTrustedMacCard(
                     presentation: trustedPairPresentation,
                     connectionStatusLabel: connectionStatusLabel,
                     onEditName: {
-                        isShowingComputerNameSheet = true
+                        isShowingMacNameSheet = true
                     }
                 )
             } else {
-                Text("No paired computer")
+                Text("No paired Mac")
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
             }
@@ -195,25 +152,6 @@ struct SettingsView: View {
                 Text(error)
                     .font(AppFont.caption())
                     .foregroundStyle(.red)
-            }
-
-            Divider()
-
-            if codex.supportsKeepAwakeWhileBridgeRuns {
-                Toggle("Keep computer reachable", isOn: keepMacAwakeWhileBridgeRunsBinding)
-                    .tint(settingsAccentColor)
-
-                Text(codex.keepMacAwakeWhileBridgeRuns
-                     ? "Uses the host computer's keep-awake support while the bridge is running so the computer stays reachable even if the display turns off. Best while charging."
-                     : "The computer can go back to sleeping normally when the bridge is idle.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-
-                if !codex.isConnected {
-                    Text("Saved on this iPhone. It will sync to the paired computer the next time the bridge reconnects.")
-                        .font(AppFont.caption())
-                        .foregroundStyle(.secondary)
-                }
             }
 
             if codex.isConnected {
@@ -324,69 +262,12 @@ struct SettingsView: View {
         )
     }
 
-    private var gitWriterModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
-    }
-
-    private var gitWriterModelSelection: Binding<String> {
+    // Writes nicknames against the active trusted Mac so switching pairs does not reuse the wrong alias.
+    private func sidebarMacNicknameBinding(for presentation: CodexTrustedPairPresentation) -> Binding<String> {
         Binding(
-            get: { codex.selectedGitWriterModelOption()?.id ?? gitWriterModelOptions.first?.id ?? "" },
-            set: { codex.setSelectedGitWriterModelId($0.isEmpty ? nil : $0) }
+            get: { SidebarMacNicknameStore.nickname(for: presentation.deviceId) },
+            set: { SidebarMacNicknameStore.setNickname($0, for: presentation.deviceId) }
         )
-    }
-
-    // Writes nicknames against the active trusted computer so switching pairs does not reuse the wrong alias.
-    private func sidebarComputerNicknameBinding(for presentation: CodexTrustedPairPresentation) -> Binding<String> {
-        Binding(
-            get: { SidebarComputerNicknameStore.nickname(for: presentation.deviceId) },
-            set: { SidebarComputerNicknameStore.setNickname($0, for: presentation.deviceId) }
-        )
-    }
-}
-
-private struct SettingsSubscriptionCard: View {
-    @Environment(SubscriptionService.self) private var subscriptions
-    @State private var isPresentingPaywall = false
-
-    var body: some View {
-        SettingsCard(title: "Remodex Pro") {
-            HStack {
-                Text("Status")
-                Spacer()
-                Text(subscriptions.hasProAccess ? "Active" : "Free")
-                    .foregroundStyle(subscriptions.hasProAccess ? .green : .secondary)
-            }
-
-            if subscriptions.hasProAccess {
-                Text("Your Pro access is active. You can still restore purchases or manage the purchase from Apple.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Open the custom paywall to choose a monthly, yearly, or lifetime plan.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-
-            SettingsButton(subscriptions.hasProAccess ? "View Pro" : "Upgrade to Pro") {
-                isPresentingPaywall = true
-            }
-
-            SettingsButton(subscriptions.isRestoring ? "Restoring..." : "Restore Purchases", isLoading: subscriptions.isRestoring) {
-                Task {
-                    await subscriptions.restorePurchases()
-                }
-            }
-            .disabled(subscriptions.isPurchasing)
-
-            if let error = subscriptions.lastErrorMessage, !error.isEmpty {
-                Text(error)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.red)
-            }
-        }
-        .sheet(isPresented: $isPresentingPaywall) {
-            RevenueCatPaywallView()
-        }
     }
 }
 
@@ -460,17 +341,23 @@ private struct SettingsUsageCard: View {
     var body: some View {
         SettingsCard(title: "Usage") {
             UsageStatusSummaryContent(
-                contextWindowUsage: nil,
-                showsContextWindowSection: false,
+                contextWindowUsage: activeThreadContextWindowUsage,
                 rateLimitBuckets: codex.rateLimitBuckets,
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage,
+                contextPlacement: .bottom,
                 refreshControl: UsageStatusRefreshControl(
                     title: "Refresh",
                     isRefreshing: isRefreshing,
                     action: refreshStatus
                 )
             )
+
+            if activeThreadID == nil {
+                Text("Open a chat to populate the current thread context window here.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
         }
         .task {
             await refreshStatusIfNeeded()
@@ -481,6 +368,24 @@ private struct SettingsUsageCard: View {
                 await refreshStatusIfNeeded()
             }
         }
+        .onChange(of: activeThreadID) { _, _ in
+            Task {
+                await refreshStatusIfNeeded()
+            }
+        }
+    }
+
+    private var activeThreadID: String? {
+        let trimmed = codex.activeThreadId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
+        return nil
+    }
+
+    private var activeThreadContextWindowUsage: ContextWindowUsage? {
+        guard let activeThreadID else { return nil }
+        return codex.contextWindowUsageByThread[activeThreadID]
     }
 
     private func refreshStatus() {
@@ -498,7 +403,7 @@ private struct SettingsUsageCard: View {
 
     private func refreshStatusIfNeeded() async {
         guard !isRefreshing else { return }
-        guard codex.shouldAutoRefreshUsageStatus(threadId: nil) else { return }
+        guard codex.shouldAutoRefreshUsageStatus(threadId: activeThreadID) else { return }
 
         await MainActor.run {
             isRefreshing = true
@@ -509,9 +414,9 @@ private struct SettingsUsageCard: View {
         }
     }
 
-    // Settings only needs the account-wide usage windows.
+    // Loads account-wide windows globally and thread context from the active chat when available.
     private func refreshStatusData() async {
-        await codex.refreshUsageStatus(threadId: nil)
+        await codex.refreshUsageStatus(threadId: activeThreadID)
     }
 }
 
@@ -618,43 +523,183 @@ private struct SettingsNotificationsCard: View {
 }
 
 private struct SettingsGPTAccountCard: View {
-    @State private var isShowingMacLoginInfo = false
+    @Environment(CodexService.self) private var codex
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var isOpeningLogin = false
+    @State private var isCancellingLogin = false
+    @State private var isLoggingOut = false
 
     var body: some View {
-        SettingsCard(title: "ChatGPT voice mode") {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                isShowingMacLoginInfo = true
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "info.circle")
-                        .font(AppFont.subheadline(weight: .medium))
-                    Text("Info")
-                        .font(AppFont.subheadline(weight: .medium))
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(AppFont.caption(weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                }
-                .foregroundStyle(.primary)
-                .padding(.vertical, 10)
-                .padding(.horizontal, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(Color.primary.opacity(0.06))
-                )
+        let snapshot = codex.gptAccountSnapshot
+
+        SettingsCard(title: "ChatGPT") {
+            HStack(spacing: 10) {
+                Image(systemName: statusIconName(for: snapshot))
+                    .foregroundStyle(statusIconColor(for: snapshot))
+                Text("Status")
+                Spacer()
+                SettingsStatusPill(label: snapshot.statusLabel)
             }
-            .buttonStyle(.plain)
+
+            if let detail = snapshot.detailText {
+                Text(detail)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let hint = hintText(for: snapshot) {
+                Text(hint)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
+            if let errorMessage = codex.gptAccountErrorMessage,
+               !errorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(errorMessage)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.red)
+            }
+
+            if !snapshot.isAuthenticated {
+                SettingsButton(
+                    loginButtonTitle(for: snapshot),
+                    isLoading: isOpeningLogin
+                ) {
+                    startLogin()
+                }
+                .opacity(canStartLogin ? 1 : 0.55)
+                .disabled(!canStartLogin)
+            }
+
+            if snapshot.hasActiveLogin {
+                SettingsButton("Cancel login", role: .cancel, isLoading: isCancellingLogin) {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    cancelPendingLogin()
+                }
+            }
+
+            if snapshot.canLogout {
+                SettingsButton("Log out", role: .destructive, isLoading: isLoggingOut) {
+                    HapticFeedback.shared.triggerImpactFeedback()
+                    logout()
+                }
+            }
         }
-        .sheet(isPresented: $isShowingMacLoginInfo) {
-            GPTVoiceSetupSheet()
+        .task {
+            await codex.refreshGPTAccountState()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                await codex.refreshGPTAccountState()
+            }
+        }
+    }
+
+    private func hintText(for snapshot: CodexGPTAccountSnapshot) -> String? {
+        if snapshot.needsReauth { return "Voice on this bridge needs a fresh ChatGPT sign-in." }
+        if snapshot.isAuthenticated && snapshot.isVoiceTokenReady { return nil }
+        if snapshot.isAuthenticated { return "Waiting for voice sync..." }
+        if snapshot.hasActiveLogin && codex.isConnected { return "Complete sign-in in the browser on this iPhone." }
+        if snapshot.hasActiveLogin { return "Reconnect to your bridge to finish sign-in." }
+        if !codex.isConnected { return "Connect to your bridge first." }
+        return nil
+    }
+
+    private func loginButtonTitle(for snapshot: CodexGPTAccountSnapshot) -> String {
+        if snapshot.hasActiveLogin {
+            return "Open On iPhone Again"
+        }
+        if snapshot.needsReauth || snapshot.status == .expired {
+            return "Sign In on iPhone Again"
+        }
+        return "Log In on iPhone"
+    }
+
+    private func statusIconName(for snapshot: CodexGPTAccountSnapshot) -> String {
+        switch snapshot.status {
+        case .authenticated:
+            return snapshot.needsReauth ? "exclamationmark.triangle.fill" : "checkmark.shield.fill"
+        case .loginPending:
+            return "arrow.up.forward.app.fill"
+        case .expired:
+            return "exclamationmark.triangle.fill"
+        case .notLoggedIn, .unknown:
+            return "person.crop.circle.badge.plus"
+        case .unavailable:
+            return "wifi.slash"
+        }
+    }
+
+    private func statusIconColor(for snapshot: CodexGPTAccountSnapshot) -> Color {
+        switch snapshot.status {
+        case .authenticated:
+            return snapshot.needsReauth ? .orange : .green
+        case .loginPending:
+            return .orange
+        case .expired:
+            return .red
+        case .notLoggedIn, .unknown, .unavailable:
+            return .secondary
+        }
+    }
+
+    private var canStartLogin: Bool {
+        codex.isConnected
+    }
+
+    private func startLogin() {
+        guard !isOpeningLogin else { return }
+        HapticFeedback.shared.triggerImpactFeedback()
+        guard canStartLogin else {
+            codex.gptAccountErrorMessage = "Connect to your bridge before opening ChatGPT sign-in."
+            return
+        }
+
+        isOpeningLogin = true
+        codex.gptAccountErrorMessage = nil
+
+        Task { @MainActor in
+            defer {
+                isOpeningLogin = false
+            }
+
+            do {
+                let authURL = try await codex.startOrResumeGPTLoginOnPhone()
+                await UIApplication.shared.open(authURL)
+            } catch {
+                codex.gptAccountErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelPendingLogin() {
+        guard !isCancellingLogin else { return }
+        isCancellingLogin = true
+        codex.gptAccountErrorMessage = nil
+
+        Task { @MainActor in
+            await codex.cancelGPTLogin()
+            await codex.refreshGPTAccountState()
+            isCancellingLogin = false
+        }
+    }
+
+    private func logout() {
+        guard !isLoggingOut else { return }
+        isLoggingOut = true
+        codex.gptAccountErrorMessage = nil
+
+        Task { @MainActor in
+            await codex.logoutGPTAccount()
+            await codex.refreshGPTAccountState()
+            isLoggingOut = false
         }
     }
 }
 
 private struct SettingsBridgeVersionCard: View {
     @Environment(CodexService.self) private var codex
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         SettingsCard(title: "Bridge Version") {
@@ -665,7 +710,7 @@ private struct SettingsBridgeVersionCard: View {
             }
 
             settingsVersionRow(
-                title: "Installed on Computer",
+                title: "Installed on Mac",
                 value: installedVersionLabel,
                 valueStyle: installedValueStyle
             )
@@ -682,15 +727,6 @@ private struct SettingsBridgeVersionCard: View {
                     .foregroundStyle(guidanceColor)
             }
         }
-        .task {
-            await codex.refreshBridgeVersionState()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            Task {
-                await codex.refreshBridgeVersionState()
-            }
-        }
     }
 
     private var installedVersionLabel: String {
@@ -703,7 +739,7 @@ private struct SettingsBridgeVersionCard: View {
 
     private var guidanceText: String? {
         guard let installedVersion else {
-            return "Connect to a computer bridge to read the installed package version."
+            return "Connect to a Mac bridge to read the installed package version."
         }
 
         guard let latestVersion else {
@@ -863,34 +899,6 @@ private struct SettingsAboutCard: View {
                 )
             }
             .buttonStyle(.plain)
-
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                UIApplication.shared.open(AppEnvironment.privacyPolicyURL)
-            } label: {
-                settingsAccessoryRow(
-                    title: "Privacy Policy",
-                    leading: {
-                        Image(systemName: "hand.raised")
-                            .font(AppFont.subheadline(weight: .medium))
-                    }
-                )
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                UIApplication.shared.open(AppEnvironment.termsOfUseURL)
-            } label: {
-                settingsAccessoryRow(
-                    title: "Terms of Use",
-                    leading: {
-                        Image(systemName: "doc.text")
-                            .font(AppFont.subheadline(weight: .medium))
-                    }
-                )
-            }
-            .buttonStyle(.plain)
         }
         .fullScreenCover(isPresented: $isShowingAbout) {
             AboutRemodexView()
@@ -921,7 +929,7 @@ private struct SettingsAboutCard: View {
     }
 }
 
-private struct SettingsTrustedComputerCard: View {
+private struct SettingsTrustedMacCard: View {
     let presentation: CodexTrustedPairPresentation
     let connectionStatusLabel: String
     let onEditName: () -> Void
@@ -940,7 +948,7 @@ private struct SettingsTrustedComputerCard: View {
                         )
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Computer")
+                        Text("Mac")
                             .font(AppFont.caption(weight: .semibold))
                             .foregroundStyle(.secondary)
 
@@ -965,7 +973,7 @@ private struct SettingsTrustedComputerCard: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Edit computer name")
+                .accessibilityLabel("Edit Mac name")
             }
 
             HStack(spacing: 8) {
@@ -1035,7 +1043,7 @@ private struct SettingsStatusPill: View {
     }
 }
 
-private struct SettingsComputerNameSheet: View {
+private struct SettingsMacNameSheet: View {
     @Binding var nickname: String
     let currentName: String
     let systemName: String
@@ -1047,7 +1055,7 @@ private struct SettingsComputerNameSheet: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
-                        Text("Computer name")
+                    Text("Mac name")
                         .font(AppFont.subheadline(weight: .semibold))
                         .foregroundStyle(.primary)
 
@@ -1067,7 +1075,7 @@ private struct SettingsComputerNameSheet: View {
                             .fill(Color(.secondarySystemFill))
                     )
 
-                Text("This nickname stays on this iPhone and appears anywhere this computer is shown.")
+                Text("This nickname stays on this iPhone and appears anywhere this Mac is shown.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
@@ -1092,7 +1100,7 @@ private struct SettingsComputerNameSheet: View {
             .padding(20)
             .presentationDetents([.height(300)])
             .presentationDragIndicator(.visible)
-            .navigationTitle("Edit Computer Name")
+            .navigationTitle("Edit Mac Name")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

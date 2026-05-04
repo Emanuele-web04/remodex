@@ -13,7 +13,7 @@ private struct TurnViewLifecycleModifier: ViewModifier {
     let isThreadRunning: Bool
     let isConnected: Bool
     let scenePhase: ScenePhase
-    let approvalRequestChangeToken: String?
+    let approvalRequestID: String?
     let photoPickerItems: [PhotosPickerItem]
 
     let onTask: @Sendable () async -> Void
@@ -23,7 +23,7 @@ private struct TurnViewLifecycleModifier: ViewModifier {
     let onThreadRunningChanged: (Bool, Bool) -> Void
     let onConnectionChanged: (Bool, Bool) -> Void
     let onScenePhaseChanged: (ScenePhase) -> Void
-    let onApprovalRequestChanged: () -> Void
+    let onApprovalRequestIDChanged: () -> Void
 
     func body(content: Content) -> some View {
         content
@@ -46,8 +46,8 @@ private struct TurnViewLifecycleModifier: ViewModifier {
             .onChange(of: scenePhase) { _, newPhase in
                 onScenePhaseChanged(newPhase)
             }
-            .onChange(of: approvalRequestChangeToken) { _, _ in
-                onApprovalRequestChanged()
+            .onChange(of: approvalRequestID) { _, _ in
+                onApprovalRequestIDChanged()
             }
     }
 }
@@ -59,7 +59,7 @@ extension View {
         isThreadRunning: Bool,
         isConnected: Bool,
         scenePhase: ScenePhase,
-        approvalRequestChangeToken: String?,
+        approvalRequestID: String?,
         photoPickerItems: [PhotosPickerItem],
         onTask: @escaping @Sendable () async -> Void,
         onInitialAppear: @escaping () -> Void,
@@ -68,7 +68,7 @@ extension View {
         onThreadRunningChanged: @escaping (Bool, Bool) -> Void,
         onConnectionChanged: @escaping (Bool, Bool) -> Void,
         onScenePhaseChanged: @escaping (ScenePhase) -> Void,
-        onApprovalRequestChanged: @escaping () -> Void
+        onApprovalRequestIDChanged: @escaping () -> Void
     ) -> some View {
         modifier(
             TurnViewLifecycleModifier(
@@ -77,7 +77,7 @@ extension View {
                 isThreadRunning: isThreadRunning,
                 isConnected: isConnected,
                 scenePhase: scenePhase,
-                approvalRequestChangeToken: approvalRequestChangeToken,
+                approvalRequestID: approvalRequestID,
                 photoPickerItems: photoPickerItems,
                 onTask: onTask,
                 onInitialAppear: onInitialAppear,
@@ -86,7 +86,7 @@ extension View {
                 onThreadRunningChanged: onThreadRunningChanged,
                 onConnectionChanged: onConnectionChanged,
                 onScenePhaseChanged: onScenePhaseChanged,
-                onApprovalRequestChanged: onApprovalRequestChanged
+                onApprovalRequestIDChanged: onApprovalRequestIDChanged
             )
         )
     }

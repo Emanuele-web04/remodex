@@ -26,26 +26,18 @@ enum GitActionsError: LocalizedError {
         switch code {
         case "nothing_to_commit": return "Nothing to commit."
         case "nothing_to_push": return "Nothing to push."
-        case "already_git_repository": return fallback ?? "This folder is already inside a Git repository."
-        case "git_metadata_exists": return fallback ?? "A .git entry already exists in this folder."
-        case "git_init_failed": return fallback ?? "Could not initialize Git in this folder."
         case "push_rejected": return "Push rejected. Pull changes first."
         case "branch_is_main": return "Cannot operate on the main branch."
         case "protected_branch": return "This branch is protected."
         case "branch_behind_remote": return "Branch is behind remote. Pull first."
         case "dirty_and_behind": return "Uncommitted changes and branch is behind remote."
-        case "checkout_conflict_dirty_tree":
-            return "Cannot switch branches: tracked local changes would be overwritten."
-        case "checkout_conflict_untracked_collision":
-            return "Cannot switch branches: untracked files would be overwritten."
+        case "checkout_conflict_dirty_tree": return "Cannot switch branches: you have uncommitted changes."
         case "checkout_branch_in_other_worktree":
             return "Cannot switch branches: this branch is already open in another worktree."
         case "pull_conflict": return "Pull failed due to conflicts."
         case "branch_exists": return fallback ?? "Branch already exists."
         case "invalid_branch_name": return fallback ?? "Branch name is not valid for Git."
-        case "missing_branch_name": return "Branch name is required."
-        case "branch_not_found": return fallback ?? "That branch does not exist locally."
-        case "missing_branch": return fallback ?? "Branch name is required."
+        case "missing_branch", "missing_branch_name": return "Branch name is required."
         case "missing_base_branch": return fallback ?? "Base branch is required."
         case "branch_already_open_here":
             return fallback ?? "This branch is already open in the current project."
@@ -62,16 +54,6 @@ enum GitActionsError: LocalizedError {
             return fallback ?? "Only managed worktrees can be cleaned up automatically."
         case "worktree_cleanup_failed":
             return fallback ?? "We could not clean up the temporary worktree automatically."
-        case "handoff_target_dirty":
-            return fallback ?? "The handoff destination already has uncommitted changes."
-        case "handoff_target_mismatch":
-            return fallback ?? "The selected handoff destination belongs to a different checkout."
-        case "handoff_transfer_failed":
-            return fallback ?? "Could not move local changes into the handoff destination."
-        case "missing_handoff_source":
-            return fallback ?? "The current handoff source is no longer available on this Mac."
-        case "missing_handoff_target":
-            return fallback ?? "The handoff destination is no longer available on this Mac."
         default: return fallback ?? "Git operation failed."
         }
     }
@@ -94,15 +76,6 @@ final class GitActionsService {
         return result
     }
 
-    func initializeRepository() async throws -> GitInitResult {
-        let json = try await request(method: "git/init")
-        let result = GitInitResult(from: json)
-        if let status = result.status {
-            rememberRepoRoot(from: status)
-        }
-        return result
-    }
-
     func diff() async throws -> GitRepoDiffResult {
         let json = try await request(method: "git/diff")
         return GitRepoDiffResult(from: json)
@@ -115,15 +88,6 @@ final class GitActionsService {
         }
         let json = try await request(method: "git/commit", params: params)
         return GitCommitResult(from: json)
-    }
-
-    func generateCommitMessage(model: String?) async throws -> GitGeneratedCommitMessageResult {
-        var params: [String: JSONValue] = [:]
-        if let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            params["model"] = .string(model)
-        }
-        let json = try await request(method: "git/generateCommitMessage", params: params)
-        return GitGeneratedCommitMessageResult(from: json)
     }
 
     func push() async throws -> GitPushResult {
@@ -170,29 +134,6 @@ final class GitActionsService {
         return GitCreateWorktreeResult(from: json)
     }
 
-    // Creates a Codex-managed detached worktree rooted under CODEX_HOME/worktrees.
-    func createManagedWorktree(
-        baseBranch: String,
-        changeTransfer: GitWorktreeChangeTransferMode = .move
-    ) async throws -> GitCreateManagedWorktreeResult {
-        let json = try await request(
-            method: "git/createManagedWorktree",
-            params: [
-                "baseBranch": .string(baseBranch),
-                "changeTransfer": .string(changeTransfer.rawValue),
-            ]
-        )
-        return GitCreateManagedWorktreeResult(from: json)
-    }
-
-    func transferManagedHandoff(targetProjectPath: String) async throws -> GitManagedHandoffTransferResult {
-        let json = try await request(
-            method: "git/transferManagedHandoff",
-            params: ["targetPath": .string(targetProjectPath)]
-        )
-        return GitManagedHandoffTransferResult(from: json)
-    }
-
     func removeManagedWorktree(branch: String?) async throws {
         var params: [String: JSONValue] = [:]
         if let branch, !branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -221,48 +162,6 @@ final class GitActionsService {
     func remoteUrl() async throws -> GitRemoteUrlResult {
         let json = try await request(method: "git/remoteUrl")
         return GitRemoteUrlResult(from: json)
-    }
-
-    func generatePullRequestDraft(
-        model: String?,
-        baseBranch: String?
-    ) async throws -> GitPullRequestDraftResult {
-        var params: [String: JSONValue] = [:]
-        if let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            params["model"] = .string(model)
-        }
-        if let baseBranch, !baseBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            params["baseBranch"] = .string(baseBranch)
-        }
-        let json = try await request(method: "git/generatePullRequestDraft", params: params)
-        return GitPullRequestDraftResult(from: json)
-    }
-
-    // Runs bridge-owned Git publishing flows so commit/push/PR decisions stay local to the repo.
-    func runStackedAction(
-        action: String,
-        commitMessage: String? = nil,
-        model: String? = nil,
-        baseBranch: String? = nil,
-        featureBranch: Bool = false
-    ) async throws -> GitStackedActionResult {
-        var params: [String: JSONValue] = ["action": .string(action)]
-        if let commitMessage, !commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            params["commitMessage"] = .string(commitMessage)
-        }
-        if let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            params["model"] = .string(model)
-        }
-        if let baseBranch, !baseBranch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            params["baseBranch"] = .string(baseBranch)
-        }
-        if featureBranch {
-            params["featureBranch"] = .bool(true)
-        }
-        let json = try await request(method: "git/runStackedAction", params: params)
-        let result = GitStackedActionResult(from: json)
-        rememberRepoRoot(from: result.status)
-        return result
     }
 
     func branchesWithStatus() async throws -> GitBranchesWithStatusResult {

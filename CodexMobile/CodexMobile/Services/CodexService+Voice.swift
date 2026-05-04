@@ -7,7 +7,7 @@
 import Foundation
 
 struct CodexVoiceTranscriptionPreflight: Equatable, Sendable {
-    static let maxDurationSeconds: TimeInterval = 120
+    static let maxDurationSeconds: TimeInterval = 60
     static let maxByteCount: Int = 10 * 1024 * 1024
 
     let byteCount: Int
@@ -15,7 +15,7 @@ struct CodexVoiceTranscriptionPreflight: Equatable, Sendable {
 
     var failureMessage: String? {
         if durationSeconds > Self.maxDurationSeconds {
-            return "Voice clips must be 120 seconds or less."
+            return "Voice clips must be 60 seconds or less."
         }
 
         if byteCount > Self.maxByteCount {
@@ -51,6 +51,7 @@ extension CodexService {
         do {
             token = try await resolveVoiceAuthToken()
         } catch {
+            // Refresh auth state so the Settings UI reflects the real token situation.
             Task { await refreshGPTAccountState() }
             throw error
         }
@@ -66,13 +67,7 @@ extension CodexService {
 
     // Asks the bridge for an ephemeral ChatGPT token over the E2E encrypted channel.
     private func resolveVoiceAuthToken() async throws -> String {
-        let response: RPCMessage
-        do {
-            response = try await sendRequest(method: "voice/resolveAuth", params: nil)
-        } catch {
-            _ = consumeUnsupportedVoiceBridgeAuth(error)
-            throw error
-        }
+        let response = try await sendRequest(method: "voice/resolveAuth", params: nil)
 
         guard let payload = response.result?.objectValue,
               let token = payload["token"]?.stringValue,

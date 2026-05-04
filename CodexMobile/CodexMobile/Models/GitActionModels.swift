@@ -1,7 +1,7 @@
 // FILE: GitActionModels.swift
 // Purpose: Data models for git operations executed via the phodex-bridge.
 // Layer: Model
-// Exports: GitDiffTotals, GitRepoSyncResult, GitPushResult, GitStackedActionResult, TurnGitActionKind, TurnGitSyncAlert
+// Exports: GitDiffTotals, GitChangedFile, GitRepoSyncResult, GitRepoDiffResult, GitCommitResult, GitPushResult, GitBranchesResult, GitCreateBranchResult, GitCreateWorktreeResult, GitCheckoutResult, GitPullResult, GitResetResult, TurnGitActionKind, TurnGitSyncAlert, TurnGitSyncAlertButton, TurnGitSyncAlertAction
 // Depends on: JSONValue
 
 import Foundation
@@ -11,18 +11,6 @@ import Foundation
 enum GitWorktreeChangeTransferMode: String, Equatable, Sendable {
     case move
     case copy
-    case none
-
-    var transferVerb: String? {
-        switch self {
-        case .move:
-            return "move"
-        case .copy:
-            return "copy"
-        case .none:
-            return nil
-        }
-    }
 }
 
 struct GitDiffTotals: Equatable, Sendable {
@@ -73,13 +61,10 @@ struct GitChangedFile: Equatable, Sendable {
 }
 
 struct GitRepoSyncResult: Sendable {
-    let isGitRepository: Bool
     let repoRoot: String?
     let currentBranch: String?
     let trackingBranch: String?
     let isDirty: Bool
-    let hasHeadCommit: Bool
-    let hasPushRemote: Bool
     let aheadCount: Int
     let behindCount: Int
     let localOnlyCommitCount: Int
@@ -90,13 +75,10 @@ struct GitRepoSyncResult: Sendable {
     let repoDiffTotals: GitDiffTotals?
 
     init(from json: [String: JSONValue]) {
-        self.isGitRepository = json["isRepo"]?.boolValue ?? true
         self.repoRoot = json["repoRoot"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.currentBranch = json["branch"]?.stringValue
         self.trackingBranch = json["tracking"]?.stringValue
         self.isDirty = json["dirty"]?.boolValue ?? false
-        self.hasHeadCommit = json["hasHeadCommit"]?.boolValue ?? true
-        self.hasPushRemote = json["hasPushRemote"]?.boolValue ?? true
         self.aheadCount = json["ahead"]?.intValue ?? 0
         self.behindCount = json["behind"]?.intValue ?? 0
         self.localOnlyCommitCount = json["localOnlyCommitCount"]?.intValue ?? 0
@@ -108,18 +90,6 @@ struct GitRepoSyncResult: Sendable {
             return GitChangedFile(from: object)
         } ?? []
         self.repoDiffTotals = GitDiffTotals(from: json["diff"]?.objectValue)
-    }
-}
-
-struct GitInitResult: Sendable {
-    let status: GitRepoSyncResult?
-
-    init(from json: [String: JSONValue]) {
-        if let statusObj = json["status"]?.objectValue {
-            self.status = GitRepoSyncResult(from: statusObj)
-        } else {
-            self.status = nil
-        }
     }
 }
 
@@ -140,18 +110,6 @@ struct GitCommitResult: Sendable {
         self.commitHash = json["hash"]?.stringValue ?? ""
         self.branch = json["branch"]?.stringValue ?? ""
         self.summary = json["summary"]?.stringValue ?? ""
-    }
-}
-
-struct GitGeneratedCommitMessageResult: Sendable {
-    let subject: String
-    let body: String
-    let fullMessage: String
-
-    init(from json: [String: JSONValue]) {
-        self.subject = json["subject"]?.stringValue ?? ""
-        self.body = json["body"]?.stringValue ?? ""
-        self.fullMessage = json["fullMessage"]?.stringValue ?? ""
     }
 }
 
@@ -217,34 +175,6 @@ struct GitCreateWorktreeResult: Sendable {
     }
 }
 
-struct GitCreateManagedWorktreeResult: Sendable {
-    let worktreePath: String
-    let alreadyExisted: Bool
-    let baseBranch: String
-    let headMode: String
-    let transferredChanges: Bool
-
-    init(from json: [String: JSONValue]) {
-        self.worktreePath = json["worktreePath"]?.stringValue ?? ""
-        self.alreadyExisted = json["alreadyExisted"]?.boolValue ?? false
-        self.baseBranch = json["baseBranch"]?.stringValue ?? ""
-        self.headMode = json["headMode"]?.stringValue ?? ""
-        self.transferredChanges = json["transferredChanges"]?.boolValue ?? false
-    }
-}
-
-struct GitManagedHandoffTransferResult: Sendable {
-    let success: Bool
-    let targetPath: String?
-    let transferredChanges: Bool
-
-    init(from json: [String: JSONValue]) {
-        self.success = json["success"]?.boolValue ?? false
-        self.targetPath = json["targetPath"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.transferredChanges = json["transferredChanges"]?.boolValue ?? false
-    }
-}
-
 struct GitCheckoutResult: Sendable {
     let currentBranch: String
     let tracking: String?
@@ -299,57 +229,6 @@ struct GitRemoteUrlResult: Sendable {
     }
 }
 
-struct GitPullRequestDraftResult: Sendable {
-    let title: String
-    let body: String
-
-    init(from json: [String: JSONValue]) {
-        self.title = json["title"]?.stringValue ?? ""
-        self.body = json["body"]?.stringValue ?? ""
-    }
-}
-
-struct GitPullRequestResult: Sendable {
-    let status: String
-    let url: String?
-    let number: Int?
-    let baseBranch: String?
-    let headBranch: String?
-    let title: String?
-
-    init(from json: [String: JSONValue]?) {
-        self.status = json?["status"]?.stringValue ?? "skipped_not_requested"
-        self.url = json?["url"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.number = json?["number"]?.intValue
-        self.baseBranch = json?["baseBranch"]?.stringValue
-        self.headBranch = json?["headBranch"]?.stringValue
-        self.title = json?["title"]?.stringValue
-    }
-}
-
-struct GitStackedActionResult: Sendable {
-    let action: String
-    let push: GitPushResult?
-    let pullRequest: GitPullRequestResult
-    let status: GitRepoSyncResult?
-
-    init(from json: [String: JSONValue]) {
-        self.action = json["action"]?.stringValue ?? ""
-        if let pushObj = json["push"]?.objectValue,
-           pushObj["state"]?.stringValue == "pushed" || pushObj["branch"]?.stringValue != nil {
-            self.push = GitPushResult(from: pushObj)
-        } else {
-            self.push = nil
-        }
-        self.pullRequest = GitPullRequestResult(from: json["pr"]?.objectValue)
-        if let statusObj = json["status"]?.objectValue {
-            self.status = GitRepoSyncResult(from: statusObj)
-        } else {
-            self.status = nil
-        }
-    }
-}
-
 struct GitBranchesWithStatusResult: Sendable {
     let branches: [String]
     let branchesCheckedOutElsewhere: Set<String>
@@ -396,94 +275,21 @@ private extension GitBranchesWithStatusResult {
 // MARK: - Action kind
 
 enum TurnGitActionKind: CaseIterable, Sendable {
-    case initialize
     case syncNow
     case commit
     case push
     case commitAndPush
-    case commitPushCreatePR
     case createPR
     case discardRuntimeChangesAndSync
 
     var title: String {
         switch self {
-        case .initialize: return "Initialize Git"
-        case .syncNow: return "Update"
-        case .commit: return "Commit"
-        case .push: return "Push"
-        case .commitAndPush: return "Commit & Push"
-        case .commitPushCreatePR: return "Commit, Push & PR"
-        case .createPR: return "Create PR"
-        case .discardRuntimeChangesAndSync: return "Discard Local Changes"
-        }
-    }
-
-    var stackedActionIdentifier: String? {
-        switch self {
-        case .commit: return "commit"
-        case .push: return "push"
-        case .commitAndPush: return "commit_push"
-        case .commitPushCreatePR: return "commit_push_pr"
-        case .createPR: return "create_pr"
-        case .initialize, .syncNow, .discardRuntimeChangesAndSync:
-            return nil
-        }
-    }
-
-    func loadingTitle(repoSync: GitRepoSyncResult?) -> String {
-        switch self {
-        case .initialize:
-            return "Initializing Git..."
-        case .syncNow:
-            return "Updating..."
-        case .commit:
-            return "Committing..."
-        case .push:
-            return "Pushing..."
-        case .commitAndPush:
-            return "Git action running"
-        case .commitPushCreatePR:
-            return "Git action running"
-        case .createPR:
-            return "Git action running"
-        case .discardRuntimeChangesAndSync:
-            return "Discarding changes..."
-        }
-    }
-
-    func loadingSteps(repoSync: GitRepoSyncResult?) -> [String] {
-        switch self {
-        case .initialize:
-            return ["Initializing Git..."]
-        case .syncNow:
-            return ["Updating..."]
-        case .commit:
-            return ["Committing..."]
-        case .push:
-            return ["Pushing..."]
-        case .commitAndPush:
-            return ["Committing...", "Pushing..."]
-        case .commitPushCreatePR:
-            return ["Committing...", "Pushing...", "Creating PR..."]
-        case .createPR:
-            let needsPush = repoSync.map { !$0.isDirty && (!$0.isPublishedToRemote || $0.aheadCount > 0 || $0.trackingBranch == nil) } ?? false
-            return needsPush ? ["Pushing...", "Creating PR..."] : ["Creating PR..."]
-        case .discardRuntimeChangesAndSync:
-            return ["Discarding changes..."]
-        }
-    }
-}
-
-enum InlineCommitAndPushPhase: Sendable {
-    case committing
-    case pushing
-
-    var title: String {
-        switch self {
-        case .committing:
-            return "Committing..."
-        case .pushing:
-            return "Pushing..."
+        case .syncNow: return L10n.tr("Update")
+        case .commit: return L10n.tr("Commit")
+        case .push: return L10n.tr("Push")
+        case .commitAndPush: return L10n.tr("Commit & Push")
+        case .createPR: return L10n.tr("Create PR")
+        case .discardRuntimeChangesAndSync: return L10n.tr("Discard Local Changes")
         }
     }
 }
@@ -520,7 +326,7 @@ struct TurnGitSyncAlertButton: Identifiable, Sendable {
         switch action {
         case .dismissOnly:
             return [
-                TurnGitSyncAlertButton(title: "OK", role: .cancel, action: .dismissOnly)
+                TurnGitSyncAlertButton(title: L10n.tr("OK"), role: .cancel, action: .dismissOnly)
             ]
         case .pullRebase:
             return [

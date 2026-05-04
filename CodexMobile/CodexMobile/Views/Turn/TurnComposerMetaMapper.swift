@@ -13,13 +13,11 @@ enum TurnComposerMetaMapper {
     // Returns models sorted using the explicit product order expected by the UI.
     static func orderedModels(from models: [CodexModelOption]) -> [CodexModelOption] {
         let preferredOrder: [String] = [
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.3-codex",
-            "gpt-5.2-codex",
-            "gpt-5.1-codex-max",
-            "gpt-5.2",
             "gpt-5.1-codex-mini",
+            "gpt-5.2",
+            "gpt-5.1-codex-max",
+            "gpt-5.2-codex",
+            "gpt-5.3-codex",
         ]
         let rankByModel = Dictionary(uniqueKeysWithValues: preferredOrder.enumerated().map { index, value in
             (value, index)
@@ -82,13 +80,13 @@ enum TurnComposerMetaMapper {
 
         switch normalized {
         case "minimal", "low":
-            return "Low"
+            return L10n.tr("Low")
         case "medium":
-            return "Medium"
+            return L10n.tr("Medium")
         case "high":
-            return "High"
+            return L10n.tr("High")
         case "xhigh", "extra_high", "extra-high", "very_high", "very-high":
-            return "Extra High"
+            return L10n.tr("Extra High")
         default:
             return normalized.split(separator: "_")
                 .map { $0.capitalized }
@@ -97,7 +95,7 @@ enum TurnComposerMetaMapper {
     }
 }
 
-struct TurnComposerReasoningDisplayOption: Identifiable, Equatable {
+struct TurnComposerReasoningDisplayOption: Identifiable {
     let effort: String
     let title: String
 
@@ -105,14 +103,14 @@ struct TurnComposerReasoningDisplayOption: Identifiable, Equatable {
 
     // Provides deterministic ordering for reasoning rows.
     var rank: Int {
-        switch title {
-        case "Low":
+        switch effort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "minimal", "low":
             return 0
-        case "Medium":
+        case "medium":
             return 1
-        case "High":
+        case "high":
             return 2
-        case "Exceptional":
+        case "xhigh", "extra_high", "extra-high", "very_high", "very-high":
             return 3
         default:
             return 4

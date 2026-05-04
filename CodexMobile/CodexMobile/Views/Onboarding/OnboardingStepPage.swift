@@ -12,7 +12,6 @@ struct OnboardingStepPage: View {
     let title: String
     let description: String
     var command: String? = nil
-    var commandCaption: String? = nil
 
     private let accentGradient = LinearGradient(
         colors: [Color(.plan).opacity(0.35), Color(.plan).opacity(0.08)],
@@ -66,7 +65,7 @@ struct OnboardingStepPage: View {
 
                     VStack(spacing: 12) {
                         // Step label
-                        Text("STEP \(stepNumber)")
+                        Text(L10n.fmt("STEP %lld", stepNumber))
                             .font(AppFont.caption2(weight: .bold))
                             .foregroundStyle(Color(.plan).opacity(0.7))
                             .kerning(1.5)
@@ -83,16 +82,7 @@ struct OnboardingStepPage: View {
                     }
 
                     if let command {
-                        VStack(alignment: .leading, spacing: 10) {
-                            OnboardingCommandCard(command: command)
-
-                            if let commandCaption, !commandCaption.isEmpty {
-                                Text(commandCaption)
-                                    .font(AppFont.caption())
-                                    .foregroundStyle(.white.opacity(0.45))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
+                        OnboardingCommandCard(command: command)
                     }
                 }
                 .padding(.horizontal, 28)
@@ -127,8 +117,7 @@ struct OnboardingStepPage: View {
             icon: "link",
             title: "Install the Bridge",
             description: "A lightweight relay that securely connects your Mac to your iPhone.",
-            command: "npm install -g remodex@latest",
-            commandCaption: "Remodex can keep your Mac awake with macOS caffeinate while the bridge is running, but it starts disabled by default. You can enable it later in Settings if you want."
+            command: "npm install -g remodex@latest"
         )
     }
     .preferredColorScheme(.dark)
@@ -141,7 +130,7 @@ struct OnboardingStepPage: View {
             stepNumber: 3,
             icon: "qrcode.viewfinder",
             title: "Start Pairing",
-            description: "Run this on your computer. A QR code will appear in your terminal — scan it next.",
+            description: "Run this on your Mac. A QR code will appear in your terminal — scan it next.",
             command: "remodex up"
         )
     }

@@ -4,7 +4,6 @@
 // Exports: SidebarThreadRowView
 
 import SwiftUI
-import UIKit
 
 struct SidebarThreadRowView: View {
     let thread: CodexThread
@@ -12,14 +11,11 @@ struct SidebarThreadRowView: View {
     let runBadgeState: CodexThreadRunBadgeState?
     let timingLabel: String?
     let diffTotals: TurnSessionDiffTotals?
-    let isPinned: Bool
-    let pinnedProjectLabel: String?
     let childSubagentCount: Int
     let isSubagentExpanded: Bool
     let onToggleSubagents: (() -> Void)?
     let onTap: () -> Void
     var onRename: ((String) -> Void)? = nil
-    var onPinToggle: (() -> Void)? = nil
     var onArchiveToggle: (() -> Void)? = nil
     var onDelete: (() -> Void)? = nil
 
@@ -56,27 +52,13 @@ struct SidebarThreadRowView: View {
 
                 // Keep trailing metadata inside the main stack so long titles truncate before it.
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        if isPinned && !thread.isSubagent {
-                            Image(systemName: "pin.fill")
-                                .font(AppFont.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
+                    Text(thread.displayTitle)
+                        .font(AppFont.body())
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(.primary)
 
-                        Text(thread.displayTitle)
-                            .font(AppFont.body())
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .foregroundStyle(.primary)
-                    }
-
-                    if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
-                        Text(pinnedProjectLabel)
-                            .font(AppFont.footnote())
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    } else if thread.syncState == .archivedLocal {
+                    if thread.syncState == .archivedLocal {
                         Text("Stored locally")
                             .font(AppFont.footnote())
                             .foregroundStyle(.tertiary)
@@ -228,13 +210,6 @@ struct SidebarThreadRowView: View {
 
     @ViewBuilder
     private var contextMenuContent: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            UIPasteboard.general.string = thread.sessionId
-        } label: {
-            Label("Copy sessionId", systemImage: "doc.on.doc")
-        }
-
         if onRename != nil {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
@@ -256,24 +231,12 @@ struct SidebarThreadRowView: View {
             }
         }
 
-        if let onPinToggle, thread.syncState != .archivedLocal, !thread.isSubagent {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onPinToggle()
-            } label: {
-                Label(
-                    isPinned ? "Unpin" : "Pin",
-                    systemImage: isPinned ? "pin.slash" : "pin"
-                )
-            }
-        }
-
         if let onDelete {
             Button(role: .destructive) {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onDelete()
             } label: {
-                Label("Remove from Phone", systemImage: "trash")
+                Label("Delete", systemImage: "trash")
             }
         }
     }
@@ -293,7 +256,7 @@ private struct SidebarSubagentNameLabel: View {
             ?? codex.resolvedSubagentDisplayLabel(threadId: thread.id, agentId: thread.agentId)
             ?? "Subagent"
         let parsed = SubagentLabelParser.parse(source)
-        let nickname = parsed.nickname.isEmpty || CodexThread.isGenericPlaceholderTitle(parsed.nickname) ? "Subagent" : parsed.nickname
+        let nickname = parsed.nickname.isEmpty || parsed.nickname == "Conversation" ? "Subagent" : parsed.nickname
         SubagentLabelParser.styledText(nickname: nickname, roleSuffix: parsed.roleSuffix)
             .font(AppFont.caption(weight: .medium))
             .lineLimit(1)

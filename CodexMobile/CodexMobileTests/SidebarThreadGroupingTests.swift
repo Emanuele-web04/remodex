@@ -41,22 +41,6 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups[0].threads.map(\.id), ["thread-a", "thread-b"])
     }
 
-    func testMakeGroupsTreatsPseudoProjectBucketsAsNoProject() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let threads = [
-            makeThread(id: "thread-a", updatedAt: now, cwd: "server"),
-            makeThread(id: "thread-b", updatedAt: now.addingTimeInterval(-30), cwd: "_default"),
-        ]
-
-        let groups = SidebarThreadGrouping.makeGroups(from: threads, now: now)
-
-        XCTAssertEqual(groups.count, 1)
-        XCTAssertEqual(groups[0].id, "project:__no_project__")
-        XCTAssertEqual(groups[0].label, "No Project")
-        XCTAssertNil(groups[0].projectPath)
-        XCTAssertEqual(groups[0].threads.map(\.id), ["thread-a", "thread-b"])
-    }
-
     func testMakeGroupsKeepsArchivedThreadsInDedicatedTrailingSection() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
@@ -77,73 +61,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(groups[1].threads.map(\.id), ["archived-thread"])
     }
 
-    func testMakeGroupsLiftsPinnedThreadsIntoDedicatedLeadingSection() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let threads = [
-            makeThread(id: "thread-a", updatedAt: now, cwd: "/Users/me/work/app"),
-            makeThread(id: "thread-b", updatedAt: now.addingTimeInterval(-60), cwd: "/Users/me/work/site"),
-            makeThread(id: "thread-c", updatedAt: now.addingTimeInterval(-120), cwd: "/Users/me/work/app"),
-        ]
-
-        let groups = SidebarThreadGrouping.makeGroups(
-            from: threads,
-            pinnedThreadIDs: ["thread-b", "thread-a"]
-        )
-
-        XCTAssertEqual(groups.map(\.id), ["pinned", "project:/Users/me/work/app"])
-        XCTAssertEqual(groups.first?.kind, .pinned)
-        XCTAssertEqual(groups.first?.threads.map(\.id), ["thread-b", "thread-a"])
-        XCTAssertEqual(groups.last?.threads.map(\.id), ["thread-c"])
-    }
-
-    func testMakeGroupsIgnoresArchivedPinnedThreads() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let threads = [
-            makeThread(id: "live-thread", updatedAt: now, cwd: "/Users/me/work/app"),
-            makeThread(
-                id: "archived-thread",
-                updatedAt: now.addingTimeInterval(-60),
-                cwd: "/Users/me/work/site",
-                syncState: .archivedLocal
-            ),
-        ]
-
-        let groups = SidebarThreadGrouping.makeGroups(
-            from: threads,
-            pinnedThreadIDs: ["archived-thread", "live-thread"]
-        )
-
-        XCTAssertEqual(groups.map(\.id), ["pinned", "project:/Users/me/work/app", "archived"])
-        XCTAssertEqual(groups.first?.threads.map(\.id), ["live-thread"])
-        XCTAssertEqual(groups[2].threads.map(\.id), ["archived-thread"])
-    }
-
-    func testMakeGroupsKeepsPinnedRootSubtreeTogetherAndOutOfProjectSection() {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let rootThread = makeThread(id: "root-thread", updatedAt: now, cwd: "/Users/me/work/app")
-        let childThread = makeThread(
-            id: "child-thread",
-            updatedAt: now.addingTimeInterval(-30),
-            cwd: "/Users/me/work/app",
-            parentThreadId: "root-thread"
-        )
-        let siblingThread = makeThread(
-            id: "sibling-thread",
-            updatedAt: now.addingTimeInterval(-60),
-            cwd: "/Users/me/work/app"
-        )
-
-        let groups = SidebarThreadGrouping.makeGroups(
-            from: [rootThread, childThread, siblingThread],
-            pinnedThreadIDs: ["root-thread"]
-        )
-
-        XCTAssertEqual(groups.map(\.id), ["pinned", "project:/Users/me/work/app"])
-        XCTAssertEqual(groups.first?.threads.map(\.id), ["root-thread", "child-thread"])
-        XCTAssertEqual(groups.last?.threads.map(\.id), ["sibling-thread"])
-    }
-
-    func testMakeGroupsMarksCodexManagedWorktreesInLabelAndIcon() throws {
+    func testMakeGroupsMarksCodexManagedWorktreesInLabelAndIcon() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [
             makeThread(id: "main-thread", updatedAt: now, cwd: "/Users/me/work/Remodex"),
@@ -412,7 +330,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertFalse(shouldReveal)
     }
 
-    func testProjectThreadPreviewStateShowsOnlyLatestSixRootThreadsByDefault() throws {
+    func testProjectThreadPreviewStateShowsOnlyLatestTenRootThreadsByDefault() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = (0..<12).map { index in
             makeThread(
@@ -431,8 +349,8 @@ final class SidebarThreadGroupingTests: XCTestCase {
             manuallyExpandedGroupIDs: []
         )
 
-        XCTAssertEqual(visibleRootThreads.count, 6)
-        XCTAssertEqual(visibleRootThreads.map(\.id), (0..<6).map { "thread-\($0)" })
+        XCTAssertEqual(visibleRootThreads.count, 10)
+        XCTAssertEqual(visibleRootThreads.map(\.id), (0..<10).map { "thread-\($0)" })
         XCTAssertTrue(
             SidebarProjectThreadPreviewState.shouldShowMoreButton(
                 for: projectGroup,

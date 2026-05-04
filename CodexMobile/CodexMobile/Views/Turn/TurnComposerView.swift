@@ -5,7 +5,6 @@
 // Depends on: SwiftUI, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, FileMentionChip, TurnComposerInputTextView, TurnComposerSecondaryBar
 
 import SwiftUI
-import UIKit
 
 struct TurnComposerView: View {
     @Binding var input: String
@@ -69,18 +68,15 @@ struct TurnComposerView: View {
     let onStopTurn: (String?) -> Void
     let onInputChangedForFileAutocomplete: (String) -> Void
     let onInputChangedForSkillAutocomplete: (String) -> Void
-    let onInputChangedForPluginAutocomplete: (String) -> Void
     let onInputChangedForSlashCommandAutocomplete: (String) -> Void
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
-    let onSelectPluginAutocomplete: (CodexPluginMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
-    let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
     let onPasteImageData: ([Data]) -> Void
@@ -111,14 +107,13 @@ struct TurnComposerView: View {
                     onRemoveAttachment: onRemoveAttachment,
                     onRemoveMentionedFile: onRemoveMentionedFile,
                     onRemoveMentionedSkill: onRemoveMentionedSkill,
-                    onRemoveMentionedPlugin: onRemoveMentionedPlugin,
                     onRemoveComposerReviewSelection: onRemoveComposerReviewSelection,
                     onRemoveComposerSubagentsSelection: onRemoveComposerSubagentsSelection
                 )
 
                 ZStack(alignment: .topLeading) {
                     if input.isEmpty {
-                        Text("Ask anything... @plugins, $skills, /commands")
+                        Text("Ask anything... @files, $skills, /commands")
                             .font(AppFont.body())
                             .foregroundStyle(Color(.placeholderText))
                             .allowsHitTesting(false)
@@ -136,21 +131,15 @@ struct TurnComposerView: View {
                             onPasteImageData(imageDataItems)
                         }
                     )
-                    .frame(height: max(composerInputHeight, 34))
+                    .frame(height: composerInputHeight)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.top, accessoryState.topInputPadding + 4)
-                .padding(.bottom, 8)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    guard !isComposerInteractionLocked else { return }
-                    isInputFocused.wrappedValue = true
-                }
+                .padding(.bottom, 10)
                 .onChange(of: input) { _, newValue in
                     onInputChangedForFileAutocomplete(newValue)
                     onInputChangedForSkillAutocomplete(newValue)
-                    onInputChangedForPluginAutocomplete(newValue)
                     onInputChangedForSlashCommandAutocomplete(newValue)
                 }
 
@@ -180,7 +169,7 @@ struct TurnComposerView: View {
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 26))
+            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 28))
             .overlay(alignment: .topLeading) {
                 Color.clear
                     .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
@@ -201,7 +190,6 @@ struct TurnComposerView: View {
                                 state: autocompleteState,
                                 onSelectFileAutocomplete: onSelectFileAutocomplete,
                                 onSelectSkillAutocomplete: onSelectSkillAutocomplete,
-                                onSelectPluginAutocomplete: onSelectPluginAutocomplete,
                                 onSelectSlashCommand: onSelectSlashCommand,
                                 onSelectCodeReviewTarget: onSelectCodeReviewTarget,
                                 onSelectForkDestination: onSelectForkDestination,
@@ -259,7 +247,6 @@ private struct TurnComposerAutocompletePanels: View {
     let state: TurnComposerAutocompleteState
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
-    let onSelectPluginAutocomplete: (CodexPluginMetadata) -> Void
     let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
@@ -270,26 +257,9 @@ private struct TurnComposerAutocompletePanels: View {
             if state.isFileAutocompleteVisible {
                 FileAutocompletePanel(
                     items: state.fileAutocompleteItems,
-                    pluginItems: state.pluginAutocompleteItems,
                     isLoading: state.isFileAutocompleteLoading,
-                    isLoadingPlugins: state.isPluginAutocompleteLoading,
                     query: state.fileAutocompleteQuery,
-                    pluginQuery: state.pluginAutocompleteQuery,
-                    onSelect: onSelectFileAutocomplete,
-                    onSelectPlugin: onSelectPluginAutocomplete
-                )
-            }
-
-            if !state.isFileAutocompleteVisible && state.isPluginAutocompleteVisible {
-                FileAutocompletePanel(
-                    items: [],
-                    pluginItems: state.pluginAutocompleteItems,
-                    isLoading: false,
-                    isLoadingPlugins: state.isPluginAutocompleteLoading,
-                    query: state.pluginAutocompleteQuery,
-                    pluginQuery: state.pluginAutocompleteQuery,
-                    onSelect: onSelectFileAutocomplete,
-                    onSelectPlugin: onSelectPluginAutocomplete
+                    onSelect: onSelectFileAutocomplete
                 )
             }
 
@@ -310,7 +280,6 @@ private struct TurnComposerAutocompletePanels: View {
                     isThreadRunning: state.isThreadRunning,
                     showsGitBranchSelector: state.showsGitBranchSelector,
                     isLoadingGitBranchTargets: state.isLoadingGitBranchTargets,
-                    availableGitBranchTargets: state.availableGitBranchTargets,
                     selectedGitBaseBranch: state.selectedGitBaseBranch,
                     gitDefaultBranch: state.gitDefaultBranch,
                     onSelectCommand: onSelectSlashCommand,
@@ -369,7 +338,6 @@ private struct TurnComposerAccessorySection: View {
     let onRemoveAttachment: (String) -> Void
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
-    let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
 
@@ -415,27 +383,12 @@ private struct TurnComposerAccessorySection: View {
                 .padding(.top, 8)
             }
 
-            if state.showsMentionedPlugins {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(state.composerMentionedPlugins) { plugin in
-                            PluginMentionChip(pluginName: plugin.displayName ?? plugin.name) {
-                                onRemoveMentionedPlugin(plugin.id)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-            }
-
             if state.showsSubagentsSelection {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ComposerActionChip(
                             title: "Subagents",
-                            symbolName: "point.3.connected.trianglepath.dotted",
+                            symbolName: "person.crop.circle",
                             tintColor: .teal,
                             removeAccessibilityLabel: "Remove subagents"
                         ) {
@@ -474,10 +427,6 @@ private struct TurnComposerAccessorySection: View {
     QueuedDraftsPanelPreviewWrapper()
 }
 
-#Preview("Composer Input - Runtime Controls") {
-    ComposerInputRuntimePreviewWrapper()
-}
-
 private struct QueuedDraftsPanelPreviewWrapper: View {
     @State private var input = ""
     @State private var isInputFocused = false
@@ -492,289 +441,130 @@ private struct QueuedDraftsPanelPreviewWrapper: View {
         VStack {
             Spacer()
 
-            ComposerPreviewContent(
+            TurnComposerView(
                 input: $input,
                 isInputFocused: $isInputFocused,
-                queuedDrafts: fakeDrafts,
-                canSteerQueuedDrafts: true,
-                isSubagentsSelectionArmed: true,
+                accessoryState: TurnComposerAccessoryState(
+                    queuedDrafts: fakeDrafts,
+                    canSteerQueuedDrafts: true,
+                    canRestoreQueuedDrafts: true,
+                    steeringDraftID: nil,
+                    composerAttachments: [],
+                    composerMentionedFiles: [],
+                    composerMentionedSkills: [],
+                    composerReviewSelection: nil,
+                    isSubagentsSelectionArmed: true,
+                    isVoiceRecording: false,
+                    voiceAudioLevels: [],
+                    voiceRecordingDuration: 0
+                ),
+                autocompleteState: TurnComposerAutocompleteState(
+                    availableSlashCommands: TurnComposerSlashCommand.allCommands,
+                    fileAutocompleteItems: [],
+                    isFileAutocompleteVisible: false,
+                    isFileAutocompleteLoading: false,
+                    fileAutocompleteQuery: "",
+                    skillAutocompleteItems: [],
+                    isSkillAutocompleteVisible: false,
+                    isSkillAutocompleteLoading: false,
+                    skillAutocompleteQuery: "",
+                    slashCommandPanelState: .hidden,
+                    hasComposerContentConflictingWithReview: false,
+                    isThreadRunning: true,
+                    showsGitBranchSelector: false,
+                    isLoadingGitBranchTargets: false,
+                    selectedGitBaseBranch: "",
+                    gitDefaultBranch: "main"
+                ),
+                remainingAttachmentSlots: 4,
+                isComposerInteractionLocked: false,
+                isSendDisabled: false,
                 isPlanModeArmed: true,
                 queuedCount: 3,
-                isThreadRunning: true
-            )
-        }
-        .safeAreaPadding(.bottom, 20)
-        .background(Color(.secondarySystemBackground))
-    }
-}
-
-private struct ComposerInputRuntimePreviewWrapper: View {
-    @State private var input = ""
-    @State private var isInputFocused = false
-
-    var body: some View {
-        VStack {
-            Spacer()
-
-            ComposerPreviewContent(
-                input: $input,
-                isInputFocused: $isInputFocused,
-                queuedDrafts: [],
-                canSteerQueuedDrafts: false,
-                isSubagentsSelectionArmed: false,
-                isPlanModeArmed: false,
-                queuedCount: 0,
-                isThreadRunning: false
-            )
-        }
-        .safeAreaPadding(.bottom, 20)
-        .background(Color(.secondarySystemBackground))
-    }
-}
-
-// Shared preview fixture keeps the sample runtime controls aligned across composer previews.
-private struct ComposerPreviewContent: View {
-    @Binding var input: String
-    @Binding var isInputFocused: Bool
-
-    let queuedDrafts: [QueuedTurnDraft]
-    let canSteerQueuedDrafts: Bool
-    let isSubagentsSelectionArmed: Bool
-    let isPlanModeArmed: Bool
-    let queuedCount: Int
-    let isThreadRunning: Bool
-
-    private let reasoningOptions = TurnComposerMetaMapper.reasoningDisplayOptions(
-        from: ["low", "medium", "high", "xhigh"]
-    )
-
-    private let modelOptions: [CodexModelOption] = [
-        CodexModelOption(
-            id: "gpt-5.5",
-            model: "gpt-5.5",
-            displayName: "GPT-5.5",
-            description: "Preview model",
-            isDefault: true,
-            supportsFastMode: true,
-            supportedReasoningEfforts: [
-                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "xhigh", description: ""),
-            ],
-            defaultReasoningEffort: "high"
-        ),
-        CodexModelOption(
-            id: "gpt-5.4",
-            model: "gpt-5.4",
-            displayName: "GPT-5.4",
-            description: "Preview model",
-            isDefault: false,
-            supportsFastMode: true,
-            supportedReasoningEfforts: [
-                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
-            ],
-            defaultReasoningEffort: "medium"
-        ),
-        CodexModelOption(
-            id: "gpt-5.3-codex",
-            model: "gpt-5.3-codex",
-            displayName: "GPT-5.3-Codex",
-            description: "Preview model",
-            isDefault: false,
-            supportsFastMode: false,
-            supportedReasoningEfforts: [
-                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
-            ],
-            defaultReasoningEffort: "high"
-        ),
-        CodexModelOption(
-            id: "gpt-5.2-codex",
-            model: "gpt-5.2-codex",
-            displayName: "GPT-5.2-Codex",
-            description: "Preview model",
-            isDefault: false,
-            supportedReasoningEfforts: [
-                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
-            ],
-            defaultReasoningEffort: "medium"
-        ),
-        CodexModelOption(
-            id: "gpt-5.2",
-            model: "gpt-5.2",
-            displayName: "GPT-5.2",
-            description: "Preview model",
-            isDefault: false,
-            supportedReasoningEfforts: [
-                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
-            ],
-            defaultReasoningEffort: "medium"
-        ),
-        CodexModelOption(
-            id: "gpt-5.1-codex-max",
-            model: "gpt-5.1-codex-max",
-            displayName: "GPT-5.1-Codex-Max",
-            description: "Preview model",
-            isDefault: false,
-            supportedReasoningEfforts: [
-                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "high", description: ""),
-            ],
-            defaultReasoningEffort: "high"
-        ),
-        CodexModelOption(
-            id: "gpt-5.1-codex-mini",
-            model: "gpt-5.1-codex-mini",
-            displayName: "GPT-5.1-Codex-Mini",
-            description: "Preview model",
-            isDefault: false,
-            supportedReasoningEfforts: [
-                CodexReasoningEffortOption(reasoningEffort: "low", description: ""),
-                CodexReasoningEffortOption(reasoningEffort: "medium", description: ""),
-            ],
-            defaultReasoningEffort: "low"
-        ),
-    ]
-
-    var body: some View {
-        TurnComposerView(
-            input: $input,
-            isInputFocused: $isInputFocused,
-            accessoryState: TurnComposerAccessoryState(
-                queuedDrafts: queuedDrafts,
-                canSteerQueuedDrafts: canSteerQueuedDrafts,
-                canRestoreQueuedDrafts: canSteerQueuedDrafts,
-                steeringDraftID: nil,
-                composerAttachments: [],
-                composerMentionedFiles: [],
-                composerMentionedSkills: [],
-                composerMentionedPlugins: [],
-                composerReviewSelection: nil,
-                isSubagentsSelectionArmed: isSubagentsSelectionArmed,
-                isVoiceRecording: false,
-                voiceAudioLevels: [],
-                voiceRecordingDuration: 0
-            ),
-            autocompleteState: TurnComposerAutocompleteState(
-                availableSlashCommands: TurnComposerSlashCommand.allCommands,
-                fileAutocompleteItems: [],
-                isFileAutocompleteVisible: false,
-                isFileAutocompleteLoading: false,
-                fileAutocompleteQuery: "",
-                skillAutocompleteItems: [],
-                isSkillAutocompleteVisible: false,
-                isSkillAutocompleteLoading: false,
-                skillAutocompleteQuery: "",
-                pluginAutocompleteItems: [],
-                isPluginAutocompleteVisible: false,
-                isPluginAutocompleteLoading: false,
-                pluginAutocompleteQuery: "",
-                slashCommandPanelState: .hidden,
-                hasComposerContentConflictingWithReview: false,
-                isThreadRunning: isThreadRunning,
+                isQueuePaused: false,
+                activeTurnID: nil,
+                isThreadRunning: true,
+                isEmptyThread: true,
+                isWorktreeProject: false,
+                orderedModelOptions: [],
+                selectedModelID: nil,
+                selectedModelTitle: "GPT-5.3-Codex",
+                isLoadingModels: false,
+                runtimeState: TurnComposerRuntimeState(
+                    reasoningDisplayOptions: [],
+                    effectiveReasoningEffort: nil,
+                    selectedReasoningEffort: nil,
+                    reasoningMenuDisabled: true,
+                    selectedServiceTier: .fast
+                ),
+                runtimeActions: TurnComposerRuntimeActions(
+                    selectModel: { _ in },
+                    selectAutomaticReasoning: {},
+                    selectReasoning: { _ in },
+                    selectServiceTier: { _ in }
+                ),
+                voiceButtonPresentation: TurnComposerVoiceButtonPresentation(
+                    systemImageName: "mic",
+                    foregroundColor: Color(.secondaryLabel),
+                    backgroundColor: .clear,
+                    accessibilityLabel: "Start voice transcription",
+                    isDisabled: false,
+                    showsProgress: false,
+                    hasCircleBackground: false
+                ),
+                selectedAccessMode: .onRequest,
+                contextWindowUsage: nil,
+                rateLimitBuckets: [],
+                isLoadingRateLimits: false,
+                rateLimitsErrorMessage: nil,
+                shouldAutoRefreshUsageStatus: false,
                 showsGitBranchSelector: false,
-                isLoadingGitBranchTargets: false,
+                isGitBranchSelectorEnabled: false,
                 availableGitBranchTargets: [],
+                gitBranchesCheckedOutElsewhere: [],
+                gitWorktreePathsByBranch: [:],
                 selectedGitBaseBranch: "",
-                gitDefaultBranch: "main"
-            ),
-            remainingAttachmentSlots: 4,
-            isComposerInteractionLocked: false,
-            isSendDisabled: false,
-            isPlanModeArmed: isPlanModeArmed,
-            queuedCount: queuedCount,
-            isQueuePaused: false,
-            activeTurnID: nil,
-            isThreadRunning: isThreadRunning,
-            isEmptyThread: true,
-            isWorktreeProject: false,
-            orderedModelOptions: modelOptions,
-            selectedModelID: "gpt-5.5",
-            selectedModelTitle: "GPT-5.5",
-            isLoadingModels: false,
-            runtimeState: TurnComposerRuntimeState(
-                reasoningDisplayOptions: reasoningOptions,
-                effectiveReasoningEffort: "high",
-                selectedReasoningEffort: "high",
-                reasoningMenuDisabled: false,
-                selectedServiceTier: .fast,
-                supportsFastMode: true
-            ),
-            runtimeActions: TurnComposerRuntimeActions(
-                selectModel: { _ in },
-                selectAutomaticReasoning: {},
-                selectReasoning: { _ in },
-                selectServiceTier: { _ in }
-            ),
-            voiceButtonPresentation: TurnComposerVoiceButtonPresentation(
-                systemImageName: "mic",
-                foregroundColor: Color(.secondaryLabel),
-                backgroundColor: .clear,
-                accessibilityLabel: "Start voice transcription",
-                isDisabled: false,
-                showsProgress: false,
-                hasCircleBackground: false
-            ),
-            selectedAccessMode: .onRequest,
-            contextWindowUsage: nil,
-            rateLimitBuckets: [],
-            isLoadingRateLimits: false,
-            rateLimitsErrorMessage: nil,
-            shouldAutoRefreshUsageStatus: false,
-            showsGitBranchSelector: false,
-            isGitBranchSelectorEnabled: false,
-            availableGitBranchTargets: [],
-            gitBranchesCheckedOutElsewhere: [],
-            gitWorktreePathsByBranch: [:],
-            selectedGitBaseBranch: "",
-            currentGitBranch: "main",
-            gitDefaultBranch: "main",
-            isLoadingGitBranchTargets: false,
-            isSwitchingGitBranch: false,
-            isCreatingGitWorktree: false,
-            onSelectGitBranch: { _ in },
-            onCreateGitBranch: { _ in },
-            onSelectGitBaseBranch: { _ in },
-            onRefreshGitBranches: {},
-            onRefreshUsageStatus: {},
-            onSelectAccessMode: { _ in },
-            canHandOffToWorktree: false,
-            onTapAddImage: {},
-            onTapTakePhoto: {},
-            onTapVoice: {},
-            onCancelVoiceRecording: {},
-            onTapCreateWorktree: {},
-            onSetPlanModeArmed: { _ in },
-            onRemoveAttachment: { _ in },
-            onStopTurn: { _ in },
-            onInputChangedForFileAutocomplete: { _ in },
-            onInputChangedForSkillAutocomplete: { _ in },
-            onInputChangedForPluginAutocomplete: { _ in },
-            onInputChangedForSlashCommandAutocomplete: { _ in },
-            onSelectFileAutocomplete: { _ in },
-            onSelectSkillAutocomplete: { _ in },
-            onSelectPluginAutocomplete: { _ in },
-            onSelectSlashCommand: { _ in },
-            onSelectCodeReviewTarget: { _ in },
-            onSelectForkDestination: { _ in },
-            onCloseSlashCommandPanel: {},
-            onRemoveMentionedFile: { _ in },
-            onRemoveMentionedSkill: { _ in },
-            onRemoveMentionedPlugin: { _ in },
-            onRemoveComposerReviewSelection: {},
-            onRemoveComposerSubagentsSelection: {},
-            onPasteImageData: { _ in },
-            onResumeQueue: {},
-            onRestoreQueuedDraft: { _ in },
-            onSteerQueuedDraft: { _ in },
-            onRemoveQueuedDraft: { _ in },
-            onSend: {}
-        )
+                currentGitBranch: "main",
+                gitDefaultBranch: "main",
+                isLoadingGitBranchTargets: false,
+                isSwitchingGitBranch: false,
+                isCreatingGitWorktree: false,
+                onSelectGitBranch: { _ in },
+                onCreateGitBranch: { _ in },
+                onSelectGitBaseBranch: { _ in },
+                onRefreshGitBranches: {},
+                onRefreshUsageStatus: {},
+                onSelectAccessMode: { _ in },
+                canHandOffToWorktree: false,
+                onTapAddImage: {},
+                onTapTakePhoto: {},
+                onTapVoice: {},
+                onCancelVoiceRecording: {},
+                onTapCreateWorktree: {},
+                onSetPlanModeArmed: { _ in },
+                onRemoveAttachment: { _ in },
+                onStopTurn: { _ in },
+                onInputChangedForFileAutocomplete: { _ in },
+                onInputChangedForSkillAutocomplete: { _ in },
+                onInputChangedForSlashCommandAutocomplete: { _ in },
+                onSelectFileAutocomplete: { _ in },
+                onSelectSkillAutocomplete: { _ in },
+                onSelectSlashCommand: { _ in },
+                onSelectCodeReviewTarget: { _ in },
+                onSelectForkDestination: { _ in },
+                onCloseSlashCommandPanel: {},
+                onRemoveMentionedFile: { _ in },
+                onRemoveMentionedSkill: { _ in },
+                onRemoveComposerReviewSelection: {},
+                onRemoveComposerSubagentsSelection: {},
+                onPasteImageData: { _ in },
+                onResumeQueue: {},
+                onRestoreQueuedDraft: { _ in },
+                onSteerQueuedDraft: { _ in },
+                onRemoveQueuedDraft: { _ in },
+                onSend: {}
+            )
+        }
+        .background(Color(.secondarySystemBackground))
     }
 }

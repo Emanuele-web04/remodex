@@ -7,137 +7,10 @@
 import Foundation
 import UIKit
 
-private enum TurnTimelineProjectionPolicy {
-    // Long chats can contain thousands of persisted rows. Keep initial/open-chat projection
-    // bounded to the recent tail so selecting one thread does not freeze the whole screen.
-    static let rawMessageLimit = 400
-    static let eagerHydrationMessageLimit = 400
-}
-
-private enum CanonicalHistoryReconcileRetryPolicy {
-    // Transient thread/read failures should self-heal, but with a small delay so we do not
-    // spin aggressively when the bridge or socket is still recovering.
-    static let transientErrorDelayNanoseconds: UInt64 = 1_500_000_000
-}
-
-private enum StreamingDeltaCoalescingPolicy {
-    // One display-frame worth of buffering keeps streaming lively while reducing UI invalidations.
-    static let flushDelayNanoseconds: UInt64 = 16_000_000
-}
-
-private extension Array where Element == CodexMessage {
-    func messageIndexByID() -> [String: Int] {
-        var result: [String: Int] = [:]
-        result.reserveCapacity(count)
-        for (index, message) in enumerated() {
-            result[message.id] = index
-        }
-        return result
-    }
-}
-
 extension CodexService {
-    enum ThreadHistoryLoadOutcome: Equatable {
-        case alreadyHydrated
-        case notMaterialized
-        case skippedForRunningThread
-        case loadedCanonicalHistory
-        case loadedRecentWindow
-
-        var didCompleteCanonicalReconcile: Bool {
-            self == .loadedCanonicalHistory
-        }
-
-        var needsCanonicalRetry: Bool {
-            self == .loadedRecentWindow || self == .skippedForRunningThread
-        }
-    }
-
-    enum ThreadDisplayPhase: Equatable {
-        case loading
-        case empty
-        case ready
-    }
-
     // Returns the full persisted timeline for a single thread.
     func messages(for threadId: String) -> [CodexMessage] {
         messagesByThread[threadId] ?? []
-    }
-
-    // Centralizes first-open display state so reconnect jitter does not bounce
-    // an existing chat between loading and the empty placeholder.
-    func threadDisplayPhase(threadId: String) -> ThreadDisplayPhase {
-        threadDisplayPhase(
-            threadId: threadId,
-            hasVisibleMessages: !messages(for: threadId).isEmpty,
-            isThreadRunning: threadHasActiveOrRunningTurn(threadId)
-        )
-    }
-
-    // Variant for active SwiftUI views that already hold a per-thread render snapshot.
-    // It avoids subscribing that view to the global messagesByThread dictionary.
-    func threadDisplayPhase(
-        threadId: String,
-        hasVisibleMessages: Bool,
-        isThreadRunning: Bool
-    ) -> ThreadDisplayPhase {
-        if hasVisibleMessages || isThreadRunning {
-            return .ready
-        }
-
-        if shouldSkipInitialDisplayHydration(
-            threadId: threadId,
-            hasVisibleMessages: hasVisibleMessages,
-            isThreadRunning: isThreadRunning
-        ) || shouldShowImmediateEmptyPlaceholder(
-            threadId: threadId,
-            hasVisibleMessages: hasVisibleMessages,
-            isThreadRunning: isThreadRunning
-        ) {
-            return .empty
-        }
-
-        if loadingThreadIDs.contains(threadId) {
-            return .loading
-        }
-
-        if !hydratedThreadIDs.contains(threadId) {
-            return .loading
-        }
-
-        return .empty
-    }
-
-    // Treats placeholder-only chats as intentionally blank so the UI does not flash
-    // a loading state before the thread-open preparation path can confirm the skip.
-    func shouldShowImmediateEmptyPlaceholder(threadId: String) -> Bool {
-        shouldShowImmediateEmptyPlaceholder(
-            threadId: threadId,
-            hasVisibleMessages: !messages(for: threadId).isEmpty,
-            isThreadRunning: threadHasActiveOrRunningTurn(threadId)
-        )
-    }
-
-    func shouldShowImmediateEmptyPlaceholder(
-        threadId: String,
-        hasVisibleMessages: Bool,
-        isThreadRunning: Bool
-    ) -> Bool {
-        guard !isThreadRunning,
-              !hasVisibleMessages,
-              let thread = thread(for: threadId),
-              thread.syncState == .live else {
-            return false
-        }
-
-        let preview = thread.preview?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard preview.isEmpty else {
-            return false
-        }
-
-        // Keep a brand-new blank chat on the empty composer even if a hydration
-        // race briefly toggled the thread into a loading state behind the scenes.
-        return thread.displayTitle == CodexThread.defaultDisplayTitle
     }
 
     // Returns a lightweight per-thread revision token for any message timeline mutation.
@@ -163,18 +36,9 @@ extension CodexService {
         stoppedTurnIDsByThread.removeValue(forKey: threadId)
         messageIndexCacheByThread.removeValue(forKey: threadId)
         latestAssistantOutputByThread.removeValue(forKey: threadId)
-        latestAssistantMessageIDByThread.removeValue(forKey: threadId)
         latestRepoAffectingMessageSignalByThread.removeValue(forKey: threadId)
         assistantRevertStateCacheByThread.removeValue(forKey: threadId)
-        cancelPendingStreamingDeltaFlushes(for: threadId)
         threadsPendingCompletionHaptic.remove(threadId)
-        threadsNeedingCanonicalHistoryReconcile.remove(threadId)
-        threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
-        canonicalHistoryReconcileTaskByThreadID[threadId]?.cancel()
-        canonicalHistoryReconcileTaskByThreadID.removeValue(forKey: threadId)
-        canonicalHistoryReconcileRetryTaskByThreadID[threadId]?.cancel()
-        canonicalHistoryReconcileRetryTaskByThreadID.removeValue(forKey: threadId)
-        cancelPerThreadRefreshWork(for: threadId)
     }
 
     // Clears every service-owned timeline cache during global teardown.
@@ -183,17 +47,8 @@ extension CodexService {
         stoppedTurnIDsByThread.removeAll()
         messageIndexCacheByThread.removeAll()
         latestAssistantOutputByThread.removeAll()
-        latestAssistantMessageIDByThread.removeAll()
         latestRepoAffectingMessageSignalByThread.removeAll()
         assistantRevertStateCacheByThread.removeAll()
-        cancelAllPendingStreamingDeltaFlushes()
-        threadsNeedingCanonicalHistoryReconcile.removeAll()
-        threadsWithSatisfiedDeferredHistoryHydration.removeAll()
-        canonicalHistoryReconcileTaskByThreadID.values.forEach { $0.cancel() }
-        canonicalHistoryReconcileTaskByThreadID.removeAll()
-        canonicalHistoryReconcileRetryTaskByThreadID.values.forEach { $0.cancel() }
-        canonicalHistoryReconcileRetryTaskByThreadID.removeAll()
-        cancelAllPerThreadRefreshWork()
     }
 
     // Refreshes the derived output cache and bumps the thread timeline revision.
@@ -232,32 +87,11 @@ extension CodexService {
               ),
               rawMessages.indices.contains(updatedMessageIndex),
               rawMessages[updatedMessageIndex].id == messageId,
-              let projectedIndex = state.renderSnapshot.messageIndexByID[messageId],
-              state.renderSnapshot.messages.indices.contains(projectedIndex),
-              state.renderSnapshot.messages[projectedIndex].id == messageId else {
+              let projectedIndex = state.renderSnapshot.messages.firstIndex(where: { $0.id == messageId }) else {
             refreshThreadTimelineState(for: threadId)
             return
         }
         let updatedMessage = rawMessages[updatedMessageIndex]
-        if updatedMessage.role == .assistant,
-           let terminalMessageId = assistantReplayTargetMessageId(
-               in: rawMessages,
-               threadId: threadId,
-               turnId: updatedMessage.turnId,
-               text: updatedMessage.text,
-               excludingMessageID: messageId
-           ) {
-            var nextRawMessages = rawMessages
-            nextRawMessages.remove(at: updatedMessageIndex)
-            messagesByThread[threadId] = nextRawMessages
-            removeAssistantStreamingLookups(messageId: messageId)
-            if let turnId = updatedMessage.turnId {
-                noteAssistantMessage(threadId: threadId, turnId: turnId, assistantMessageId: terminalMessageId)
-            }
-            persistMessages()
-            updateCurrentOutput(for: threadId)
-            return
-        }
 
         let revision = messageRevisionByThread[threadId] ?? 0
         var projectedMessages = state.renderSnapshot.messages
@@ -268,60 +102,10 @@ extension CodexService {
         state.renderSnapshot = TurnTimelineRenderSnapshot(
             threadID: threadId,
             messages: projectedMessages,
-            messageIndexByID: state.renderSnapshot.messageIndexByID,
-            planMatchingMessages: state.renderSnapshot.planMatchingMessages,
             timelineChangeToken: revision,
             activeTurnID: state.renderSnapshot.activeTurnID,
             isThreadRunning: state.renderSnapshot.isThreadRunning,
             latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
-            completedTurnIDs: state.renderSnapshot.completedTurnIDs,
-            stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
-            assistantRevertStatesByMessageID: state.renderSnapshot.assistantRevertStatesByMessageID,
-            repoRefreshSignal: state.renderSnapshot.repoRefreshSignal
-        )
-    }
-
-    // Patches an already-projected streaming system row without rerunning the reducer.
-    func updateStreamingSystemOutput(for threadId: String, messageId: String, rawMessageIndex: Int? = nil) {
-        noteMessagesChanged(for: threadId)
-
-        if activeThreadId == threadId {
-            currentOutput = latestAssistantOutputByThread[threadId] ?? syncLatestAssistantOutputCache(for: threadId)
-        }
-
-        guard let state = threadTimelineStateByThread[threadId],
-              let rawMessages = messagesByThread[threadId],
-              let updatedMessageIndex = resolvedMessageIndex(
-                  threadId: threadId,
-                  messageId: messageId,
-                  preferredIndex: rawMessageIndex,
-                  in: rawMessages
-              ),
-              rawMessages.indices.contains(updatedMessageIndex),
-              rawMessages[updatedMessageIndex].id == messageId,
-              let projectedIndex = state.renderSnapshot.messageIndexByID[messageId],
-              state.renderSnapshot.messages.indices.contains(projectedIndex),
-              state.renderSnapshot.messages[projectedIndex].id == messageId else {
-            refreshThreadTimelineState(for: threadId)
-            return
-        }
-
-        let revision = messageRevisionByThread[threadId] ?? 0
-        var projectedMessages = state.renderSnapshot.messages
-        projectedMessages[projectedIndex] = rawMessages[updatedMessageIndex]
-
-        state.messages = rawMessages
-        state.messageRevision = revision
-        state.renderSnapshot = TurnTimelineRenderSnapshot(
-            threadID: threadId,
-            messages: projectedMessages,
-            messageIndexByID: state.renderSnapshot.messageIndexByID,
-            planMatchingMessages: state.renderSnapshot.planMatchingMessages,
-            timelineChangeToken: revision,
-            activeTurnID: state.renderSnapshot.activeTurnID,
-            isThreadRunning: state.renderSnapshot.isThreadRunning,
-            latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
-            completedTurnIDs: state.renderSnapshot.completedTurnIDs,
             stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
             assistantRevertStatesByMessageID: state.renderSnapshot.assistantRevertStatesByMessageID,
             repoRefreshSignal: state.renderSnapshot.repoRefreshSignal
@@ -375,7 +159,6 @@ extension CodexService {
         clearMirroredRunningCatchupNeeded(for: threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
         refreshThreadTimelineState(for: threadId)
-        scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
     }
 
     // Clears every running marker during disconnect/cleanup so stale repo-busy state cannot leak.
@@ -388,110 +171,6 @@ extension CodexService {
         // Always refresh all threads: threads without a gitWorkingDirectory won't appear in
         // changedRoots but still need their isThreadRunning flag updated after clearing.
         refreshAllThreadTimelineStates()
-        for threadId in threadsNeedingCanonicalHistoryReconcile {
-            scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
-        }
-    }
-
-    // Schedules one full reconcile after a lightweight running catch-up once the thread settles.
-    func scheduleCanonicalHistoryReconcileIfNeeded(for threadId: String) {
-        guard threadsNeedingCanonicalHistoryReconcile.contains(threadId),
-              canonicalHistoryReconcileTaskByThreadID[threadId] == nil,
-              canonicalHistoryReconcileRetryTaskByThreadID[threadId] == nil,
-              isConnected,
-              !threadHasActiveOrRunningTurn(threadId),
-              thread(for: threadId)?.syncState == .live else {
-            return
-        }
-
-        canonicalHistoryReconcileTaskByThreadID[threadId] = Task { @MainActor [weak self] in
-            var shouldRetry = false
-            var retryDelayNanoseconds: UInt64 = 0
-            defer {
-                self?.canonicalHistoryReconcileTaskByThreadID.removeValue(forKey: threadId)
-                if shouldRetry {
-                    self?.canonicalHistoryReconcileRetryTaskByThreadID[threadId]?.cancel()
-                    self?.canonicalHistoryReconcileRetryTaskByThreadID[threadId] = Task { @MainActor [weak self] in
-                        defer {
-                            self?.canonicalHistoryReconcileRetryTaskByThreadID.removeValue(forKey: threadId)
-                        }
-                        if retryDelayNanoseconds > 0 {
-                            try? await Task.sleep(nanoseconds: retryDelayNanoseconds)
-                        }
-                        guard !Task.isCancelled else {
-                            return
-                        }
-                        self?.scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
-                    }
-                }
-            }
-
-            guard let self,
-                  self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
-                  self.isConnected,
-                  !self.threadHasActiveOrRunningTurn(threadId),
-                  self.thread(for: threadId)?.syncState == .live else {
-                return
-            }
-
-            do {
-                let outcome = try await self.loadThreadHistoryIfNeeded(threadId: threadId, forceRefresh: true)
-                guard !Task.isCancelled else { return }
-                if outcome.didCompleteCanonicalReconcile {
-                    self.markThreadCanonicalHistoryReconciled(threadId)
-                } else if outcome.needsCanonicalRetry,
-                          self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
-                          self.isConnected,
-                          !self.threadHasActiveOrRunningTurn(threadId),
-                          self.thread(for: threadId)?.syncState == .live {
-                    shouldRetry = true
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                if self.shouldTreatAsThreadNotFound(error) {
-                    self.threadsNeedingCanonicalHistoryReconcile.remove(threadId)
-                    self.threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
-                    self.handleMissingThread(threadId)
-                } else if self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
-                          self.isConnected,
-                          !self.threadHasActiveOrRunningTurn(threadId),
-                          self.thread(for: threadId)?.syncState == .live {
-                    shouldRetry = true
-                    retryDelayNanoseconds = CanonicalHistoryReconcileRetryPolicy.transientErrorDelayNanoseconds
-                }
-            }
-        }
-    }
-
-    // Marks a large chat as "local-first for now, but still needs one authoritative server merge".
-    func markThreadNeedingCanonicalHistoryReconcile(
-        _ threadId: String,
-        requestImmediateSync: Bool = false
-    ) {
-        threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
-        threadsNeedingCanonicalHistoryReconcile.insert(threadId)
-        scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
-
-        guard requestImmediateSync else {
-            return
-        }
-
-        requestImmediateActiveThreadSync(threadId: threadId)
-    }
-
-    // Clears the deferred-hydration pending flag only after a full canonical merge succeeds.
-    func markThreadCanonicalHistoryReconciled(_ threadId: String) {
-        guard threadsNeedingCanonicalHistoryReconcile.contains(threadId)
-                || threadsWithSatisfiedDeferredHistoryHydration.contains(threadId)
-                || hasLargePersistedTranscript(threadId: threadId) else {
-            threadsNeedingCanonicalHistoryReconcile.remove(threadId)
-            threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
-            return
-        }
-
-        threadsNeedingCanonicalHistoryReconcile.remove(threadId)
-        threadsWithSatisfiedDeferredHistoryHydration.insert(threadId)
     }
 
     // Returns the latest real terminal outcome seen for a thread.
@@ -510,10 +189,10 @@ extension CodexService {
         stoppedTurnIDsByThread[threadId] ?? []
     }
 
-    // Returns sidebar-only chat badge state. This intentionally stays separate from
-    // per-turn runtime truth so "chat finished unread" does not leak into timeline logic.
+    // Returns the sidebar run badge state for a thread with deterministic priority.
     func threadRunBadgeState(for threadId: String) -> CodexThreadRunBadgeState? {
-        if threadHasActiveOrRunningTurn(threadId) {
+        if runningThreadIDs.contains(threadId)
+            || activeTurnIdByThread[threadId] != nil {
             return .running
         }
         if failedThreadIDs.contains(threadId) {
@@ -545,8 +224,8 @@ extension CodexService {
         updateBackgroundRunGraceTask()
     }
 
-    // Drops the eager runtime-running flag after a stop attempt proves the server still
-    // has not published a usable turn id, while keeping protected fallback recovery alive.
+    // Hides the visible running state when a stop attempt proves we still do not have a
+    // usable turn id, while keeping fallback recovery alive in the background.
     func demoteVisibleRunningStateToProtectedFallback(for threadId: String) {
         runningThreadIDs.remove(threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
@@ -560,7 +239,7 @@ extension CodexService {
         failedThreadIDs.remove(threadId)
     }
 
-    // Marks a chat as ready for sidebar presentation only when it completed off-screen.
+    // Marks a thread as ready only when the user is not already viewing it.
     func markReadyIfUnread(threadId: String) {
         clearRunningThreadWatch(threadId)
         let wasAlreadyReady = readyThreadIDs.contains(threadId)
@@ -604,10 +283,7 @@ extension CodexService {
         let previousState = latestTurnTerminalStateByThread[threadId]
         latestTurnTerminalStateByThread[threadId] = state
         if let turnId {
-            if terminalStateByTurnID[turnId] != state {
-                terminalStateByTurnID[turnId] = state
-                persistTurnTerminalStates()
-            }
+            terminalStateByTurnID[turnId] = state
         }
         refreshThreadTimelineState(for: threadId)
         triggerRunCompletionHapticIfNeeded(
@@ -623,8 +299,6 @@ extension CodexService {
         activeThreadId = threadId
         markThreadAsViewed(threadId)
         updateCurrentOutput(for: threadId)
-        var didRefreshRunningState = false
-        var shouldRequestImmediateSync = true
 
         guard isConnected else {
             return true
@@ -635,27 +309,6 @@ extension CodexService {
         // thread is already running and the user simply wants a blank composer.
         if shouldSkipInitialDisplayHydration(threadId: threadId) {
             return true
-        }
-
-        // Reopening a huge, already-materialized chat should prefer local persisted rows over
-        // an immediate full resume/read pass, otherwise one tap can freeze the app on-device.
-        if shouldDeferHeavyDisplayHydration(threadId: threadId) {
-            // Large chats still need one lightweight turn-state ping so reconnect can rediscover
-            // a live run before we decide to trust the local persisted transcript.
-            didRefreshRunningState = await refreshInFlightTurnState(threadId: threadId)
-            guard !Task.isCancelled else {
-                return false
-            }
-            if shouldTrustClosedStateAfterTurnRefresh(
-                threadId: threadId,
-                didRefreshTurnState: didRefreshRunningState
-            ) {
-                markThreadNeedingCanonicalHistoryReconcile(
-                    threadId,
-                    requestImmediateSync: activeThreadId == threadId
-                )
-                return true
-            }
         }
 
         do {
@@ -670,105 +323,36 @@ extension CodexService {
             return false
         }
 
-        let catchupOutcome = await catchUpRunningThreadIfNeeded(
-            threadId: threadId,
-            shouldForceResume: true,
-            didRefreshTurnState: didRefreshRunningState
-        )
+        // Rehydrate in-flight turn metadata after reconnect/background transitions.
+        // Without this refresh, stop-state can disappear until a new live event arrives.
+        await refreshInFlightTurnState(threadId: threadId)
         guard !Task.isCancelled else {
             return false
         }
 
-        if catchupOutcome.isRunning {
+        if threadHasActiveOrRunningTurn(threadId) {
             // When reopening a running thread, force a fresh resume snapshot so the
             // timeline catches up with output produced while the thread was off-screen.
-            // Keep a sync fallback only when the shared catch-up pipeline skipped
-            // the forced resume for throttling or a transient refresh failure.
-            if catchupOutcome.didRunForcedResume {
-                shouldRequestImmediateSync = false
+            _ = try? await ensureThreadResumed(threadId: threadId, force: true)
+            guard !Task.isCancelled else {
+                return false
             }
             updateCurrentOutput(for: threadId)
         }
-        guard !Task.isCancelled, activeThreadId == threadId else {
-            return false
-        }
-        if shouldRequestImmediateSync {
-            requestImmediateActiveThreadSync(threadId: threadId)
-        }
+        requestImmediateSync(threadId: threadId)
         return true
     }
 
     // Detects a brand-new local thread that has no timeline to hydrate yet.
     func shouldSkipInitialDisplayHydration(threadId: String) -> Bool {
-        shouldSkipInitialDisplayHydration(
-            threadId: threadId,
-            hasVisibleMessages: !messages(for: threadId).isEmpty,
-            isThreadRunning: threadHasActiveOrRunningTurn(threadId)
-        )
-    }
-
-    func shouldSkipInitialDisplayHydration(
-        threadId: String,
-        hasVisibleMessages: Bool,
-        isThreadRunning: Bool
-    ) -> Bool {
         guard resumedThreadIDs.contains(threadId),
               !hydratedThreadIDs.contains(threadId),
-              !isThreadRunning,
-              !hasVisibleMessages,
+              !threadHasActiveOrRunningTurn(threadId),
+              messages(for: threadId).isEmpty,
               thread(for: threadId)?.syncState == .live else {
             return false
         }
 
-        return true
-    }
-
-    // Prefers the locally persisted transcript when a non-running thread is already huge.
-    // The active sync loop can still refresh lighter chats, but giant histories should not
-    // block first paint or crash the device just because the user tapped the row.
-    func shouldDeferHeavyDisplayHydration(threadId: String) -> Bool {
-        guard !threadHasActiveOrRunningTurn(threadId) else {
-            return false
-        }
-
-        if threadsNeedingCanonicalHistoryReconcile.contains(threadId) {
-            return false
-        }
-
-        if threadsWithSatisfiedDeferredHistoryHydration.contains(threadId) {
-            return true
-        }
-
-        guard hasLargePersistedTranscript(threadId: threadId) else {
-            return false
-        }
-
-        return true
-    }
-
-    // Centralizes the "large chat" threshold so deferred hydration only applies to heavy transcripts.
-    func hasLargePersistedTranscript(threadId: String) -> Bool {
-        messages(for: threadId).count > TurnTimelineProjectionPolicy.eagerHydrationMessageLimit
-    }
-
-    // Only trust a "thread is closed" decision when the turn-state refresh actually succeeded.
-    // A failed ping means "unknown", so callers should fall back instead of bailing out early.
-    func shouldTrustClosedStateAfterTurnRefresh(threadId: String, didRefreshTurnState: Bool) -> Bool {
-        didRefreshTurnState && !threadHasActiveOrRunningTurn(threadId)
-    }
-
-    // Prevents repeated forced resumes when the user rapidly switches between running chats.
-    func takeForcedRunningResumePermit(
-        for threadId: String,
-        minInterval: TimeInterval = 1.0,
-        now: Date = Date()
-    ) -> Bool {
-        if let lastRefreshAt = lastForcedRunningResumeAtByThread[threadId],
-           now.timeIntervalSince(lastRefreshAt) < minInterval {
-            return false
-        }
-
-        lastForcedRunningResumeAtByThread[threadId] = now
         return true
     }
 
@@ -807,175 +391,88 @@ extension CodexService {
     }
 
     // Loads thread/read(includeTurns=true) once per thread to backfill old messages.
-    @discardableResult
     func loadThreadHistoryIfNeeded(
         threadId: String,
         forceRefresh: Bool = false,
-        markHydratedWhenNotMaterialized: Bool = true,
-        allowForceRefreshRetry: Bool = true
-    ) async throws -> ThreadHistoryLoadOutcome {
-        if forceRefresh {
-            forcedHistoryLoadThreadIDs.insert(threadId)
-        }
+        markHydratedWhenNotMaterialized: Bool = true
+    ) async throws {
         if !forceRefresh, hydratedThreadIDs.contains(threadId) {
-            return .alreadyHydrated
-        }
-        if !markHydratedWhenNotMaterialized {
-            deferHydratedMarkForNotMaterializedThreadIDs.insert(threadId)
+            return
         }
 
-        if let existingTask = threadHistoryLoadTaskByThreadID[threadId] {
-            let outcome = try await existingTask.value
-            if forceRefresh,
-               allowForceRefreshRetry,
-               outcome == .skippedForRunningThread,
-               threadHasActiveOrRunningTurn(threadId) {
-                forcedHistoryLoadThreadIDs.insert(threadId)
-                return try await loadThreadHistoryIfNeeded(
-                    threadId: threadId,
-                    forceRefresh: true,
-                    markHydratedWhenNotMaterialized: markHydratedWhenNotMaterialized,
-                    allowForceRefreshRetry: false
-                )
-            }
-            return outcome
+        if loadingThreadIDs.contains(threadId) {
+            return
         }
 
-        let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
-        let task = Task<ThreadHistoryLoadOutcome, Error> { @MainActor in
-            loadingThreadIDs.insert(threadId)
-            defer {
-                // Only clear bookkeeping for the latest refresh generation.
-                if isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) {
-                    loadingThreadIDs.remove(threadId)
-                    threadHistoryLoadTaskByThreadID.removeValue(forKey: threadId)
-                    forcedHistoryLoadThreadIDs.remove(threadId)
-                    deferHydratedMarkForNotMaterializedThreadIDs.remove(threadId)
-                }
-            }
+        loadingThreadIDs.insert(threadId)
+        defer { loadingThreadIDs.remove(threadId) }
 
-            // First try with includeTurns to get full history.
-            // Falls back without includeTurns if the thread has no messages yet
-            // (server returns -32600 "not materialized yet").
-            let paramsWithTurns: JSONValue = .object([
-                "threadId": .string(threadId),
-                "includeTurns": .bool(true),
-            ])
+        // First try with includeTurns to get full history.
+        // Falls back without includeTurns if the thread has no messages yet
+        // (server returns -32600 "not materialized yet").
+        let paramsWithTurns: JSONValue = .object([
+            "threadId": .string(threadId),
+            "includeTurns": .bool(true),
+        ])
 
-            let response: RPCMessage
-            do {
-                response = try await sendRequest(method: "thread/read", params: paramsWithTurns)
-            } catch let error as CodexServiceError {
-                if case .rpcError(let rpcError) = error, rpcError.code == -32600 {
-                    // Sidebar/timeline metadata fetches should keep retrying while the child thread
-                    // is still materializing, but full history hydration can stop here.
-                    let shouldMarkHydrated = markHydratedWhenNotMaterialized
-                        && !deferHydratedMarkForNotMaterializedThreadIDs.contains(threadId)
-                    if shouldMarkHydrated {
-                        hydratedThreadIDs.insert(threadId)
-                    }
-                    return .notMaterialized
-                }
-                throw error
-            }
-
-            guard !Task.isCancelled,
-                  isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
-                throw CancellationError()
-            }
-
-            guard let resultObject = response.result?.objectValue,
-                  let threadObject = resultObject["thread"]?.objectValue else {
-                throw CodexServiceError.invalidResponse("thread/read response missing thread payload")
-            }
-
-            extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
-
-            // Upsert thread metadata (name, agentNickname, agentRole, model, etc.)
-            // so subagent identity resolves without navigating into the child thread.
-            if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
-               let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
-                upsertThread(decoded, treatAsServerState: true)
-            }
-
-            let shouldForceRefresh = forceRefresh || forcedHistoryLoadThreadIDs.contains(threadId)
-
-            // A turn may have started while thread/read was in flight. Normal background
-            // history loads should still stay out of the way, but forced refreshes are
-            // used when reopening a running thread and need to merge the latest snapshot.
-            if threadHasActiveOrRunningTurn(threadId) && !shouldForceRefresh {
-                hydratedThreadIDs.insert(threadId)
-                return .skippedForRunningThread
-            }
-
-            let historyTerminalStates = decodeTurnTerminalStatesFromThreadRead(threadObject)
-            let didUpdateTerminalStates = mergeHistoryTurnTerminalStates(
-                threadId: threadId,
-                terminalStatesByTurnID: historyTerminalStates
-            )
-            let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
-            registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
-            var outcome: ThreadHistoryLoadOutcome = .loadedCanonicalHistory
-            if !historyMessages.isEmpty {
-                let existingMessages = messagesByThread[threadId] ?? []
-                let activeThreadIDs = Set(activeTurnIdByThread.keys)
-                let runningIDs = runningThreadIDs
-                let usedRecentWindow = shouldForceRefresh
-                    && threadHasActiveOrRunningTurn(threadId)
-                    && Self.shouldPreferRecentHistoryWindow(
-                        existingCount: existingMessages.count,
-                        historyCount: historyMessages.count
-                    )
-                if usedRecentWindow {
-                    markThreadNeedingCanonicalHistoryReconcile(threadId)
-                }
-                let merged = try await mergeHistoryMessagesOffMainActor(
-                    existing: existingMessages,
-                    history: historyMessages,
-                    activeThreadIDs: activeThreadIDs,
-                    runningThreadIDs: runningIDs,
-                    preferRecentWindow: usedRecentWindow
-                )
-                guard !Task.isCancelled,
-                      isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
-                    throw CancellationError()
-                }
-                guard shouldForceRefresh || !threadHasActiveOrRunningTurn(threadId) else {
+        var response: RPCMessage
+        do {
+            response = try await sendRequest(method: "thread/read", params: paramsWithTurns)
+        } catch let error as CodexServiceError {
+            if case .rpcError(let rpcError) = error, rpcError.code == -32600 {
+                // Sidebar/timeline metadata fetches should keep retrying while the child thread
+                // is still materializing, but full history hydration can stop here.
+                if markHydratedWhenNotMaterialized {
                     hydratedThreadIDs.insert(threadId)
-                    return .skippedForRunningThread
                 }
-                if merged != existingMessages {
-                    messagesByThread[threadId] = merged
-                    persistMessages()
-                    updateCurrentOutput(for: threadId)
-                } else if didUpdateTerminalStates {
-                    refreshThreadTimelineState(for: threadId)
-                }
-                if usedRecentWindow {
-                    outcome = .loadedRecentWindow
-                    if !threadHasActiveOrRunningTurn(threadId) {
-                        scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
-                    }
-                } else if !threadHasActiveOrRunningTurn(threadId) {
-                    markThreadCanonicalHistoryReconciled(threadId)
-                }
-            } else if didUpdateTerminalStates {
-                refreshThreadTimelineState(for: threadId)
+                return
             }
-
-            guard !Task.isCancelled,
-                  isPerThreadRefreshCurrent(for: threadId, generation: refreshGeneration) else {
-                throw CancellationError()
-            }
-            if outcome.didCompleteCanonicalReconcile, !threadHasActiveOrRunningTurn(threadId) {
-                markThreadCanonicalHistoryReconciled(threadId)
-            }
-            hydratedThreadIDs.insert(threadId)
-            return outcome
+            throw error
         }
 
-        threadHistoryLoadTaskByThreadID[threadId] = task
-        return try await task.value
+        guard let resultObject = response.result?.objectValue,
+              let threadObject = resultObject["thread"]?.objectValue else {
+            throw CodexServiceError.invalidResponse("thread/read response missing thread payload")
+        }
+
+        extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
+
+        // Upsert thread metadata (name, agentNickname, agentRole, model, etc.)
+        // so subagent identity resolves without navigating into the child thread.
+        if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
+           let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
+            upsertThread(decoded)
+        }
+
+        // A turn may have started while thread/read was in flight. Normal background
+        // history loads should still stay out of the way, but forced refreshes are
+        // used when reopening a running thread and need to merge the latest snapshot.
+        if threadHasActiveOrRunningTurn(threadId) && !forceRefresh {
+            hydratedThreadIDs.insert(threadId)
+            return
+        }
+
+        let historyMessages = decodeMessagesFromThreadRead(threadId: threadId, threadObject: threadObject)
+        registerSubagentThreads(from: historyMessages, parentThreadId: threadId)
+        if !historyMessages.isEmpty {
+            let existingMessages = messagesByThread[threadId] ?? []
+            let activeThreadIDs = Set(activeTurnIdByThread.keys)
+            let runningIDs = runningThreadIDs
+            let merged = await Task.detached {
+                Self.mergeHistoryMessages(existingMessages, historyMessages, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
+            }.value
+            guard forceRefresh || !threadHasActiveOrRunningTurn(threadId) else {
+                hydratedThreadIDs.insert(threadId)
+                return
+            }
+            if merged != existingMessages {
+                messagesByThread[threadId] = merged
+                persistMessages()
+                updateCurrentOutput(for: threadId)
+            }
+        }
+
+        hydratedThreadIDs.insert(threadId)
     }
 
     // Extracts context window usage from thread/read response if the runtime includes it.
@@ -990,8 +487,7 @@ extension CodexService {
         threadId: String,
         text: String,
         turnId: String? = nil,
-        attachments: [CodexImageAttachment] = [],
-        fileMentions: [String] = []
+        attachments: [CodexImageAttachment] = []
     ) -> String {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty || !attachments.isEmpty else {
@@ -1002,7 +498,6 @@ extension CodexService {
             threadId: threadId,
             role: .user,
             text: trimmedText,
-            fileMentions: fileMentions,
             turnId: turnId,
             isStreaming: false,
             deliveryState: .pending,
@@ -1018,8 +513,7 @@ extension CodexService {
     func appendConfirmedMirroredUserMessage(
         threadId: String,
         turnId: String?,
-        text: String,
-        fileMentions: [String] = []
+        text: String
     ) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalizedIncomingText = Self.normalizedMessageText(trimmedText)
@@ -1044,11 +538,6 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].turnId = turnId
                 didMutate = true
             }
-            // Optional chaining turns `isEmpty` into `Bool?`, so compare explicitly here.
-            if messagesByThread[threadId]?[existingIndex].fileMentions.isEmpty == true, !fileMentions.isEmpty {
-                messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
-                didMutate = true
-            }
             guard didMutate else {
                 return
             }
@@ -1062,7 +551,6 @@ extension CodexService {
                 threadId: threadId,
                 role: .user,
                 text: trimmedText,
-                fileMentions: fileMentions,
                 turnId: turnId,
                 deliveryState: .confirmed
             )
@@ -1176,8 +664,7 @@ extension CodexService {
         text: String? = nil,
         explanation: String? = nil,
         steps: [CodexPlanStep]? = nil,
-        isStreaming: Bool,
-        planPresentation: CodexPlanPresentation
+        isStreaming: Bool
     ) {
         if let itemId, !itemId.isEmpty {
             upsertStreamingSystemItemMessage(
@@ -1210,8 +697,7 @@ extension CodexService {
         guard let messageIndex = findLatestPlanMessageIndex(
             threadId: threadId,
             turnId: turnId,
-            itemId: itemId,
-            planPresentation: planPresentation
+            itemId: itemId
         ) else {
             return
         }
@@ -1225,11 +711,6 @@ extension CodexService {
             planState.steps = steps
         }
         messagesByThread[threadId]?[messageIndex].planState = planState
-        messagesByThread[threadId]?[messageIndex].planPresentation = resolvedPlanPresentation(
-            requested: planPresentation,
-            turnId: turnId
-        )
-        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
         persistMessages()
         updateCurrentOutput(for: threadId)
     }
@@ -1471,28 +952,6 @@ extension CodexService {
         }
     }
 
-    // Clears all unresolved structured prompts in a thread when the user exits native plan mode.
-    func removeAllStructuredUserInputPrompts(threadId: String) {
-        guard var threadMessages = messagesByThread[threadId] else {
-            return
-        }
-
-        let previousCount = threadMessages.count
-        threadMessages.removeAll { message in
-            message.kind == .userInputPrompt
-        }
-
-        guard threadMessages.count != previousCount else {
-            return
-        }
-
-        messagesByThread[threadId] = threadMessages
-        persistMessages()
-        if let activeThreadId {
-            updateCurrentOutput(for: activeThreadId)
-        }
-    }
-
     // Persists a hidden push-reset marker across all threads bound to the same repo.
     func appendHiddenPushResetMarkers(
         threadId: String,
@@ -1568,11 +1027,7 @@ extension CodexService {
             }
             messagesByThread[threadId] = threadMessages
             persistMessages()
-            updateStreamingSystemOutput(
-                for: threadId,
-                messageId: threadMessages[targetIndex].id,
-                rawMessageIndex: targetIndex
-            )
+            updateCurrentOutput(for: threadId)
             return
         }
 
@@ -1821,7 +1276,7 @@ extension CodexService {
                         && !isStreamingPlaceholder(existingTrimmed, for: kind) {
                         // Ignore completion placeholders when we already have real streamed content.
                     } else if isStreamingPlaceholder(existingTrimmed, for: kind) {
-                        // Replace placeholder labels with real content.
+                        // Replace placeholder labels ("Thinking...") with real content.
                         messagesByThread[threadId]?[index].text = incoming
                     } else if !isStreaming || isFileChangeSnapshot {
                         // Completed item payloads are authoritative snapshots; replace streamed deltas.
@@ -1847,7 +1302,6 @@ extension CodexService {
             if var threadMessages = messagesByThread[threadId],
                let refreshedIndex = threadMessages.indices.first(where: { threadMessages[$0].id == messageID }) {
                 let keepID = threadMessages[refreshedIndex].id
-                var finalRawIndex: Int?
                 if let resolvedTurnId {
                     if kind == .fileChange {
                         pruneDuplicateSystemRows(
@@ -1879,23 +1333,10 @@ extension CodexService {
                     }
                 }
                 if let finalIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) {
-                    if kind == .fileChange {
-                        // File-change cards are intentionally trailed; other activity keeps
-                        // its original slot so late completion refreshes do not jump below the answer.
-                        threadMessages[finalIndex].orderIndex = CodexMessageOrderCounter.next()
-                    }
-                    finalRawIndex = finalIndex
+                    threadMessages[finalIndex].orderIndex = CodexMessageOrderCounter.next()
                 }
                 threadMessages.sort(by: { $0.orderIndex < $1.orderIndex })
-                finalRawIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) ?? finalRawIndex
                 messagesByThread[threadId] = threadMessages
-                persistMessages()
-                if kind == .thinking, isStreaming, let finalRawIndex {
-                    updateStreamingSystemOutput(for: threadId, messageId: keepID, rawMessageIndex: finalRawIndex)
-                } else {
-                    updateCurrentOutput(for: threadId)
-                }
-                return
             }
             persistMessages()
             updateCurrentOutput(for: threadId)
@@ -2270,120 +1711,14 @@ extension CodexService {
             return
         }
 
-        enqueueStreamingSystemItemDelta(
+        upsertStreamingSystemItemMessage(
             threadId: threadId,
             turnId: turnId,
             itemId: itemId,
             kind: kind,
-            delta: delta
-        )
-    }
-
-    // Buffers reasoning/system deltas so thinking rows do not force one UI refresh per token.
-    private func enqueueStreamingSystemItemDelta(
-        threadId: String,
-        turnId: String?,
-        itemId: String,
-        kind: CodexMessageKind,
-        delta: String
-    ) {
-        let key = streamingItemMessageKey(threadId: threadId, itemId: itemId)
-        if pendingSystemDeltasByKey[key] == nil {
-            pendingSystemDeltasByKey[key] = PendingSystemStreamingDeltas(
-                threadId: threadId,
-                turnId: turnId,
-                itemId: itemId,
-                kind: kind,
-                deltas: []
-            )
-        }
-        pendingSystemDeltasByKey[key]?.deltas.append(delta)
-
-        guard systemDeltaFlushTasksByKey[key] == nil else { return }
-        systemDeltaFlushTasksByKey[key] = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: StreamingDeltaCoalescingPolicy.flushDelayNanoseconds)
-            guard !Task.isCancelled else { return }
-            self?.flushPendingSystemDeltas(forKey: key)
-        }
-    }
-
-    private func applyStreamingSystemDeltas(_ pending: PendingSystemStreamingDeltas) {
-        upsertStreamingSystemItemMessage(
-            threadId: pending.threadId,
-            turnId: pending.turnId,
-            itemId: pending.itemId,
-            kind: pending.kind,
-            text: pending.deltas.joined(),
+            text: delta,
             isStreaming: true
         )
-    }
-
-    func flushPendingSystemDeltas(threadId: String, itemId: String) {
-        flushPendingSystemDeltas(forKey: streamingItemMessageKey(threadId: threadId, itemId: itemId))
-    }
-
-    func flushPendingSystemDeltasForTurn(threadId: String, turnId: String?) {
-        let keys = pendingSystemDeltasByKey
-            .filter { _, pending in
-                guard pending.threadId == threadId else { return false }
-                guard let turnId else { return true }
-                return pending.turnId == turnId
-            }
-            .map(\.key)
-        for key in keys {
-            flushPendingSystemDeltas(forKey: key)
-        }
-    }
-
-    private func flushPendingSystemDeltas(forKey key: String) {
-        systemDeltaFlushTasksByKey[key]?.cancel()
-        systemDeltaFlushTasksByKey.removeValue(forKey: key)
-        guard let pending = pendingSystemDeltasByKey.removeValue(forKey: key) else {
-            return
-        }
-        applyStreamingSystemDeltas(pending)
-    }
-
-    func flushAllPendingStreamingDeltas() {
-        flushPendingAssistantDeltas()
-        for key in Array(pendingSystemDeltasByKey.keys) {
-            flushPendingSystemDeltas(forKey: key)
-        }
-    }
-
-    func cancelPendingStreamingDeltaFlushes(for threadId: String) {
-        let assistantStreamIDs = pendingAssistantDeltaContextByStreamID
-            .filter { $0.value.threadId == threadId }
-            .map(\.key)
-        for streamID in assistantStreamIDs {
-            pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaStreamOrder.removeAll { $0 == streamID }
-        }
-        if pendingAssistantDeltaByStreamID.isEmpty {
-            pendingAssistantDeltaFlushTask?.cancel()
-            pendingAssistantDeltaFlushTask = nil
-        }
-
-        let systemKeys = pendingSystemDeltasByKey
-            .filter { $0.value.threadId == threadId }
-            .map(\.key)
-        for key in systemKeys {
-            systemDeltaFlushTasksByKey[key]?.cancel()
-            systemDeltaFlushTasksByKey.removeValue(forKey: key)
-            pendingSystemDeltasByKey.removeValue(forKey: key)
-        }
-    }
-
-    func cancelAllPendingStreamingDeltaFlushes() {
-        pendingAssistantDeltaFlushTask?.cancel()
-        pendingAssistantDeltaFlushTask = nil
-        pendingAssistantDeltaByStreamID.removeAll()
-        pendingAssistantDeltaContextByStreamID.removeAll()
-        pendingAssistantDeltaStreamOrder.removeAll()
-        systemDeltaFlushTasksByKey.values.forEach { $0.cancel() }
-        systemDeltaFlushTasksByKey.removeAll()
-        pendingSystemDeltasByKey.removeAll()
     }
 
     // Merges a late reasoning delta into an existing thinking row without reopening streaming state.
@@ -2494,7 +1829,6 @@ extension CodexService {
         kind: CodexMessageKind,
         text: String?
     ) {
-        flushPendingSystemDeltas(threadId: threadId, itemId: itemId)
         let key = streamingItemMessageKey(threadId: threadId, itemId: itemId)
         let completedMessageID = streamingSystemMessageByItemID[key]
         upsertStreamingSystemItemMessage(
@@ -2547,133 +1881,76 @@ extension CodexService {
     }
 
     // Creates a streaming assistant placeholder for a turn/item if missing.
-    func beginAssistantMessage(
-        threadId: String,
-        turnId: String,
-        itemId: String? = nil,
-        assistantPhase: String? = nil
-    ) {
+    func beginAssistantMessage(threadId: String, turnId: String, itemId: String? = nil) {
         let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: turnId)
         let normalizedItemId = normalizedStreamingItemID(itemId)
-        let normalizedPhase = normalizedAssistantPhase(assistantPhase)
         let itemStreamingKey = normalizedItemId.map {
             assistantStreamingMessageKey(threadId: threadId, turnId: turnId, itemId: $0)
         }
 
         if let itemStreamingKey,
-           let messageID = streamingAssistantMessageByItemKey[itemStreamingKey],
-           let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
-            // Item-scoped late events must not steal the turn fallback pointer from
-            // a newer assistant item that is still receiving turn-scoped deltas.
-            applyAssistantPhaseIfNeeded(
-                threadId: threadId,
-                messageIndex: messageIndex,
-                assistantPhase: normalizedPhase
-            )
+           let messageID = streamingAssistantMessageByTurnID[itemStreamingKey],
+           findMessageIndex(threadId: threadId, messageId: messageID) != nil {
+            streamingAssistantMessageByTurnID[turnStreamingKey] = messageID
             return
         }
 
-        if let messageID = streamingAssistantFallbackMessageByTurnID[turnStreamingKey],
+        if let messageID = streamingAssistantMessageByTurnID[turnStreamingKey],
            let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
             if let normalizedItemId {
                 let existingItemId = normalizedStreamingItemID(messagesByThread[threadId]?[messageIndex].itemId)
                 if existingItemId == nil {
                     messagesByThread[threadId]?[messageIndex].itemId = normalizedItemId
-                    applyAssistantPhaseIfNeeded(
-                        threadId: threadId,
-                        messageIndex: messageIndex,
-                        assistantPhase: normalizedPhase
-                    )
                     if let itemStreamingKey {
-                        streamingAssistantMessageByItemKey[itemStreamingKey] = messageID
+                        streamingAssistantMessageByTurnID[itemStreamingKey] = messageID
                     }
                     persistMessages()
                     updateCurrentOutput(for: threadId)
                     return
                 }
                 if existingItemId == normalizedItemId {
-                    applyAssistantPhaseIfNeeded(
-                        threadId: threadId,
-                        messageIndex: messageIndex,
-                        assistantPhase: normalizedPhase
-                    )
                     if let itemStreamingKey {
-                        streamingAssistantMessageByItemKey[itemStreamingKey] = messageID
+                        streamingAssistantMessageByTurnID[itemStreamingKey] = messageID
                     }
                     return
                 }
 
                 // New assistant item started inside the same turn: preserve the previous bubble.
                 messagesByThread[threadId]?[messageIndex].isStreaming = false
-                streamingAssistantFallbackMessageByTurnID.removeValue(forKey: turnStreamingKey)
+                streamingAssistantMessageByTurnID.removeValue(forKey: turnStreamingKey)
                 persistMessages()
                 updateCurrentOutput(for: threadId)
             } else {
                 return
             }
         } else {
-            streamingAssistantFallbackMessageByTurnID.removeValue(forKey: turnStreamingKey)
+            streamingAssistantMessageByTurnID.removeValue(forKey: turnStreamingKey)
         }
 
-        _ = createAssistantMessage(
+        let message = CodexMessage(
             threadId: threadId,
+            role: .assistant,
+            text: "",
             turnId: turnId,
             itemId: normalizedItemId,
-            assistantPhase: normalizedPhase,
-            isStreaming: true,
-            promoteTurnFallback: true
+            isStreaming: true
         )
+
+        threadIdByTurnID[turnId] = threadId
+        streamingAssistantMessageByTurnID[turnStreamingKey] = message.id
+        if let itemStreamingKey {
+            streamingAssistantMessageByTurnID[itemStreamingKey] = message.id
+        }
+        appendMessage(message)
     }
 
     // Streams assistant delta chunks into the message linked to a turn.
-    func appendAssistantDelta(
-        threadId: String,
-        turnId: String,
-        itemId: String?,
-        assistantPhase: String? = nil,
-        delta: String
-    ) {
+    func appendAssistantDelta(threadId: String, turnId: String, itemId: String?, delta: String) {
         guard !delta.isEmpty else {
             return
         }
 
-        enqueueAssistantDelta(
-            threadId: threadId,
-            turnId: turnId,
-            itemId: itemId,
-            assistantPhase: assistantPhase,
-            delta: delta
-        )
-    }
-
-    // Applies one already-coalesced assistant delta batch to the active timeline.
-    private func applyAssistantDeltaBatch(
-        threadId: String,
-        turnId: String,
-        itemId: String?,
-        assistantPhase: String?,
-        delta: String
-    ) {
-        guard !delta.isEmpty else {
-            return
-        }
-
-        if applyLateTerminalAssistantDelta(
-            threadId: threadId,
-            turnId: turnId,
-            itemId: itemId,
-            assistantPhase: assistantPhase,
-            delta: delta
-        ) {
-            return
-        }
-
-        let messageID = ensureStreamingAssistantMessage(
-            threadId: threadId,
-            turnId: turnId,
-            itemId: itemId,
-            assistantPhase: assistantPhase
-        )
+        let messageID = ensureStreamingAssistantMessage(threadId: threadId, turnId: turnId, itemId: itemId)
         guard let messageID,
               let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) else {
             return
@@ -2694,363 +1971,61 @@ extension CodexService {
 
         messagesByThread[threadId]?[messageIndex].text = nextText
         messagesByThread[threadId]?[messageIndex].isStreaming = true
-        applyAssistantPhaseIfNeeded(
-            threadId: threadId,
-            messageIndex: messageIndex,
-            assistantPhase: assistantPhase
-        )
         if messagesByThread[threadId]?[messageIndex].itemId == nil, let itemId {
             messagesByThread[threadId]?[messageIndex].itemId = itemId
         }
-        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
 
         persistMessages()
         updateStreamingAssistantOutput(for: threadId, messageId: messageID, rawMessageIndex: messageIndex)
     }
 
-    // Late replay deltas for a closed turn should patch the closed assistant row, not reopen streaming.
-    private func applyLateTerminalAssistantDelta(
-        threadId: String,
-        turnId: String,
-        itemId: String?,
-        assistantPhase: String?,
-        delta: String
-    ) -> Bool {
-        let normalizedTurnId = turnId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedTurnId.isEmpty,
-              terminalStateByTurnID[normalizedTurnId] != nil,
-              activeTurnIdByThread[threadId] != normalizedTurnId,
-              var threadMessages = messagesByThread[threadId] else {
-            return false
-        }
-
-        let normalizedItemId = normalizedStreamingItemID(itemId)
-        let targetIndex: Int? = {
-            if let normalizedItemId {
-                return threadMessages.indices.reversed().first { index in
-                    let candidate = threadMessages[index]
-                    return candidate.role == .assistant
-                        && candidate.turnId == normalizedTurnId
-                        && (candidate.itemId == normalizedItemId || candidate.itemId == nil)
-                }
-            }
-
-            return threadMessages.indices.reversed().first { index in
-                let candidate = threadMessages[index]
-                return candidate.role == .assistant
-                    && candidate.turnId == normalizedTurnId
-                    && !candidate.isStreaming
-            }
-        }()
-
-        guard let targetIndex else {
-            // Closed turns must not be reopened by late status/progress replay chunks.
-            return true
-        }
-
-        let currentText = threadMessages[targetIndex].text
-        let nextText = mergeAssistantDelta(existingText: currentText, incomingDelta: delta)
-        let didResolveItemId = threadMessages[targetIndex].itemId == nil && normalizedItemId != nil
-
-        guard nextText != currentText || threadMessages[targetIndex].isStreaming || didResolveItemId else {
-            return true
-        }
-
-        threadMessages[targetIndex].text = nextText
-        threadMessages[targetIndex].isStreaming = false
-        if threadMessages[targetIndex].assistantPhase == nil, let assistantPhase {
-            threadMessages[targetIndex].assistantPhase = normalizedAssistantPhase(assistantPhase)
-        }
-        if didResolveItemId {
-            threadMessages[targetIndex].itemId = normalizedItemId
-        }
-        messagesByThread[threadId] = threadMessages
-        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: targetIndex)
-        persistMessages()
-        updateCurrentOutput(for: threadId)
-        return true
-    }
-
     // Finalizes assistant text when item/completed carries the canonical message body.
-    func completeAssistantMessage(
-        threadId: String,
-        turnId: String?,
-        itemId: String?,
-        assistantPhase: String? = nil,
-        text: String
-    ) {
+    func completeAssistantMessage(threadId: String, turnId: String?, itemId: String?, text: String) {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty else {
             return
         }
 
+        let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
         let now = Date()
-        let normalizedPhase = normalizedAssistantPhase(assistantPhase)
         var resolvedAssistantMessageId: String?
-        let explicitTurnId = normalizedStreamingItemID(turnId)
-        let explicitItemId = normalizedStreamingItemID(itemId)
-        let activeTurnIdForThread = activeTurnIdByThread[threadId]
-        let hasExplicitIdentity = explicitTurnId != nil || explicitItemId != nil
 
-        if explicitTurnId == nil,
-           explicitItemId == nil,
-           shouldIgnoreIdentifierlessAssistantCompletion(
-               threadId: threadId,
-               text: trimmedText,
-               activeTurnId: activeTurnIdForThread,
-               now: now
-           ) {
-            return
-        }
-
-        if !hasExplicitIdentity,
-           activeTurnIdForThread != nil || threadHasActiveOrRunningTurn(threadId) {
-            // t3code never assigns turn-less completions to the newest active turn.
-            // Late legacy payloads are ambiguous, so do not let them overwrite the current answer.
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
-            return
-        }
-
-        let resolvedTurnId = explicitTurnId
-            ?? explicitItemId.flatMap { knownAssistantTurnId(threadId: threadId, itemId: $0) }
-            ?? (explicitItemId == nil ? nil : activeTurnIdForThread)
-        if let resolvedTurnId {
-            threadIdByTurnID[resolvedTurnId] = threadId
-        }
-        flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId, itemId: explicitItemId)
-
-        if resolvedTurnId == nil, explicitItemId == nil,
+        if resolvedTurnId == nil, itemId == nil,
            let fingerprint = assistantCompletionFingerprintByThread[threadId],
            fingerprint.text == trimmedText,
            now.timeIntervalSince(fingerprint.timestamp) <= 45 {
             return
         }
 
-        if let replayTerminalMessageId = absorbAssistantBlockReplayCompletion(
-            threadId: threadId,
-            turnId: resolvedTurnId,
-            text: trimmedText
-        ) {
-            applyAssistantPhaseIfNeeded(
-                threadId: threadId,
-                messageId: replayTerminalMessageId,
-                assistantPhase: normalizedPhase
-            )
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
-            _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
-                threadId: threadId,
-                turnId: resolvedTurnId,
-                assistantMessageId: replayTerminalMessageId
-            )
-            persistMessages()
-            if let resolvedTurnId {
-                noteAssistantMessage(
-                    threadId: threadId,
-                    turnId: resolvedTurnId,
-                    assistantMessageId: replayTerminalMessageId
-                )
-            }
-            updateCurrentOutput(for: threadId)
-            return
-        }
-
         if let resolvedTurnId,
-           let imagePreviewIndex = imagePreviewAssistantCompletionIndex(
-               threadId: threadId,
-               turnId: resolvedTurnId,
-               itemId: explicitItemId,
-               text: trimmedText
-           ) {
-            let existingText = messagesByThread[threadId]?[imagePreviewIndex].text ?? ""
-            messagesByThread[threadId]?[imagePreviewIndex].text = Self.assistantCompletionTextPreservingImages(
-                existingText: existingText,
-                canonicalText: trimmedText
-            )
-            messagesByThread[threadId]?[imagePreviewIndex].isStreaming = false
-            applyAssistantPhaseIfNeeded(
-                threadId: threadId,
-                messageIndex: imagePreviewIndex,
-                assistantPhase: normalizedPhase
-            )
-            if messagesByThread[threadId]?[imagePreviewIndex].itemId == nil, let explicitItemId {
-                messagesByThread[threadId]?[imagePreviewIndex].itemId = explicitItemId
-            }
-            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: imagePreviewIndex)
-            let messageId = messagesByThread[threadId]?[imagePreviewIndex].id
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
-            if let messageId {
-                _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
-                    threadId: threadId,
-                    turnId: resolvedTurnId,
-                    assistantMessageId: messageId
-                )
-                persistMessages()
-                noteAssistantMessage(
-                    threadId: threadId,
-                    turnId: resolvedTurnId,
-                    assistantMessageId: messageId
-                )
-                updateCurrentOutput(for: threadId)
-            }
-            return
-        }
-
-        if let resolvedTurnId,
-           explicitItemId == nil,
-           let duplicateIndex = completedAssistantMessageIndices(
-               threadId: threadId,
-               turnId: resolvedTurnId
-           ).last(where: { index in
-               Self.normalizedMessageText(messagesByThread[threadId]?[index].text ?? "") == trimmedText
-           }) {
-            messagesByThread[threadId]?[duplicateIndex].isStreaming = false
-            applyAssistantPhaseIfNeeded(
-                threadId: threadId,
-                messageIndex: duplicateIndex,
-                assistantPhase: normalizedPhase
-            )
-            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
-            if let resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id {
-                _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
-                    threadId: threadId,
-                    turnId: resolvedTurnId,
-                    assistantMessageId: resolvedAssistantMessageId
-                )
-                persistMessages()
-                noteAssistantMessage(
-                    threadId: threadId,
-                    turnId: resolvedTurnId,
-                    assistantMessageId: resolvedAssistantMessageId
-                )
-                updateCurrentOutput(for: threadId)
-            }
-            return
-        }
-
-        if let resolvedTurnId,
-           explicitItemId == nil,
-           !threadHasActiveOrRunningTurn(threadId) {
-            let completedAssistantIndices = completedAssistantMessageIndices(
-                threadId: threadId,
-                turnId: resolvedTurnId
-            )
-
-            if completedAssistantIndices.count == 1,
-               let targetIndex = completedAssistantIndices.first {
-                let currentAssistant = messagesByThread[threadId]?[targetIndex]
-                if let currentAssistant,
-                   Self.shouldReplaceClosedAssistantMessage(
-                        currentAssistant,
-                        with: CodexMessage(
-                            threadId: threadId,
-                            role: .assistant,
-                            text: trimmedText,
-                            turnId: resolvedTurnId,
-                            itemId: nil,
-                            isStreaming: false,
-                            deliveryState: .confirmed,
-                            orderIndex: currentAssistant.orderIndex
-                        )
-                   ) {
-                    messagesByThread[threadId]?[targetIndex].text = Self.assistantCompletionTextPreservingImages(
-                        existingText: currentAssistant.text,
-                        canonicalText: trimmedText
-                    )
-                    messagesByThread[threadId]?[targetIndex].isStreaming = false
-                    applyAssistantPhaseIfNeeded(
-                        threadId: threadId,
-                        messageIndex: targetIndex,
-                        assistantPhase: normalizedPhase
-                    )
-                    if messagesByThread[threadId]?[targetIndex].turnId == nil {
-                        messagesByThread[threadId]?[targetIndex].turnId = resolvedTurnId
-                    }
-                    refreshDerivedPlanMetadata(threadId: threadId, messageIndex: targetIndex)
-                    resolvedAssistantMessageId = messagesByThread[threadId]?[targetIndex].id
-                }
-                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
-                if let resolvedAssistantMessageId {
-                    _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
-                        threadId: threadId,
-                        turnId: resolvedTurnId,
-                        assistantMessageId: resolvedAssistantMessageId
-                    )
-                    persistMessages()
-                    noteAssistantMessage(
-                        threadId: threadId,
-                        turnId: resolvedTurnId,
-                        assistantMessageId: resolvedAssistantMessageId
-                    )
-                    updateCurrentOutput(for: threadId)
-                }
-                return
-            }
-
-            if !completedAssistantIndices.isEmpty {
-                // Late legacy completions without item identity are ambiguous once a closed
-                // turn already has assistant bubbles. Ignore them instead of appending a duplicate.
-                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
-                return
-            }
-        }
-
-        if let resolvedTurnId,
-           let messageID = ensureStreamingAssistantMessage(
-               threadId: threadId,
-               turnId: resolvedTurnId,
-               itemId: explicitItemId,
-               assistantPhase: normalizedPhase,
-               promoteTurnFallback: explicitItemId == nil,
-               createStreamingMessage: explicitItemId == nil
-           ),
+           let messageID = ensureStreamingAssistantMessage(threadId: threadId, turnId: resolvedTurnId, itemId: itemId),
            let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
             let existingText = messagesByThread[threadId]?[messageIndex].text ?? ""
-            let completedText = Self.assistantCompletionTextPreservingImages(
-                existingText: existingText,
-                canonicalText: trimmedText
-            )
 
             if existingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                messagesByThread[threadId]?[messageIndex].text = completedText
-            } else if existingText != completedText {
-                messagesByThread[threadId]?[messageIndex].text = completedText
+                messagesByThread[threadId]?[messageIndex].text = trimmedText
+            } else if existingText != trimmedText {
+                messagesByThread[threadId]?[messageIndex].text = trimmedText
             }
 
             messagesByThread[threadId]?[messageIndex].isStreaming = false
-            applyAssistantPhaseIfNeeded(
-                threadId: threadId,
-                messageIndex: messageIndex,
-                assistantPhase: normalizedPhase
-            )
-            if messagesByThread[threadId]?[messageIndex].itemId == nil, let explicitItemId {
-                messagesByThread[threadId]?[messageIndex].itemId = explicitItemId
+            if messagesByThread[threadId]?[messageIndex].itemId == nil, let itemId {
+                messagesByThread[threadId]?[messageIndex].itemId = itemId
             }
             if messagesByThread[threadId]?[messageIndex].turnId == nil {
                 messagesByThread[threadId]?[messageIndex].turnId = resolvedTurnId
             }
-            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
             resolvedAssistantMessageId = messagesByThread[threadId]?[messageIndex].id
         } else {
-            if let explicitItemId,
+            if let itemId,
                let existingItemIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
-                   candidate.role == .assistant && candidate.itemId == explicitItemId
+                   candidate.role == .assistant && candidate.itemId == itemId
                }) {
-                let existingText = messagesByThread[threadId]?[existingItemIndex].text ?? ""
-                messagesByThread[threadId]?[existingItemIndex].text = Self.assistantCompletionTextPreservingImages(
-                    existingText: existingText,
-                    canonicalText: trimmedText
-                )
+                messagesByThread[threadId]?[existingItemIndex].text = trimmedText
                 messagesByThread[threadId]?[existingItemIndex].isStreaming = false
-                applyAssistantPhaseIfNeeded(
-                    threadId: threadId,
-                    messageIndex: existingItemIndex,
-                    assistantPhase: normalizedPhase
-                )
                 if messagesByThread[threadId]?[existingItemIndex].turnId == nil {
                     messagesByThread[threadId]?[existingItemIndex].turnId = resolvedTurnId
                 }
-                refreshDerivedPlanMetadata(threadId: threadId, messageIndex: existingItemIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[existingItemIndex].id
             } else if let duplicateIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
                 candidate.role == .assistant
@@ -3058,33 +2033,25 @@ extension CodexService {
                     && (
                         candidate.isStreaming
                             || (resolvedTurnId != nil && candidate.turnId == resolvedTurnId)
-                            || (explicitItemId != nil && candidate.itemId == explicitItemId)
+                            || (itemId != nil && candidate.itemId == itemId)
                     )
             }) {
                 // Drop duplicated completion payloads that carry the same final assistant text.
                 messagesByThread[threadId]?[duplicateIndex].isStreaming = false
-                applyAssistantPhaseIfNeeded(
-                    threadId: threadId,
-                    messageIndex: duplicateIndex,
-                    assistantPhase: normalizedPhase
-                )
-                if messagesByThread[threadId]?[duplicateIndex].itemId == nil, let explicitItemId {
-                    messagesByThread[threadId]?[duplicateIndex].itemId = explicitItemId
+                if messagesByThread[threadId]?[duplicateIndex].itemId == nil, let itemId {
+                    messagesByThread[threadId]?[duplicateIndex].itemId = itemId
                 }
                 if messagesByThread[threadId]?[duplicateIndex].turnId == nil {
                     messagesByThread[threadId]?[duplicateIndex].turnId = resolvedTurnId
                 }
-                refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id
             } else {
                 let newMessage = CodexMessage(
-                    id: Self.stableAssistantMessageID(threadId: threadId, turnId: resolvedTurnId, itemId: explicitItemId) ?? UUID().uuidString,
                     threadId: threadId,
                     role: .assistant,
-                    assistantPhase: normalizedPhase,
                     text: trimmedText,
                     turnId: resolvedTurnId,
-                    itemId: explicitItemId,
+                    itemId: itemId,
                     isStreaming: false,
                     deliveryState: .confirmed
                 )
@@ -3095,14 +2062,6 @@ extension CodexService {
 
         assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
 
-        if let resolvedAssistantMessageId {
-            _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
-                threadId: threadId,
-                turnId: resolvedTurnId,
-                assistantMessageId: resolvedAssistantMessageId
-            )
-        }
-
         persistMessages()
         if let resolvedAssistantMessageId {
             noteAssistantMessage(
@@ -3112,469 +2071,6 @@ extension CodexService {
             )
         }
         updateCurrentOutput(for: threadId)
-    }
-
-    // Renders image-generation artifacts as assistant image previews without embedding image bytes.
-    func appendGeneratedImageReference(
-        threadId: String,
-        turnId: String?,
-        itemId: String?,
-        imagePath: String
-    ) {
-        let trimmedPath = imagePath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedPath.isEmpty else {
-            return
-        }
-
-        let resolvedTurnId = normalizedStreamingItemID(turnId) ?? activeTurnIdByThread[threadId]
-        let resolvedItemId = normalizedStreamingItemID(itemId)
-        if let resolvedTurnId {
-            threadIdByTurnID[resolvedTurnId] = threadId
-        }
-
-        let markdown = "![Generated image](\(Self.markdownImagePath(trimmedPath)))"
-        if var threadMessages = messagesByThread[threadId],
-           let mergeTarget = generatedImageMergeTarget(
-               in: threadMessages,
-               turnId: resolvedTurnId,
-               itemId: resolvedItemId,
-               imagePath: trimmedPath,
-               markdown: markdown
-           ) {
-            let existingIndex = mergeTarget.index
-            var existing = threadMessages[existingIndex]
-            if !existing.text.contains(trimmedPath) && !existing.text.contains(markdown) {
-                existing.text = existing.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    ? markdown
-                    : "\(existing.text)\n\n\(markdown)"
-            }
-            existing.isStreaming = false
-            if existing.turnId == nil {
-                existing.turnId = resolvedTurnId
-            }
-            if mergeTarget.canAdoptImageItemId, existing.itemId == nil {
-                existing.itemId = resolvedItemId
-            }
-            threadMessages[existingIndex] = existing
-            messagesByThread[threadId] = threadMessages
-            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: existingIndex)
-        } else {
-            let message = CodexMessage(
-                id: Self.stableAssistantMessageID(threadId: threadId, turnId: resolvedTurnId, itemId: resolvedItemId)
-                    ?? UUID().uuidString,
-                threadId: threadId,
-                role: .assistant,
-                text: markdown,
-                turnId: resolvedTurnId,
-                itemId: resolvedItemId,
-                isStreaming: false,
-                deliveryState: .confirmed
-            )
-            appendMessage(message)
-            return
-        }
-
-        persistMessages()
-        updateCurrentOutput(for: threadId)
-    }
-
-    private struct GeneratedImageMergeTarget {
-        let index: Int
-        let canAdoptImageItemId: Bool
-    }
-
-    private func generatedImageMergeTarget(
-        in threadMessages: [CodexMessage],
-        turnId: String?,
-        itemId: String?,
-        imagePath: String,
-        markdown: String
-    ) -> GeneratedImageMergeTarget? {
-        if let sameItemIndex = threadMessages.indices.reversed().first(where: { index in
-            let candidate = threadMessages[index]
-            return candidate.role == .assistant && itemId != nil && candidate.itemId == itemId
-        }) {
-            return GeneratedImageMergeTarget(index: sameItemIndex, canAdoptImageItemId: true)
-        }
-
-        if let sameImageIndex = threadMessages.indices.reversed().first(where: { index in
-            let candidate = threadMessages[index]
-            return candidate.role == .assistant
-                && (candidate.text.contains(imagePath) || candidate.text.contains(markdown))
-        }) {
-            return GeneratedImageMergeTarget(index: sameImageIndex, canAdoptImageItemId: false)
-        }
-
-        // Late image-generation events can arrive after the final prose item, so attach them
-        // to the visible assistant answer without stealing that row's item-scoped identity.
-        guard let turnId else {
-            return nil
-        }
-        guard let fallbackIndex = threadMessages.indices.reversed().first(where: { index in
-            let candidate = threadMessages[index]
-            return candidate.role == .assistant
-                && candidate.kind == .chat
-                && candidate.turnId == turnId
-                && Self.isFinalAnswerAssistantPhase(candidate.assistantPhase)
-                && !candidate.isStreaming
-                && !Self.isGeneratedImageArtifactOnly(candidate.text)
-                && !candidate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }) else {
-            return nil
-        }
-        return GeneratedImageMergeTarget(index: fallbackIndex, canAdoptImageItemId: false)
-    }
-
-    // Folds image-generation artifact rows into the final assistant text for the same turn.
-    private func mergeGeneratedImageArtifactsIntoAssistantMessage(
-        threadId: String,
-        turnId: String?,
-        assistantMessageId: String
-    ) -> Bool {
-        guard let resolvedTurnId = turnId,
-              var threadMessages = messagesByThread[threadId],
-              let targetIndex = threadMessages.firstIndex(where: { $0.id == assistantMessageId }) else {
-            return false
-        }
-
-        let artifactMessages = threadMessages.filter { candidate in
-            candidate.id != assistantMessageId
-                && candidate.role == .assistant
-                && candidate.turnId == resolvedTurnId
-                && Self.isGeneratedImageArtifactOnly(candidate.text)
-        }
-        guard !artifactMessages.isEmpty else {
-            return false
-        }
-
-        var targetMessage = threadMessages[targetIndex]
-        var mergedText = targetMessage.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        for artifact in artifactMessages {
-            let artifactText = artifact.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !artifactText.isEmpty, !mergedText.contains(artifactText) else {
-                continue
-            }
-            mergedText = mergedText.isEmpty ? artifactText : "\(mergedText)\n\n\(artifactText)"
-        }
-        targetMessage.text = mergedText
-        targetMessage.isStreaming = false
-        if targetMessage.turnId == nil {
-            targetMessage.turnId = resolvedTurnId
-        }
-
-        let artifactIds = Set(artifactMessages.map(\.id))
-        threadMessages.removeAll { artifactIds.contains($0.id) }
-        guard let updatedTargetIndex = threadMessages.firstIndex(where: { $0.id == assistantMessageId }) else {
-            return false
-        }
-        threadMessages[updatedTargetIndex] = targetMessage
-        messagesByThread[threadId] = threadMessages
-        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: updatedTargetIndex)
-        return true
-    }
-
-    private static func isGeneratedImageArtifactOnly(_ text: String) -> Bool {
-        let imageReferences = AssistantMarkdownImageReferenceParser.references(in: text)
-        guard !imageReferences.isEmpty,
-              imageReferences.allSatisfy(\.isCodexGeneratedImage) else {
-            return false
-        }
-
-        return AssistantMarkdownImageReferenceParser
-            .visibleTextRemovingImageSyntax(from: text)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty
-    }
-
-    private static func isFinalAnswerAssistantPhase(_ phase: String?) -> Bool {
-        phase == "final_answer"
-    }
-
-    @discardableResult
-    private func applyAssistantPhaseIfNeeded(
-        threadId: String,
-        messageId: String,
-        assistantPhase: String?
-    ) -> Bool {
-        guard let messageIndex = findMessageIndex(threadId: threadId, messageId: messageId) else {
-            return false
-        }
-        return applyAssistantPhaseIfNeeded(
-            threadId: threadId,
-            messageIndex: messageIndex,
-            assistantPhase: assistantPhase
-        )
-    }
-
-    @discardableResult
-    private func applyAssistantPhaseIfNeeded(
-        threadId: String,
-        messageIndex: Int,
-        assistantPhase: String?
-    ) -> Bool {
-        guard let phase = normalizedAssistantPhase(assistantPhase),
-              messagesByThread[threadId]?.indices.contains(messageIndex) == true,
-              messagesByThread[threadId]?[messageIndex].role == .assistant else {
-            return false
-        }
-
-        let currentPhase = messagesByThread[threadId]?[messageIndex].assistantPhase
-        guard currentPhase == nil || Self.isFinalAnswerAssistantPhase(phase) else {
-            return false
-        }
-
-        messagesByThread[threadId]?[messageIndex].assistantPhase = phase
-        return true
-    }
-
-    // Canonical item completions replace prose, but turn-scoped image previews may
-    // already be visible in the same bubble and must survive that replacement.
-    private static func assistantCompletionTextPreservingImages(
-        existingText: String,
-        canonicalText: String
-    ) -> String {
-        let trimmedCanonicalText = canonicalText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let existingImageReferences = AssistantMarkdownImageReferenceParser.references(in: existingText)
-            .filter(\.isCodexGeneratedImage)
-        guard !existingImageReferences.isEmpty else {
-            return trimmedCanonicalText
-        }
-
-        var preservedText = trimmedCanonicalText
-        let canonicalImagePaths = Set(
-            AssistantMarkdownImageReferenceParser.references(in: trimmedCanonicalText).map(\.path)
-        )
-        var appendedImagePaths = canonicalImagePaths
-
-        for reference in existingImageReferences where !appendedImagePaths.contains(reference.path) {
-            let altText = reference.altText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let label = altText.isEmpty ? "Generated image" : altText
-            let markdown = "![\(label)](\(Self.markdownImagePath(reference.path)))"
-            preservedText = preservedText.isEmpty ? markdown : "\(preservedText)\n\n\(markdown)"
-            appendedImagePaths.insert(reference.path)
-        }
-
-        return preservedText
-    }
-
-    // Suppresses completion replays that resend the whole assistant block already shown around tool rows.
-    private func absorbAssistantBlockReplayCompletion(
-        threadId: String,
-        turnId: String?,
-        text: String
-    ) -> String? {
-        guard var threadMessages = messagesByThread[threadId] else {
-            return nil
-        }
-
-        if let exactReplayIndex = AssistantReplayDeduper.exactReplayMessageIndex(
-            in: threadMessages,
-            threadId: threadId,
-            turnId: turnId,
-            text: text
-        ) {
-            var didMutate = false
-            if threadMessages[exactReplayIndex].isStreaming {
-                threadMessages[exactReplayIndex].isStreaming = false
-                didMutate = true
-            }
-            if threadMessages[exactReplayIndex].turnId == nil, let turnId {
-                threadMessages[exactReplayIndex].turnId = turnId
-                didMutate = true
-            }
-            if didMutate {
-                messagesByThread[threadId] = threadMessages
-            }
-            return threadMessages[exactReplayIndex].id
-        }
-
-        if let imageMergedReplay = imageMergedReplayMessage(
-            in: threadMessages,
-            threadId: threadId,
-            turnId: turnId,
-            text: text
-        ) {
-            let existingText = threadMessages[imageMergedReplay.index].text
-            let canonicalText = Self.canonicalTextRemovingReplayedImagePreview(
-                text,
-                previewText: imageMergedReplay.previewText
-            )
-            threadMessages[imageMergedReplay.index].text = Self.assistantCompletionTextPreservingImages(
-                existingText: existingText,
-                canonicalText: canonicalText
-            )
-            threadMessages[imageMergedReplay.index].isStreaming = false
-            if threadMessages[imageMergedReplay.index].turnId == nil, let turnId {
-                threadMessages[imageMergedReplay.index].turnId = turnId
-            }
-            messagesByThread[threadId] = threadMessages
-            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: imageMergedReplay.index)
-            return threadMessages[imageMergedReplay.index].id
-        }
-
-        guard let assistantIndices = AssistantReplayDeduper.blockReplayMessageIndices(
-            in: threadMessages,
-            threadId: threadId,
-            turnId: turnId,
-            text: text
-        ),
-        let terminalIndex = assistantIndices.last else {
-            return nil
-        }
-
-        var didMutate = false
-        for index in assistantIndices where threadMessages[index].isStreaming {
-            threadMessages[index].isStreaming = false
-            didMutate = true
-        }
-        if threadMessages[terminalIndex].turnId == nil, let turnId {
-            threadMessages[terminalIndex].turnId = turnId
-            didMutate = true
-        }
-        if didMutate {
-            messagesByThread[threadId] = threadMessages
-        }
-        return threadMessages[terminalIndex].id
-    }
-
-    // Image generation can finish on a preparatory assistant row before the final
-    // completion replays that same prose plus the terminal answer.
-    private func imageMergedReplayMessage(
-        in messages: [CodexMessage],
-        threadId: String,
-        turnId: String?,
-        text: String
-    ) -> (index: Int, previewText: String)? {
-        let replayText = Self.normalizedMessageText(text)
-        guard !replayText.isEmpty else {
-            return nil
-        }
-
-        let normalizedTurnId = normalizedStreamingItemID(turnId)
-        for index in messages.indices.reversed() {
-            let candidate = messages[index]
-            let imageReferences = AssistantMarkdownImageReferenceParser.references(in: candidate.text)
-            guard candidate.role == .assistant,
-                  candidate.threadId == threadId,
-                  !candidate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  !imageReferences.isEmpty,
-                  imageReferences.allSatisfy(\.isCodexGeneratedImage) else {
-                continue
-            }
-
-            if let normalizedTurnId,
-               let candidateTurnId = normalizedStreamingItemID(candidate.turnId),
-               candidateTurnId != normalizedTurnId {
-                continue
-            }
-
-            let candidateTextWithoutImages = AssistantMarkdownImageReferenceParser
-                .visibleTextRemovingImageSyntax(from: candidate.text)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard candidateTextWithoutImages.count >= 24 else {
-                continue
-            }
-
-            if replayText.contains(Self.normalizedMessageText(candidateTextWithoutImages)) {
-                return (index, candidateTextWithoutImages)
-            }
-        }
-        return nil
-    }
-
-    private static func canonicalTextRemovingReplayedImagePreview(_ text: String, previewText: String) -> String {
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedPreview = previewText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty,
-              !trimmedPreview.isEmpty,
-              let range = trimmedText.range(of: trimmedPreview) else {
-            return trimmedText
-        }
-
-        let prunedText = (trimmedText[..<range.lowerBound] + trimmedText[range.upperBound...])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return prunedText.isEmpty ? trimmedText : prunedText
-    }
-
-    private func imagePreviewAssistantCompletionIndex(
-        threadId: String,
-        turnId: String,
-        itemId: String?,
-        text: String
-    ) -> Int? {
-        guard itemId == nil else {
-            return nil
-        }
-
-        let normalizedText = Self.normalizedMessageText(text)
-        guard !normalizedText.isEmpty,
-              let threadMessages = messagesByThread[threadId] else {
-            return nil
-        }
-
-        return threadMessages.indices.reversed().first { index in
-            let candidate = threadMessages[index]
-            let imageReferences = AssistantMarkdownImageReferenceParser.references(in: candidate.text)
-            guard candidate.role == .assistant,
-                  candidate.threadId == threadId,
-                  candidate.turnId == turnId,
-                  !candidate.isStreaming,
-                  Self.normalizedMessageText(candidate.text) != normalizedText,
-                  !imageReferences.isEmpty,
-                  imageReferences.allSatisfy(\.isCodexGeneratedImage) else {
-                return false
-            }
-
-            if let itemId,
-               let candidateItemId = normalizedStreamingItemID(candidate.itemId),
-               candidateItemId == itemId {
-                return false
-            }
-
-            return true
-        }
-    }
-
-    private func removeAssistantStreamingLookups(messageId: String) {
-        streamingAssistantFallbackMessageByTurnID = streamingAssistantFallbackMessageByTurnID.filter { $0.value != messageId }
-        streamingAssistantMessageByItemKey = streamingAssistantMessageByItemKey.filter { $0.value != messageId }
-    }
-
-    private func assistantReplayTargetMessageId(
-        in messages: [CodexMessage],
-        threadId: String,
-        turnId: String?,
-        text: String,
-        excludingMessageID: String
-    ) -> String? {
-        if let exactReplayIndex = AssistantReplayDeduper.exactReplayMessageIndex(
-            in: messages,
-            threadId: threadId,
-            turnId: turnId,
-            text: text,
-            excludingMessageID: excludingMessageID
-        ) {
-            return messages[exactReplayIndex].id
-        }
-
-        guard let replayIndices = AssistantReplayDeduper.blockReplayMessageIndices(
-            in: messages,
-            threadId: threadId,
-            turnId: turnId,
-            text: text,
-            excludingMessageID: excludingMessageID
-        ) else {
-            return nil
-        }
-        return replayIndices.last.map { messages[$0].id }
-    }
-
-    private func knownAssistantTurnId(threadId: String, itemId: String) -> String? {
-        messagesByThread[threadId]?.reversed().first(where: { message in
-            message.role == .assistant
-                && message.itemId == itemId
-                && !(message.turnId ?? "").isEmpty
-        })?.turnId
     }
 
     func markMessageDeliveryState(
@@ -3625,7 +2121,7 @@ extension CodexService {
     ) {
         let normalizedText = matchingText.trimmingCharacters(in: .whitespacesAndNewlines)
         let matchingAttachmentSignature = matchingAttachments
-            .map(\.stableIdentityKey)
+            .map { $0.payloadDataURL ?? $0.sourceURL ?? $0.thumbnailBase64JPEG }
             .joined(separator: "|")
 
         guard (!normalizedText.isEmpty || !matchingAttachmentSignature.isEmpty),
@@ -3636,7 +2132,7 @@ extension CodexService {
         guard let index = threadMessages.indices.reversed().first(where: { index in
             let message = threadMessages[index]
             let messageAttachmentSignature = message.attachments
-                .map(\.stableIdentityKey)
+                .map { $0.payloadDataURL ?? $0.sourceURL ?? $0.thumbnailBase64JPEG }
                 .joined(separator: "|")
             let matchesText = normalizedText.isEmpty
                 || message.text.trimmingCharacters(in: .whitespacesAndNewlines) == normalizedText
@@ -3658,21 +2154,29 @@ extension CodexService {
 
     // Marks streaming assistant state complete once turn/completed arrives.
     func markTurnCompleted(threadId: String, turnId: String?) {
-        let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
-        flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId)
-        flushPendingSystemDeltasForTurn(threadId: threadId, turnId: resolvedTurnId)
-
         clearRunningState(for: threadId)
         clearRunningThreadWatch(threadId)
-        let shouldFinalizePlanSteps: Bool = {
-            if let resolvedTurnId {
-                return terminalStateByTurnID[resolvedTurnId] == .completed
-            }
-            return latestTurnTerminalStateByThread[threadId] == .completed
-        }()
+        let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
 
         if let resolvedTurnId {
-            clearAssistantStreamingState(threadId: threadId, turnId: resolvedTurnId)
+            let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: resolvedTurnId)
+            let itemStreamingPrefix = "\(turnStreamingKey)|item:"
+            let keysToClear = streamingAssistantMessageByTurnID.keys.filter { key in
+                key == turnStreamingKey || key.hasPrefix(itemStreamingPrefix)
+            }
+
+            var closedMessageIDs: Set<String> = []
+            for key in keysToClear {
+                guard let messageID = streamingAssistantMessageByTurnID.removeValue(forKey: key) else {
+                    continue
+                }
+                guard closedMessageIDs.insert(messageID).inserted else {
+                    continue
+                }
+                if let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
+                    messagesByThread[threadId]?[messageIndex].isStreaming = false
+                }
+            }
         }
 
         if let resolvedTurnId,
@@ -3693,79 +2197,18 @@ extension CodexService {
         // Close both turn-bound and orphan system stream rows, but keep reasoning content visible.
         if var threadMessages = messagesByThread[threadId] {
             var didMutate = false
-            let belongsToCompletedTurn: (CodexMessage) -> Bool = { message in
-                if let resolvedTurnId {
-                    return message.turnId == resolvedTurnId || message.turnId == nil
-                }
-                return message.isStreaming
-            }
-
             for index in threadMessages.indices where threadMessages[index].role == .system
                 && threadMessages[index].isStreaming {
-                let belongsToTurn = belongsToCompletedTurn(threadMessages[index])
+                let belongsToTurn: Bool
+                if let resolvedTurnId {
+                    belongsToTurn = threadMessages[index].turnId == resolvedTurnId
+                        || threadMessages[index].turnId == nil
+                } else {
+                    belongsToTurn = true
+                }
                 guard belongsToTurn else { continue }
                 threadMessages[index].isStreaming = false
                 didMutate = true
-            }
-
-            for index in threadMessages.indices where threadMessages[index].role == .system
-                && threadMessages[index].kind == .plan {
-                let belongsToTurn = belongsToCompletedTurn(threadMessages[index])
-                guard belongsToTurn else { continue }
-
-                switch threadMessages[index].resolvedPlanPresentation {
-                case .resultCompletedItem:
-                    let nextPresentation: CodexPlanPresentation = shouldFinalizePlanSteps ? .resultReady : .resultClosed
-                    if threadMessages[index].planPresentation != nextPresentation {
-                        threadMessages[index].planPresentation = nextPresentation
-                    }
-                    refreshDerivedPlanMetadata(in: &threadMessages, index: index)
-                    didMutate = true
-                case .resultStreaming:
-                    if threadMessages[index].planPresentation != .resultClosed {
-                        threadMessages[index].planPresentation = .resultClosed
-                        threadMessages[index].proposedPlan = nil
-                        didMutate = true
-                    }
-                default:
-                    break
-                }
-            }
-
-            // Successful completions can land before the server publishes a final
-            // "all steps completed" plan snapshot, so normalize stale progress steps here.
-            if shouldFinalizePlanSteps {
-                let fallbackPlanIndex: Int? = {
-                    guard resolvedTurnId == nil else { return nil }
-                    return threadMessages.indices.reversed().first(where: { index in
-                        let candidate = threadMessages[index]
-                        return candidate.role == .system
-                            && candidate.kind == .plan
-                            && candidate.resolvedPlanPresentation == .progress
-                            && candidate.planState?.steps.contains(where: { $0.status != .completed }) == true
-                    })
-                }()
-
-                for index in threadMessages.indices where threadMessages[index].role == .system
-                    && threadMessages[index].kind == .plan {
-                    let belongsToTurn = belongsToCompletedTurn(threadMessages[index])
-                        || fallbackPlanIndex == index
-                    guard belongsToTurn,
-                          threadMessages[index].resolvedPlanPresentation == .progress,
-                          let planState = threadMessages[index].planState,
-                          !planState.steps.isEmpty,
-                          planState.steps.contains(where: { $0.status != .completed }) else {
-                        continue
-                    }
-
-                    threadMessages[index].planState = CodexPlanState(
-                        explanation: planState.explanation,
-                        steps: planState.steps.map { step in
-                            CodexPlanStep(id: step.id, step: step.step, status: .completed)
-                        }
-                    )
-                    didMutate = true
-                }
             }
 
             let priorCount = threadMessages.count
@@ -3817,7 +2260,6 @@ extension CodexService {
 
     // Converts all pending streaming bubbles to completed state after transport failures.
     func finalizeAllStreamingState() {
-        flushAllPendingStreamingDeltas()
         var didMutate = false
 
         for threadId in messagesByThread.keys {
@@ -3839,14 +2281,8 @@ extension CodexService {
         activeTurnIdByThread.removeAll()
         threadsPendingCompletionHaptic.removeAll()
         clearAllRunningState()
-        streamingAssistantFallbackMessageByTurnID.removeAll()
-        streamingAssistantMessageByItemKey.removeAll()
+        streamingAssistantMessageByTurnID.removeAll()
         streamingSystemMessageByItemID.removeAll()
-        pendingAssistantDeltaByStreamID.removeAll()
-        pendingAssistantDeltaContextByStreamID.removeAll()
-        pendingAssistantDeltaStreamOrder.removeAll()
-        pendingAssistantDeltaFlushTask?.cancel()
-        pendingAssistantDeltaFlushTask = nil
         threadIdByTurnID.removeAll()
 
         if didMutate {
@@ -3873,170 +2309,11 @@ extension CodexService {
             }
         }
     }
-
-    // Persists per-turn terminal state so completed-turn grouping survives app relaunch.
-    func persistTurnTerminalStates() {
-        guard !terminalStateByTurnID.isEmpty else {
-            defaults.removeObject(forKey: Self.turnTerminalStatesDefaultsKey)
-            return
-        }
-
-        guard let data = try? encoder.encode(terminalStateByTurnID) else {
-            defaults.removeObject(forKey: Self.turnTerminalStatesDefaultsKey)
-            return
-        }
-
-        defaults.set(data, forKey: Self.turnTerminalStatesDefaultsKey)
-    }
 }
 
 // ─── Private helpers ──────────────────────────────────────────
 
 extension CodexService {
-    private func enqueueAssistantDelta(
-        threadId: String,
-        turnId: String,
-        itemId: String?,
-        assistantPhase: String?,
-        delta: String
-    ) {
-        let normalizedItemId = normalizedStreamingItemID(itemId)
-        let normalizedPhase = normalizedAssistantPhase(assistantPhase)
-        let streamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: normalizedItemId)
-
-        if normalizedItemId != nil {
-            migratePendingTurnFallbackDelta(
-                threadId: threadId,
-                turnId: turnId,
-                destinationStreamID: streamID,
-                normalizedItemId: normalizedItemId
-            )
-        }
-
-        pendingAssistantDeltaContextByStreamID[streamID] = (
-            threadId: threadId,
-            turnId: turnId.trimmingCharacters(in: .whitespacesAndNewlines),
-            itemId: normalizedItemId,
-            assistantPhase: normalizedPhase
-        )
-        if pendingAssistantDeltaByStreamID[streamID] == nil,
-           !pendingAssistantDeltaStreamOrder.contains(streamID) {
-            pendingAssistantDeltaStreamOrder.append(streamID)
-        }
-        pendingAssistantDeltaByStreamID[streamID] = mergeAssistantDelta(
-            existingText: pendingAssistantDeltaByStreamID[streamID] ?? "",
-            incomingDelta: delta
-        )
-        schedulePendingAssistantDeltaFlushIfNeeded()
-    }
-
-    private func migratePendingTurnFallbackDelta(
-        threadId: String,
-        turnId: String,
-        destinationStreamID: String,
-        normalizedItemId: String?
-    ) {
-        let fallbackStreamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: nil)
-        guard fallbackStreamID != destinationStreamID,
-              let fallbackDelta = pendingAssistantDeltaByStreamID.removeValue(forKey: fallbackStreamID) else {
-            return
-        }
-
-        let fallbackPhase = pendingAssistantDeltaContextByStreamID[fallbackStreamID]?.assistantPhase
-        pendingAssistantDeltaContextByStreamID.removeValue(forKey: fallbackStreamID)
-        pendingAssistantDeltaStreamOrder.removeAll { $0 == fallbackStreamID }
-        if pendingAssistantDeltaByStreamID[destinationStreamID] == nil,
-           !pendingAssistantDeltaStreamOrder.contains(destinationStreamID) {
-            pendingAssistantDeltaStreamOrder.append(destinationStreamID)
-        }
-        pendingAssistantDeltaByStreamID[destinationStreamID] = mergeAssistantDelta(
-            existingText: pendingAssistantDeltaByStreamID[destinationStreamID] ?? "",
-            incomingDelta: fallbackDelta
-        )
-        pendingAssistantDeltaContextByStreamID[destinationStreamID] = (
-            threadId: threadId,
-            turnId: turnId.trimmingCharacters(in: .whitespacesAndNewlines),
-            itemId: normalizedItemId,
-            assistantPhase: fallbackPhase
-        )
-    }
-
-    private func schedulePendingAssistantDeltaFlushIfNeeded() {
-        guard pendingAssistantDeltaFlushTask == nil else { return }
-
-        pendingAssistantDeltaFlushTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(nanoseconds: assistantDeltaBatchIntervalNanoseconds)
-            guard !Task.isCancelled else { return }
-            self.flushPendingAssistantDeltas()
-        }
-    }
-
-    func flushPendingAssistantDeltas(
-        for threadId: String? = nil,
-        turnId: String? = nil,
-        itemId: String? = nil
-    ) {
-        let normalizedTurnId = turnId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedItemId = normalizedStreamingItemID(itemId)
-        let streamIDsToFlush = pendingAssistantDeltaStreamOrder.filter { streamID in
-            guard let context = pendingAssistantDeltaContextByStreamID[streamID] else {
-                return true
-            }
-            if let threadId, context.threadId != threadId {
-                return false
-            }
-            if let normalizedTurnId, context.turnId != normalizedTurnId {
-                return false
-            }
-            if let normalizedItemId {
-                return context.itemId == normalizedItemId || context.itemId == nil
-            }
-            return true
-        }
-
-        for streamID in streamIDsToFlush {
-            guard let context = pendingAssistantDeltaContextByStreamID[streamID],
-                  let delta = pendingAssistantDeltaByStreamID[streamID] else {
-                pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
-                pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
-                pendingAssistantDeltaStreamOrder.removeAll { $0 == streamID }
-                continue
-            }
-
-            pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaStreamOrder.removeAll { $0 == streamID }
-            applyAssistantDeltaBatch(
-                threadId: context.threadId,
-                turnId: context.turnId,
-                itemId: context.itemId,
-                assistantPhase: context.assistantPhase,
-                delta: delta
-            )
-        }
-
-        if pendingAssistantDeltaByStreamID.isEmpty {
-            pendingAssistantDeltaStreamOrder.removeAll()
-            pendingAssistantDeltaFlushTask?.cancel()
-            pendingAssistantDeltaFlushTask = nil
-        } else if pendingAssistantDeltaFlushTask == nil {
-            schedulePendingAssistantDeltaFlushIfNeeded()
-        }
-    }
-
-    private func assistantDeltaStreamID(threadId: String, turnId: String, itemId: String?) -> String {
-        let normalizedTurnId = turnId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedItemId = itemId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let itemComponent: String
-        if let normalizedItemId, !normalizedItemId.isEmpty {
-            itemComponent = normalizedItemId
-        } else {
-            itemComponent = "__turn__"
-        }
-        return "\(threadId)|\(normalizedTurnId)|\(itemComponent)"
-    }
-
     // Reuses the sidebar "ready" signal to surface a lightweight in-app banner for off-screen chats.
     func presentThreadCompletionBannerIfNeeded(threadId: String) {
         guard let thread = thread(for: threadId), !thread.isSubagent else {
@@ -4056,44 +2333,11 @@ extension CodexService {
 
     // Keeps the "latest output" cache in sync for both full refreshes and lightweight streaming updates.
     func syncLatestAssistantOutputCache(for threadId: String) -> String {
-        guard let messages = messagesByThread[threadId] else {
-            latestAssistantOutputByThread[threadId] = ""
-            latestAssistantMessageIDByThread.removeValue(forKey: threadId)
-            return ""
-        }
-
-        if let cachedMessageID = latestAssistantMessageIDByThread[threadId],
-           let cachedIndex = findMessageIndex(threadId: threadId, messageId: cachedMessageID),
-           messages.indices.contains(cachedIndex) {
-            for index in messages[cachedIndex...].indices.reversed() {
-                let candidate = messages[index]
-                guard candidate.role == .assistant,
-                      hasRenderableAssistantOutputText(candidate.text) else {
-                    continue
-                }
-                latestAssistantOutputByThread[threadId] = candidate.text
-                latestAssistantMessageIDByThread[threadId] = candidate.id
-                return candidate.text
-            }
-        }
-
-        let latestAssistant = messages
-            .last(where: { $0.role == .assistant && hasRenderableAssistantOutputText($0.text) })
-        let latestAssistantText = latestAssistant?.text ?? ""
+        let latestAssistantText = messagesByThread[threadId]?
+            .last(where: { $0.role == .assistant && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+            .text ?? ""
         latestAssistantOutputByThread[threadId] = latestAssistantText
-        latestAssistantMessageIDByThread[threadId] = latestAssistant?.id
         return latestAssistantText
-    }
-
-    // Streaming calls hit this on every delta; avoid allocating a trimmed copy for normal prose.
-    func hasRenderableAssistantOutputText(_ text: String) -> Bool {
-        guard let first = text.first else {
-            return false
-        }
-        if !first.isWhitespace {
-            return true
-        }
-        return text.contains { !$0.isWhitespace }
     }
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
@@ -4102,22 +2346,11 @@ extension CodexService {
         let messages = messagesByThread[threadId] ?? []
         let revision = messageRevisionByThread[threadId] ?? 0
         let activeTurnID = activeTurnIdByThread[threadId]
-        let isThreadRunning = threadHasActiveOrRunningTurn(threadId)
-        let projectionSourceMessages = snapshotProjectionSourceMessages(from: messages)
-        let stoppedTurnIDs = rebuildStoppedTurnIDs(for: threadId, messages: projectionSourceMessages)
+        let isThreadRunning = activeTurnID != nil || runningThreadIDs.contains(threadId)
+        let stoppedTurnIDs = rebuildStoppedTurnIDs(for: threadId, messages: messages)
         let latestTurnTerminalState = latestTurnTerminalStateByThread[threadId]
-        let projectedMessages = TurnTimelineReducer.project(messages: projectionSourceMessages).messages
-        let planMatchingMessages = messages.filter { $0.kind == .userInputPrompt }
-        let completedTurnIDs = Set(
-            projectedMessages.compactMap { message -> String? in
-                guard let turnId = message.turnId,
-                      terminalStateByTurnID[turnId] == .completed else {
-                    return nil
-                }
-                return turnId
-            }
-        )
-        let repoRefreshSignal = buildRepoRefreshSignal(for: projectionSourceMessages)
+        let projectedMessages = TurnTimelineReducer.project(messages: messages).messages
+        let repoRefreshSignal = buildRepoRefreshSignal(for: messages)
         latestRepoAffectingMessageSignalByThread[threadId] = repoRefreshSignal
         let assistantRevertStates = assistantRevertStates(
             for: threadId,
@@ -4132,33 +2365,19 @@ extension CodexService {
         state.activeTurnID = activeTurnID
         state.isThreadRunning = isThreadRunning
         state.latestTurnTerminalState = latestTurnTerminalState
-        state.completedTurnIDs = completedTurnIDs
         state.stoppedTurnIDs = stoppedTurnIDs
         state.repoRefreshSignal = repoRefreshSignal
         state.renderSnapshot = TurnTimelineRenderSnapshot(
             threadID: threadId,
             messages: projectedMessages,
-            messageIndexByID: projectedMessages.messageIndexByID(),
-            planMatchingMessages: planMatchingMessages,
             timelineChangeToken: revision,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning,
             latestTurnTerminalState: latestTurnTerminalState,
-            completedTurnIDs: completedTurnIDs,
             stoppedTurnIDs: stoppedTurnIDs,
             assistantRevertStatesByMessageID: assistantRevertStates,
             repoRefreshSignal: repoRefreshSignal
         )
-    }
-
-    // Bounds expensive render-only projection work to the recent transcript tail.
-    // The service still keeps the full raw history for sync, diff summaries, and persistence.
-    func snapshotProjectionSourceMessages(from messages: [CodexMessage]) -> [CodexMessage] {
-        guard messages.count > TurnTimelineProjectionPolicy.rawMessageLimit else {
-            return messages
-        }
-
-        return Array(messages.suffix(TurnTimelineProjectionPolicy.rawMessageLimit))
     }
 
     // Refreshes every known timeline state when repo-busy status changes across threads.
@@ -4214,29 +2433,6 @@ extension CodexService {
         )
         stoppedTurnIDsByThread[threadId] = stoppedTurnIDs
         return stoppedTurnIDs
-    }
-
-    // Merges terminal states decoded from thread/read without firing haptics or unread badges.
-    @discardableResult
-    func mergeHistoryTurnTerminalStates(
-        threadId: String,
-        terminalStatesByTurnID historyStates: [String: CodexTurnTerminalState]
-    ) -> Bool {
-        guard !historyStates.isEmpty else {
-            return false
-        }
-
-        var didChange = false
-        for (turnId, state) in historyStates {
-            guard terminalStateByTurnID[turnId] != state else { continue }
-            terminalStateByTurnID[turnId] = state
-            didChange = true
-        }
-
-        if didChange {
-            persistTurnTerminalStates()
-        }
-        return didChange
     }
 
     // Tracks the latest repo-affecting system row so git refresh logic can stay out of the view body.
@@ -4369,60 +2565,14 @@ extension CodexService {
     }
 
     func appendMessage(_ message: CodexMessage) {
-        var normalizedMessage = message
-        normalizedMessage.proposedPlan = derivedProposedPlan(for: normalizedMessage)
         if message.isStreaming {
             // Keep sidebar run state independent from timeline scanning cost.
             markThreadAsRunning(message.threadId)
         }
-        if normalizedMessage.role == .assistant,
-           let existingIndex = messagesByThread[message.threadId]?.firstIndex(where: { $0.id == normalizedMessage.id }),
-           let existingMessage = messagesByThread[message.threadId]?[existingIndex] {
-            let activeThreadIDs = Set(activeTurnIdByThread.keys)
-            let merged = Self.reconcileExistingMessage(
-                existingMessage,
-                with: normalizedMessage,
-                activeThreadIDs: activeThreadIDs,
-                runningThreadIDs: runningThreadIDs
-            )
-            messagesByThread[message.threadId]?[existingIndex] = merged
-            persistMessages()
-            updateCurrentOutput(for: message.threadId)
-            return
-        }
-        messagesByThread[message.threadId, default: []].append(normalizedMessage)
+        messagesByThread[message.threadId, default: []].append(message)
         messagesByThread[message.threadId]?.sort(by: { $0.orderIndex < $1.orderIndex })
         persistMessages()
         updateCurrentOutput(for: message.threadId)
-    }
-
-    private func refreshDerivedPlanMetadata(threadId: String, messageIndex: Int) {
-        guard let message = messagesByThread[threadId]?[messageIndex] else {
-            return
-        }
-
-        messagesByThread[threadId]?[messageIndex].proposedPlan = derivedProposedPlan(for: message)
-    }
-
-    private func refreshDerivedPlanMetadata(in messages: inout [CodexMessage], index: Int) {
-        guard messages.indices.contains(index) else {
-            return
-        }
-
-        messages[index].proposedPlan = derivedProposedPlan(for: messages[index])
-    }
-
-    private func derivedProposedPlan(for message: CodexMessage) -> CodexProposedPlan? {
-        if message.role == .system && message.kind == .plan {
-            guard let presentation = message.resolvedPlanPresentation,
-                  presentation == .resultCompletedItem || presentation == .resultReady else {
-                return nil
-            }
-
-            return CodexProposedPlanParser.parsePlanItem(from: message.text)
-        }
-
-        return CodexProposedPlanParser.parse(from: message.text)
     }
 
     func findMessageIndex(threadId: String, messageId: String) -> Int? {
@@ -4459,12 +2609,7 @@ extension CodexService {
         return findMessageIndex(threadId: threadId, messageId: messageId)
     }
 
-    func findLatestPlanMessageIndex(
-        threadId: String,
-        turnId: String?,
-        itemId: String?,
-        planPresentation: CodexPlanPresentation
-    ) -> Int? {
+    func findLatestPlanMessageIndex(threadId: String, turnId: String?, itemId: String?) -> Int? {
         if let itemId, !itemId.isEmpty {
             if let directIndex = messagesByThread[threadId]?.indices.reversed().first(where: { index in
                 let candidate = messagesByThread[threadId]?[index]
@@ -4482,34 +2627,13 @@ extension CodexService {
                 return candidate?.role == .system
                     && candidate?.kind == .plan
                     && candidate?.turnId == turnId
-                    && candidate?.resolvedPlanPresentation == planPresentation
             })
         }
 
         return messagesByThread[threadId]?.indices.reversed().first(where: { index in
             let candidate = messagesByThread[threadId]?[index]
-            return candidate?.role == .system
-                && candidate?.kind == .plan
-                && candidate?.resolvedPlanPresentation == planPresentation
+            return candidate?.role == .system && candidate?.kind == .plan
         })
-    }
-
-    private func resolvedPlanPresentation(
-        requested: CodexPlanPresentation,
-        turnId: String?
-    ) -> CodexPlanPresentation {
-        guard requested == .resultCompletedItem else {
-            return requested
-        }
-
-        switch turnTerminalState(for: turnId) {
-        case .completed:
-            return .resultReady
-        case .failed, .stopped:
-            return .resultClosed
-        case nil:
-            return .resultCompletedItem
-        }
     }
 
     func findLatestSubagentActionMessageIndex(threadId: String, turnId: String?, itemId: String?) -> Int? {
@@ -4539,48 +2663,29 @@ extension CodexService {
         })
     }
 
-    func ensureStreamingAssistantMessage(
-        threadId: String,
-        turnId: String,
-        itemId: String?,
-        assistantPhase: String? = nil,
-        promoteTurnFallback: Bool = true,
-        createStreamingMessage: Bool = true
-    ) -> String? {
+    func ensureStreamingAssistantMessage(threadId: String, turnId: String, itemId: String?) -> String? {
         let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: turnId)
         let normalizedItemId = normalizedStreamingItemID(itemId)
-        let normalizedPhase = normalizedAssistantPhase(assistantPhase)
         let itemStreamingKey = normalizedItemId.map {
             assistantStreamingMessageKey(threadId: threadId, turnId: turnId, itemId: $0)
         }
 
         if let itemStreamingKey,
-           let messageID = streamingAssistantMessageByItemKey[itemStreamingKey],
-           let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
-            // Keep turn-scoped fallback deltas anchored to the newest assistant item.
-            // Late updates for older item ids should patch that item only.
-            applyAssistantPhaseIfNeeded(
-                threadId: threadId,
-                messageIndex: messageIndex,
-                assistantPhase: normalizedPhase
-            )
+           let messageID = streamingAssistantMessageByTurnID[itemStreamingKey],
+           findMessageIndex(threadId: threadId, messageId: messageID) != nil {
+            streamingAssistantMessageByTurnID[turnStreamingKey] = messageID
             return messageID
         }
 
-        if let turnMessageID = streamingAssistantFallbackMessageByTurnID[turnStreamingKey],
+        if let turnMessageID = streamingAssistantMessageByTurnID[turnStreamingKey],
            let messageIndex = findMessageIndex(threadId: threadId, messageId: turnMessageID) {
             if let normalizedItemId {
                 let existingItemId = normalizedStreamingItemID(messagesByThread[threadId]?[messageIndex].itemId)
 
                 if existingItemId == nil {
                     messagesByThread[threadId]?[messageIndex].itemId = normalizedItemId
-                    applyAssistantPhaseIfNeeded(
-                        threadId: threadId,
-                        messageIndex: messageIndex,
-                        assistantPhase: normalizedPhase
-                    )
                     if let itemStreamingKey {
-                        streamingAssistantMessageByItemKey[itemStreamingKey] = turnMessageID
+                        streamingAssistantMessageByTurnID[itemStreamingKey] = turnMessageID
                     }
                     persistMessages()
                     updateCurrentOutput(for: threadId)
@@ -4588,125 +2693,39 @@ extension CodexService {
                 }
 
                 if existingItemId == normalizedItemId {
-                    applyAssistantPhaseIfNeeded(
-                        threadId: threadId,
-                        messageIndex: messageIndex,
-                        assistantPhase: normalizedPhase
-                    )
                     if let itemStreamingKey {
-                        streamingAssistantMessageByItemKey[itemStreamingKey] = turnMessageID
+                        streamingAssistantMessageByTurnID[itemStreamingKey] = turnMessageID
                     }
                     return turnMessageID
                 }
 
-                guard promoteTurnFallback else {
-                    return createAssistantMessage(
-                        threadId: threadId,
-                        turnId: turnId,
-                        itemId: normalizedItemId,
-                        assistantPhase: normalizedPhase,
-                        isStreaming: createStreamingMessage,
-                        promoteTurnFallback: false
-                    )
-                }
-
                 // New assistant item in the same turn: close previous row and start a new bubble.
                 messagesByThread[threadId]?[messageIndex].isStreaming = false
-                streamingAssistantFallbackMessageByTurnID.removeValue(forKey: turnStreamingKey)
+                streamingAssistantMessageByTurnID.removeValue(forKey: turnStreamingKey)
                 persistMessages()
                 updateCurrentOutput(for: threadId)
 
-                beginAssistantMessage(
-                    threadId: threadId,
-                    turnId: turnId,
-                    itemId: normalizedItemId,
-                    assistantPhase: normalizedPhase
-                )
+                beginAssistantMessage(threadId: threadId, turnId: turnId, itemId: normalizedItemId)
                 if let itemStreamingKey,
-                   let messageID = streamingAssistantMessageByItemKey[itemStreamingKey] {
-                    streamingAssistantFallbackMessageByTurnID[turnStreamingKey] = messageID
+                   let messageID = streamingAssistantMessageByTurnID[itemStreamingKey] {
+                    streamingAssistantMessageByTurnID[turnStreamingKey] = messageID
                     return messageID
                 }
-                return streamingAssistantFallbackMessageByTurnID[turnStreamingKey]
+                return streamingAssistantMessageByTurnID[turnStreamingKey]
             }
 
             return turnMessageID
         } else {
-            streamingAssistantFallbackMessageByTurnID.removeValue(forKey: turnStreamingKey)
+            streamingAssistantMessageByTurnID.removeValue(forKey: turnStreamingKey)
         }
 
-        let messageID = createAssistantMessage(
-            threadId: threadId,
-            turnId: turnId,
-            itemId: normalizedItemId,
-            assistantPhase: normalizedPhase,
-            isStreaming: createStreamingMessage,
-            promoteTurnFallback: promoteTurnFallback
-        )
-        return messageID
-    }
-
-    // Creates one assistant bubble and records item/turn lookup keys without letting
-    // late item-specific completions overwrite the active turn fallback.
-    func createAssistantMessage(
-        threadId: String,
-        turnId: String,
-        itemId: String?,
-        assistantPhase: String? = nil,
-        isStreaming: Bool,
-        promoteTurnFallback: Bool
-    ) -> String {
-        let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: turnId)
-        let itemStreamingKey = itemId.map {
-            assistantStreamingMessageKey(threadId: threadId, turnId: turnId, itemId: $0)
+        beginAssistantMessage(threadId: threadId, turnId: turnId, itemId: normalizedItemId)
+        if let itemStreamingKey,
+           let messageID = streamingAssistantMessageByTurnID[itemStreamingKey] {
+            streamingAssistantMessageByTurnID[turnStreamingKey] = messageID
+            return messageID
         }
-        let message = CodexMessage(
-            id: Self.stableAssistantMessageID(threadId: threadId, turnId: turnId, itemId: itemId) ?? UUID().uuidString,
-            threadId: threadId,
-            role: .assistant,
-            assistantPhase: normalizedAssistantPhase(assistantPhase),
-            text: "",
-            turnId: turnId,
-            itemId: itemId,
-            isStreaming: isStreaming
-        )
-
-        threadIdByTurnID[turnId] = threadId
-        if promoteTurnFallback {
-            streamingAssistantFallbackMessageByTurnID[turnStreamingKey] = message.id
-        }
-        if let itemStreamingKey {
-            streamingAssistantMessageByItemKey[itemStreamingKey] = message.id
-        }
-        appendMessage(message)
-        return message.id
-    }
-
-    // Clears assistant stream lookup state for one turn and closes each touched bubble once.
-    func clearAssistantStreamingState(threadId: String, turnId: String) {
-        let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: turnId)
-        let itemStreamingPrefix = "\(turnStreamingKey)|item:"
-
-        var closedMessageIDs: Set<String> = []
-        if let messageID = streamingAssistantFallbackMessageByTurnID.removeValue(forKey: turnStreamingKey) {
-            closedMessageIDs.insert(messageID)
-            if let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
-                messagesByThread[threadId]?[messageIndex].isStreaming = false
-            }
-        }
-
-        let itemKeysToClear = streamingAssistantMessageByItemKey.keys.filter { key in
-            key.hasPrefix(itemStreamingPrefix)
-        }
-        for key in itemKeysToClear {
-            guard let messageID = streamingAssistantMessageByItemKey.removeValue(forKey: key) else { continue }
-            guard closedMessageIDs.insert(messageID).inserted else {
-                continue
-            }
-            if let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) {
-                messagesByThread[threadId]?[messageIndex].isStreaming = false
-            }
-        }
+        return streamingAssistantMessageByTurnID[turnStreamingKey]
     }
 
     func streamingMessageKey(threadId: String, turnId: String) -> String {
@@ -4715,63 +2734,6 @@ extension CodexService {
 
     func assistantStreamingMessageKey(threadId: String, turnId: String, itemId: String) -> String {
         "\(streamingMessageKey(threadId: threadId, turnId: turnId))|item:\(itemId)"
-    }
-
-    func completedAssistantMessageIndices(threadId: String, turnId: String) -> [Int] {
-        guard let threadMessages = messagesByThread[threadId] else {
-            return []
-        }
-
-        return threadMessages.indices.filter { index in
-            let candidate = threadMessages[index]
-            return candidate.role == .assistant
-                && candidate.turnId == turnId
-                && !candidate.isStreaming
-        }
-    }
-
-    // Identifier-less completion events can arrive after the next turn already became active.
-    // If they exactly match a closed prior assistant row, treat them as late replay.
-    func shouldIgnoreIdentifierlessAssistantCompletion(
-        threadId: String,
-        text: String,
-        activeTurnId: String?,
-        now: Date
-    ) -> Bool {
-        if let fingerprint = assistantCompletionFingerprintByThread[threadId],
-           fingerprint.text == text,
-           now.timeIntervalSince(fingerprint.timestamp) <= 45 {
-            return true
-        }
-
-        guard let activeTurnId = normalizedStreamingItemID(activeTurnId),
-              let threadMessages = messagesByThread[threadId] else {
-            return false
-        }
-
-        let activeTurnHasSameAssistant = threadMessages.contains { candidate in
-            candidate.role == .assistant
-                && candidate.turnId == activeTurnId
-                && Self.normalizedMessageText(candidate.text) == text
-        }
-        if activeTurnHasSameAssistant {
-            return false
-        }
-
-        guard let latestActiveUserOrder = threadMessages
-            .filter({ $0.role == .user && $0.turnId == activeTurnId })
-            .map(\.orderIndex)
-            .max() else {
-            return false
-        }
-
-        return threadMessages.contains { candidate in
-            candidate.role == .assistant
-                && candidate.turnId != activeTurnId
-                && !candidate.isStreaming
-                && candidate.orderIndex < latestActiveUserOrder
-                && Self.normalizedMessageText(candidate.text) == text
-        }
     }
 
     func streamingItemMessageKey(threadId: String, itemId: String) -> String {
@@ -4798,7 +2760,7 @@ extension CodexService {
     func streamingPlaceholderText(for kind: CodexMessageKind) -> String {
         switch kind {
         case .thinking:
-            return ""
+            return "Thinking..."
         case .toolActivity:
             return "Working…"
         case .fileChange:

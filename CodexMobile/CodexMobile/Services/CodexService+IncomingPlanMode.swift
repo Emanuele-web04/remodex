@@ -10,8 +10,8 @@ extension CodexService {
     // Applies the latest structured plan snapshot for a turn while plan text keeps streaming separately.
     func handleTurnPlanUpdated(_ paramsObject: IncomingParamsObject?) {
         guard let paramsObject,
-              let turnId = normalizedPlanIdentifier(paramsObject["turnId"]?.stringValue),
-              let threadId = resolvePlanThreadID(paramsObject: paramsObject, turnId: turnId) else {
+              let threadId = normalizedPlanIdentifier(paramsObject["threadId"]?.stringValue),
+              let turnId = normalizedPlanIdentifier(paramsObject["turnId"]?.stringValue) else {
             return
         }
 
@@ -25,16 +25,15 @@ extension CodexService {
             itemId: nil,
             explanation: explanation,
             steps: steps,
-            isStreaming: true,
-            planPresentation: .progress
+            isStreaming: true
         )
     }
 
     // Streams the current proposed-plan text while treating the final item/completed body as authoritative.
     func appendPlanDelta(from paramsObject: IncomingParamsObject?) {
         guard let paramsObject,
+              let threadId = normalizedPlanIdentifier(paramsObject["threadId"]?.stringValue),
               let turnId = normalizedPlanIdentifier(paramsObject["turnId"]?.stringValue),
-              let threadId = resolvePlanThreadID(paramsObject: paramsObject, turnId: turnId),
               let itemId = normalizedPlanIdentifier(paramsObject["itemId"]?.stringValue) else {
             return
         }
@@ -50,8 +49,7 @@ extension CodexService {
             turnId: turnId,
             itemId: itemId,
             text: delta,
-            isStreaming: true,
-            planPresentation: .resultStreaming
+            isStreaming: true
         )
     }
 
@@ -60,18 +58,13 @@ extension CodexService {
         requestID: JSONValue,
         paramsObject: IncomingParamsObject?
     ) {
-        guard let paramsObject else {
+        guard let paramsObject,
+              let threadId = normalizedPlanIdentifier(paramsObject["threadId"]?.stringValue),
+              let turnId = normalizedPlanIdentifier(paramsObject["turnId"]?.stringValue) else {
             return
         }
 
-        let turnId = normalizedPlanIdentifier(paramsObject["turnId"]?.stringValue)
-        guard let threadId = normalizedPlanIdentifier(paramsObject["threadId"]?.stringValue)
-            ?? turnId.flatMap({ threadIdByTurnID[$0] }) else {
-            return
-        }
-        if let turnId {
-            threadIdByTurnID[turnId] = threadId
-        }
+        threadIdByTurnID[turnId] = threadId
         let itemId = normalizedPlanIdentifier(paramsObject["itemId"]?.stringValue) ?? "request-\(idKey(from: requestID))"
         let questions = decodeStructuredUserInputQuestions(from: paramsObject["questions"])
         guard !questions.isEmpty else {
@@ -87,15 +80,17 @@ extension CodexService {
                 questions: questions
             )
         )
-        markNativePlanSession(for: threadId)
-        notifyStructuredUserInputIfNeeded(
-            threadId: threadId,
-            turnId: turnId,
-            requestID: requestID,
-            questions: questions
-        )
     }
 
+    // Removes inline question cards once the server confirms the request was resolved.
+    func handleServerRequestResolved(_ paramsObject: IncomingParamsObject?) {
+        guard let requestID = paramsObject?["requestId"] else {
+            return
+        }
+
+        let threadId = normalizedPlanIdentifier(paramsObject?["threadId"]?.stringValue)
+        removeStructuredUserInputPrompt(requestID: requestID, threadIdHint: threadId)
+    }
 }
 
 private extension CodexService {
@@ -117,23 +112,13 @@ private extension CodexService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    // `turn/plan/updated` is documented around turn identity first, so recover the thread
-    // from the stored turn mapping when the server omits `threadId`.
-    func resolvePlanThreadID(
-        paramsObject: IncomingParamsObject,
-        turnId: String
-    ) -> String? {
-        normalizedPlanIdentifier(paramsObject["threadId"]?.stringValue)
-            ?? threadIdByTurnID[turnId]
-    }
-
     func decodePlanSteps(from value: JSONValue?) -> [CodexPlanStep] {
         let items = value?.arrayValue ?? []
         return items.compactMap { value in
             guard let object = value.objectValue,
                   let step = normalizedOptionalPlanText(object["step"]?.stringValue),
                   let rawStatus = normalizedOptionalPlanText(object["status"]?.stringValue),
-                  let status = CodexPlanStepStatus(wireValue: rawStatus) else {
+                  let status = CodexPlanStepStatus(rawValue: rawStatus) else {
                 return nil
             }
 
@@ -166,7 +151,6 @@ private extension CodexService {
                 question: question,
                 isOther: object["isOther"]?.boolValue ?? false,
                 isSecret: object["isSecret"]?.boolValue ?? false,
-                selectionLimit: object["selectionLimit"]?.intValue ?? object["selection_limit"]?.intValue,
                 options: options
             )
         }

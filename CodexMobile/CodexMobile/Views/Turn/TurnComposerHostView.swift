@@ -29,7 +29,6 @@ struct TurnComposerHostView: View {
     let onStartForkThreadLocally: () -> Void
     let onOpenForkWorktree: () -> Void
     let onOpenWorktreeHandoff: () -> Void
-    let onOpenFeedbackMail: () -> Void
     let onShowStatus: () -> Void
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
     let isVoiceRecording: Bool
@@ -67,16 +66,11 @@ struct TurnComposerHostView: View {
             isSkillAutocompleteVisible: viewModel.isSkillAutocompleteVisible,
             isSkillAutocompleteLoading: viewModel.isSkillAutocompleteLoading,
             skillAutocompleteQuery: viewModel.skillAutocompleteQuery,
-            pluginAutocompleteItems: viewModel.pluginAutocompleteItems,
-            isPluginAutocompleteVisible: viewModel.isPluginAutocompleteVisible,
-            isPluginAutocompleteLoading: viewModel.isPluginAutocompleteLoading,
-            pluginAutocompleteQuery: viewModel.pluginAutocompleteQuery,
             slashCommandPanelState: viewModel.slashCommandPanelState,
             hasComposerContentConflictingWithReview: viewModel.hasComposerContentConflictingWithReview,
             isThreadRunning: isThreadRunning,
             showsGitBranchSelector: showsGitControls,
             isLoadingGitBranchTargets: viewModel.isLoadingGitBranchTargets,
-            availableGitBranchTargets: viewModel.availableGitBranchTargets,
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
             gitDefaultBranch: viewModel.gitDefaultBranch
         )
@@ -88,7 +82,6 @@ struct TurnComposerHostView: View {
             composerAttachments: viewModel.composerAttachments,
             composerMentionedFiles: viewModel.composerMentionedFiles,
             composerMentionedSkills: viewModel.composerMentionedSkills,
-            composerMentionedPlugins: viewModel.composerMentionedPlugins,
             composerReviewSelection: viewModel.composerReviewSelection,
             isSubagentsSelectionArmed: viewModel.isSubagentsSelectionArmed,
             isVoiceRecording: isVoiceRecording,
@@ -179,14 +172,6 @@ struct TurnComposerHostView: View {
                     activeTurnID: activeTurnID
                 )
             },
-            onInputChangedForPluginAutocomplete: { text in
-                viewModel.onInputChangedForPluginAutocomplete(
-                    text,
-                    codex: codex,
-                    thread: thread,
-                    activeTurnID: activeTurnID
-                )
-            },
             onInputChangedForSlashCommandAutocomplete: { text in
                 viewModel.onInputChangedForSlashCommandAutocomplete(
                     text,
@@ -195,14 +180,10 @@ struct TurnComposerHostView: View {
             },
             onSelectFileAutocomplete: viewModel.onSelectFileAutocomplete,
             onSelectSkillAutocomplete: viewModel.onSelectSkillAutocomplete,
-            onSelectPluginAutocomplete: viewModel.onSelectPluginAutocomplete,
             onSelectSlashCommand: { command in
                 switch command {
                 case .codeReview:
                     viewModel.onSelectSlashCommand(command)
-                case .feedback:
-                    viewModel.onSelectSlashCommand(command)
-                    onOpenFeedbackMail()
                 case .fork:
                     viewModel.onSelectSlashCommand(
                         command,
@@ -231,7 +212,6 @@ struct TurnComposerHostView: View {
             onCloseSlashCommandPanel: viewModel.closeSlashCommandPanel,
             onRemoveMentionedFile: viewModel.removeMentionedFile,
             onRemoveMentionedSkill: viewModel.removeMentionedSkill,
-            onRemoveMentionedPlugin: viewModel.removeMentionedPlugin,
             onRemoveComposerReviewSelection: viewModel.clearComposerReviewSelection,
             onRemoveComposerSubagentsSelection: viewModel.clearSubagentsSelection,
             onPasteImageData: { imageDataItems in

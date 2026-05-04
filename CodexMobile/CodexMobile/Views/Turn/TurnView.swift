@@ -6,17 +6,11 @@
 
 import SwiftUI
 import PhotosUI
-import UIKit
 
 struct TurnView: View {
     let thread: CodexThread
-    let isWakingMacDisplayRecovery: Bool
 
     @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
-    @Environment(\.openURL) private var openURL
-    @Environment(\.reconnectAction) private var reconnectAction
-    @Environment(\.wakeMacDisplayAction) private var wakeMacDisplayAction
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
@@ -26,7 +20,6 @@ struct TurnView: View {
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
     @State private var alertApprovalRequest: CodexApprovalRequest?
-    @State private var isApprovalAlertPresented = false
     @State private var isShowingMacHandoffConfirm = false
     @State private var isShowingWorktreeHandoff = false
     @State private var isShowingForkWorktree = false
@@ -39,9 +32,6 @@ struct TurnView: View {
     @State private var isVoicePreflighting = false
     @State private var voicePreflightGeneration = 0
     @State private var isVoiceTranscribing = false
-    @State private var hasTriggeredVoiceAutoStop = false
-    @State private var voiceRecoveryReason: CodexVoiceFailureReason?
-    @State private var isShowingVoiceSetupSheet = false
     @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -50,50 +40,20 @@ struct TurnView: View {
         let timelineState = codex.timelineState(for: thread.id)
         let renderSnapshot = timelineState.renderSnapshot
         let activeTurnID = renderSnapshot.activeTurnID
-        let planSessionSource = codex.currentPlanSessionSource(for: thread.id)
         let gitWorkingDirectory = resolvedThread.gitWorkingDirectory
         let isThreadRunning = renderSnapshot.isThreadRunning
         let isEmptyThread = renderSnapshot.messages.isEmpty
-        let threadDisplayPhase = codex.threadDisplayPhase(
-            threadId: thread.id,
-            hasVisibleMessages: !renderSnapshot.messages.isEmpty,
-            isThreadRunning: isThreadRunning
-        )
-        // Keep the service-owned loading vs empty-state decision intact while
-        // history hydration catches up for previously active conversations.
-        let resolvedEmptyConversationState = resolvedEmptyState(for: threadDisplayPhase)
         let showsGitControls = codex.isConnected && gitWorkingDirectory != nil
         let isWorktreeProject = resolvedThread.isManagedWorktreeProject
-        let isComposerAutocompletePresented = viewModel.isFileAutocompleteVisible
-            || viewModel.isSkillAutocompleteVisible
-            || viewModel.slashCommandPanelState != .hidden
         let isWorktreeHandoffAvailable = isWorktreeHandoffAvailable(
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
         )
         let canHandOffToWorktree = canHandOffToWorktree(
             isThreadRunning: isThreadRunning,
-            gitWorkingDirectory: gitWorkingDirectory
+            gitWorkingDirectory: gitWorkingDirectory,
+            isWorktreeProject: isWorktreeProject
         )
-        let toolbarNavigationContext = threadNavigationContext(for: resolvedThread)
-        let toolbarWorktreeHandoffTitle = isWorktreeProject ? "Hand off to Local" : "Hand off to Worktree"
-        let isGitActionEnabled = viewModel.gitRepoSync != nil && canRunGitAction(
-            isThreadRunning: isThreadRunning,
-            gitWorkingDirectory: gitWorkingDirectory
-        )
-        let disabledGitActions: Set<TurnGitActionKind> = viewModel.disabledGitActions
-        let onTapMacHandoff: (() -> Void)? = codex.isConnected && codex.supportsDesktopAppHandoff ? {
-            isShowingMacHandoffConfirm = true
-        } : nil
-        let onTapWorktreeHandoff: (() -> Void)? = showsGitControls ? {
-            handleWorktreeHandoffTap(currentThread: resolvedThread)
-        } : nil
-        let onTapNewChat: (() -> Void)? = codex.isConnected && !isWorktreeProject ? {
-            startSiblingChat()
-        } : nil
-        let onTapRepoDiff: (() -> Void)? = showsGitControls ? {
-            presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
-        } : nil
 
         return TurnConversationContainerView(
                 threadID: thread.id,
@@ -102,20 +62,13 @@ struct TurnView: View {
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
                 latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
-                completedTurnIDs: renderSnapshot.completedTurnIDs,
                 stoppedTurnIDs: renderSnapshot.stoppedTurnIDs,
                 assistantRevertStatesByMessageID: renderSnapshot.assistantRevertStatesByMessageID,
-                planSessionSource: planSessionSource,
-                allowsAssistantPlanFallbackRecovery: planSessionSource == .compatibilityFallback,
-                threadMessagesForPlanMatching: renderSnapshot.planMatchingMessages,
-                currentWorkingDirectory: gitWorkingDirectory,
                 errorMessage: codex.lastErrorMessage,
-                composerRecoveryAccessory: composerRecoveryAccessory,
                 shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponseBinding,
                 isScrolledToBottom: isScrolledToBottomBinding,
                 isComposerFocused: isInputFocused,
-                isComposerAutocompletePresented: isComposerAutocompletePresented,
-                emptyState: resolvedEmptyConversationState,
+                emptyState: AnyView(emptyState),
                 composer: AnyView(composerWithSubagentAccessory(
                     currentThread: resolvedThread,
                     activeTurnID: activeTurnID,
@@ -125,9 +78,6 @@ struct TurnView: View {
                     showsGitControls: showsGitControls,
                     gitWorkingDirectory: gitWorkingDirectory
                 )),
-                structuredPromptReplacementComposer: { message in
-                    AnyView(composerStructuredPromptReplacement(message: message))
-                },
                 repositoryLoadingToastOverlay: AnyView(EmptyView()),
                 usageToastOverlay: AnyView(EmptyView()),
                 isRepositoryLoadingToastVisible: false,
@@ -154,32 +104,40 @@ struct TurnView: View {
                 threadID: thread.id
             )
         } as (() -> Void)? : nil)
-        .environment(\.inlineCommitAndPushPhase, viewModel.inlineCommitAndPushPhase)
         .navigationTitle(resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             TurnToolbarContent(
                 displayTitle: resolvedThread.displayTitle,
-                navigationContext: toolbarNavigationContext,
+                navigationContext: threadNavigationContext(for: resolvedThread),
                 showsThreadActions: codex.isConnected,
                 isHandingOffToMac: isHandingOffToMac,
                 isStartingNewChat: isStartingSiblingChat,
                 canHandOffToWorktree: canHandOffToWorktree,
-                worktreeHandoffTitle: toolbarWorktreeHandoffTitle,
                 isCreatingGitWorktree: viewModel.isCreatingGitWorktree,
                 repoDiffTotals: viewModel.gitRepoSync?.repoDiffTotals,
                 isLoadingRepoDiff: isLoadingRepositoryDiff,
                 showsGitActions: showsGitControls,
-                isGitActionEnabled: isGitActionEnabled,
-                disabledGitActions: disabledGitActions,
+                isGitActionEnabled: canRunGitAction(
+                    isThreadRunning: isThreadRunning,
+                    gitWorkingDirectory: gitWorkingDirectory
+                ),
+                disabledGitActions: viewModel.canCreatePullRequest ? [] : [.createPR],
                 isRunningGitAction: viewModel.isRunningGitAction,
-                gitActionLoadingTitle: viewModel.gitActionLoadingTitle,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
-                onTapMacHandoff: onTapMacHandoff,
-                onTapWorktreeHandoff: onTapWorktreeHandoff,
-                onTapNewChat: onTapNewChat,
-                onTapRepoDiff: onTapRepoDiff,
+                onTapMacHandoff: codex.isConnected ? {
+                    isShowingMacHandoffConfirm = true
+                } : nil,
+                onTapWorktreeHandoff: showsGitControls ? {
+                    isShowingWorktreeHandoff = true
+                } : nil,
+                onTapNewChat: codex.isConnected && !isWorktreeProject ? {
+                    startSiblingChat()
+                } : nil,
+                onTapRepoDiff: showsGitControls ? {
+                    presentRepositoryDiff(workingDirectory: gitWorkingDirectory)
+                } : nil,
                 onGitAction: { action in
                     handleGitActionSelection(
                         action,
@@ -191,11 +149,6 @@ struct TurnView: View {
             )
         }
         .overlay {
-            if isStartingSiblingChat {
-                NewChatOpeningOverlay()
-                    .transition(.opacity)
-            }
-
             if isShowingWorktreeHandoff {
                 TurnWorktreeHandoffOverlay(
                     mode: .handoff,
@@ -234,10 +187,6 @@ struct TurnView: View {
                 .transition(.opacity)
             }
         }
-        .overlay(alignment: .top) {
-            gitActionToastOverlay
-        }
-        .animation(.spring(response: 0.35, dampingFraction: 0.88), value: viewModel.gitActionLoadingTitle)
         .fullScreenCover(isPresented: isCameraPresentedBinding) {
             CameraImagePicker { data in
                 viewModel.enqueueCapturedImageData(data, codex: codex)
@@ -257,7 +206,7 @@ struct TurnView: View {
             isThreadRunning: isThreadRunning,
             isConnected: codex.isConnected,
             scenePhase: scenePhase,
-            approvalRequestChangeToken: approvalRequestChangeToken,
+            approvalRequestID: approvalForThread?.id,
             photoPickerItems: viewModel.photoPickerItems,
             onTask: {
                 await prepareThreadIfReady(gitWorkingDirectory: gitWorkingDirectory)
@@ -287,11 +236,9 @@ struct TurnView: View {
                 if !isConnected {
                     cancelVoiceRecordingIfNeeded()
                     invalidatePendingVoicePreflight()
-                    clearVoiceRecovery()
                     return
                 }
 
-                clearVoiceRecovery()
                 guard !wasConnected, isConnected else { return }
                 viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
                 guard showsGitControls else { return }
@@ -306,16 +253,13 @@ struct TurnView: View {
                 cancelVoiceRecordingIfNeeded()
                 invalidatePendingVoicePreflight()
             },
-            onApprovalRequestChanged: {
-                syncApprovalAlertPresentation()
+            onApprovalRequestIDChanged: {
+                alertApprovalRequest = approvalForThread
             }
         )
         .onDisappear {
             cancelVoiceRecordingIfNeeded()
             invalidatePendingVoicePreflight()
-            clearVoiceRecovery()
-            viewModel.cancelTransientTasks()
-            viewModel.clearComposerAutocomplete()
         }
         .onChange(of: isInputFocused) { _, isFocused in
             guard !isFocused else { return }
@@ -328,22 +272,6 @@ struct TurnView: View {
                 workingDirectory: gitWorkingDirectory,
                 threadID: thread.id
             )
-        }
-        .onChange(of: renderSnapshot.timelineChangeToken) { _, _ in
-            viewModel.reconcileDismissedStructuredPlanPrompts(messages: renderSnapshot.messages, codex: codex)
-        }
-        .onReceive(voiceTranscriptionManager.$recordingDuration) { duration in
-            guard isVoiceRecording,
-                  !isVoiceTranscribing,
-                  !hasTriggeredVoiceAutoStop,
-                  duration >= voiceAutoStopThreshold else {
-                return
-            }
-
-            hasTriggeredVoiceAutoStop = true
-            Task { @MainActor in
-                await stopVoiceTranscription()
-            }
         }
         .sheet(isPresented: $isShowingThreadPathSheet) {
             if let context = threadNavigationContext(for: resolvedThread) {
@@ -363,9 +291,6 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
-        }
-        .sheet(isPresented: $isShowingVoiceSetupSheet) {
-            GPTVoiceSetupSheet()
         }
         .sheet(item: $repositoryDiffPresentation) { presentation in
             TurnDiffSheet(
@@ -388,28 +313,15 @@ struct TurnView: View {
         }
         .turnViewAlerts(
             alertApprovalRequest: $alertApprovalRequest,
-            isApprovalAlertPresented: $isApprovalAlertPresented,
             isShowingNothingToCommitAlert: isShowingNothingToCommitAlertBinding,
             gitSyncAlert: gitSyncAlertBinding,
             isShowingMacHandoffConfirm: $isShowingMacHandoffConfirm,
             macHandoffErrorMessage: $macHandoffErrorMessage,
-            onDeclineApproval: { request in
-                viewModel.decline(request, codex: codex) { didSucceed in
-                    if didSucceed {
-                        syncApprovalAlertPresentation()
-                    } else {
-                        restoreApprovalAlert(afterFailureOf: request)
-                    }
-                }
+            onDeclineApproval: {
+                viewModel.decline(codex: codex)
             },
-            onApproveApproval: { request in
-                viewModel.approve(request, codex: codex) { didSucceed in
-                    if didSucceed {
-                        syncApprovalAlertPresentation()
-                    } else {
-                        restoreApprovalAlert(afterFailureOf: request)
-                    }
-                }
+            onApproveApproval: {
+                viewModel.approve(codex: codex)
             },
             onConfirmGitSyncAction: { alertAction in
                 viewModel.confirmGitSyncAlertAction(
@@ -424,7 +336,7 @@ struct TurnView: View {
                 viewModel.dismissGitSyncAlert()
             },
             onConfirmMacHandoff: {
-                continueOnDesktopApp()
+                continueOnMac()
             }
         )
         .alert(
@@ -445,69 +357,6 @@ struct TurnView: View {
         } message: { alert in
             Text(alert.message)
         }
-    }
-
-    // Reuses the shared recovery-card slot for both transport reconnects and voice-specific guidance.
-    private var composerRecoveryAccessory: AnyView? {
-        if let voiceRecoveryPresentation {
-            return AnyView(
-                ConnectionRecoveryCard(snapshot: voiceRecoveryPresentation.snapshot) {
-                    handleVoiceRecoveryAction(voiceRecoveryPresentation.action)
-                }
-            )
-        }
-
-        guard let snapshot = connectionRecoverySnapshot else {
-            return nil
-        }
-
-        return AnyView(
-            ConnectionRecoveryCard(snapshot: snapshot) {
-                handleConnectionRecoveryAction()
-            }
-        )
-    }
-
-    private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {
-        guard let voiceRecoveryReason else {
-            return nil
-        }
-
-        guard let resolvedReason = codex.resolveVoiceRecoveryReason(voiceRecoveryReason) else {
-            return nil
-        }
-
-        return buildVoiceRecoveryPresentation(for: resolvedReason)
-    }
-
-    private var connectionRecoverySnapshot: ConnectionRecoverySnapshot? {
-        TurnConnectionRecoverySnapshotBuilder.makeSnapshot(
-            hasReconnectCandidate: codex.hasReconnectCandidate,
-            isConnected: codex.isConnected,
-            secureConnectionState: codex.secureConnectionState,
-            showsWakeSavedMacDisplayAction: shouldOfferWakeSavedMacDisplayAction,
-            isWakingMacDisplayRecovery: isWakingMacDisplayRecovery,
-            isConnecting: codex.isConnecting,
-            shouldAutoReconnectOnForeground: codex.shouldAutoReconnectOnForeground,
-            isRetryingConnectionRecovery: isRetryingConnectionRecovery,
-            lastErrorMessage: codex.lastErrorMessage
-        )
-    }
-
-    private var canWakeSavedMacDisplay: Bool {
-        codex.canWakePreferredMacDisplay
-    }
-
-    // Matches the root fallback gate so the turn card only offers wake after the silent attempt already ran.
-    private var shouldOfferWakeSavedMacDisplayAction: Bool {
-        canWakeSavedMacDisplay && wakeMacDisplayAction != nil
-    }
-
-    private var isRetryingConnectionRecovery: Bool {
-        if case .retrying = codex.connectionRecoveryState {
-            return true
-        }
-        return false
     }
 
     // MARK: - Bindings
@@ -579,7 +428,7 @@ struct TurnView: View {
         }
     }
 
-    private func continueOnDesktopApp() {
+    private func continueOnMac() {
         guard !isHandingOffToMac else { return }
         isHandingOffToMac = true
 
@@ -588,7 +437,7 @@ struct TurnView: View {
 
             do {
                 let handoffService = DesktopHandoffService(codex: codex)
-                try await handoffService.continueOnDesktopApp(threadId: thread.id)
+                try await handoffService.continueOnMac(threadId: thread.id)
             } catch {
                 macHandoffErrorMessage = error.localizedDescription
             }
@@ -610,35 +459,6 @@ struct TurnView: View {
                     codex.lastErrorMessage = error.localizedDescription
                 }
             }
-        }
-    }
-
-    @ViewBuilder
-    private var gitActionToastOverlay: some View {
-        if let action = viewModel.runningGitAction {
-            InAppToastBannerView(
-                title: viewModel.gitActionLoadingTitle ?? "Git action running",
-                subtitle: nil,
-                detailLines: action.loadingSteps(repoSync: viewModel.gitRepoSync),
-                accessibilityHint: nil,
-                isDismissable: false,
-                onTap: nil,
-                onDismiss: nil
-            ) {
-                ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: "icloud.and.arrow.up.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.blue)
-
-                    ProgressView()
-                        .controlSize(.mini)
-                        .background(Color(.systemBackground), in: Circle())
-                        .offset(x: 4, y: 4)
-                }
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
@@ -680,50 +500,7 @@ struct TurnView: View {
     private func handleSend() {
         isInputFocused = false
         viewModel.clearComposerAutocomplete()
-        viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
-    }
-
-    @ViewBuilder
-    private func composerStructuredPromptReplacement(message: CodexMessage) -> some View {
-        if let request = message.structuredUserInputRequest {
-            let isDismissed = viewModel.isStructuredPlanPromptDismissed(request.requestID, codex: codex)
-            let isDismissing = viewModel.isStructuredPlanPromptDismissing(request.requestID, codex: codex)
-
-            if !isDismissed {
-                StructuredUserInputCard(
-                    request: request,
-                    isInteractionLocked: isDismissing,
-                    secondaryActionTitle: isDismissing ? "Closing..." : "ESC",
-                    onSecondaryAction: isDismissing ? nil : {
-                        isInputFocused = true
-                        viewModel.dismissStructuredPlanPrompt(message, codex: codex, threadID: thread.id)
-                    }
-                )
-                .id(request.requestID)
-                .padding(.horizontal, 12)
-                .padding(.top, 4)
-            } else {
-                composerWithSubagentAccessory(
-                    currentThread: currentResolvedThread,
-                    activeTurnID: codex.activeTurnID(for: thread.id),
-                    isThreadRunning: codex.timelineState(for: thread.id).renderSnapshot.isThreadRunning,
-                    isEmptyThread: codex.timelineState(for: thread.id).renderSnapshot.messages.isEmpty,
-                    isWorktreeProject: currentResolvedThread.isManagedWorktreeProject,
-                    showsGitControls: codex.isConnected && currentResolvedThread.gitWorkingDirectory != nil,
-                    gitWorkingDirectory: currentResolvedThread.gitWorkingDirectory
-                )
-            }
-        } else {
-            composerWithSubagentAccessory(
-                currentThread: currentResolvedThread,
-                activeTurnID: codex.activeTurnID(for: thread.id),
-                isThreadRunning: codex.timelineState(for: thread.id).renderSnapshot.isThreadRunning,
-                isEmptyThread: codex.timelineState(for: thread.id).renderSnapshot.messages.isEmpty,
-                isWorktreeProject: currentResolvedThread.isManagedWorktreeProject,
-                showsGitControls: codex.isConnected && currentResolvedThread.gitWorkingDirectory != nil,
-                gitWorkingDirectory: currentResolvedThread.gitWorkingDirectory
-            )
-        }
+        viewModel.sendTurn(codex: codex, threadID: thread.id)
     }
 
     private func handleGitActionSelection(
@@ -759,7 +536,7 @@ struct TurnView: View {
         isThreadRunning: Bool,
         gitWorkingDirectory: String?
     ) -> Bool {
-        viewModel.isGitRepositoryInitialized && canRunGitAction(
+        canRunGitAction(
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
         )
@@ -768,81 +545,17 @@ struct TurnView: View {
     // Centralizes the toolbar/composer availability rule so both entry points stay aligned.
     private func canHandOffToWorktree(
         isThreadRunning: Bool,
-        gitWorkingDirectory: String?
+        gitWorkingDirectory: String?,
+        isWorktreeProject: Bool
     ) -> Bool {
         isWorktreeHandoffAvailable(
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
-        ) && !viewModel.isCreatingGitWorktree
-    }
-
-    private func handleWorktreeHandoffTap(currentThread: CodexThread) {
-        if currentThread.isManagedWorktreeProject {
-            Task { @MainActor in
-                do {
-                    let move = try await WorktreeFlowCoordinator.handoffThreadToLocal(
-                        thread: currentThread,
-                        codex: codex
-                    )
-                    viewModel.refreshGitBranchTargets(
-                        codex: codex,
-                        workingDirectory: move.projectPath,
-                        threadID: thread.id
-                    )
-                } catch {
-                    viewModel.gitSyncAlert = TurnGitSyncAlert(
-                        title: "Local Handoff Failed",
-                        message: error.localizedDescription.isEmpty
-                            ? "Could not hand off the thread back to Local."
-                            : error.localizedDescription,
-                        action: .dismissOnly
-                    )
-                }
-            }
-            return
-        }
-
-        guard let associatedWorktreePath = codex.associatedManagedWorktreePath(for: thread.id) else {
-            isShowingWorktreeHandoff = true
-            return
-        }
-
-        Task { @MainActor in
-            viewModel.isCreatingGitWorktree = true
-            defer { viewModel.isCreatingGitWorktree = false }
-
-            do {
-                let outcome = try await WorktreeFlowCoordinator.handoffThreadToWorktree(
-                    threadID: thread.id,
-                    sourceProjectPath: currentThread.gitWorkingDirectory,
-                    associatedWorktreePath: associatedWorktreePath,
-                    codex: codex
-                )
-
-                switch outcome {
-                case .moved(let move):
-                    viewModel.refreshGitBranchTargets(
-                        codex: codex,
-                        workingDirectory: move.projectPath,
-                        threadID: thread.id
-                    )
-                case .missingAssociatedWorktree:
-                    isShowingWorktreeHandoff = true
-                }
-            } catch {
-                viewModel.gitSyncAlert = TurnGitSyncAlert(
-                    title: "Worktree Handoff Failed",
-                    message: error.localizedDescription.isEmpty
-                        ? "Could not hand off the thread to the new worktree."
-                        : error.localizedDescription,
-                    action: .dismissOnly
-                )
-            }
-        }
+        ) && !isWorktreeProject && !viewModel.isCreatingGitWorktree
     }
 
     private func handleInitialAppear(activeTurnID: String?) {
-        syncApprovalAlertPresentation()
+        alertApprovalRequest = approvalForThread
         if let pendingComposerAction = codex.consumePendingComposerAction(for: thread.id) {
             viewModel.applyPendingComposerAction(pendingComposerAction)
             isInputFocused = true
@@ -947,12 +660,9 @@ struct TurnView: View {
     }
 
     private func prepareThreadIfReady(gitWorkingDirectory: String?) async {
-        let didPrepare = await codex.prepareThreadForDisplay(threadId: thread.id)
-        guard didPrepare, !Task.isCancelled, codex.activeThreadId == thread.id else { return }
+        await codex.prepareThreadForDisplay(threadId: thread.id)
         await codex.refreshContextWindowUsage(threadId: thread.id)
-        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         viewModel.flushQueueIfPossible(codex: codex, threadID: thread.id)
-        guard !Task.isCancelled, codex.activeThreadId == thread.id else { return }
         guard gitWorkingDirectory != nil else { return }
         viewModel.refreshGitBranchTargets(
             codex: codex,
@@ -975,7 +685,7 @@ struct TurnView: View {
         return viewModel.gitDefaultBranch
     }
 
-    // Creates a named worktree, then rebinds this same chat to that checkout.
+    // Creates the worktree first, then rebinds this same chat to the returned project path.
     private func submitWorktreeHandoff(
         branchName: String,
         baseBranch: String,
@@ -985,78 +695,43 @@ struct TurnView: View {
         viewModel.requestCreateGitWorktree(
             named: branchName,
             fromBaseBranch: baseBranch,
-            changeTransfer: .none,
+            changeTransfer: .move,
             codex: codex,
             workingDirectory: gitWorkingDirectory,
             threadID: thread.id,
             activeTurnID: activeTurnID,
             onOpenWorktree: { result in
-                guard !result.alreadyExisted else {
-                    viewModel.gitSyncAlert = TurnGitSyncAlert(
-                        title: "Branch Already Exists",
-                        message: "A worktree for '\(result.branch)' already exists. Choose a different name.",
-                        action: .dismissOnly
-                    )
-                    return
-                }
-
-                Task { @MainActor in
-                    do {
-                        let outcome = try await WorktreeFlowCoordinator.handoffThreadToWorktree(
-                            threadID: thread.id,
-                            sourceProjectPath: gitWorkingDirectory,
-                            associatedWorktreePath: result.worktreePath,
-                            codex: codex
-                        )
-
-                        if case .moved(let move) = outcome {
-                            isShowingWorktreeHandoff = false
-                            viewModel.refreshGitBranchTargets(
-                                codex: codex,
-                                workingDirectory: move.projectPath,
-                                threadID: thread.id
-                            )
-                        }
-                    } catch {
-                        viewModel.gitSyncAlert = TurnGitSyncAlert(
-                            title: "Worktree Handoff Failed",
-                            message: error.localizedDescription.isEmpty
-                                ? "Could not hand off the thread to the new worktree."
-                                : error.localizedDescription,
-                            action: .dismissOnly
-                        )
-                    }
-                }
+                isShowingWorktreeHandoff = false
+                TurnViewWorktreeActions.handoffCurrentThreadToWorktree(
+                    projectPath: result.worktreePath,
+                    branch: result.branch,
+                    codex: codex,
+                    viewModel: viewModel,
+                    threadID: thread.id
+                )
             }
         )
     }
 
-    // Forks the current conversation into the Local checkout when possible.
+    // Forks the current conversation into the Local checkout when possible, or keeps it on the current cwd.
     private func startLocalFork() {
         Task { @MainActor in
             guard !isForkingThread else { return }
             let sourceThread = currentResolvedThread
-            guard WorktreeFlowCoordinator.localForkProjectPath(
+            guard let targetProjectPath = TurnThreadForkCoordinator.localForkProjectPath(
                 for: sourceThread,
                 localCheckoutPath: viewModel.gitLocalCheckoutPath
-            ) != nil else {
-                viewModel.gitSyncAlert = TurnGitSyncAlert(
-                    title: "Local Fork Unavailable",
-                    message: sourceThread.isManagedWorktreeProject
-                        ? "Could not resolve the Local checkout for this worktree thread."
-                        : "Could not resolve the local project path for this thread.",
-                    action: .dismissOnly
-                )
+            ) else {
+                viewModel.gitSyncAlert = TurnThreadForkCoordinator.localForkUnavailableAlert(for: sourceThread)
                 return
             }
             isForkingThread = true
             defer { isForkingThread = false }
 
             do {
-                let forkedThread = try await WorktreeFlowCoordinator.forkThreadToLocal(
-                    sourceThread: sourceThread,
-                    localCheckoutPath: viewModel.gitLocalCheckoutPath,
-                    codex: codex
+                let forkedThread = try await codex.forkThreadIfReady(
+                    from: thread.id,
+                    target: .projectPath(targetProjectPath)
                 )
                 openThread(forkedThread.id)
             } catch {
@@ -1067,7 +742,7 @@ struct TurnView: View {
         }
     }
 
-    // Creates a named worktree, then forks the conversation into that checkout.
+    // Creates a fresh worktree first, then forks the conversation into that checkout as a new thread.
     private func submitForkIntoNewWorktree(
         branchName: String,
         baseBranch: String,
@@ -1077,7 +752,7 @@ struct TurnView: View {
         viewModel.requestCreateGitWorktree(
             named: branchName,
             fromBaseBranch: baseBranch,
-            changeTransfer: .none,
+            changeTransfer: .copy,
             codex: codex,
             workingDirectory: gitWorkingDirectory,
             threadID: thread.id,
@@ -1085,8 +760,17 @@ struct TurnView: View {
             onOpenWorktree: { result in
                 guard !result.alreadyExisted else {
                     viewModel.gitSyncAlert = TurnGitSyncAlert(
-                        title: "Branch Already Exists",
-                        message: "A worktree for '\(result.branch)' already exists. Choose a different name.",
+                        title: "Pick a Different Branch Name",
+                        message: "A managed worktree for '\(result.branch)' already exists. Choose a different branch name to create a fresh forked workspace.",
+                        action: .dismissOnly
+                    )
+                    return
+                }
+
+                guard let normalizedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(result.worktreePath) else {
+                    viewModel.gitSyncAlert = TurnGitSyncAlert(
+                        title: "Worktree Fork Failed",
+                        message: "Could not resolve the new worktree path for '\(result.branch)'.",
                         action: .dismissOnly
                     )
                     return
@@ -1097,18 +781,29 @@ struct TurnView: View {
                     defer { isForkingThread = false }
 
                     do {
-                        let forkedThread = try await codex.forkThreadIfReady(
-                            from: thread.id,
-                            target: .projectPath(result.worktreePath)
+                        let forkedThread = try await TurnThreadForkCoordinator.forkThreadIntoPreparedWorktree(
+                            codex: codex,
+                            sourceThreadId: thread.id,
+                            projectPath: normalizedProjectPath
                         )
                         isShowingForkWorktree = false
                         openThread(forkedThread.id)
                     } catch {
+                        let cleanupResult = await TurnThreadForkCoordinator.cleanupResultForFailedWorktreeFork(
+                            result,
+                            sourceWorkingDirectory: gitWorkingDirectory,
+                            error: error,
+                            codex: codex,
+                            viewModel: viewModel,
+                            threadID: thread.id
+                        )
                         viewModel.gitSyncAlert = TurnGitSyncAlert(
                             title: "Worktree Fork Failed",
-                            message: error.localizedDescription.isEmpty
-                                ? "Could not fork the thread into the new worktree."
-                                : error.localizedDescription,
+                            message: TurnThreadForkCoordinator.failedWorktreeForkMessage(
+                                for: error,
+                                branch: result.branch,
+                                cleanupResult: cleanupResult
+                            ),
                             action: .dismissOnly
                         )
                     }
@@ -1193,27 +888,15 @@ struct TurnView: View {
     }
 
     private var approvalForThread: CodexApprovalRequest? {
-        codex.pendingApproval(for: thread.id)
-    }
-
-    private var approvalRequestChangeToken: String? {
-        guard let request = approvalForThread else {
+        guard let request = codex.pendingApproval else {
             return nil
         }
 
-        let reason = request.reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let command = request.command?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return [request.id, reason, command].joined(separator: "|")
-    }
+        guard let requestThreadID = request.threadId else {
+            return request
+        }
 
-    private func syncApprovalAlertPresentation() {
-        alertApprovalRequest = approvalForThread
-        isApprovalAlertPresented = alertApprovalRequest != nil
-    }
-
-    private func restoreApprovalAlert(afterFailureOf request: CodexApprovalRequest) {
-        alertApprovalRequest = approvalForThread ?? request
-        isApprovalAlertPresented = alertApprovalRequest != nil
+        return requestThreadID == thread.id ? request : nil
     }
 
     private var parentThread: CodexThread? {
@@ -1225,7 +908,7 @@ struct TurnView: View {
     }
 
     private func threadNavigationContext(for thread: CodexThread) -> TurnThreadNavigationContext? {
-        guard let path = thread.gitWorkingDirectory,
+        guard let path = thread.normalizedProjectPath ?? thread.cwd,
               !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
@@ -1274,7 +957,7 @@ struct TurnView: View {
                 isThreadRunning: isThreadRunning,
                 isEmptyThread: isEmptyThread,
                 isWorktreeProject: isWorktreeProject,
-                canForkLocally: WorktreeFlowCoordinator.localForkProjectPath(
+                canForkLocally: TurnThreadForkCoordinator.localForkProjectPath(
                     for: currentThread,
                     localCheckoutPath: viewModel.gitLocalCheckoutPath
                 ) != nil,
@@ -1282,8 +965,8 @@ struct TurnView: View {
                 orderedModelOptions: orderedModelOptions,
                 selectedModelTitle: selectedModelTitle,
                 reasoningDisplayOptions: reasoningDisplayOptions,
-                showsGitControls: showsGitControls && viewModel.isGitRepositoryInitialized,
-                isGitBranchSelectorEnabled: viewModel.isGitRepositoryInitialized && canRunGitAction(
+                showsGitControls: showsGitControls,
+                isGitBranchSelectorEnabled: canRunGitAction(
                     isThreadRunning: isThreadRunning,
                     gitWorkingDirectory: gitWorkingDirectory
                 ),
@@ -1302,7 +985,7 @@ struct TurnView: View {
                             }
                         }
 
-                        let existingThread = WorktreeFlowCoordinator.liveThreadForCheckedOutElsewhereBranch(
+                        let existingThread = TurnViewWorktreeActions.liveThreadForCheckedOutElsewhereBranch(
                             projectPath: worktreePath,
                             codex: codex,
                             currentThread: currentThread
@@ -1337,7 +1020,7 @@ struct TurnView: View {
                     )
                 },
                 onRefreshGitBranches: {
-                    guard showsGitControls, viewModel.isGitRepositoryInitialized else { return }
+                    guard showsGitControls else { return }
                     viewModel.refreshGitBranchTargets(
                         codex: codex,
                         workingDirectory: gitWorkingDirectory,
@@ -1350,10 +1033,7 @@ struct TurnView: View {
                     isShowingForkWorktree = true
                 },
                 onOpenWorktreeHandoff: {
-                    handleWorktreeHandoffTap(currentThread: currentThread)
-                },
-                onOpenFeedbackMail: {
-                    openURL(AppEnvironment.feedbackMailtoURL)
+                    isShowingWorktreeHandoff = true
                 },
                 onShowStatus: presentStatusSheet,
                 voiceButtonPresentation: voiceButtonPresentation,
@@ -1436,7 +1116,6 @@ struct TurnView: View {
 
     // Stops the recorder, transcribes through the bridge, and appends the final text into the draft.
     private func stopVoiceTranscription() async {
-        hasTriggeredVoiceAutoStop = false
         isVoiceTranscribing = true
         defer { isVoiceTranscribing = false }
 
@@ -1457,14 +1136,13 @@ struct TurnView: View {
                 at: clip.url,
                 durationSeconds: clip.durationSeconds
             )
-            clearVoiceRecovery()
             viewModel.appendVoiceTranscript(transcript)
             // Keep voice flows keyboard-free; users can tap into the draft afterward if they want to edit.
             isInputFocused = false
         } catch {
             isVoiceRecording = false
             voiceTranscriptionManager.resetMeteringState()
-            presentVoiceRecovery(for: error)
+            codex.lastErrorMessage = error.localizedDescription
         }
     }
 
@@ -1475,19 +1153,12 @@ struct TurnView: View {
             return
         }
 
-        guard codex.supportsBridgeVoiceAuth else {
-            presentVoiceRecovery(for: .bridgeSessionUnsupported)
-            return
-        }
-
         guard codex.isConnected else {
-            presentVoiceRecovery(for: .reconnectRequired)
+            codex.lastErrorMessage = "Connect to your Mac before using voice transcription."
             return
         }
 
-        clearVoiceRecovery()
         codex.lastErrorMessage = nil
-        hasTriggeredVoiceAutoStop = false
         // Dismiss any active text focus before recording so the keyboard does not
         // compete with the waveform UI or waste vertical space during capture.
         isInputFocused = false
@@ -1512,7 +1183,7 @@ struct TurnView: View {
             isVoiceRecording = true
             isInputFocused = false
         } catch {
-            presentVoiceRecovery(for: error)
+            codex.lastErrorMessage = error.localizedDescription
         }
     }
 
@@ -1524,165 +1195,6 @@ struct TurnView: View {
 
         voiceTranscriptionManager.cancelRecording()
         isVoiceRecording = false
-        hasTriggeredVoiceAutoStop = false
-    }
-
-    // Trigger a hair before the hard validation limit so the saved WAV never misses by timer drift.
-    private var voiceAutoStopThreshold: TimeInterval {
-        max(0, CodexVoiceTranscriptionPreflight.maxDurationSeconds - 0.25)
-    }
-
-    private func clearVoiceRecovery() {
-        voiceRecoveryReason = nil
-    }
-
-    // Keeps voice failures out of the transcript by routing them into a dedicated recovery accessory.
-    private func presentVoiceRecovery(for error: Error) {
-        presentVoiceRecovery(for: codex.classifyVoiceFailure(error))
-    }
-
-    private func presentVoiceRecovery(for reason: CodexVoiceFailureReason) {
-        voiceRecoveryReason = reason
-        codex.lastErrorMessage = nil
-    }
-
-    private func buildVoiceRecoveryPresentation(for reason: CodexVoiceFailureReason) -> VoiceRecoveryPresentation {
-        switch reason {
-        case .reconnectRequired:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "Reconnect to your Mac to use voice mode.",
-                    detail: "Keep the Remodex bridge running on your paired computer, then try the microphone again.",
-                    status: .interrupted,
-                    trailingStyle: .action("Reconnect")
-                ),
-                action: .reconnect
-            )
-        case .bridgeSessionUnsupported:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "This bridge session does not support voice mode yet.",
-                    detail: "Restart Remodex on your computer, then reconnect this iPhone. If it still happens, update Remodex on your computer and pair again.",
-                    status: .actionRequired,
-                    trailingStyle: .action("Reconnect")
-                ),
-                action: .reconnect
-            )
-        case .macLoginRequired:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "Sign in to ChatGPT on your computer to use voice mode.",
-                    detail: "Open ChatGPT on the paired computer, sign in there, then come back here and try again.",
-                    status: .actionRequired,
-                    trailingStyle: .action("How To Fix")
-                ),
-                action: .showSetupHelp
-            )
-        case .macReauthenticationRequired:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "ChatGPT voice needs a fresh sign-in on your computer.",
-                    detail: "Open ChatGPT on the paired computer, sign in again there, then retry voice mode here.",
-                    status: .actionRequired,
-                    trailingStyle: .action("How To Fix")
-                ),
-                action: .showSetupHelp
-            )
-        case .voiceSyncInProgress:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "Voice mode is still syncing from your Mac.",
-                    detail: "Keep the bridge connected for a moment, then try again.",
-                    status: .syncing,
-                    trailingStyle: .progress
-                ),
-                action: .none
-            )
-        case .chatGPTRequired:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "Voice mode needs a ChatGPT session on your computer.",
-                    detail: "API-key-only auth is not enough here. Sign in to ChatGPT on the paired computer, then try again.",
-                    status: .actionRequired,
-                    trailingStyle: .action("How To Fix")
-                ),
-                action: .showSetupHelp
-            )
-        case .microphonePermissionRequired:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "Microphone access is off for Remodex.",
-                    detail: "Open iPhone Settings, allow Microphone for Remodex, then try recording again.",
-                    status: .actionRequired,
-                    trailingStyle: .action("Open Settings")
-                ),
-                action: .openSystemSettings
-            )
-        case .microphoneUnavailable:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "No microphone input is available right now.",
-                    detail: "Check that another app is not holding the microphone, then try again.",
-                    status: .actionRequired,
-                    trailingStyle: .none
-                ),
-                action: .none
-            )
-        case .recorderUnavailable:
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: "Remodex could not start the recorder.",
-                    detail: "Close other audio-heavy apps, then try voice mode again.",
-                    status: .actionRequired,
-                    trailingStyle: .none
-                ),
-                action: .none
-            )
-        case .generic(let message):
-            return VoiceRecoveryPresentation(
-                snapshot: ConnectionRecoverySnapshot(
-                    title: "Voice Mode",
-                    summary: message,
-                    status: .actionRequired,
-                    trailingStyle: .none
-                ),
-                action: .none
-            )
-        }
-    }
-
-    private func handleVoiceRecoveryAction(_ action: VoiceRecoveryAction) {
-        switch action {
-        case .reconnect:
-            reconnectAction?()
-        case .showSetupHelp:
-            isShowingVoiceSetupSheet = true
-        case .openSystemSettings:
-            guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else {
-                return
-            }
-            openURL(settingsURL)
-        case .none:
-            break
-        }
-    }
-
-    private func handleConnectionRecoveryAction() {
-        if shouldOfferWakeSavedMacDisplayAction {
-            wakeMacDisplayAction?()
-            return
-        }
-
-        reconnectAction?()
     }
 
     // Invalidates any in-flight async mic startup so it cannot reopen the recorder after leaving the screen.
@@ -1718,35 +1230,11 @@ struct TurnView: View {
     private func openThread(_ threadId: String) {
         codex.activeThreadId = threadId
         codex.markThreadAsViewed(threadId)
-        codex.requestImmediateActiveThreadSync(threadId: threadId)
     }
 
     // MARK: - Empty State
 
-    private var loadingState: some View {
-        chatPlaceholderState(
-            title: "Loading chat...",
-            subtitle: "Fetching the latest messages for this conversation."
-        )
-    }
-
-    private func resolvedEmptyState(for phase: CodexService.ThreadDisplayPhase) -> AnyView {
-        switch phase {
-        case .loading:
-            return AnyView(loadingState)
-        case .empty, .ready:
-            return AnyView(emptyState)
-        }
-    }
-
     private var emptyState: some View {
-        chatPlaceholderState(
-            title: "Hi! How can I help you?",
-            subtitle: "Chats are End-to-end encrypted"
-        )
-    }
-
-    private func chatPlaceholderState(title: String, subtitle: String) -> some View {
         VStack(spacing: 12) {
             Spacer()
             Image("AppLogo")
@@ -1755,51 +1243,17 @@ struct TurnView: View {
                 .frame(width: 56, height: 56)
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            Text(title)
+            Text("Hi! How can I help you?")
                 .font(AppFont.title2(weight: .semibold))
-            Text(subtitle)
+            // Reinforces the secure transport upgrade right where a new chat starts.
+            Text("Chats are End-to-end encrypted")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 28)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
-}
-
-private struct NewChatOpeningOverlay: View {
-    var body: some View {
-        VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.regular)
-
-            VStack(spacing: 4) {
-                Text("Starting new chat...")
-                    .font(AppFont.headline())
-                    .foregroundStyle(.primary)
-
-                Text("Preparing an empty conversation.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
-    }
-}
-
-private enum VoiceRecoveryAction: Equatable {
-    case reconnect
-    case showSetupHelp
-    case openSystemSettings
-    case none
-}
-
-private struct VoiceRecoveryPresentation: Equatable {
-    let snapshot: ConnectionRecoverySnapshot
-    let action: VoiceRecoveryAction
 }
 
 private struct SubagentParentAccessoryCard: View {
@@ -1863,64 +1317,9 @@ private struct CheckedOutElsewhereAlert: Identifiable {
     }
 }
 
-private struct RuntimeDebugLogSheet: View {
-    @Environment(CodexService.self) private var codex
-    @Environment(\.dismiss) private var dismiss
-
-    private var combinedLogText: String {
-        codex.runtimeDebugLogEntries.joined(separator: "\n")
-    }
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if codex.runtimeDebugLogEntries.isEmpty {
-                    ContentUnavailableView(
-                        "No Runtime Logs Yet",
-                        systemImage: "list.bullet.rectangle",
-                        description: Text("Start a Plan Mode turn and the RPC events will appear here.")
-                    )
-                } else {
-                    ScrollView {
-                        Text(combinedLogText)
-                            .font(AppFont.mono(.footnote))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                    }
-                    .background(Color(.systemBackground))
-                }
-            }
-            .navigationTitle("Runtime Logs")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Close") {
-                        dismiss()
-                    }
-                }
-
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("Clear") {
-                        codex.clearRuntimeDebugLog()
-                    }
-
-                    Button("Copy") {
-                        UIPasteboard.general.string = combinedLogText
-                    }
-                    .disabled(combinedLogText.isEmpty)
-                }
-            }
-        }
-    }
-}
-
 #Preview {
     NavigationStack {
-        TurnView(
-            thread: CodexThread(id: "thread_preview", title: "Preview"),
-            isWakingMacDisplayRecovery: false
-        )
+        TurnView(thread: CodexThread(id: "thread_preview", title: "Preview"))
             .environment(CodexService())
     }
 }

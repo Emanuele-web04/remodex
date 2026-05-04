@@ -8,7 +8,6 @@ import SwiftUI
 import UIKit
 
 struct TurnComposerInputTextView: UIViewRepresentable {
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Binding var text: String
     @Binding var isFocused: Bool
     let isEditable: Bool
@@ -18,26 +17,23 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     let onPasteImageData: ([Data]) -> Void
 
     private let minVisibleLines: CGFloat = 1
-    private let maxVisibleLines: CGFloat = 4
+    private let maxVisibleLines: CGFloat = 6
+
     func makeUIView(context: Context) -> TurnComposerPasteInterceptingTextView {
         let textView = TurnComposerPasteInterceptingTextView(frame: .zero, textContainer: nil)
         textView.delegate = context.coordinator
         textView.backgroundColor = .clear
         textView.font = composerUIFont()
         textView.textColor = UIColor.label
-        textView.typingAttributes[.font] = composerUIFont()
-        textView.typingAttributes[.foregroundColor] = UIColor.label
-        textView.adjustsFontForContentSizeCategory = true
         textView.textContainerInset = .zero
         textView.textContainer.lineFragmentPadding = 0
         textView.textContainer.widthTracksTextView = true
         textView.autocorrectionType = .default
         textView.autocapitalizationType = .sentences
-        textView.isScrollEnabled = false
+        textView.isScrollEnabled = true
         textView.showsVerticalScrollIndicator = false
-        textView.alwaysBounceVertical = false
-        // Keep drags inside the composer dedicated to editing and internal scrolling.
-        textView.keyboardDismissMode = .none
+        // Lets upward drags that start inside the composer dismiss the keyboard too.
+        textView.keyboardDismissMode = .interactive
         textView.onPasteImageData = onPasteImageData
         textView.runtimeState = runtimeState
         textView.runtimeActions = runtimeActions
@@ -49,15 +45,11 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             shouldBeFocused: isFocused,
             isEditable: isEditable
         )
-        context.coordinator.updateHeightIfNeeded(for: textView, force: true)
+        context.coordinator.updateHeight(for: textView)
         return textView
     }
 
     func updateUIView(_ uiView: TurnComposerPasteInterceptingTextView, context: Context) {
-        let nextFont = composerUIFont()
-        let currentFont = uiView.font
-        let fontChanged = currentFont?.fontName != nextFont.fontName
-            || abs((currentFont?.pointSize ?? 0) - nextFont.pointSize) > 0.5
         let textChanged = uiView.text != text
         if textChanged {
             uiView.text = text
@@ -70,16 +62,10 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         )
         uiView.isEditable = isEditable
         uiView.isSelectable = true
-        if fontChanged {
-            uiView.font = nextFont
-        }
-        uiView.typingAttributes[.font] = nextFont
-        uiView.typingAttributes[.foregroundColor] = UIColor.label
-        uiView.adjustsFontForContentSizeCategory = true
-        uiView.textContainerInset = .zero
+        uiView.font = composerUIFont()
         uiView.textContainer.widthTracksTextView = true
-        // Preserve internal scrolling without letting composer drags dismiss the keyboard.
-        uiView.keyboardDismissMode = .none
+        // Keep drag-to-dismiss active after SwiftUI updates the wrapped text view.
+        uiView.keyboardDismissMode = .interactive
         uiView.onPasteImageData = onPasteImageData
         uiView.runtimeState = runtimeState
         uiView.runtimeActions = runtimeActions
@@ -89,7 +75,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             shouldBeFocused: isFocused,
             isEditable: isEditable
         )
-        context.coordinator.updateHeightIfNeeded(for: uiView, force: textChanged || fontChanged)
+        context.coordinator.updateHeight(for: uiView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -102,12 +88,9 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         )
     }
 
-    // Keeps the composer aligned with the app's normal body sizing instead of
-    // the smaller ad hoc size that made the input feel visually detached.
+    // Mirrors the shared font setting so the UIKit composer stays aligned with SwiftUI text.
     private func composerUIFont() -> UIFont {
-        // Read the SwiftUI environment so UIKit gets refreshed when Dynamic Type changes.
-        let _ = dynamicTypeSize
-        return AppFont.uiFont(size: 15, textStyle: .body)
+        AppFont.uiFont(size: 14, textStyle: .body)
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
@@ -119,7 +102,6 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private var lastFocusBindingValue: Bool
         private var pendingHeightValue: CGFloat?
         private var isHeightCommitScheduled = false
-        private var lastHeightMeasurementSignature: HeightMeasurementSignature?
 
         init(
             text: Binding<String>,
@@ -150,7 +132,8 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             if text.wrappedValue != textView.text {
                 text.wrappedValue = textView.text
             }
-            updateHeightIfNeeded(for: textView, force: true)
+            updateHeight(for: textView)
+            keepCaretVisible(in: textView)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -165,52 +148,24 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             }
         }
 
-        fileprivate func updateHeightIfNeeded(for textView: UITextView, force: Bool = false) {
-            let signature = heightMeasurementSignature(for: textView)
-            guard force || signature != lastHeightMeasurementSignature else {
-                return
-            }
-            lastHeightMeasurementSignature = signature
-            updateHeight(for: textView)
-        }
-
-        private func updateHeight(for textView: UITextView) {
-            textView.layoutIfNeeded()
-            textView.layoutManager.ensureLayout(for: textView.textContainer)
+        fileprivate func updateHeight(for textView: UITextView) {
             let lineHeight = (textView.font ?? UIFont.preferredFont(forTextStyle: .body)).lineHeight
             let minHeight = lineHeight * minVisibleLines
             let maxHeight = lineHeight * maxVisibleLines
-            let targetWidth = max(textView.bounds.width, textView.textContainer.size.width, 1)
+            let targetWidth = max(textView.bounds.width, 1)
             let fitSize = CGSize(width: targetWidth, height: .greatestFiniteMagnitude)
             var measured = textView.sizeThatFits(fitSize).height
             let shouldScroll = measured > maxHeight + 0.5
             if textView.isScrollEnabled != shouldScroll {
                 textView.isScrollEnabled = shouldScroll
-                textView.alwaysBounceVertical = shouldScroll
-                textView.showsVerticalScrollIndicator = shouldScroll
                 textView.invalidateIntrinsicContentSize()
                 measured = textView.sizeThatFits(fitSize).height
             }
             let clamped = min(max(measured, minHeight), maxHeight)
-            normalizeViewport(in: textView, shouldScroll: shouldScroll)
 
             if abs(dynamicHeight.wrappedValue - clamped) > 0.5 {
                 scheduleHeightCommit(clamped)
             }
-
-            keepCaretVisible(in: textView)
-        }
-
-        // Avoids recalculating UITextView layout when only the streaming transcript invalidated SwiftUI.
-        private func heightMeasurementSignature(for textView: UITextView) -> HeightMeasurementSignature {
-            let font = textView.font ?? UIFont.preferredFont(forTextStyle: .body)
-            let width = max(textView.bounds.width, textView.textContainer.size.width, 1)
-            return HeightMeasurementSignature(
-                textHash: textView.text.hashValue,
-                widthBucket: Int((width * 2).rounded()),
-                lineHeightBucket: Int((font.lineHeight * 10).rounded()),
-                isScrollEnabled: textView.isScrollEnabled
-            )
         }
 
         // Coalesces repeated text-layout height writes so SwiftUI sees at most one
@@ -236,48 +191,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         // Keeps the newest typed line visible once the composer switches from growing to internal scrolling.
         private func keepCaretVisible(in textView: UITextView) {
             guard textView.isScrollEnabled else { return }
-            DispatchQueue.main.async { [weak textView] in
-                guard let textView else { return }
-                textView.layoutIfNeeded()
-                guard let selectionEnd = textView.selectedTextRange?.end else { return }
-                let caretRect = textView.caretRect(for: selectionEnd).insetBy(dx: 0, dy: -8)
-                textView.scrollRectToVisible(caretRect, animated: false)
-            }
-        }
-
-        // Resets/clamps the text viewport after Return inserts can nudge UITextView
-        // into a stale offset even when the full composer content still fits.
-        private func normalizeViewport(in textView: UITextView, shouldScroll: Bool) {
-            let adjustedInset = textView.adjustedContentInset
-            let minOffset = CGPoint(x: -adjustedInset.left, y: -adjustedInset.top)
-
-            guard shouldScroll else {
-                guard
-                    abs(textView.contentOffset.x - minOffset.x) > 0.5
-                        || abs(textView.contentOffset.y - minOffset.y) > 0.5
-                else {
-                    return
-                }
-                textView.setContentOffset(minOffset, animated: false)
-                return
-            }
-
-            let maxYOffset = max(
-                minOffset.y,
-                textView.contentSize.height - textView.bounds.height + adjustedInset.bottom
-            )
-            let clampedOffset = CGPoint(
-                x: minOffset.x,
-                y: min(max(textView.contentOffset.y, minOffset.y), maxYOffset)
-            )
-
-            guard
-                abs(textView.contentOffset.x - clampedOffset.x) > 0.5
-                    || abs(textView.contentOffset.y - clampedOffset.y) > 0.5
-            else {
-                return
-            }
-            textView.setContentOffset(clampedOffset, animated: false)
+            textView.scrollRangeToVisible(textView.selectedRange)
         }
 
         fileprivate func syncFocusIfNeeded(
@@ -307,13 +221,6 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             }
         }
     }
-
-    private struct HeightMeasurementSignature: Equatable {
-        let textHash: Int
-        let widthBucket: Int
-        let lineHeightBucket: Int
-        let isScrollEnabled: Bool
-    }
 }
 
 // Internal (not fileprivate) because UIViewRepresentable protocol methods expose the type.
@@ -335,24 +242,6 @@ final class TurnComposerPasteInterceptingTextView: UITextView {
     // Without this, SwiftUI uses the full text width as the ideal size.
     override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric, height: super.intrinsicContentSize.height)
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-
-        guard !isScrollEnabled else { return }
-
-        let pinnedOffset = CGPoint(
-            x: -adjustedContentInset.left,
-            y: -adjustedContentInset.top
-        )
-        guard
-            abs(contentOffset.x - pinnedOffset.x) > 0.5
-                || abs(contentOffset.y - pinnedOffset.y) > 0.5
-        else {
-            return
-        }
-        contentOffset = pinnedOffset
     }
 
     // Adds the shared runtime controls directly into the text edit menu.

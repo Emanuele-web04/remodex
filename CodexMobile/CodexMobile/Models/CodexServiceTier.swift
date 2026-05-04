@@ -12,14 +12,14 @@ enum CodexServiceTier: String, CaseIterable, Codable, Hashable, Sendable {
     var displayName: String {
         switch self {
         case .fast:
-            return "Fast"
+            return L10n.tr("Fast")
         }
     }
 
     var description: String {
         switch self {
         case .fast:
-            return "Lower latency using Codex Fast Mode."
+            return L10n.tr("Lower latency using Codex Fast Mode.")
         }
     }
 

@@ -2,16 +2,13 @@
 // Purpose: Mirrors desktop-origin rollout activity back into live bridge notifications for iPhone catch-up.
 // Layer: CLI helper
 // Exports: createRolloutLiveMirrorController
-// Depends on: fs, crypto, path, ./rollout-watch, ./codex-home
+// Depends on: fs, ./rollout-watch
 
 const fs = require("fs");
-const crypto = require("crypto");
-const path = require("path");
 const {
   findRecentRolloutFileForContextRead,
   resolveSessionsRoot,
 } = require("./rollout-watch");
-const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 
 const DEFAULT_POLL_INTERVAL_MS = 700;
 const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
@@ -382,20 +379,11 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
       if (!message || !shouldMirrorAgentMessage(payload)) {
         return [];
       }
-      const turnId = readString(payload.turn_id) || readString(payload.turnId) || state.activeTurnId || "";
 
       notifications.push(createNotification("codex/event/agent_message", {
         threadId: state.threadId,
-        turnId,
-        itemId: buildAgentMessageItemId(state.threadId, turnId, entry, message),
+        turnId: readString(payload.turn_id) || readString(payload.turnId) || state.activeTurnId || "",
         message,
-      }));
-      return notifications;
-    }
-
-    if (eventType === "image_generation_end") {
-      notifications.push(...imageGenerationNotifications(state, payload, {
-        preferCallId: true,
       }));
       return notifications;
     }
@@ -408,25 +396,20 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
   }
 
   const payload = entry.payload || {};
-  const itemType = normalizeRolloutItemType(payload.type);
+  const itemType = readString(payload.type);
 
   if (itemType === "reasoning") {
     notifications.push(...reasoningNotifications(state, extractReasoningText(payload)));
     return notifications;
   }
 
-  if (itemType === "functioncall") {
+  if (itemType === "function_call") {
     notifications.push(...toolStartNotifications(state, payload));
     return notifications;
   }
 
-  if (itemType === "functioncalloutput") {
+  if (itemType === "function_call_output") {
     notifications.push(...toolOutputNotifications(state, payload));
-    return notifications;
-  }
-
-  if (itemType === "imagegeneration" || itemType === "imagegenerationcall" || itemType === "imagegenerationend" || itemType === "imageview") {
-    notifications.push(...imageGenerationNotifications(state, payload));
     return notifications;
   }
 
@@ -547,54 +530,6 @@ function toolOutputNotifications(state, payload) {
   }));
   state.commandCalls.delete(callId);
   return notifications;
-}
-
-function imageGenerationNotifications(state, payload, { preferCallId = false } = {}) {
-  if (!state.activeTurnId) {
-    return [];
-  }
-
-  const callId = preferCallId
-    ? firstNonEmptyString([
-        readString(payload.call_id),
-        readString(payload.callId),
-        readString(payload.itemId),
-        readString(payload.item_id),
-        readString(payload.id),
-      ])
-    : firstNonEmptyString([
-        readString(payload.id),
-        readString(payload.call_id),
-        readString(payload.callId),
-        readString(payload.itemId),
-        readString(payload.item_id),
-      ]);
-  if (!callId) {
-    return [];
-  }
-
-  const imagePath = firstNonEmptyString([
-    readString(payload.saved_path),
-    readString(payload.savedPath),
-    readString(payload.file_path),
-    readString(payload.path),
-  ]) || generatedImagePathForRolloutItem(state.threadId, callId);
-  if (!imagePath) {
-    return [];
-  }
-
-  return [
-    ...ensureThinkingNotifications(state),
-    createNotification("codex/event/image_generation_end", {
-      threadId: state.threadId,
-      turnId: state.activeTurnId,
-      call_id: callId,
-      itemId: callId,
-      saved_path: imagePath,
-      file_path: imagePath,
-      path: imagePath,
-    }),
-  ];
 }
 
 function ensureThinkingNotifications(state) {
@@ -726,38 +661,8 @@ function createNotification(method, params) {
   return { method, params };
 }
 
-function buildSyntheticItemId(kind, threadId, turnId, suffix = "") {
-  const suffixPart = suffix ? `:${suffix}` : "";
-  return `rollout-${kind}:${threadId}:${turnId}${suffixPart}`;
-}
-
-function buildAgentMessageItemId(threadId, turnId, entry, message) {
-  const timestamp = readString(entry?.timestamp) || "untimed";
-  const messageHash = crypto
-    .createHash("sha256")
-    .update(readString(message))
-    .digest("hex")
-    .slice(0, 12);
-  return buildSyntheticItemId(
-    "agent-message",
-    threadId,
-    turnId || "turnless",
-    `${timestamp}:${messageHash}`
-  );
-}
-
-function generatedImagePathForRolloutItem(threadId, callId) {
-  const resolvedThreadId = readString(threadId);
-  const resolvedCallId = readString(callId);
-  if (!resolvedThreadId || !resolvedCallId) {
-    return "";
-  }
-
-  return path.join(resolveCodexGeneratedImagesRoot(), resolvedThreadId, `${resolvedCallId}.png`);
-}
-
-function normalizeRolloutItemType(value) {
-  return readString(value).replace(/[_-]/g, "").toLowerCase();
+function buildSyntheticItemId(kind, threadId, turnId) {
+  return `rollout-${kind}:${threadId}:${turnId}`;
 }
 
 function resetRunState(state) {

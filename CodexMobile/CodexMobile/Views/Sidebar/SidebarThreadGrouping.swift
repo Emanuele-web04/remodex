@@ -6,7 +6,6 @@
 import Foundation
 
 enum SidebarThreadGroupKind: Equatable {
-    case pinned
     case project
     case archived
 }
@@ -29,8 +28,6 @@ struct SidebarThreadGroup: Identifiable {
 
     var iconSystemName: String {
         switch kind {
-        case .pinned:
-            return "pin"
         case .project:
             return CodexThread.projectIconSystemName(for: projectPath)
         case .archived:
@@ -46,14 +43,10 @@ struct SidebarThreadGroup: Identifiable {
 enum SidebarThreadGrouping {
     static func makeGroups(
         from threads: [CodexThread],
-        pinnedThreadIDs: [String] = [],
         now _: Date = Date(),
         calendar _: Calendar = .current
     ) -> [SidebarThreadGroup] {
-        var groups: [SidebarThreadGroup] = []
         var archivedThreads: [CodexThread] = []
-        let pinnedThreads = collectPinnedThreads(from: threads, pinnedRootThreadIDs: pinnedThreadIDs)
-        let pinnedThreadIDSet = Set(pinnedThreads.map(\.id))
 
         for thread in threads {
             if thread.syncState == .archivedLocal {
@@ -61,27 +54,14 @@ enum SidebarThreadGrouping {
             }
         }
 
-        if let firstPinned = pinnedThreads.first {
-            groups.append(
-                SidebarThreadGroup(
-                    id: "pinned",
-                    label: "Pinned",
-                    kind: .pinned,
-                    sortDate: firstPinned.updatedAt ?? firstPinned.createdAt ?? .distantPast,
-                    projectPath: nil,
-                    threads: pinnedThreads
-                )
-            )
-        }
-
-        groups.append(contentsOf: makeProjectGroups(from: threads, excludingPinnedThreadIDs: pinnedThreadIDSet))
+        var groups = makeProjectGroups(from: threads)
 
         let sortedArchived = sortThreadsByRecentActivity(archivedThreads)
         if let firstArchived = sortedArchived.first {
             groups.append(
                 SidebarThreadGroup(
                     id: "archived",
-                    label: "Archived (\(sortedArchived.count))",
+                    label: L10n.fmt("Archived (%lld)", sortedArchived.count),
                     kind: .archived,
                     sortDate: firstArchived.updatedAt ?? firstArchived.createdAt ?? .distantPast,
                     projectPath: nil,
@@ -123,26 +103,13 @@ enum SidebarThreadGrouping {
         ).map(\.id)
     }
 
-    // Includes archived and pinned chats so local project removal fully hides the project on this device.
-    static func allThreadIDsForProjectGroup(_ group: SidebarThreadGroup, in threads: [CodexThread]) -> [String] {
-        guard group.kind == .project else {
-            return []
-        }
-
-        return sortThreadsByRecentActivity(
-            threads.filter { thread in
-                projectGroupID(for: thread) == group.id
-            }
-        ).map(\.id)
-    }
-
     private static func makeProjectGroup(projectKey: String, threads: [CodexThread]) -> SidebarThreadGroup {
         let sortedThreads = sortThreadsByRecentActivity(threads)
         let representativeThread = sortedThreads.first
         let sortDate = representativeThread?.updatedAt ?? representativeThread?.createdAt ?? .distantPast
         return SidebarThreadGroup(
             id: "project:\(projectKey)",
-            label: representativeThread?.projectDisplayName ?? "Cloud",
+            label: representativeThread?.projectDisplayName ?? L10n.tr("Cloud"),
             kind: .project,
             sortDate: sortDate,
             projectPath: representativeThread?.normalizedProjectPath,
@@ -151,16 +118,10 @@ enum SidebarThreadGrouping {
     }
 
     // Keeps project-derived UI consistent by centralizing the live-thread → project bucket mapping.
-    private static func makeProjectGroups(
-        from threads: [CodexThread],
-        excludingPinnedThreadIDs pinnedThreadIDs: Set<String> = []
-    ) -> [SidebarThreadGroup] {
+    private static func makeProjectGroups(from threads: [CodexThread]) -> [SidebarThreadGroup] {
         var liveThreadsByProject: [String: [CodexThread]] = [:]
 
         for thread in threads where thread.syncState != .archivedLocal {
-            guard !pinnedThreadIDs.contains(thread.id) else {
-                continue
-            }
             liveThreadsByProject[thread.projectKey, default: []].append(thread)
         }
 
@@ -177,60 +138,6 @@ enum SidebarThreadGrouping {
             }
 
             return lhs.id < rhs.id
-        }
-    }
-
-    // Keeps pinned roots and their descendants together so sidebar trees do not split across sections.
-    private static func collectPinnedThreads(
-        from threads: [CodexThread],
-        pinnedRootThreadIDs: [String]
-    ) -> [CodexThread] {
-        let liveThreads = threads.filter { $0.syncState != .archivedLocal }
-        let threadsByID = Dictionary(uniqueKeysWithValues: liveThreads.map { ($0.id, $0) })
-        let childrenByParentID = liveThreads.reduce(into: [String: [CodexThread]]()) { partialResult, thread in
-            guard let parentThreadID = thread.parentThreadId else {
-                return
-            }
-            partialResult[parentThreadID, default: []].append(thread)
-        }
-        var pinnedThreads: [CodexThread] = []
-        var visitedThreadIDs: Set<String> = []
-
-        for rootThreadID in pinnedRootThreadIDs {
-            guard let rootThread = threadsByID[rootThreadID] else {
-                continue
-            }
-
-            appendPinnedSubtree(
-                rootThread,
-                childrenByParentID: childrenByParentID,
-                into: &pinnedThreads,
-                visitedThreadIDs: &visitedThreadIDs
-            )
-        }
-
-        return pinnedThreads
-    }
-
-    private static func appendPinnedSubtree(
-        _ thread: CodexThread,
-        childrenByParentID: [String: [CodexThread]],
-        into pinnedThreads: inout [CodexThread],
-        visitedThreadIDs: inout Set<String>
-    ) {
-        guard visitedThreadIDs.insert(thread.id).inserted else {
-            return
-        }
-
-        pinnedThreads.append(thread)
-
-        for childThread in childrenByParentID[thread.id] ?? [] {
-            appendPinnedSubtree(
-                childThread,
-                childrenByParentID: childrenByParentID,
-                into: &pinnedThreads,
-                visitedThreadIDs: &visitedThreadIDs
-            )
         }
     }
 

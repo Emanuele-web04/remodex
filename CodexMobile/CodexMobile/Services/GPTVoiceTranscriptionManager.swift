@@ -1,5 +1,5 @@
 // FILE: GPTVoiceTranscriptionManager.swift
-// Purpose: Captures microphone audio with AVAudioEngine and produces normalized 24 kHz mono WAV clips for voice transcription.
+// Purpose: Captures microphone audio with AVAudioEngine and produces normalized 24 kHz mono WAV clips for bridge transcription.
 // Layer: Service
 // Exports: GPTVoiceRecordingClip, GPTVoiceTranscriptionManager
 // Depends on: AVFoundation, Foundation
@@ -56,7 +56,6 @@ enum GPTVoiceTranscriptionError: LocalizedError {
 final class GPTVoiceTranscriptionManager: ObservableObject {
     private let audioSession = AVAudioSession.sharedInstance()
     private static let targetSampleRate: Double = 24_000
-    private static let maxRecordingDurationSeconds = CodexVoiceTranscriptionPreflight.maxDurationSeconds
     // Keeps enough metering history for the capsule to resample across the full composer width.
     private static let maxAudioLevels = 240
 
@@ -175,11 +174,9 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         guard !allSamples.isEmpty else { return nil }
 
         let resampled = Self.resample(allSamples, from: captureSampleRate, to: Self.targetSampleRate)
-        let maxSampleCount = Int(Self.targetSampleRate * Self.maxRecordingDurationSeconds)
-        let boundedSamples = Array(resampled.prefix(maxSampleCount))
-        guard !boundedSamples.isEmpty else { return nil }
+        guard !resampled.isEmpty else { return nil }
 
-        let wavData = Self.encodeWAV(samples: boundedSamples, sampleRate: UInt32(Self.targetSampleRate))
+        let wavData = Self.encodeWAV(samples: resampled, sampleRate: UInt32(Self.targetSampleRate))
 
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("remodex-voice-\(UUID().uuidString)")
@@ -192,7 +189,7 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
             throw GPTVoiceTranscriptionError.unableToCreateOutputFile
         }
 
-        let durationSeconds = Double(boundedSamples.count) / Self.targetSampleRate
+        let durationSeconds = Double(resampled.count) / Self.targetSampleRate
         codexLogVoiceRecording("clip ready: \(String(format: "%.1f", durationSeconds))s, \(wavData.count) bytes")
 
         return GPTVoiceRecordingClip(

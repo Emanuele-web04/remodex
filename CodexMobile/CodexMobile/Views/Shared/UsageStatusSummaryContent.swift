@@ -19,7 +19,6 @@ struct UsageStatusSummaryContent: View {
     }
 
     let contextWindowUsage: ContextWindowUsage?
-    let showsContextWindowSection: Bool
     let rateLimitBuckets: [CodexRateLimitBucket]
     let isLoadingRateLimits: Bool
     let rateLimitsErrorMessage: String?
@@ -29,7 +28,6 @@ struct UsageStatusSummaryContent: View {
 
     init(
         contextWindowUsage: ContextWindowUsage?,
-        showsContextWindowSection: Bool = true,
         rateLimitBuckets: [CodexRateLimitBucket],
         isLoadingRateLimits: Bool,
         rateLimitsErrorMessage: String?,
@@ -38,7 +36,6 @@ struct UsageStatusSummaryContent: View {
         refreshControl: UsageStatusRefreshControl? = nil
     ) {
         self.contextWindowUsage = contextWindowUsage
-        self.showsContextWindowSection = showsContextWindowSection
         self.rateLimitBuckets = rateLimitBuckets
         self.isLoadingRateLimits = isLoadingRateLimits
         self.rateLimitsErrorMessage = rateLimitsErrorMessage
@@ -53,7 +50,7 @@ struct UsageStatusSummaryContent: View {
                 refreshButton(refreshControl)
             }
 
-            if showsContextWindowSection && contextPlacement == .top {
+            if contextPlacement == .top {
                 contextSection
             }
 
@@ -63,7 +60,7 @@ struct UsageStatusSummaryContent: View {
 
             rateLimitsSection
 
-            if showsContextWindowSection && contextPlacement == .bottom {
+            if contextPlacement == .bottom {
                 Divider()
                 contextSection
             }
@@ -73,7 +70,7 @@ struct UsageStatusSummaryContent: View {
     // ─── Shared Sections ────────────────────────────────────────
 
     private var showsDividerBeforeRateLimits: Bool {
-        guard showsContextWindowSection, contextPlacement == .top else { return false }
+        guard contextPlacement == .top else { return false }
         return !rateLimitRows.isEmpty || isLoadingRateLimits || !(rateLimitsErrorMessage?.isEmpty ?? true)
     }
 
@@ -116,20 +113,22 @@ struct UsageStatusSummaryContent: View {
     }
 
     private var contextSection: some View {
-        let displayUsage = contextWindowUsage ?? .zero
-
-        return VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Context window")
                 .font(AppFont.subheadline(weight: .semibold))
 
-            metricRow(
-                label: "Context",
-                value: contextValue(for: displayUsage),
-                detail: contextDetail(for: displayUsage),
-                monospace: true
-            )
+            if let contextWindowUsage {
+                metricRow(
+                    label: "Context",
+                    value: L10n.fmt("%lld%% left", contextWindowUsage.percentRemaining),
+                    detail: "(\(compactTokenCount(contextWindowUsage.tokensUsed)) used / \(compactTokenCount(contextWindowUsage.tokenLimit)))",
+                    monospace: true
+                )
 
-            progressBar(progress: displayUsage.fractionUsed)
+                progressBar(progress: contextWindowUsage.fractionUsed)
+            } else {
+                metricRow(label: "Context", value: "Unavailable", detail: "Waiting for token usage")
+            }
         }
     }
 
@@ -150,7 +149,7 @@ struct UsageStatusSummaryContent: View {
                         .font(AppFont.system(size: 12, weight: .semibold))
                 }
 
-                Text(refreshControl.isRefreshing ? "Refreshing..." : refreshControl.title)
+                Text(refreshControl.isRefreshing ? L10n.tr("Refreshing...") : refreshControl.title)
                     .font(AppFont.subheadline(weight: .semibold))
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -168,7 +167,7 @@ struct UsageStatusSummaryContent: View {
 
                 Spacer(minLength: 12)
 
-                Text("\(row.window.remainingPercent)% left")
+                Text(L10n.fmt("%lld%% left", row.window.remainingPercent))
                     .font(AppFont.mono(.callout))
                     .foregroundStyle(.primary)
 
@@ -247,15 +246,6 @@ struct UsageStatusSummaryContent: View {
         }
     }
 
-    private func contextValue(for usage: ContextWindowUsage) -> String {
-        usage.tokenLimit > 0 ? "\(usage.percentRemaining)% left" : "0 used"
-    }
-
-    private func contextDetail(for usage: ContextWindowUsage) -> String? {
-        guard usage.tokenLimit > 0 else { return nil }
-        return "(\(compactTokenCount(usage.tokensUsed)) used / \(compactTokenCount(usage.tokenLimit)))"
-    }
-
     private func groupedTokenCount(_ count: Int) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -271,11 +261,11 @@ struct UsageStatusSummaryContent: View {
         if calendar.isDate(resetsAt, inSameDayAs: now) {
             let formatter = DateFormatter()
             formatter.dateFormat = "HH:mm"
-            return "resets \(formatter.string(from: resetsAt))"
+            return L10n.fmt("resets %@", formatter.string(from: resetsAt))
         }
 
         let formatter = DateFormatter()
         formatter.dateFormat = "d MMM HH:mm"
-        return "resets \(formatter.string(from: resetsAt))"
+        return L10n.fmt("resets %@", formatter.string(from: resetsAt))
     }
 }

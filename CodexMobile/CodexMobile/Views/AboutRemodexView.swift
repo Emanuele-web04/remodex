@@ -61,7 +61,7 @@ struct AboutRemodexView: View {
             calloutCard(
                 icon: "desktopcomputer",
                 color: .cyan,
-                text: "The Codex runtime stays on your computer. Your phone is a secure remote control connected through a relay."
+                text: "The Codex runtime stays on your Mac. Your phone is a secure remote control connected through a relay."
             )
         }
         .padding(.top, 8)
@@ -73,11 +73,11 @@ struct AboutRemodexView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionTitle("How It Works")
 
-            bodyText("Your computer runs a lightweight **bridge** that connects to a **relay server** over WebSocket.")
+            bodyText("Your Mac runs a lightweight **bridge** that connects to a **relay server** over WebSocket.")
 
             bulletList([
                 "You send a prompt from your phone",
-                "It travels through the relay to the bridge on your computer",
+                "It travels through the relay to the bridge on your Mac",
                 "The bridge forwards it to `codex app-server` via JSON-RPC",
                 "Responses stream back the same path in real time",
             ])
@@ -85,7 +85,7 @@ struct AboutRemodexView: View {
             calloutCard(
                 icon: "lock.shield.fill",
                 color: .green,
-                text: "All execution happens locally on your computer — code generation, tool use, file edits. Nothing runs on the relay."
+                text: "All execution happens locally on your Mac — code generation, tool use, file edits. Nothing runs on the relay."
             )
         }
     }
@@ -113,7 +113,7 @@ struct AboutRemodexView: View {
     private func diagramStep(from: String, to: String, via: String, isLast: Bool = false) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text(from)
+                Text(L10n.tr(from))
                     .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
@@ -122,14 +122,14 @@ struct AboutRemodexView: View {
                     Image(systemName: "arrow.right")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundStyle(.tertiary)
-                    Text(via)
+                    Text(L10n.tr(via))
                         .font(AppFont.caption2())
                         .foregroundStyle(.secondary)
                         .italic()
                 }
                 .frame(width: 90)
 
-                Text(to)
+                Text(L10n.tr(to))
                     .font(AppFont.caption(weight: .semibold))
                     .foregroundStyle(.primary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -149,9 +149,9 @@ struct AboutRemodexView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionTitle("The Relay")
 
-            bodyText("A lightweight WebSocket server that routes messages between your iPhone and your computer.")
+            bodyText("A lightweight WebSocket server that routes messages between your iPhone and your Mac.")
 
-            iconRow("arrow.triangle.2.circlepath", "Handles session discovery so your phone finds the computer's live session")
+            iconRow("arrow.triangle.2.circlepath", "Handles session discovery so your phone finds the Mac's live session")
             iconRow("eye.slash.fill", "Never sees decrypted message contents after the handshake")
             iconRow("tag.fill", "Only observes connection metadata — session IDs, device IDs, timing")
 
@@ -199,7 +199,7 @@ struct AboutRemodexView: View {
 
             bodyText("Scan it once from this app. After the handshake:")
 
-            iconRow("checkmark.shield.fill", "iPhone saves the computer as a **trusted device** in Keychain")
+            iconRow("checkmark.shield.fill", "iPhone saves the Mac as a **trusted device** in Keychain")
             iconRow("desktopcomputer", "Bridge persists your phone's identity locally")
             iconRow("arrow.clockwise", "Later launches auto-reconnect — no QR needed")
 
@@ -278,12 +278,12 @@ struct AboutRemodexView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionTitle("Desktop App Integration")
 
-            bodyText("Threads from your phone are persisted as JSONL rollout files, so they appear in **Codex.app** on your computer.")
+            bodyText("Threads from your phone are persisted as JSONL rollout files, so they appear in **Codex.app** on your Mac.")
 
             calloutCard(
                 icon: "macbook.and.iphone",
                 color: .blue,
-                text: "The desktop app doesn't live-reload external writes. Use the desktop app handoff button in Remodex to continue the current thread on your computer."
+                text: "The desktop app doesn't live-reload external writes. Use the Hand off to Mac button in the app to continue the current thread on your Mac."
             )
         }
     }
@@ -346,7 +346,7 @@ struct AboutRemodexView: View {
     @ViewBuilder
     private func specRow(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label)
+            Text(L10n.tr(label))
                 .font(AppFont.caption(weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 120, alignment: .leading)

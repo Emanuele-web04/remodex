@@ -12,43 +12,6 @@ import XCTest
 final class CodexGPTAccountTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
-    func testKnownWindowsBridgeDoesNotUseLegacyMacDisplayWakeFallback() {
-        let service = makeService()
-        let macDeviceID = "host-\(UUID().uuidString)"
-
-        service.lastTrustedMacDeviceId = macDeviceID
-        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
-            macDeviceId: macDeviceID,
-            macIdentityPublicKey: Data(repeating: 7, count: 32).base64EncodedString(),
-            lastPairedAt: Date()
-        )
-        service.gptAccountSnapshot.hostPlatform = .windows
-        service.gptAccountSnapshot.hostCapabilities = nil
-
-        XCTAssertEqual(service.bridgeHostPlatform, .windows)
-        XCTAssertFalse(service.supportsDisplayWake)
-        XCTAssertFalse(service.supportsDesktopAppHandoff)
-        XCTAssertFalse(service.supportsKeepAwakeWhileBridgeRuns)
-    }
-
-    func testKnownMacBridgeKeepsLegacyDisplayWakeFallback() {
-        let service = makeService()
-        let macDeviceID = "mac-\(UUID().uuidString)"
-
-        service.lastTrustedMacDeviceId = macDeviceID
-        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
-            macDeviceId: macDeviceID,
-            macIdentityPublicKey: Data(repeating: 8, count: 32).base64EncodedString(),
-            lastPairedAt: Date()
-        )
-        service.gptAccountSnapshot.hostPlatform = .macOS
-        service.gptAccountSnapshot.hostCapabilities = nil
-
-        XCTAssertTrue(service.supportsDisplayWake)
-        XCTAssertTrue(service.supportsDesktopAppHandoff)
-        XCTAssertTrue(service.supportsKeepAwakeWhileBridgeRuns)
-    }
-
     func testRefreshGPTAccountStateDecodesSanitizedBridgeStatus() async {
         let service = makeService()
         service.isConnected = true
@@ -118,135 +81,6 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertEqual(service.gptAccountSnapshot.authMethod, .chatgpt)
         XCTAssertTrue(service.gptAccountSnapshot.isVoiceTokenReady)
         XCTAssertFalse(service.gptVoiceRequiresLogin)
-    }
-
-    func testRefreshBridgeVersionStatePresentsOptionalBridgeUpdateWhenLatestIsNewer() async {
-        let service = makeService()
-        service.isConnected = true
-
-        service.requestTransportOverride = { method, params in
-            XCTAssertEqual(method, "account/status/read")
-            XCTAssertNil(params)
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "status": .string("authenticated"),
-                    "authMethod": .string("chatgpt"),
-                    "loginInFlight": .bool(false),
-                    "needsReauth": .bool(false),
-                    "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
-                ]),
-                includeJSONRPC: false
-            )
-        }
-
-        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
-
-        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.9")
-        XCTAssertEqual(service.latestBridgePackageVersion, "1.4.0")
-        XCTAssertEqual(
-            service.bridgeUpdatePrompt?.title,
-            "A newer Remodex update is available on your Mac"
-        )
-        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
-        XCTAssertEqual(service.gptAccountSnapshot.status, .unknown)
-    }
-
-    func testRefreshBridgeVersionStateDoesNotPresentOptionalBridgeUpdateWithoutForegroundFlag() async {
-        let service = makeService()
-        service.isConnected = true
-
-        service.requestTransportOverride = { method, params in
-            XCTAssertEqual(method, "account/status/read")
-            XCTAssertNil(params)
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "status": .string("authenticated"),
-                    "authMethod": .string("chatgpt"),
-                    "loginInFlight": .bool(false),
-                    "needsReauth": .bool(false),
-                    "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
-                ]),
-                includeJSONRPC: false
-            )
-        }
-
-        await service.refreshBridgeVersionState()
-
-        XCTAssertNil(service.bridgeUpdatePrompt)
-    }
-
-    func testRefreshBridgeVersionStateDoesNotRepeatOptionalBridgeUpdateForSameLatestVersion() async {
-        let service = makeService()
-        service.isConnected = true
-
-        service.requestTransportOverride = { method, params in
-            XCTAssertEqual(method, "account/status/read")
-            XCTAssertNil(params)
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "status": .string("authenticated"),
-                    "authMethod": .string("chatgpt"),
-                    "loginInFlight": .bool(false),
-                    "needsReauth": .bool(false),
-                    "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
-                ]),
-                includeJSONRPC: false
-            )
-        }
-
-        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
-        let firstPrompt = service.bridgeUpdatePrompt
-
-        service.bridgeUpdatePrompt = nil
-        await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
-
-        XCTAssertNotNil(firstPrompt)
-        XCTAssertNil(service.bridgeUpdatePrompt)
-    }
-
-    func testForegroundReturnRefreshesBridgeVersionAndPresentsOptionalUpdatePrompt() async {
-        let service = makeService()
-        service.isConnected = true
-        service.isInitialized = true
-        service.syncRealtimeEnabled = false
-        service.isAppInForeground = false
-
-        service.requestTransportOverride = { method, params in
-            XCTAssertEqual(method, "account/status/read")
-            XCTAssertNil(params)
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "status": .string("authenticated"),
-                    "authMethod": .string("chatgpt"),
-                    "loginInFlight": .bool(false),
-                    "needsReauth": .bool(false),
-                    "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
-                ]),
-                includeJSONRPC: false
-            )
-        }
-
-        service.setForegroundState(true)
-        await yieldMainActor(times: 3)
-
-        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.9")
-        XCTAssertEqual(service.latestBridgePackageVersion, "1.4.0")
-        XCTAssertEqual(
-            service.bridgeUpdatePrompt?.title,
-            "A newer Remodex update is available on your Mac"
-        )
     }
 
     func testStartOrResumeGPTLoginUsesChatGPTVariantAndCachesPendingURL() async throws {
@@ -599,17 +433,6 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
-    func testVoiceTranscriptionPreflightRejectsClipsLongerThanTwoMinutes() {
-        let preflight = CodexVoiceTranscriptionPreflight(
-            byteCount: 2_048,
-            durationSeconds: 120.5
-        )
-
-        XCTAssertThrowsError(try preflight.validate()) { error in
-            XCTAssertEqual(error.localizedDescription, "Voice clips must be 120 seconds or less.")
-        }
-    }
-
     func testVoiceTranscriptionReportsDisconnectedInsteadOfLoginWhenBridgeIsOffline() async {
         let service = makeService()
         service.isConnected = false
@@ -634,119 +457,6 @@ final class CodexGPTAccountTests: XCTestCase {
         }) { error in
             XCTAssertEqual(error.localizedDescription, "Connect to your Mac before using voice transcription.")
         }
-    }
-
-    func testVoiceTranscriptionUsesBridgeResolvedTokenForDirectUpload() async throws {
-        let service = makeService()
-        service.isConnected = true
-        let clipURL = try makeTemporaryVoiceClipURL()
-        defer { try? FileManager.default.removeItem(at: clipURL) }
-        let expectedAudio = makeTestWavData()
-        let expectedToken = "chatgpt-token-123"
-
-        var observedMethod: String?
-        var observedParams: JSONValue?
-        service.requestTransportOverride = { method, params in
-            observedMethod = method
-            observedParams = params
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object([
-                    "token": .string(expectedToken),
-                ]),
-                includeJSONRPC: false
-            )
-        }
-        GPTVoiceTranscriptionManager.transcribeOverride = { wavData, token in
-            XCTAssertEqual(wavData, expectedAudio)
-            XCTAssertEqual(token, expectedToken)
-            return "transcribed on phone"
-        }
-        defer { GPTVoiceTranscriptionManager.transcribeOverride = nil }
-
-        let transcript = try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1.25)
-
-        XCTAssertEqual(transcript, "transcribed on phone")
-        XCTAssertEqual(observedMethod, "voice/resolveAuth")
-        XCTAssertNil(observedParams)
-    }
-
-    func testUnsupportedVoiceBridgeAuthMarksBridgeSessionAsUnsupported() {
-        let service = makeService()
-        let error = CodexServiceError.rpcError(
-            RPCError(
-                code: -32600,
-                message: "Invalid request: unknown variant `voice/resolveAuth`, expected one of `initialize`, `thread/start`"
-            )
-        )
-
-        XCTAssertTrue(service.consumeUnsupportedVoiceBridgeAuth(error))
-        XCTAssertFalse(service.supportsBridgeVoiceAuth)
-        XCTAssertEqual(service.classifyVoiceFailure(error), .bridgeSessionUnsupported)
-    }
-
-    func testResolvedVoiceRecoveryClearsBannerOnceVoiceAuthIsHealthy() {
-        let service = makeService()
-        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
-            status: .authenticated,
-            authMethod: .chatgpt,
-            email: "voice@example.com",
-            displayName: nil,
-            planType: "plus",
-            loginInFlight: false,
-            needsReauth: false,
-            expiresAt: nil,
-            tokenReady: true,
-            updatedAt: .now
-        )
-
-        XCTAssertNil(service.resolveVoiceRecoveryReason(.voiceSyncInProgress))
-        XCTAssertNil(service.resolveVoiceRecoveryReason(.macLoginRequired))
-        XCTAssertNil(service.resolveVoiceRecoveryReason(.macReauthenticationRequired))
-    }
-
-    func testVoiceMissingTokenWhileAuthenticatedIsClassifiedAsSyncing() {
-        let service = makeService()
-        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
-            status: .authenticated,
-            authMethod: .chatgpt,
-            email: "voice@example.com",
-            displayName: nil,
-            planType: "plus",
-            loginInFlight: false,
-            needsReauth: false,
-            expiresAt: nil,
-            tokenReady: false,
-            tokenUnavailableSince: .now,
-            updatedAt: .now
-        )
-
-        let error = CodexServiceError.rpcError(
-            RPCError(
-                code: -32000,
-                message: "No ChatGPT session token available. Sign in to ChatGPT on the Mac.",
-                data: .object([
-                    "errorCode": .string("token_missing"),
-                ])
-            )
-        )
-
-        XCTAssertEqual(service.classifyVoiceFailure(error), .voiceSyncInProgress)
-    }
-
-    func testVoiceAuthUnavailableIsClassifiedAsReconnectRequired() {
-        let service = makeService()
-        let error = CodexServiceError.rpcError(
-            RPCError(
-                code: -32000,
-                message: "Could not read ChatGPT session from the Mac runtime. Is the bridge running?",
-                data: .object([
-                    "errorCode": .string("auth_unavailable"),
-                ])
-            )
-        )
-
-        XCTAssertEqual(service.classifyVoiceFailure(error), .reconnectRequired)
     }
 
     func testSuccessfulLoginKeepsPollingUntilVoiceTokenIsReady() async throws {
@@ -834,38 +544,6 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
-    private func makeTemporaryVoiceClipURL() throws -> URL {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("wav")
-        try makeTestWavData().write(to: url)
-        return url
-    }
-
-    private func makeTestWavData() -> Data {
-        let sampleRate = 24_000
-        let sampleCount = sampleRate / 4
-        let pcmData = Data(repeating: 0, count: sampleCount * 2)
-        let dataSize = UInt32(pcmData.count)
-
-        var wav = Data()
-        wav.append(contentsOf: "RIFF".utf8)
-        wav.appendLE(UInt32(36 + dataSize))
-        wav.append(contentsOf: "WAVE".utf8)
-        wav.append(contentsOf: "fmt ".utf8)
-        wav.appendLE(UInt32(16))
-        wav.appendLE(UInt16(1))
-        wav.appendLE(UInt16(1))
-        wav.appendLE(UInt32(sampleRate))
-        wav.appendLE(UInt32(sampleRate * 2))
-        wav.appendLE(UInt16(2))
-        wav.appendLE(UInt16(16))
-        wav.append(contentsOf: "data".utf8)
-        wav.appendLE(dataSize)
-        wav.append(pcmData)
-        return wav
-    }
-
     private func XCTAssertThrowsErrorAsync<T>(
         _ expression: () async throws -> T,
         _ errorHandler: (Error) -> Void
@@ -875,15 +553,6 @@ final class CodexGPTAccountTests: XCTestCase {
             XCTFail("Expected expression to throw")
         } catch {
             errorHandler(error)
-        }
-    }
-}
-
-private extension Data {
-    mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
-        var littleEndian = value.littleEndian
-        Swift.withUnsafeBytes(of: &littleEndian) { rawBuffer in
-            append(contentsOf: rawBuffer.bindMemory(to: UInt8.self))
         }
     }
 }

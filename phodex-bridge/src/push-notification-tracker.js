@@ -133,7 +133,7 @@ function createPushNotificationTracker({
     }
 
     const state = getTurnState(resolvedThreadId, turnId);
-    const title = normalizePreviewText(threadTitleById.get(resolvedThreadId)) || "New Thread";
+    const title = normalizePreviewText(threadTitleById.get(resolvedThreadId)) || "Conversation";
     const body = buildNotificationBody({
       result,
       state,

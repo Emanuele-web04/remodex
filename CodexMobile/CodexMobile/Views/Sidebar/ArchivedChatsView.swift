@@ -44,24 +44,22 @@ struct ArchivedChatsView: View {
         .navigationTitle("Archived Chats")
         .navigationBarTitleDisplayMode(.inline)
         .confirmationDialog(
-            "Remove \"\(threadPendingDeletion?.displayTitle ?? "conversation")\" from this phone?",
+            "Delete \"\(threadPendingDeletion?.displayTitle ?? "conversation")\"?",
             isPresented: Binding(
                 get: { threadPendingDeletion != nil },
                 set: { if !$0 { threadPendingDeletion = nil } }
             ),
             titleVisibility: .visible
         ) {
-            Button("Remove from Phone", role: .destructive) {
+            Button("Delete", role: .destructive) {
                 if let thread = threadPendingDeletion {
-                    codex.deleteThreadLocally(thread.id)
+                    codex.deleteThread(thread.id)
                 }
                 threadPendingDeletion = nil
             }
             Button("Cancel", role: .cancel) {
                 threadPendingDeletion = nil
             }
-        } message: {
-            Text("This only removes the chat from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
         }
     }
 
@@ -86,7 +84,7 @@ struct ArchivedChatsView: View {
             Button(role: .destructive) {
                 threadPendingDeletion = thread
             } label: {
-                Label("Remove", systemImage: "trash")
+                Label("Delete", systemImage: "trash")
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
@@ -109,7 +107,7 @@ struct ArchivedChatsView: View {
             Button(role: .destructive) {
                 threadPendingDeletion = thread
             } label: {
-                Label("Remove from Phone", systemImage: "trash")
+                Label("Delete", systemImage: "trash")
             }
         }
     }

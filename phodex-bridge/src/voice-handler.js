@@ -4,9 +4,11 @@
 // Exports: createVoiceHandler
 // Depends on: global fetch/FormData/Blob, local codex app-server auth via sendCodexRequest
 
+const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions";
 const CHATGPT_TRANSCRIPTIONS_URL = "https://chatgpt.com/backend-api/transcribe";
+const DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
-const MAX_DURATION_MS = 120_000;
+const MAX_DURATION_MS = 60_000;
 
 function createVoiceHandler({
   sendCodexRequest,
@@ -91,7 +93,7 @@ async function transcribeVoice(
     throw voiceError("invalid_duration", "Voice messages must include a positive duration.");
   }
   if (durationMs > MAX_DURATION_MS) {
-    throw voiceError("duration_too_long", "Voice messages are limited to 120 seconds.");
+    throw voiceError("duration_too_long", "Voice messages are limited to 60 seconds.");
   }
 
   const audioBuffer = decodeAudioBase64(params.audioBase64);
@@ -123,6 +125,9 @@ async function requestTranscription({
   const makeAttempt = async (activeAuthContext) => {
     const formData = new FormDataImpl();
     formData.append("file", new BlobImpl([audioBuffer], { type: mimeType }), "voice.wav");
+    if (!activeAuthContext.isChatGPT) {
+      formData.append("model", DEFAULT_TRANSCRIPTION_MODEL);
+    }
 
     const headers = {
       Authorization: `Bearer ${activeAuthContext.token}`,
@@ -178,20 +183,17 @@ async function loadAuthContext(sendCodexRequest) {
 
   const authMethod = readString(authStatus?.authMethod);
   const token = readString(authStatus?.authToken);
-  const isChatGPT = authMethod === "chatgpt" || authMethod === "chatgptAuthTokens";
-
-  if (!token) {
+  if (!authMethod || !token) {
     throw voiceError("not_authenticated", "Sign in with ChatGPT before using voice transcription.");
-  }
-  if (!isChatGPT) {
-    throw voiceError("not_chatgpt", "Voice transcription requires a ChatGPT account.");
   }
 
   return {
     authMethod,
     token,
-    isChatGPT,
-    transcriptionURL: CHATGPT_TRANSCRIPTIONS_URL,
+    isChatGPT: authMethod === "chatgpt" || authMethod === "chatgptAuthTokens",
+    transcriptionURL: authMethod === "chatgpt" || authMethod === "chatgptAuthTokens"
+      ? CHATGPT_TRANSCRIPTIONS_URL
+      : OPENAI_TRANSCRIPTIONS_URL,
     chatgptAccountId: readChatGPTAccountIdFromToken(token),
   };
 }

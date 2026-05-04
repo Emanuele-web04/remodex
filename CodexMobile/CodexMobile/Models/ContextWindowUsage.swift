@@ -6,9 +6,6 @@
 import Foundation
 
 struct ContextWindowUsage: Equatable, Sendable {
-    // Fallback for new chats or runtimes that cannot report context usage yet.
-    static let zero = ContextWindowUsage(tokensUsed: 0, tokenLimit: 0)
-
     let tokensUsed: Int
     let tokenLimit: Int
 

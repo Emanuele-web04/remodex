@@ -75,13 +75,6 @@ extension CodexService {
             includeJSONRPC: false
         )
 
-        if method == "turn/start",
-           let collaborationMode = params?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue {
-            debugRuntimeLog(
-                "rpc send turn/start collaborationMode=\(collaborationMode) thread=\(params?.objectValue?["threadId"]?.stringValue ?? "")"
-            )
-        }
-
         return try await withCheckedThrowingContinuation { continuation in
             pendingRequests[requestKey] = continuation
 
@@ -252,10 +245,7 @@ extension CodexService {
                     if !data.isEmpty {
                         self.manualWebSocketReadBuffer.append(data)
                         do {
-                            let didHandleClose = try await self.drainManualWebSocketFrames(on: connection)
-                            if didHandleClose {
-                                return
-                            }
+                            try await self.drainManualWebSocketFrames(on: connection)
                         } catch {
                             self.handleReceiveError(error)
                             return
@@ -349,7 +339,7 @@ extension CodexService {
             timeoutMessage: "Connection timed out after 12s while opening the direct relay socket."
         )
 
-        codexLogPairingTransport("opening manual TCP websocket")
+        codexLogPairingTransport("opening manual TCP websocket to \(url.absoluteString)")
         try await waitUntilManualConnectionReady(connection, configuration: waitConfiguration)
         do {
             try await performManualWebSocketHandshake(on: connection, url: url, token: token, role: role)
@@ -407,7 +397,7 @@ extension CodexService {
         let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
         parameters.defaultProtocolStack.applicationProtocols.insert(webSocketOptions, at: 0)
 
-        codexLogPairingTransport("opening NWConnection websocket")
+        codexLogPairingTransport("opening NWConnection websocket to \(url.absoluteString)")
         let connection = NWConnection(to: .url(url), using: parameters)
         let waitConfiguration = CodexConnectionReadyWaitConfiguration(
             logLabel: "NWConnection websocket",
@@ -465,7 +455,7 @@ extension CodexService {
         task.maximumMessageSize = codexWebSocketMaximumMessageSizeBytes
         let connectionTimeoutNanoseconds: UInt64 = 12_000_000_000
 
-        codexLogPairingTransport("opening URLSessionWebSocketTask")
+        codexLogPairingTransport("opening URLSessionWebSocketTask to \(url.absoluteString)")
         task.resume()
         webSocketSessionDelegate = delegate
 
@@ -640,7 +630,7 @@ extension CodexService {
         }
         requestLines.append(contentsOf: ["", ""])
 
-        codexLogPairingTransport("sending manual TCP websocket upgrade request")
+        codexLogPairingTransport("manual TCP websocket sending upgrade request for path=\(path)")
         try await sendRaw(Data(requestLines.joined(separator: "\r\n").utf8), on: connection)
 
         var headerBytes = Data()
@@ -719,9 +709,7 @@ extension CodexService {
         }
     }
 
-    // Preserves relay close semantics on the raw TCP websocket path so `.local` reconnects
-    // reuse the same retry / re-pair policy as the higher-level websocket transports.
-    func drainManualWebSocketFrames(on connection: NWConnection) async throws -> Bool {
+    func drainManualWebSocketFrames(on connection: NWConnection) async throws {
         while let frame = parseManualWebSocketFrame(from: &manualWebSocketReadBuffer) {
             switch frame.opcode {
             case 0x1:
@@ -730,11 +718,7 @@ extension CodexService {
                     processIncomingWireText(text)
                 }
             case 0x8:
-                handleReceiveError(
-                    CodexServiceError.disconnected,
-                    relayCloseCode: relayCloseCode(fromManualWebSocketClosePayload: frame.payload)
-                )
-                return true
+                throw CodexServiceError.disconnected
             case 0x9:
                 try await sendManualWebSocketFrame(opcode: 0xA, payload: frame.payload, on: connection)
             case 0xA:
@@ -743,8 +727,6 @@ extension CodexService {
                 break
             }
         }
-
-        return false
     }
 
     func parseManualWebSocketFrame(from buffer: inout Data) -> (opcode: UInt8, payload: Data)? {
@@ -793,23 +775,6 @@ extension CodexService {
         }
 
         return (opcode: opcode, payload: payload)
-    }
-
-    // Pulls relay-owned custom close codes out of raw websocket close payloads on the direct transport.
-    func relayCloseCode(fromManualWebSocketClosePayload payload: Data) -> NWProtocolWebSocket.CloseCode? {
-        guard payload.count >= 2 else {
-            return nil
-        }
-
-        let rawValue = (UInt16(payload[payload.startIndex]) << 8) | UInt16(payload[payload.startIndex + 1])
-        if rawValue >= 4000 {
-            return .privateCode(rawValue)
-        }
-        if rawValue >= 3000 {
-            return .applicationCode(rawValue)
-        }
-
-        return nil
     }
 
     func sendManualWebSocketFrame(opcode: UInt8, payload: Data, on connection: NWConnection) async throws {

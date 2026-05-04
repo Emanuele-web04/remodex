@@ -7,63 +7,7 @@
 import Foundation
 import UIKit
 
-private enum RunningThreadHistoryCatchupPolicy {
-    // Running-thread reopen only needs the latest transcript tail to catch up the UI.
-    static let recentMergeWindow = 160
-    static let cancellationCheckInterval = 32
-}
-
 extension CodexService {
-    nonisolated static func shouldPreferRecentHistoryWindow(
-        existingCount: Int,
-        historyCount: Int,
-        windowSize: Int = RunningThreadHistoryCatchupPolicy.recentMergeWindow
-    ) -> Bool {
-        let normalizedWindowSize = max(1, windowSize)
-        guard existingCount > normalizedWindowSize,
-              historyCount > normalizedWindowSize else {
-            return false
-        }
-
-        // Only trust the local prefix when it is already deep enough to cover the
-        // server prefix we are about to skip. Otherwise fall back to canonical merge.
-        return existingCount >= (historyCount - normalizedWindowSize)
-    }
-
-    // Runs history reconciliation off the main actor and cancels the worker if the caller goes away.
-    func mergeHistoryMessagesOffMainActor(
-        existing: [CodexMessage],
-        history: [CodexMessage],
-        activeThreadIDs: Set<String>,
-        runningThreadIDs: Set<String>,
-        preferRecentWindow: Bool
-    ) async throws -> [CodexMessage] {
-        let mergeTask = Task.detached(priority: .userInitiated) { () throws -> [CodexMessage] in
-            if preferRecentWindow {
-                return try Self.mergeRecentHistoryWindow(
-                    existing,
-                    history,
-                    activeThreadIDs: activeThreadIDs,
-                    runningThreadIDs: runningThreadIDs,
-                    windowSize: RunningThreadHistoryCatchupPolicy.recentMergeWindow
-                )
-            }
-
-            return try Self.mergeHistoryMessages(
-                existing,
-                history,
-                activeThreadIDs: activeThreadIDs,
-                runningThreadIDs: runningThreadIDs
-            )
-        }
-
-        return try await withTaskCancellationHandler {
-            try await mergeTask.value
-        } onCancel: {
-            mergeTask.cancel()
-        }
-    }
-
     // Decodes thread/read(includeTurns=true) payload into chronological message timeline.
     func decodeMessagesFromThreadRead(threadId: String, threadObject: [String: JSONValue]) -> [CodexMessage] {
         let baseDate = decodeHistoryBaseDate(from: threadObject)
@@ -76,7 +20,6 @@ extension CodexService {
             guard let turnObject = turnValue.objectValue else { continue }
             let turnID = turnObject["id"]?.stringValue
             let turnTimestamp = decodeHistoryTimestamp(from: turnObject)
-            let turnCompleted = historyTurnTerminalState(turnObject) == .completed
             let items = turnObject["items"]?.arrayValue ?? []
 
             for itemValue in items {
@@ -110,7 +53,6 @@ extension CodexService {
                         to: &result,
                         role: .assistant,
                         kind: .chat,
-                        assistantPhase: normalizedAssistantPhase(itemObject["phase"]?.stringValue),
                         text: decodedText,
                         threadId: threadId,
                         turnId: turnID,
@@ -127,30 +69,12 @@ extension CodexService {
                         to: &result,
                         role: mappedRole,
                         kind: .chat,
-                        assistantPhase: mappedRole == .assistant
-                            ? normalizedAssistantPhase(itemObject["phase"]?.stringValue)
-                            : nil,
                         text: decodedText,
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
                         createdAt: timestamp,
                         attachments: imageAttachments
-                    )
-
-                case "imagegeneration", "imagegenerationcall", "imagegenerationend", "imageview":
-                    guard let generatedImageText = decodeGeneratedImageMarkdown(from: itemObject) else {
-                        continue
-                    }
-                    appendHistoryMessage(
-                        to: &result,
-                        role: .assistant,
-                        kind: .chat,
-                        text: generatedImageText,
-                        threadId: threadId,
-                        turnId: turnID,
-                        itemId: itemID,
-                        createdAt: timestamp
                     )
 
                 case "reasoning":
@@ -241,7 +165,6 @@ extension CodexService {
                         to: &result,
                         role: .assistant,
                         kind: .chat,
-                        assistantPhase: normalizedAssistantPhase(itemObject["phase"]?.stringValue),
                         text: reviewText,
                         threadId: threadId,
                         turnId: turnID,
@@ -262,7 +185,6 @@ extension CodexService {
                     )
 
                 case "plan":
-                    let decodedPlanState = decodeHistoryPlanState(from: itemObject)
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
@@ -272,10 +194,7 @@ extension CodexService {
                         turnId: turnID,
                         itemId: itemID,
                         createdAt: timestamp,
-                        planState: finalizedHistoryPlanState(decodedPlanState, turnCompleted: turnCompleted),
-                        planPresentation: itemID == nil
-                            ? .progress
-                            : (turnCompleted ? .resultReady : .resultClosed)
+                        planState: decodeHistoryPlanState(from: itemObject)
                     )
 
                 case let collabType where collabType == "collabagenttoolcall"
@@ -306,57 +225,30 @@ extension CodexService {
             }
         }
 
-        return Self.historyMessagesMergingGeneratedImageArtifacts(result)
-    }
-
-    // Extracts persisted turn outcomes from canonical history so render grouping survives app relaunch.
-    func decodeTurnTerminalStatesFromThreadRead(_ threadObject: [String: JSONValue]) -> [String: CodexTurnTerminalState] {
-        let turns = threadObject["turns"]?.arrayValue ?? []
-        var result: [String: CodexTurnTerminalState] = [:]
-
-        for turnValue in turns {
-            guard let turnObject = turnValue.objectValue,
-                  let turnID = turnObject["id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !turnID.isEmpty,
-                  let terminalState = historyTurnTerminalState(turnObject) else {
-                continue
-            }
-            result[turnID] = terminalState
-        }
-
         return result
     }
 
     func decodeHistoryBaseDate(from threadObject: [String: JSONValue]) -> Date {
         if let rawCreatedAt = threadObject["createdAt"]?.doubleValue {
-            return CodexTimestampParser.decodeUnixTimestamp(rawCreatedAt)
+            return decodeUnixTimestamp(rawCreatedAt)
         }
         if let rawCreatedAt = threadObject["created_at"]?.doubleValue {
-            return CodexTimestampParser.decodeUnixTimestamp(rawCreatedAt)
+            return decodeUnixTimestamp(rawCreatedAt)
         }
 
         if let rawUpdatedAt = threadObject["updatedAt"]?.doubleValue {
-            return CodexTimestampParser.decodeUnixTimestamp(rawUpdatedAt)
+            return decodeUnixTimestamp(rawUpdatedAt)
         }
         if let rawUpdatedAt = threadObject["updated_at"]?.doubleValue {
-            return CodexTimestampParser.decodeUnixTimestamp(rawUpdatedAt)
+            return decodeUnixTimestamp(rawUpdatedAt)
         }
 
         if let rawCreatedAt = threadObject["createdAt"]?.stringValue,
-           let parsed = CodexTimestampParser.parseString(rawCreatedAt) {
+           let parsed = parseHistoryDateString(rawCreatedAt) {
             return parsed
         }
         if let rawCreatedAt = threadObject["created_at"]?.stringValue,
-           let parsed = CodexTimestampParser.parseString(rawCreatedAt) {
-            return parsed
-        }
-
-        if let rawUpdatedAt = threadObject["updatedAt"]?.stringValue,
-           let parsed = CodexTimestampParser.parseString(rawUpdatedAt) {
-            return parsed
-        }
-        if let rawUpdatedAt = threadObject["updated_at"]?.stringValue,
-           let parsed = CodexTimestampParser.parseString(rawUpdatedAt) {
+           let parsed = parseHistoryDateString(rawCreatedAt) {
             return parsed
         }
 
@@ -365,7 +257,8 @@ extension CodexService {
     }
 
     func decodeUnixTimestamp(_ rawValue: Double) -> Date {
-        CodexTimestampParser.decodeUnixTimestamp(rawValue)
+        let secondsValue = rawValue > 10_000_000_000 ? rawValue / 1000 : rawValue
+        return Date(timeIntervalSince1970: secondsValue)
     }
 
     func decodeItemText(from itemObject: [String: JSONValue]) -> String {
@@ -419,45 +312,6 @@ extension CodexService {
         return ""
     }
 
-    func decodeGeneratedImageMarkdown(from itemObject: [String: JSONValue]) -> String? {
-        let imagePath = firstNonEmptyString([
-            itemObject["saved_path"]?.stringValue,
-            itemObject["savedPath"]?.stringValue,
-            itemObject["path"]?.stringValue,
-            itemObject["file_path"]?.stringValue
-        ])?
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard let imagePath, Self.isGeneratedImagePath(imagePath) else {
-            return nil
-        }
-
-        return "![Generated image](\(Self.markdownImagePath(imagePath)))"
-    }
-
-    nonisolated static func isGeneratedImagePath(_ path: String) -> Bool {
-        let lowercased = path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return lowercased.hasSuffix(".png")
-            || lowercased.hasSuffix(".jpg")
-            || lowercased.hasSuffix(".jpeg")
-            || lowercased.hasSuffix(".gif")
-            || lowercased.hasSuffix(".webp")
-            || lowercased.hasSuffix(".heic")
-            || lowercased.hasSuffix(".heif")
-    }
-
-    nonisolated static func markdownImagePath(_ path: String) -> String {
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.contains(")") || trimmed.contains(" ") || trimmed.contains("%") {
-            let escaped = trimmed
-                .replacingOccurrences(of: "%", with: "%25")
-                .replacingOccurrences(of: ">", with: "%3E")
-                .replacingOccurrences(of: ")", with: "%29")
-            return "<\(escaped)>"
-        }
-        return trimmed
-    }
-
     // Extracts user images from history payload and converts them into renderable thumbnail attachments.
     func decodeImageAttachments(from itemObject: [String: JSONValue]) -> [CodexImageAttachment] {
         let contentItems = itemObject["content"]?.arrayValue ?? []
@@ -496,7 +350,6 @@ extension CodexService {
                     payloadDataURL: payloadDataURL,
                     sourceURL: sourceURL
                 )
-                .sanitizedForStorage(preservingPayloadDataURL: false)
             )
         }
 
@@ -506,7 +359,7 @@ extension CodexService {
     func mergeHistoryMessages(_ existing: [CodexMessage], _ history: [CodexMessage]) -> [CodexMessage] {
         let activeThreadIDs = Set(activeTurnIdByThread.keys)
         let runningIDs = runningThreadIDs
-        return (try? Self.mergeHistoryMessages(existing, history, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)) ?? existing
+        return Self.mergeHistoryMessages(existing, history, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningIDs)
     }
 
     nonisolated static func mergeHistoryMessages(
@@ -514,47 +367,63 @@ extension CodexService {
         _ history: [CodexMessage],
         activeThreadIDs: Set<String>,
         runningThreadIDs: Set<String>
-    ) throws -> [CodexMessage] {
+    ) -> [CodexMessage] {
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
             // so that the stable sort preserves server-provided chronology.
-            var sorted = AssistantReplayDeduper.dedupeBlockReplays(
-                in: history.sorted(by: { $0.createdAt < $1.createdAt })
-            )
+            var sorted = history.sorted(by: { $0.createdAt < $1.createdAt })
             for index in sorted.indices {
                 sorted[index].orderIndex = CodexMessageOrderCounter.next()
             }
-            return historyMessagesMergingGeneratedImageArtifacts(sorted)
+            return sorted
         }
 
         var merged = existing
-        let assistantHistoryCountByTurn = Dictionary(
-            grouping: history.filter { $0.role == .assistant }
-        ) { $0.turnId ?? "" }
-        .mapValues(\.count)
-        var processedHistoryMessages = 0
 
         for message in history {
-            processedHistoryMessages &+= 1
-            if processedHistoryMessages.isMultiple(of: RunningThreadHistoryCatchupPolicy.cancellationCheckInterval),
-               Task.isCancelled {
-                throw CancellationError()
-            }
-
             if message.role == .assistant,
                let turnId = message.turnId, !turnId.isEmpty,
-               let index = uniqueAssistantHistoryTextMergeIndex(
-                   in: merged,
-                   message: message,
-                   turnId: turnId
-               ) {
+               let index = merged.lastIndex(where: { candidate in
+                   candidate.role == .assistant
+                       && candidate.turnId == turnId
+                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
+               }) {
+                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                continue
+            }
+
+            // Fallback: match assistant by turnId alone when text-based matching missed
+            // (e.g. history arrives while streaming is in progress, or itemId mismatch).
+            if message.role == .assistant,
+               let turnId = message.turnId, !turnId.isEmpty,
+               let incomingItemId = normalizedHistoryIdentifier(message.itemId),
+               let index = merged.lastIndex(where: { candidate in
+                   candidate.role == .assistant
+                       && candidate.turnId == turnId
+                       && (normalizedHistoryIdentifier(candidate.itemId) == nil
+                           || normalizedHistoryIdentifier(candidate.itemId) == incomingItemId)
+               }) {
+                merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                continue
+            }
+
+            // Legacy fallback for servers that still omit assistant item ids in history snapshots.
+            if message.role == .assistant,
+               let turnId = message.turnId, !turnId.isEmpty,
+               normalizedHistoryIdentifier(message.itemId) == nil,
+               let index = merged.lastIndex(where: { candidate in
+                   candidate.role == .assistant
+                       && candidate.turnId == turnId
+                       && normalizedHistoryIdentifier(candidate.itemId) == nil
+               }) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
 
             // Forced resume snapshots can materialize a real assistant itemId after the
-            // live row was already created with provisional identity. Only merge when
-            // the identity is compatible, otherwise stale history can pollute the live row.
+            // live row was already created with a placeholder/stale identity. When the
+            // turn is still active, prefer merging into the streaming row instead of
+            // appending a second assistant bubble for the same response.
             if message.role == .assistant,
                let turnId = message.turnId, !turnId.isEmpty,
                (activeThreadIDs.contains(message.threadId) || runningThreadIDs.contains(message.threadId)),
@@ -562,71 +431,20 @@ extension CodexService {
                    candidate.role == .assistant
                        && candidate.turnId == turnId
                        && candidate.isStreaming
-                       && assistantHistoryIdentityAllowsRunningReconcile(
-                           localMessage: candidate,
-                           serverMessage: message
-                       )
                }) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
 
-            // Running turn snapshots without item identity are too ambiguous to append
-            // beside a live item-scoped assistant row.
-            if message.role == .assistant,
-               let turnId = message.turnId, !turnId.isEmpty,
-               normalizedHistoryIdentifier(message.itemId) == nil,
-               (activeThreadIDs.contains(message.threadId) || runningThreadIDs.contains(message.threadId)),
-               merged.contains(where: { candidate in
-                   candidate.role == .assistant
-                       && candidate.turnId == turnId
-                       && candidate.isStreaming
-                       && hasStableAssistantIdentity(candidate.itemId)
-               }) {
-                continue
-            }
-
-            let threadIsStillActive = activeThreadIDs.contains(message.threadId)
-                || runningThreadIDs.contains(message.threadId)
-
-            // After a turn is fully closed, thread/read can return the same single assistant
-            // reply with canonical text or a different stable item id. Reconcile that row
-            // instead of appending a second final bubble.
-            if message.role == .assistant,
-               let turnId = message.turnId, !turnId.isEmpty,
-               !threadIsStillActive,
-               assistantHistoryCountByTurn[turnId] == 1 {
-                let candidateIndices = merged.indices.filter { index in
-                    let candidate = merged[index]
-                    return candidate.role == .assistant
-                        && candidate.turnId == turnId
-                        && !candidate.isStreaming
-                }
-
-                if candidateIndices.count == 1,
-                   let index = candidateIndices.last {
-                    if shouldReplaceClosedAssistantMessage(
-                        merged[index],
-                        with: message
-                    ) {
-                        merged[index] = reconcileExistingMessage(
-                            merged[index],
-                            with: message,
-                            activeThreadIDs: activeThreadIDs,
-                            runningThreadIDs: runningThreadIDs
-                        )
-                    }
-                    continue
-                }
-            }
-
             if message.role == .user,
                let turnId = message.turnId, !turnId.isEmpty,
-               let index = uniqueUserHistoryMergeIndex(
-                   in: merged,
-                   message: message,
-                   turnId: turnId
-               ) {
+               let index = merged.lastIndex(where: { candidate in
+                   candidate.role == .user
+                       && candidate.deliveryState != .failed
+                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
+                       && attachmentSignature(for: candidate.attachments) == attachmentSignature(for: message.attachments)
+                       && (candidate.turnId == nil || candidate.turnId == turnId)
+               }) {
                 merged[index] = reconcileExistingMessage(merged[index], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
                 continue
             }
@@ -748,21 +566,13 @@ extension CodexService {
             }
 
             if message.role == .user,
-               let pendingIndex = uniquePendingUserHistoryMergeIndex(
-                   in: merged,
-                   message: message
-               ) {
+               let pendingIndex = merged.lastIndex(where: { candidate in
+                   candidate.role == .user
+                       && candidate.deliveryState == .pending
+                       && normalizedMessageText(candidate.text) == normalizedMessageText(message.text)
+                       && attachmentSignature(for: candidate.attachments) == attachmentSignature(for: message.attachments)
+               }) {
                 merged[pendingIndex] = reconcileExistingMessage(merged[pendingIndex], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
-                continue
-            }
-
-            if message.role == .assistant,
-               AssistantReplayDeduper.isReplayMessage(
-                   in: merged,
-                   threadId: message.threadId,
-                   turnId: message.turnId,
-                   text: message.text
-               ) {
                 continue
             }
 
@@ -770,46 +580,7 @@ extension CodexService {
         }
 
         merged.sort(by: { $0.orderIndex < $1.orderIndex })
-        return historyMessagesMergingGeneratedImageArtifacts(merged)
-    }
-
-    // Keeps running-thread reopen bounded to the recent transcript tail so A/B switching
-    // does not repeatedly reconcile the entire chat while output is still streaming.
-    nonisolated static func mergeRecentHistoryWindow(
-        _ existing: [CodexMessage],
-        _ history: [CodexMessage],
-        activeThreadIDs: Set<String>,
-        runningThreadIDs: Set<String>,
-        windowSize: Int
-    ) throws -> [CodexMessage] {
-        let normalizedWindowSize = max(1, windowSize)
-        guard !existing.isEmpty,
-              shouldPreferRecentHistoryWindow(
-                existingCount: existing.count,
-                historyCount: history.count,
-                windowSize: normalizedWindowSize
-              ) else {
-            return try mergeHistoryMessages(
-                existing,
-                history,
-                activeThreadIDs: activeThreadIDs,
-                runningThreadIDs: runningThreadIDs
-            )
-        }
-
-        let prefixCount = max(existing.count - normalizedWindowSize, 0)
-        let stablePrefix = Array(existing.prefix(prefixCount))
-        let recentExisting = Array(existing.suffix(normalizedWindowSize))
-        let recentHistory = Array(history.suffix(normalizedWindowSize))
-        let mergedTail = try mergeHistoryMessages(
-            recentExisting,
-            recentHistory,
-            activeThreadIDs: activeThreadIDs,
-            runningThreadIDs: runningThreadIDs
-        )
-        let boundaryOverlapKeys = Set(stablePrefix.suffix(32).map(Self.historyMessageKey))
-        let filteredTail = mergedTail.filter { !boundaryOverlapKeys.contains(historyMessageKey(for: $0)) }
-        return stablePrefix + filteredTail
+        return merged
     }
 
     func decodeHistoryTimestamp(from object: [String: JSONValue]) -> Date? {
@@ -824,13 +595,16 @@ extension CodexService {
 
         for key in numericKeys {
             if let value = object[key]?.doubleValue {
-                return CodexTimestampParser.decodeUnixTimestamp(value)
+                return decodeUnixTimestamp(value)
             }
             if let value = object[key]?.intValue {
-                return CodexTimestampParser.decodeUnixTimestamp(Double(value))
+                return decodeUnixTimestamp(Double(value))
             }
             if let value = object[key]?.stringValue {
-                if let parsed = CodexTimestampParser.parseString(value) {
+                if let numeric = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    return decodeUnixTimestamp(numeric)
+                }
+                if let parsed = parseHistoryDateString(value) {
                     return parsed
                 }
             }
@@ -840,7 +614,18 @@ extension CodexService {
     }
 
     func parseHistoryDateString(_ value: String) -> Date? {
-        CodexTimestampParser.parseString(value)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: trimmed) {
+            return date
+        }
+
+        let fallbackFormatter = ISO8601DateFormatter()
+        fallbackFormatter.formatOptions = [.withInternetDateTime]
+        return fallbackFormatter.date(from: trimmed)
     }
 
     func reconcileExistingMessage(_ localMessage: CodexMessage, with serverMessage: CodexMessage) -> CodexMessage {
@@ -868,25 +653,19 @@ extension CodexService {
             value.deliveryState = .confirmed
         }
 
-        if CodexTimestampParser.isTrustworthyServerDate(serverMessage.createdAt),
-           abs(value.createdAt.timeIntervalSince(serverMessage.createdAt)) > 0.5 {
-            value.createdAt = serverMessage.createdAt
-        }
-
         if value.turnId == nil {
             value.turnId = serverMessage.turnId
         }
         let localItemId = normalizedHistoryIdentifier(value.itemId)
         let serverItemId = normalizedHistoryIdentifier(serverMessage.itemId)
-        let shouldAttachMissingItemId = localItemId == nil
-        let shouldRebindRunningAssistantItem = preservesRunningPresentation
-            && value.role == .assistant
-            && localMessage.isStreaming
-            && serverItemId != nil
-            && localItemId != serverItemId
-            && !hasStableAssistantIdentity(localItemId)
-        if shouldAttachMissingItemId
-            || shouldRebindRunningAssistantItem
+        if localItemId == nil
+            || (
+                preservesRunningPresentation
+                    && value.role == .assistant
+                    && localMessage.isStreaming
+                    && serverItemId != nil
+                    && localItemId != serverItemId
+            )
             || (
                 value.role == .system
                     && value.kind == .toolActivity
@@ -906,19 +685,9 @@ extension CodexService {
         if value.role == .assistant {
             let serverText = normalizedMessageText(serverMessage.text)
             if !serverText.isEmpty {
-                if preservesRunningPresentation {
-                    if assistantHistoryIdentityAllowsRunningReconcile(
-                        localMessage: localMessage,
-                        serverMessage: serverMessage
-                    ) {
-                        value.text = mergeAssistantRunningSnapshotText(
-                            existingText: value.text,
-                            incomingText: serverMessage.text
-                        )
-                    }
-                } else {
-                    value.text = serverMessage.text
-                }
+                value.text = preservesRunningPresentation
+                    ? mergeStreamingSnapshotText(existingText: value.text, incomingText: serverMessage.text)
+                    : serverMessage.text
             }
             value.isStreaming = preservesRunningPresentation
                 ? (localMessage.isStreaming || serverMessage.isStreaming || runningThreadIDs.contains(localMessage.threadId))
@@ -961,78 +730,6 @@ extension CodexService {
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    // Mirrors t3code's provider-message identity as closely as the mobile schema allows.
-    nonisolated static func stableAssistantMessageID(threadId: String, turnId: String?, itemId: String?) -> String? {
-        guard let itemId = normalizedHistoryIdentifier(itemId) else {
-            return nil
-        }
-        return "assistant:\(threadId):item:\(itemId)"
-    }
-
-    // Real provider item ids must not be rebound to a different history item mid-stream.
-    nonisolated static func hasStableAssistantIdentity(_ itemId: String?) -> Bool {
-        guard let itemId = normalizedHistoryIdentifier(itemId) else {
-            return false
-        }
-        return !itemId.hasPrefix("turn:") && !itemId.hasPrefix("rollout-")
-    }
-
-    // Running assistant rows may absorb history only when the provider item identity agrees.
-    nonisolated static func assistantHistoryIdentityAllowsRunningReconcile(
-        localMessage: CodexMessage,
-        serverMessage: CodexMessage
-    ) -> Bool {
-        let localItemId = normalizedHistoryIdentifier(localMessage.itemId)
-        let serverItemId = normalizedHistoryIdentifier(serverMessage.itemId)
-
-        if let localItemId, let serverItemId {
-            return localItemId == serverItemId || !hasStableAssistantIdentity(localItemId)
-        }
-
-        if let localItemId, serverItemId == nil {
-            return !hasStableAssistantIdentity(localItemId)
-        }
-
-        return true
-    }
-
-    // History can revisit an assistant turn multiple times while local rows still
-    // have provisional identity. Only reconcile by text when the candidate is unique.
-    nonisolated static func uniqueAssistantHistoryTextMergeIndex(
-        in messages: [CodexMessage],
-        message: CodexMessage,
-        turnId: String
-    ) -> Int? {
-        let normalizedText = normalizedMessageText(message.text)
-        guard !normalizedText.isEmpty else {
-            return nil
-        }
-
-        let normalizedTurnId = normalizedHistoryIdentifier(turnId) ?? turnId
-        let candidates = messages.indices.filter { index in
-            let candidate = messages[index]
-            let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
-            return candidate.role == .assistant
-                && (candidateTurnId == nil || candidateTurnId == normalizedTurnId)
-                && normalizedMessageText(candidate.text) == normalizedText
-        }
-
-        guard candidates.count == 1,
-              let index = candidates.last else {
-            return nil
-        }
-
-        let localItemId = normalizedHistoryIdentifier(messages[index].itemId)
-        let incomingItemId = normalizedHistoryIdentifier(message.itemId)
-        if let localItemId, let incomingItemId, localItemId != incomingItemId,
-           hasStableAssistantIdentity(localItemId),
-           hasStableAssistantIdentity(incomingItemId) {
-            return nil
-        }
-
-        return index
     }
 
     nonisolated static func shouldReconcileToolActivityRow(
@@ -1109,10 +806,6 @@ extension CodexService {
         }
 
         if incomingText.count > existingText.count, incomingText.hasPrefix(existingText) {
-            let suffix = incomingText.dropFirst(existingText.count)
-            if !existingText.isEmpty, suffix.range(of: existingText) != nil {
-                return existingText
-            }
             return incomingText
         }
 
@@ -1132,186 +825,12 @@ extension CodexService {
         return incomingText
     }
 
-    // Assistant history snapshots can be flattened across messages during reconnect.
-    // Keep the live bubble anchored to live deltas unless history is an exact/stale match.
-    nonisolated static func mergeAssistantRunningSnapshotText(existingText: String, incomingText: String) -> String {
-        if existingText.isEmpty {
-            return incomingText
-        }
-
-        if incomingText == existingText {
-            return existingText
-        }
-
-        if existingText.hasSuffix(incomingText) {
-            return existingText
-        }
-
-        if existingText.count > incomingText.count, existingText.hasPrefix(incomingText) {
-            return existingText
-        }
-
-        return existingText
-    }
-
-    // Closed-turn snapshots are only allowed to replace the visible assistant reply
-    // when they are clearly the same message and at least as complete.
-    nonisolated static func shouldReplaceClosedAssistantMessage(
-        _ localMessage: CodexMessage,
-        with serverMessage: CodexMessage
-    ) -> Bool {
-        let localText = normalizedMessageText(localMessage.text)
-        let serverText = normalizedMessageText(serverMessage.text)
-
-        guard !serverText.isEmpty else {
-            return false
-        }
-
-        if localText.isEmpty || localText == serverText {
-            return true
-        }
-
-        if localText.count > serverText.count, localText.hasPrefix(serverText) {
-            return false
-        }
-
-        if looksLikeFlattenedAssistantReplacement(localText: localText, serverText: serverText) {
-            return false
-        }
-
-        return true
-    }
-
-    // Rejects closed assistant replacements that look like multiple assistant rows
-    // collapsed into one payload instead of a single canonical final message.
-    nonisolated static func looksLikeFlattenedAssistantReplacement(localText: String, serverText: String) -> Bool {
-        if serverText.hasPrefix(localText) {
-            let suffix = serverText.dropFirst(localText.count)
-            return suffix.range(of: "\n\n") != nil || suffix.range(of: localText) != nil
-        }
-
-        if let range = serverText.range(of: localText),
-           range.lowerBound != serverText.startIndex {
-            return true
-        }
-
-        return serverText.range(of: "\n\n") != nil
-    }
-
     nonisolated static func attachmentSignature(for attachments: [CodexImageAttachment]) -> String {
         attachments
-            .map(\.stableIdentityKey)
+            .map { attachment in
+                attachment.payloadDataURL ?? attachment.sourceURL ?? attachment.thumbnailBase64JPEG
+            }
             .joined(separator: "|")
-    }
-
-    nonisolated static func fileMentionsSignature(for fileMentions: [String]) -> String {
-        fileMentions
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { !$0.isEmpty }
-            .sorted()
-            .joined(separator: "|")
-    }
-
-    nonisolated static func userMessageMetadataLooksCompatible(
-        localMessage: CodexMessage,
-        serverMessage: CodexMessage,
-        allowAttachmentCountFallback: Bool = false
-    ) -> Bool {
-        let localFileMentions = fileMentionsSignature(for: localMessage.fileMentions)
-        let serverFileMentions = fileMentionsSignature(for: serverMessage.fileMentions)
-        if !localFileMentions.isEmpty,
-           !serverFileMentions.isEmpty,
-           localFileMentions != serverFileMentions {
-            return false
-        }
-
-        let localAttachments = attachmentSignature(for: localMessage.attachments)
-        let serverAttachments = attachmentSignature(for: serverMessage.attachments)
-        if !localAttachments.isEmpty,
-           !serverAttachments.isEmpty,
-           localAttachments != serverAttachments {
-            // Pending image sends can return with a different server attachment identity
-            // even though the user row is the same prompt/image count.
-            return allowAttachmentCountFallback
-                && localMessage.attachments.count == serverMessage.attachments.count
-        }
-
-        return true
-    }
-
-    nonisolated static func shouldReconcileUserHistoryMessage(
-        _ candidate: CodexMessage,
-        with message: CodexMessage,
-        turnId: String
-    ) -> Bool {
-        guard candidate.role == .user,
-              candidate.deliveryState != .failed,
-              normalizedMessageText(candidate.text) == normalizedMessageText(message.text) else {
-            return false
-        }
-
-        let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
-        let allowsAttachmentCountFallback = candidate.deliveryState == .pending
-            || candidateTurnId == turnId
-        guard userMessageMetadataLooksCompatible(
-            localMessage: candidate,
-            serverMessage: message,
-            allowAttachmentCountFallback: allowsAttachmentCountFallback
-        ) else {
-            return false
-        }
-        return candidateTurnId == nil || candidateTurnId == turnId
-    }
-
-    nonisolated static func shouldReconcilePendingUserHistoryMessage(
-        _ candidate: CodexMessage,
-        with message: CodexMessage
-    ) -> Bool {
-        guard candidate.role == .user,
-              candidate.deliveryState == .pending,
-              normalizedMessageText(candidate.text) == normalizedMessageText(message.text),
-              userMessageMetadataLooksCompatible(
-                localMessage: candidate,
-                serverMessage: message,
-                allowAttachmentCountFallback: true
-              ) else {
-            return false
-        }
-
-        return true
-    }
-
-    nonisolated static func uniqueUserHistoryMergeIndex(
-        in merged: [CodexMessage],
-        message: CodexMessage,
-        turnId: String
-    ) -> Int? {
-        // Keep intentionally repeated sends separate when more than one local row fits.
-        let matchingIndices = merged.indices.filter { index in
-            shouldReconcileUserHistoryMessage(merged[index], with: message, turnId: turnId)
-        }
-
-        guard matchingIndices.count == 1 else {
-            return nil
-        }
-
-        return matchingIndices[0]
-    }
-
-    nonisolated static func uniquePendingUserHistoryMergeIndex(
-        in merged: [CodexMessage],
-        message: CodexMessage
-    ) -> Int? {
-        // Pending rows are especially easy to confuse during phone-started turns.
-        let matchingIndices = merged.indices.filter { index in
-            shouldReconcilePendingUserHistoryMessage(merged[index], with: message)
-        }
-
-        guard matchingIndices.count == 1 else {
-            return nil
-        }
-
-        return matchingIndices[0]
     }
 
     func normalizedItemType(_ rawType: String) -> String {
@@ -1319,17 +838,6 @@ extension CodexService {
             .replacingOccurrences(of: "_", with: "")
             .replacingOccurrences(of: "-", with: "")
             .lowercased()
-    }
-
-    func normalizedAssistantPhase(_ rawPhase: String?) -> String? {
-        guard let rawPhase else {
-            return nil
-        }
-        let normalized = rawPhase
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "-", with: "_")
-            .lowercased()
-        return normalized.isEmpty ? nil : normalized
     }
 
     nonisolated static func normalizedCommandExecutionPreviewKey(from text: String) -> String? {
@@ -1379,7 +887,6 @@ extension CodexService {
         to result: inout [CodexMessage],
         role: CodexMessageRole,
         kind: CodexMessageKind = .chat,
-        assistantPhase: String? = nil,
         text: String,
         threadId: String,
         turnId: String?,
@@ -1387,7 +894,6 @@ extension CodexService {
         createdAt: Date,
         attachments: [CodexImageAttachment] = [],
         planState: CodexPlanState? = nil,
-        planPresentation: CodexPlanPresentation? = nil,
         subagentAction: CodexSubagentAction? = nil
     ) {
         guard !text.isEmpty || !attachments.isEmpty || subagentAction != nil else {
@@ -1396,13 +902,9 @@ extension CodexService {
 
         result.append(
             CodexMessage(
-                id: role == .assistant
-                    ? (Self.stableAssistantMessageID(threadId: threadId, turnId: turnId, itemId: itemId) ?? UUID().uuidString)
-                    : UUID().uuidString,
                 threadId: threadId,
                 role: role,
                 kind: kind,
-                assistantPhase: role == .assistant ? normalizedAssistantPhase(assistantPhase) : nil,
                 text: text,
                 createdAt: createdAt,
                 turnId: turnId,
@@ -1411,81 +913,9 @@ extension CodexService {
                 deliveryState: .confirmed,
                 attachments: attachments,
                 planState: planState,
-                planPresentation: planPresentation,
-                proposedPlan: role == .assistant ? CodexProposedPlanParser.parse(from: text) : nil,
                 subagentAction: subagentAction
             )
         )
-    }
-
-    // Canonical history may store generated-image artifacts as separate items; the
-    // timeline presents them inside the final assistant answer for that turn.
-    nonisolated static func historyMessagesMergingGeneratedImageArtifacts(_ messages: [CodexMessage]) -> [CodexMessage] {
-        var result = messages
-        let turnIds = Array(Set(result.compactMap(\.turnId)))
-        for turnId in turnIds {
-            let assistantIndices = result.indices.filter { index in
-                result[index].role == .assistant && result[index].turnId == turnId
-            }
-            let imageOnlyIndices = assistantIndices.filter { index in
-                Self.isHistoryGeneratedImageArtifactOnly(result[index].text)
-            }
-            guard !imageOnlyIndices.isEmpty,
-                  let targetIndex = assistantIndices.last(where: { index in
-                      !imageOnlyIndices.contains(index)
-                          && result[index].assistantPhase == "final_answer"
-                  }) else {
-                continue
-            }
-
-            let existingText = result[targetIndex].text
-            let existingImagePaths = Set(AssistantMarkdownImageReferenceParser.references(in: existingText).map(\.path))
-            let imageText = imageOnlyIndices
-                .filter { index in
-                    AssistantMarkdownImageReferenceParser.references(in: result[index].text).contains { reference in
-                        !existingImagePaths.contains(reference.path)
-                    }
-                }
-                .map { result[$0].text.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n\n")
-            guard !imageText.isEmpty else {
-                continue
-            }
-            result[targetIndex].text = [existingText, imageText]
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .joined(separator: "\n\n")
-        }
-
-        let removedIds = Set(result.indices.filter { index in
-            if let turnId = result[index].turnId,
-               Self.isHistoryGeneratedImageArtifactOnly(result[index].text) {
-                return result.contains { candidate in
-                    candidate.id != result[index].id
-                        && candidate.role == .assistant
-                        && candidate.turnId == turnId
-                        && !Self.isHistoryGeneratedImageArtifactOnly(candidate.text)
-                        && AssistantMarkdownImageReferenceParser.references(in: candidate.text).contains { reference in
-                            result[index].text.contains(reference.path)
-                        }
-                }
-            }
-            return false
-        }.map { result[$0].id })
-        return result.filter { !removedIds.contains($0.id) }
-    }
-
-    nonisolated static func isHistoryGeneratedImageArtifactOnly(_ text: String) -> Bool {
-        let imageReferences = AssistantMarkdownImageReferenceParser.references(in: text)
-        guard !imageReferences.isEmpty,
-              imageReferences.allSatisfy(\.isCodexGeneratedImage) else {
-            return false
-        }
-        return AssistantMarkdownImageReferenceParser
-            .visibleTextRemovingImageSyntax(from: text)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty
     }
 
     // Parses `data:image/...;base64,...` payloads into raw image bytes.
@@ -1543,7 +973,7 @@ extension CodexService {
         }
 
         if sections.isEmpty {
-            return ""
+            return "Thinking..."
         }
 
         return sections.joined(separator: "\n\n")
@@ -1570,7 +1000,7 @@ extension CodexService {
             guard let stepObject = stepValue.objectValue,
                   let step = decodeHistoryNormalizedPlanText(stepObject["step"]),
                   let rawStatus = decodeHistoryNormalizedPlanText(stepObject["status"]),
-                  let status = CodexPlanStepStatus(wireValue: rawStatus) else {
+                  let status = CodexPlanStepStatus(rawValue: rawStatus) else {
                 return nil
             }
 
@@ -1582,40 +1012,6 @@ extension CodexService {
         }
 
         return CodexPlanState(explanation: explanation, steps: steps)
-    }
-
-    // Closed turns should not restore a stale "active" plan accessory from history.
-    func finalizedHistoryPlanState(_ planState: CodexPlanState?, turnCompleted: Bool) -> CodexPlanState? {
-        guard turnCompleted,
-              let planState,
-              !planState.steps.isEmpty,
-              planState.steps.contains(where: { $0.status != .completed }) else {
-            return planState
-        }
-
-        return CodexPlanState(
-            explanation: planState.explanation,
-            steps: planState.steps.map { step in
-                CodexPlanStep(id: step.id, step: step.step, status: .completed)
-            }
-        )
-    }
-
-    func isCompletedHistoryTurn(_ turnObject: [String: JSONValue]) -> Bool {
-        historyTurnTerminalState(turnObject) == .completed
-    }
-
-    func historyTurnTerminalState(_ turnObject: [String: JSONValue]) -> CodexTurnTerminalState? {
-        let statusObject = turnObject["status"]?.objectValue
-        let rawStatus = firstNonEmptyString([
-            turnObject["status"]?.stringValue,
-            statusObject?["type"]?.stringValue,
-            statusObject?["statusType"]?.stringValue,
-            statusObject?["status_type"]?.stringValue,
-            turnObject["result"]?.stringValue,
-        ]) ?? ""
-
-        return threadTerminalState(from: normalizeThreadStatusType(rawStatus))
     }
 
     // Parses collabAgentToolCall payloads into a stable summary row the timeline can render.

@@ -92,20 +92,6 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertFalse(viewModel.isSending)
     }
 
-    func testFlushQueueDoesNothingWhenProtectedRunningFallbackIsActive() {
-        let service = makeService()
-        service.isConnected = true
-        service.protectedRunningFallbackThreadIDs.insert("thread-queue")
-
-        let viewModel = makeViewModel()
-        service.queuedTurnDraftsByThread["thread-queue"] = [makeDraft(text: "queued")]
-
-        viewModel.flushQueueIfPossible(codex: service, threadID: "thread-queue")
-
-        XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
-        XCTAssertFalse(viewModel.isSending)
-    }
-
     func testFlushQueueFailureRequeuesAndPausesQueue() async {
         let service = makeService()
         service.isConnected = true
@@ -231,66 +217,10 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertTrue(service.messagesByThread["thread-queue"]?.isEmpty ?? true)
     }
 
-    func testSendTurnStoresOnlyConfirmedFileMentionsOnUserMessage() async {
-        let service = makeService()
-        service.isConnected = true
-        service.resumedThreadIDs.insert("thread-queue")
-        service.requestTransportOverride = { method, _ in
-            XCTAssertEqual(method, "turn/start")
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object(["turnId": .string("turn-new")]),
-                includeJSONRPC: false
-            )
-        }
-
-        let viewModel = makeViewModel()
-        viewModel.input = "Please inspect @TurnView.swift"
-        viewModel.composerMentionedFiles = [
-            TurnComposerMentionedFile(
-                fileName: "TurnView.swift",
-                path: "CodexMobile/Views/Turn/TurnView.swift"
-            )
-        ]
-
-        viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
-
-        let message = try XCTUnwrap(service.messagesByThread["thread-queue"]?.last)
-        XCTAssertEqual(message.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
-        XCTAssertEqual(message.fileMentions, ["CodexMobile/Views/Turn/TurnView.swift"])
-    }
-
-    func testSendTurnDoesNotStoreManualFileLikeTextAsConfirmedMention() async {
-        let service = makeService()
-        service.isConnected = true
-        service.resumedThreadIDs.insert("thread-queue")
-        service.requestTransportOverride = { method, _ in
-            XCTAssertEqual(method, "turn/start")
-            return RPCMessage(
-                id: .string(UUID().uuidString),
-                result: .object(["turnId": .string("turn-new")]),
-                includeJSONRPC: false
-            )
-        }
-
-        let viewModel = makeViewModel()
-        viewModel.input = "Please inspect @CodexMobile/Views/Turn/TurnView.swift"
-
-        viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
-
-        let message = try XCTUnwrap(service.messagesByThread["thread-queue"]?.last)
-        XCTAssertEqual(message.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
-        XCTAssertTrue(message.fileMentions.isEmpty)
-    }
-
     func testFlushQueuePreservesPlanModeFromBusyThreadQueue() async {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
-        service.supportsTurnCollaborationMode = true
-        service.selectedModelId = "gpt-5.3-codex"
 
         let viewModel = makeViewModel()
         viewModel.isPlanModeArmed = true
@@ -323,7 +253,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(
-            capturedParams?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
+            capturedParams?.objectValue?["collaborationMode"]?.stringValue,
             CodexCollaborationModeKind.plan.rawValue
         )
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)

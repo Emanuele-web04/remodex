@@ -13,8 +13,6 @@ function composeAccountStatus({
   authStatus = null,
   loginInFlight = false,
   bridgeVersionInfo = null,
-  transportMode = null,
-  hostPlatform = process.platform,
 } = {}) {
   const account = accountRead?.account || null;
   const authToken = normalizeString(authStatus?.authToken);
@@ -47,9 +45,6 @@ function composeAccountStatus({
       normalizeString(bridgePackageVersion),
     ]) || null,
     bridgeLatestVersion: normalizeString(bridgeVersionInfo?.bridgeLatestVersion) || null,
-    codexTransportMode: normalizeString(transportMode) || null,
-    hostPlatform: normalizeHostPlatform(hostPlatform),
-    hostCapabilities: deriveHostCapabilities(hostPlatform),
   };
 }
 
@@ -60,8 +55,6 @@ function redactAuthStatus(authStatus = null, extras = {}) {
     authStatus,
     loginInFlight: Boolean(extras.loginInFlight),
     bridgeVersionInfo: extras.bridgeVersionInfo || null,
-    transportMode: extras.transportMode || null,
-    hostPlatform: extras.hostPlatform || process.platform,
   });
 
   return {
@@ -75,9 +68,6 @@ function redactAuthStatus(authStatus = null, extras = {}) {
     expiresAt: composed.expiresAt,
     bridgeVersion: composed.bridgeVersion,
     bridgeLatestVersion: composed.bridgeLatestVersion,
-    codexTransportMode: composed.codexTransportMode,
-    hostPlatform: composed.hostPlatform,
-    hostCapabilities: composed.hostCapabilities,
   };
 }
 
@@ -91,14 +81,12 @@ function composeSanitizedAuthStatusFromSettledResults({
   authStatusResult = null,
   loginInFlight = false,
   bridgeVersionInfo = null,
-  transportMode = null,
-  hostPlatform = process.platform,
 } = {}) {
   const accountRead = accountReadResult?.status === "fulfilled" ? accountReadResult.value : null;
   const authStatus = authStatusResult?.status === "fulfilled" ? authStatusResult.value : null;
 
   if (!accountRead && !authStatus) {
-    const error = new Error("Unable to read ChatGPT account status from the bridge.");
+    const error = new Error("Unable to read Gemini account status from the bridge.");
     error.errorCode = "auth_status_unavailable";
     throw error;
   }
@@ -107,8 +95,6 @@ function composeSanitizedAuthStatusFromSettledResults({
     accountRead,
     loginInFlight: Boolean(loginInFlight),
     bridgeVersionInfo,
-    transportMode,
-    hostPlatform,
   });
 }
 
@@ -143,29 +129,6 @@ function normalizeString(value) {
 
 function parseBoolean(value) {
   return value === true;
-}
-
-function normalizeHostPlatform(platform) {
-  switch (platform) {
-    case "darwin":
-      return "macos";
-    case "linux":
-      return "linux";
-    case "win32":
-      return "windows";
-    default:
-      return "unknown";
-  }
-}
-
-function deriveHostCapabilities(platform) {
-  const isMacOS = platform === "darwin";
-  return {
-    desktopHandoff: isMacOS,
-    displayWake: isMacOS,
-    keepAwake: isMacOS,
-    hostBrowserLogin: isMacOS,
-  };
 }
 
 module.exports = {

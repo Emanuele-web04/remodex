@@ -6,13 +6,6 @@
 
 import Foundation
 
-private let runtimeDebugTimestampFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.dateFormat = "HH:mm:ss.SSS"
-    return formatter
-}()
-
 extension CodexService {
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
@@ -93,12 +86,6 @@ extension CodexService {
         normalizeRuntimeSelectionsAfterModelsUpdate()
     }
 
-    func setSelectedGitWriterModelId(_ modelId: String?) {
-        let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
-        selectedGitWriterModelId = (normalized?.isEmpty == false) ? normalized : nil
-        normalizeRuntimeSelectionsAfterModelsUpdate()
-    }
-
     func setSelectedReasoningEffort(_ effort: String?) {
         let normalized = effort?.trimmingCharacters(in: .whitespacesAndNewlines)
         selectedReasoningEffort = (normalized?.isEmpty == false) ? normalized : nil
@@ -134,7 +121,7 @@ extension CodexService {
     }
 
     func setSelectedServiceTier(_ serviceTier: CodexServiceTier?) {
-        selectedServiceTier = normalizedServiceTierForSelectedModel(serviceTier)
+        selectedServiceTier = serviceTier
         persistRuntimeSelections()
     }
 
@@ -143,9 +130,8 @@ extension CodexService {
             return
         }
 
-        let normalizedServiceTier = normalizedServiceTierForSelectedModel(serviceTier)
         mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
-            override.serviceTierRawValue = normalizedServiceTier?.rawValue
+            override.serviceTierRawValue = serviceTier?.rawValue
             override.overridesServiceTier = true
         }
     }
@@ -183,18 +169,6 @@ extension CodexService {
 
     func selectedModelOption() -> CodexModelOption? {
         selectedModelOption(from: availableModels)
-    }
-
-    func selectedGitWriterModelOption() -> CodexModelOption? {
-        selectedGitWriterModelOption(from: availableModels)
-    }
-
-    func selectedModelSupportsServiceTier(_ serviceTier: CodexServiceTier) -> Bool {
-        selectedModelOption()?.supportsServiceTier(serviceTier) == true
-    }
-
-    func gitWriterModelIdentifier() -> String? {
-        selectedGitWriterModelOption()?.model
     }
 
     func supportedReasoningEffortsForSelectedModel() -> [CodexReasoningEffortOption] {
@@ -257,18 +231,12 @@ extension CodexService {
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
-        let candidate: CodexServiceTier?
         if let threadOverride = threadRuntimeOverride(for: threadId),
            threadOverride.overridesServiceTier {
-            candidate = threadOverride.serviceTier
-        } else {
-            candidate = selectedServiceTier
+            return threadOverride.serviceTier
         }
 
-        guard let candidate else {
-            return nil
-        }
-        return selectedModelSupportsServiceTier(candidate) ? candidate : nil
+        return selectedServiceTier
     }
 
     func runtimeServiceTierForTurn(threadId: String? = nil) -> String? {
@@ -382,18 +350,9 @@ extension CodexService {
     }
 
     func debugRuntimeLog(_ message: String) {
-        let entry = "[\(runtimeDebugTimestampFormatter.string(from: Date()))] \(message)"
-        runtimeDebugLogEntries.append(entry)
-        if runtimeDebugLogEntries.count > 400 {
-            runtimeDebugLogEntries.removeFirst(runtimeDebugLogEntries.count - 400)
-        }
 #if DEBUG
-        print("[CodexRuntime] \(entry)")
+        print("[CodexRuntime] \(message)")
 #endif
-    }
-
-    func clearRuntimeDebugLog() {
-        runtimeDebugLogEntries.removeAll()
     }
 
     func shouldRetryWithApprovalPolicyFallback(_ error: Error) -> Bool {
@@ -412,16 +371,6 @@ extension CodexService {
             || message.contains("expected one of")
             || message.contains("onrequest")
             || message.contains("on-request")
-    }
-
-    func normalizedServiceTierForSelectedModel(_ serviceTier: CodexServiceTier?) -> CodexServiceTier? {
-        guard let serviceTier else {
-            return nil
-        }
-        guard let selectedModel = selectedModelOption() else {
-            return serviceTier
-        }
-        return selectedModel.supportsServiceTier(serviceTier) ? serviceTier : nil
     }
 }
 
@@ -473,21 +422,8 @@ private extension CodexService {
             } else {
                 selectedReasoningEffort = resolvedModel.supportedReasoningEfforts.first?.reasoningEffort
             }
-
-            if let selectedServiceTier,
-               !resolvedModel.supportsServiceTier(selectedServiceTier) {
-                self.selectedServiceTier = nil
-            }
         } else {
             selectedReasoningEffort = nil
-            selectedServiceTier = nil
-        }
-
-        if let selectedGitWriterModelId,
-           !availableModels.contains(where: {
-               $0.id == selectedGitWriterModelId || $0.model == selectedGitWriterModelId
-           }) {
-            self.selectedGitWriterModelId = nil
         }
 
         persistRuntimeSelections()
@@ -506,39 +442,7 @@ private extension CodexService {
         return nil
     }
 
-    func selectedGitWriterModelOption(
-        from models: [CodexModelOption],
-        explicitModelId: String? = nil
-    ) -> CodexModelOption? {
-        guard !models.isEmpty else {
-            return nil
-        }
-
-        let savedSelection = explicitModelId ?? selectedGitWriterModelId
-        if let savedSelection,
-           let directMatch = models.first(where: { $0.id == savedSelection || $0.model == savedSelection }) {
-            return directMatch
-        }
-
-        if let miniModel = models.first(where: { $0.id == "gpt-5.4-mini" || $0.model == "gpt-5.4-mini" }) {
-            return miniModel
-        }
-
-        if let runtimeSelected = selectedModelOption(from: models) {
-            return runtimeSelected
-        }
-
-        return fallbackModel(from: models)
-    }
-
     func fallbackModel(from models: [CodexModelOption]) -> CodexModelOption? {
-        // Prefer GPT-5.5 when the bridge advertises it; the rest of the app treats
-        // it as the canonical default regardless of the bridge's `isDefault` flag.
-        if let preferred = models.first(where: {
-            $0.id.lowercased() == "gpt-5.5" || $0.model.lowercased() == "gpt-5.5"
-        }) {
-            return preferred
-        }
         if let defaultModel = models.first(where: { $0.isDefault }) {
             return defaultModel
         }
@@ -550,12 +454,6 @@ private extension CodexService {
             defaults.set(selectedModelId, forKey: Self.selectedModelIdDefaultsKey)
         } else {
             defaults.removeObject(forKey: Self.selectedModelIdDefaultsKey)
-        }
-
-        if let selectedGitWriterModelId, !selectedGitWriterModelId.isEmpty {
-            defaults.set(selectedGitWriterModelId, forKey: Self.selectedGitWriterModelIdDefaultsKey)
-        } else {
-            defaults.removeObject(forKey: Self.selectedGitWriterModelIdDefaultsKey)
         }
 
         if let selectedReasoningEffort, !selectedReasoningEffort.isEmpty {

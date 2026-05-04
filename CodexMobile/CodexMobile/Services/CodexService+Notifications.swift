@@ -10,7 +10,6 @@ import UserNotifications
 
 private enum CodexNotificationSource {
     static let runCompletion = "codex.runCompletion"
-    static let structuredUserInput = "codex.structuredUserInput"
 }
 
 protocol CodexRemoteNotificationRegistering: AnyObject {
@@ -67,7 +66,7 @@ final class CodexNotificationCenterDelegateProxy: NSObject, UNUserNotificationCe
         didReceive response: UNNotificationResponse
     ) async {
         guard let service,
-              let payload = CodexThreadNotificationPayload(from: response.notification.request.content.userInfo) else {
+              let payload = CodexRunCompletionNotificationPayload(from: response.notification.request.content.userInfo) else {
             return
         }
 
@@ -77,14 +76,13 @@ final class CodexNotificationCenterDelegateProxy: NSObject, UNUserNotificationCe
     }
 }
 
-private struct CodexThreadNotificationPayload {
+private struct CodexRunCompletionNotificationPayload {
     let threadId: String
     let turnId: String?
 
     init?(from userInfo: [AnyHashable: Any]) {
         guard let source = userInfo[CodexNotificationPayloadKeys.source] as? String,
-              (source == CodexNotificationSource.runCompletion
-                || source == CodexNotificationSource.structuredUserInput),
+              source == CodexNotificationSource.runCompletion,
               let threadId = userInfo[CodexNotificationPayloadKeys.threadId] as? String,
               !threadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
@@ -228,28 +226,6 @@ extension CodexService {
                 threadId: threadId,
                 turnId: turnId,
                 result: result
-            )
-        }
-    }
-
-    // Prompts can arrive mid-turn without any terminal event, so surface them with a local alert
-    // when the app is backgrounded instead of making the user rediscover them later in the timeline.
-    func notifyStructuredUserInputIfNeeded(
-        threadId: String,
-        turnId: String?,
-        requestID: JSONValue,
-        questions: [CodexStructuredUserInputQuestion]
-    ) {
-        guard !isAppInForeground else {
-            return
-        }
-
-        Task { @MainActor [weak self] in
-            await self?.scheduleStructuredUserInputNotificationIfNeeded(
-                threadId: threadId,
-                turnId: turnId,
-                requestID: requestID,
-                questions: questions
             )
         }
     }
@@ -430,7 +406,7 @@ private extension CodexService {
 
         runCompletionNotificationDedupedAt[dedupeKey] = now
 
-        let title = thread(for: threadId)?.displayTitle ?? CodexThread.defaultDisplayTitle
+        let title = thread(for: threadId)?.displayTitle ?? "Conversation"
         let body: String = {
             switch result {
             case .completed:
@@ -462,63 +438,6 @@ private extension CodexService {
             try await userNotificationCenter.add(request)
         } catch {
             debugRuntimeLog("failed to schedule local notification: \(error.localizedDescription)")
-        }
-    }
-
-    // Keeps repeated request replays from spamming duplicate alerts while a prompt is still pending.
-    func scheduleStructuredUserInputNotificationIfNeeded(
-        threadId: String,
-        turnId: String?,
-        requestID: JSONValue,
-        questions: [CodexStructuredUserInputQuestion]
-    ) async {
-        await refreshNotificationAuthorizationStatus()
-        guard canScheduleRunCompletionNotifications else {
-            return
-        }
-
-        let now = Date()
-        pruneStructuredUserInputNotificationDedupe(now: now)
-        let dedupeKey = structuredUserInputNotificationDedupeKey(
-            threadId: threadId,
-            requestID: requestID
-        )
-
-        if let previousTimestamp = structuredUserInputNotificationDedupedAt[dedupeKey],
-           now.timeIntervalSince(previousTimestamp) <= 60 {
-            return
-        }
-
-        structuredUserInputNotificationDedupedAt[dedupeKey] = now
-
-        let title = thread(for: threadId)?.displayTitle ?? CodexThread.defaultDisplayTitle
-        let promptCount = questions.count
-        let body = promptCount == 1
-            ? "Codex needs one answer to continue."
-            : "Codex needs \(promptCount) answers to continue."
-
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        content.threadIdentifier = threadId
-        content.userInfo = [
-            CodexNotificationPayloadKeys.source: CodexNotificationSource.structuredUserInput,
-            CodexNotificationPayloadKeys.threadId: threadId,
-            CodexNotificationPayloadKeys.turnId: turnId ?? "",
-            CodexNotificationPayloadKeys.requestId: idKey(from: requestID),
-        ]
-
-        let request = UNNotificationRequest(
-            identifier: structuredUserInputNotificationIdentifier(for: dedupeKey),
-            content: content,
-            trigger: nil
-        )
-
-        do {
-            try await userNotificationCenter.add(request)
-        } catch {
-            debugRuntimeLog("failed to schedule structured user input notification: \(error.localizedDescription)")
         }
     }
 
@@ -565,27 +484,6 @@ private extension CodexService {
 
     func pruneRunCompletionNotificationDedupe(now: Date) {
         runCompletionNotificationDedupedAt = runCompletionNotificationDedupedAt.filter { _, timestamp in
-            now.timeIntervalSince(timestamp) <= 60
-        }
-    }
-
-    func structuredUserInputNotificationDedupeKey(
-        threadId: String,
-        requestID: JSONValue
-    ) -> String {
-        "\(threadId)|\(idKey(from: requestID))"
-    }
-
-    func structuredUserInputNotificationIdentifier(for dedupeKey: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
-        let sanitized = String(dedupeKey.unicodeScalars.map { scalar in
-            allowed.contains(scalar) ? Character(scalar) : "_"
-        })
-        return "codex.structuredUserInput.\(sanitized)"
-    }
-
-    func pruneStructuredUserInputNotificationDedupe(now: Date) {
-        structuredUserInputNotificationDedupedAt = structuredUserInputNotificationDedupedAt.filter { _, timestamp in
             now.timeIntervalSince(timestamp) <= 60
         }
     }

@@ -7,61 +7,6 @@
 
 import Foundation
 
-enum CodexTimestampParser {
-    private static let iso8601Formatters: [ISO8601DateFormatter] = {
-        let withFractions = ISO8601DateFormatter()
-        withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-
-        let standard = ISO8601DateFormatter()
-        standard.formatOptions = [.withInternetDateTime]
-
-        return [withFractions, standard]
-    }()
-
-    static func parseString(_ value: String?) -> Date? {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return nil
-        }
-
-        if let numeric = Double(trimmed) {
-            return decodeUnixTimestamp(numeric)
-        }
-
-        for formatter in iso8601Formatters {
-            if let date = formatter.date(from: trimmed) {
-                return date
-            }
-        }
-
-        return nil
-    }
-
-    // Accepts second, millisecond, microsecond, and nanosecond Unix timestamps.
-    static func decodeUnixTimestamp(_ rawValue: Double) -> Date {
-        let absoluteValue = abs(rawValue)
-        let secondsValue: Double
-
-        switch absoluteValue {
-        case 1_000_000_000_000_000_000...:
-            secondsValue = rawValue / 1_000_000_000
-        case 1_000_000_000_000_000...:
-            secondsValue = rawValue / 1_000_000
-        case 10_000_000_000...:
-            secondsValue = rawValue / 1_000
-        default:
-            secondsValue = rawValue
-        }
-
-        return Date(timeIntervalSince1970: secondsValue)
-    }
-
-    // Filters out placeholder dates so local optimistic timestamps are not replaced by epoch fallbacks.
-    static func isTrustworthyServerDate(_ date: Date) -> Bool {
-        date.timeIntervalSince1970 >= 946_684_800 // 2000-01-01T00:00:00Z
-    }
-}
-
 enum CodexThreadSyncState: String, Codable, Hashable, Sendable {
     case live
     case archivedLocal
@@ -240,27 +185,12 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
 
 extension CodexThread {
     // --- UI helpers -----------------------------------------------------------
-    static let defaultDisplayTitle = "New Thread"
     private static let noProjectGroupKey = "__no_project__"
-
-    // Old rollouts may still persist "Conversation", so treat both labels as the same placeholder.
-    static func isGenericPlaceholderTitle(_ value: String?) -> Bool {
-        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !trimmed.isEmpty else {
-            return false
-        }
-
-        return ["Conversation", defaultDisplayTitle].contains {
-            trimmed.localizedCaseInsensitiveCompare($0) == .orderedSame
-        }
-    }
-
     var displayTitle: String {
         let cleanedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedAgentLabel = agentDisplayLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedPreview = preview?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let effectiveTitle = Self.isGenericPlaceholderTitle(cleanedTitle) ? nil : cleanedTitle
 
         // Prefer explicit thread name (AI/user rename) over server title fallback.
         if let cleanedName, !cleanedName.isEmpty {
@@ -268,31 +198,26 @@ extension CodexThread {
         }
 
         if let cleanedAgentLabel, !cleanedAgentLabel.isEmpty {
-            if cleanedTitle == nil || Self.isGenericPlaceholderTitle(cleanedTitle) {
+            if cleanedTitle == nil || cleanedTitle?.localizedCaseInsensitiveCompare(L10n.tr("Conversation")) == .orderedSame {
                 return cleanedAgentLabel
             }
         }
 
-        guard let effectiveTitle, !effectiveTitle.isEmpty else {
+        guard let cleanedTitle, !cleanedTitle.isEmpty else {
             if let cleanedPreview, !cleanedPreview.isEmpty {
                 let firstCharacter = cleanedPreview.prefix(1).uppercased()
                 let remainingCharacters = cleanedPreview.dropFirst()
                 return firstCharacter + remainingCharacters
             }
 
-            return Self.defaultDisplayTitle
+            return L10n.tr("Conversation")
         }
 
-        return effectiveTitle
+        return cleanedTitle
     }
 
     var isSubagent: Bool {
         parentThreadId != nil
-    }
-
-    // App-server exposes the rollout session identifier as Thread.id.
-    var sessionId: String {
-        id
     }
 
     // Fork badges use ancestry rather than cwd heuristics so local/worktree routing stays independent.
@@ -310,7 +235,7 @@ extension CodexThread {
         for candidate in [name, title] {
             guard let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !trimmed.isEmpty,
-                  !Self.isGenericPlaceholderTitle(trimmed) else {
+                  trimmed.localizedCaseInsensitiveCompare(L10n.tr("Conversation")) != .orderedSame else {
                 continue
             }
             return trimmed
@@ -381,7 +306,13 @@ extension CodexThread {
         if let normalizedProjectPath {
             return normalizedProjectPath
         }
-        return nil
+
+        guard let cwd else {
+            return nil
+        }
+
+        let trimmed = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // Stable key for grouping threads by project.
@@ -402,7 +333,7 @@ extension CodexThread {
     // Distinguishes Codex-managed worktrees from the main repo in compact sidebar UIs.
     static func projectDisplayLabel(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
-            return "Cloud"
+            return L10n.tr("Cloud")
         }
 
         let baseLabel = projectBaseDisplayName(for: normalizedProjectPath)
@@ -421,12 +352,17 @@ extension CodexThread {
         return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "laptopcomputer" : "arrow.triangle.branch"
     }
 
-    // Shared path gate for every flow that needs to decide whether a cwd represents a real local project.
-    static func normalizedFilesystemProjectPath(_ value: String?) -> String? {
-        normalizeProjectPath(value)
-    }
-
     // --- Date parsing ---------------------------------------------------------
+
+    private static let iso8601Formatters: [ISO8601DateFormatter] = {
+        let withFractions = ISO8601DateFormatter()
+        withFractions.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        let standard = ISO8601DateFormatter()
+        standard.formatOptions = [.withInternetDateTime]
+
+        return [withFractions, standard]
+    }()
 
     private static func decodeDateIfPresent(
         from container: KeyedDecodingContainer<CodingKeys>,
@@ -434,17 +370,17 @@ extension CodexThread {
     ) throws -> Date? {
         for key in keys {
             if let stringValue = try? container.decodeIfPresent(String.self, forKey: key) {
-                if let parsedDate = CodexTimestampParser.parseString(stringValue) {
+                if let parsedDate = parseISO8601(stringValue) {
                     return parsedDate
                 }
             }
 
             if let doubleValue = try? container.decodeIfPresent(Double.self, forKey: key) {
-                return CodexTimestampParser.decodeUnixTimestamp(doubleValue)
+                return decodeUnixTimestamp(doubleValue)
             }
 
             if let intValue = try? container.decodeIfPresent(Int64.self, forKey: key) {
-                return CodexTimestampParser.decodeUnixTimestamp(Double(intValue))
+                return decodeUnixTimestamp(Double(intValue))
             }
 
             // Keep native Date decoding as a final fallback for unexpected formats.
@@ -455,6 +391,23 @@ extension CodexThread {
 
         return nil
     }
+
+    private static func parseISO8601(_ value: String) -> Date? {
+        for formatter in iso8601Formatters {
+            if let date = formatter.date(from: value) {
+                return date
+            }
+        }
+
+        return nil
+    }
+
+    // Supports both seconds and milliseconds timestamps.
+    private static func decodeUnixTimestamp(_ rawValue: Double) -> Date {
+        let secondsValue = rawValue > 10_000_000_000 ? rawValue / 1000 : rawValue
+        return Date(timeIntervalSince1970: secondsValue)
+    }
+
     private static func decodeStringIfPresent(
         from container: KeyedDecodingContainer<CodingKeys>,
         keys: [CodingKeys]
@@ -523,8 +476,8 @@ extension CodexThread {
             return nil
         }
 
-        if let normalizedRootPath = normalizedFilesystemRootPath(trimmed) {
-            return normalizedRootPath
+        if trimmed == "/" {
+            return trimmed
         }
 
         var normalized = trimmed
@@ -532,75 +485,7 @@ extension CodexThread {
             normalized.removeLast()
         }
 
-        if normalized.isEmpty {
-            return "/"
-        }
-
-        guard isLikelyFilesystemPath(normalized) else {
-            return nil
-        }
-
-        return normalized
-    }
-
-    // Preserves valid filesystem roots that would otherwise be mangled by generic trailing-slash trimming.
-    private static func normalizedFilesystemRootPath(_ value: String) -> String? {
-        if value == "/" {
-            return "/"
-        }
-
-        if value.first == "~", value.dropFirst().allSatisfy({ $0 == "/" }) {
-            return "~/"
-        }
-
-        let utf16View = value.utf16
-        guard utf16View.count >= 3 else {
-            return nil
-        }
-
-        let startIndex = utf16View.startIndex
-        let first = utf16View[startIndex]
-        let second = utf16View[utf16View.index(after: startIndex)]
-        let thirdIndex = utf16View.index(startIndex, offsetBy: 2)
-        let third = utf16View[thirdIndex]
-        let isDriveLetter = (65...90).contains(first) || (97...122).contains(first)
-        guard isDriveLetter, second == 58, third == 92 || third == 47 else {
-            return nil
-        }
-
-        let remainder = value.dropFirst(3)
-        guard remainder.allSatisfy({ $0 == "/" || $0 == "\\" }) else {
-            return nil
-        }
-
-        let drive = UnicodeScalar(first).map(String.init) ?? "C"
-        return "\(drive):/"
-    }
-
-    // Rejects pseudo-buckets like `server` or `_default` so only real local paths create project groups.
-    private static func isLikelyFilesystemPath(_ value: String) -> Bool {
-        if value == "/" {
-            return true
-        }
-
-        if value.hasPrefix("/") || value.hasPrefix("~/") {
-            return true
-        }
-
-        let utf16View = value.utf16
-        guard utf16View.count >= 3 else {
-            return false
-        }
-
-        let first = utf16View[utf16View.startIndex]
-        let second = utf16View[utf16View.index(after: utf16View.startIndex)]
-        let third = utf16View[utf16View.index(utf16View.startIndex, offsetBy: 2)]
-        let isDriveLetter = (65...90).contains(first) || (97...122).contains(first)
-        if isDriveLetter, second == 58, third == 92 || third == 47 {
-            return true
-        }
-
-        return value.hasPrefix("\\\\")
+        return normalized.isEmpty ? "/" : normalized
     }
 
     private static func projectBaseDisplayName(for normalizedProjectPath: String) -> String {

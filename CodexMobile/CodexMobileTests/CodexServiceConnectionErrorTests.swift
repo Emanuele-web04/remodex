@@ -11,16 +11,6 @@ import UIKit
 
 @MainActor
 final class CodexServiceConnectionErrorTests: XCTestCase {
-    func testKeepMacAwakePreferenceDefaultsToDisabled() {
-        let suiteName = "CodexServiceConnectionErrorTests.keepMacAwake.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-
-        let service = CodexService(defaults: defaults)
-
-        XCTAssertFalse(service.keepMacAwakeWhileBridgeRuns)
-    }
-
     func testBenignBackgroundAbortIsSuppressedFromUserFacingErrors() {
         let service = CodexService()
         let error = NWError.posix(.ECONNABORTED)
@@ -136,26 +126,6 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         )
     }
 
-    func testBrokenPipeGetsFriendlyFailureCopy() {
-        let service = CodexService()
-
-        XCTAssertEqual(
-            service.userFacingConnectFailureMessage(NWError.posix(.EPIPE)),
-            "Connection was interrupted. Tap Reconnect to try again."
-        )
-    }
-
-    func testTurnErrorSuppressesBrokenPipeWhileAutoReconnectIsRunning() {
-        let service = CodexService()
-        let error = NWError.posix(.EPIPE)
-        service.isAppInForeground = true
-        service.shouldAutoReconnectOnForeground = true
-        service.connectionRecoveryState = .retrying(attempt: 1, message: "Reconnecting...")
-
-        XCTAssertTrue(service.shouldSuppressRecoverableConnectionError(error))
-        XCTAssertEqual(service.userFacingTurnErrorMessage(from: error), "")
-    }
-
     func testConnectTimeSessionUnavailableCloseIsRetryable() {
         let service = CodexService()
         let error = CodexServiceError.invalidInput("WebSocket closed during connect (4002)")
@@ -163,42 +133,6 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertTrue(service.isRetryableSavedSessionConnectError(error))
         XCTAssertEqual(
             service.userFacingConnectFailureMessage(error),
-            "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
-        )
-    }
-
-    func testManualWebSocketClosePayloadPreservesRetryableRelayCode() {
-        let service = CodexService()
-        let closeCode = service.relayCloseCode(
-            fromManualWebSocketClosePayload: Data([0x0F, 0xA2])
-        )
-
-        XCTAssertEqual(service.relayCloseCodeRawValue(closeCode), 4002)
-    }
-
-    func testManualWebSocketCloseFrameUsesRetryableRelayRecovery() async throws {
-        let service = CodexService()
-        let connection = NWConnection(
-            host: NWEndpoint.Host("localhost"),
-            port: NWEndpoint.Port(rawValue: 80)!,
-            using: NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
-        )
-        service.relaySessionId = "session-\(UUID().uuidString)"
-        service.relayUrl = "ws://mac.local/relay"
-        service.isConnected = true
-        service.isInitialized = true
-        service.setForegroundState(true)
-        service.manualWebSocketReadBuffer = Data([0x88, 0x02, 0x0F, 0xA2])
-
-        let didHandleClose = try await service.drainManualWebSocketFrames(on: connection)
-
-        XCTAssertTrue(didHandleClose)
-        XCTAssertFalse(service.isConnected)
-        XCTAssertFalse(service.isInitialized)
-        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
-        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
-        XCTAssertEqual(
-            service.lastErrorMessage,
             "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
         )
     }

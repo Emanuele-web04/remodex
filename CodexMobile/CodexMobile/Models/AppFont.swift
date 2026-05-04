@@ -18,7 +18,7 @@ enum AppFont {
 
         var title: String {
             switch self {
-            case .system: return "System"
+            case .system: return L10n.tr("System")
             case .geist: return "Geist"
             case .geistMono: return "Geist Mono"
             case .jetBrainsMono: return "JetBrains Mono"
@@ -28,13 +28,13 @@ enum AppFont {
         var subtitle: String {
             switch self {
             case .system:
-                return "Use the native iOS font for regular text. Code stays monospaced."
+                return L10n.tr("Use the native iOS font for regular text. Code stays monospaced.")
             case .geist:
-                return "Use Geist for regular text. Code stays monospaced."
+                return L10n.tr("Use Geist for regular text. Code stays monospaced.")
             case .geistMono:
-                return "Use Geist Mono for regular text and code."
+                return L10n.tr("Use Geist Mono for regular text and code.")
             case .jetBrainsMono:
-                return "Use JetBrains Mono for regular text and code."
+                return L10n.tr("Use JetBrains Mono for regular text and code.")
             }
         }
     }
@@ -156,11 +156,10 @@ enum AppFont {
     ) -> UIFont {
         let selectedStyle = currentStyle
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
-        let metrics = UIFontMetrics(forTextStyle: fallbackTextStyle)
 
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize),
            let font = UIFont(name: faceName, size: adjustedSize) {
-            return metrics.scaledFont(for: font)
+            return font
         }
 
         return UIFont.preferredFont(forTextStyle: fallbackTextStyle)
@@ -221,16 +220,15 @@ enum AppFont {
         fallbackTextStyle: UIFont.TextStyle
     ) -> UIFont {
         let adjustedSize = max(size + monoSizeAdjustment(), 1)
-        let metrics = UIFontMetrics(forTextStyle: fallbackTextStyle)
 
         if let faceName = resolvedMonoFaceName(for: weight, size: adjustedSize),
            let font = UIFont(name: faceName, size: adjustedSize) {
-            return metrics.scaledFont(for: font)
+            return font
         }
 
         if let descriptor = UIFontDescriptor.preferredFontDescriptor(withTextStyle: fallbackTextStyle)
             .withDesign(.monospaced) {
-            return UIFont(descriptor: descriptor, size: 0)
+            return UIFont(descriptor: descriptor, size: size)
         }
 
         return UIFont.monospacedSystemFont(ofSize: size, weight: uiKitWeight(for: weight))
@@ -239,7 +237,7 @@ enum AppFont {
     private static func monoFont(size: CGFloat, weight: Font.Weight, style: Font.TextStyle) -> Font {
         let adjustedSize = max(size + monoSizeAdjustment(), 1)
         if let faceName = resolvedMonoFaceName(for: weight, size: adjustedSize) {
-            return .custom(faceName, size: adjustedSize, relativeTo: style)
+            return .custom(faceName, size: adjustedSize)
         }
 
         return .system(style, design: .monospaced, weight: weight)
@@ -272,7 +270,7 @@ enum AppFont {
 
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize) {
-            return .custom(faceName, size: adjustedSize, relativeTo: style)
+            return .custom(faceName, size: adjustedSize)
         }
 
         return .system(style, design: systemDesign, weight: weight)

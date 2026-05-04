@@ -17,9 +17,7 @@ struct TurnComposerRuntimeMenuBuilder {
             children.append(reasoningMenu)
         }
 
-        if let speedMenu = makeSpeedMenu() {
-            children.append(speedMenu)
-        }
+        children.append(makeSpeedMenu())
 
         guard !children.isEmpty else {
             return nil
@@ -54,11 +52,7 @@ struct TurnComposerRuntimeMenuBuilder {
         )
     }
 
-    private func makeSpeedMenu() -> UIMenu? {
-        guard runtimeState.supportsFastMode else {
-            return nil
-        }
-
+    private func makeSpeedMenu() -> UIMenu {
         var children: [UIMenuElement] = [
             UIAction(
                 title: "Normal",

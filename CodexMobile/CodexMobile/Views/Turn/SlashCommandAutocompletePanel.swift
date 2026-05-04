@@ -13,7 +13,6 @@ struct SlashCommandAutocompletePanel: View {
     let isThreadRunning: Bool
     let showsGitBranchSelector: Bool
     let isLoadingGitBranchTargets: Bool
-    let availableGitBranchTargets: [String]
     let selectedGitBaseBranch: String
     let gitDefaultBranch: String
     let onSelectCommand: (TurnComposerSlashCommand) -> Void
@@ -74,9 +73,9 @@ struct SlashCommandAutocompletePanel: View {
                                 commandIcon(for: item, isEnabled: isEnabled)
 
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text(item.commandToken)
+                                    Text(item.title)
                                         .font(AppFont.subheadline(weight: .semibold))
-                                        .foregroundStyle(commandPrimaryStyle(isEnabled: isEnabled))
+                                        .foregroundStyle(isEnabled ? .primary : .secondary)
                                         .lineLimit(1)
 
                                     Text(commandSubtitle(for: item))
@@ -87,7 +86,7 @@ struct SlashCommandAutocompletePanel: View {
 
                                 Spacer(minLength: 8)
 
-                                Text(item.title)
+                                Text(item.commandToken)
                                     .font(AppFont.footnote())
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -237,19 +236,15 @@ struct SlashCommandAutocompletePanel: View {
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
-                .foregroundStyle(commandPrimaryStyle(isEnabled: isEnabled))
+                .foregroundStyle(isEnabled ? .primary : .secondary)
                 .frame(width: 16, height: 16)
                 .frame(width: 22)
         } else {
             Image(systemName: command.symbolName)
                 .font(AppFont.system(size: 15, weight: .semibold))
-                .foregroundStyle(commandPrimaryStyle(isEnabled: isEnabled))
+                .foregroundStyle(isEnabled ? .primary : .secondary)
                 .frame(width: 22)
         }
-    }
-
-    private func commandPrimaryStyle(isEnabled: Bool) -> Color {
-        isEnabled ? .primary : .secondary
     }
 
     @ViewBuilder
@@ -277,10 +272,8 @@ struct SlashCommandAutocompletePanel: View {
             return trimmedSelected
         }
 
-        return remodexSelectableDefaultBranch(
-            defaultBranch: gitDefaultBranch,
-            availableGitBranchTargets: availableGitBranchTargets
-        )
+        let trimmedDefault = gitDefaultBranch.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedDefault.isEmpty ? nil : trimmedDefault
     }
 
     private var isBaseBranchTargetAvailable: Bool {
@@ -303,8 +296,6 @@ struct SlashCommandAutocompletePanel: View {
         switch command {
         case .codeReview:
             return !hasComposerContentConflictingWithReview
-        case .feedback:
-            return true
         case .fork:
             return !isThreadRunning
         case .status:

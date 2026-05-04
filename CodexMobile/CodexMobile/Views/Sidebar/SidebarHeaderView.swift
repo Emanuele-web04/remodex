@@ -1,14 +1,11 @@
 // FILE: SidebarHeaderView.swift
-// Purpose: Displays the sidebar app identity header and the inline close affordance for full-width presentation.
+// Purpose: Displays the sidebar app identity header.
 // Layer: View Component
 // Exports: SidebarHeaderView
 
 import SwiftUI
 
 struct SidebarHeaderView: View {
-    var showsCloseButton = false
-    var onClose: () -> Void = {}
-
     var body: some View {
         HStack(spacing: 10) {
             Image("AppLogo")
@@ -19,22 +16,6 @@ struct SidebarHeaderView: View {
 
             Text("Remodex")
                 .font(AppFont.title3(weight: .medium))
-
-            Spacer(minLength: 0)
-
-            if showsCloseButton {
-                // Mirrors the top-bar menu affordance so full-width sidebar presentations still
-                // have an obvious close target after the content shifts completely offscreen.
-                Button(action: onClose) {
-                    TwoLineHamburgerIcon()
-                        .foregroundStyle(.primary)
-                        .frame(width: 44, height: 44)
-                        .adaptiveGlass(.regular, in: Circle())
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Close menu")
-            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
@@ -43,5 +24,5 @@ struct SidebarHeaderView: View {
 }
 
 #Preview {
-    SidebarHeaderView(showsCloseButton: true)
+    SidebarHeaderView()
 }

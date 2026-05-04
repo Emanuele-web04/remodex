@@ -130,7 +130,7 @@ function createPushSessionService({
     await apnsClient.sendNotification({
       deviceToken: session.deviceToken,
       apnsEnvironment: session.apnsEnvironment,
-      title: normalizePreviewText(title) || "New Thread",
+      title: normalizePreviewText(title) || "Conversation",
       body: normalizePreviewText(body) || fallbackBodyForResult(normalizedResult),
       payload: {
         source: "codex.runCompletion",

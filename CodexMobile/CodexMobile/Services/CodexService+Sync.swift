@@ -7,17 +7,7 @@
 import Foundation
 import UIKit
 
-private final class BackgroundTaskIdentifierBox: @unchecked Sendable {
-    var taskID: UIBackgroundTaskIdentifier = .invalid
-}
-
 extension CodexService {
-    struct RunningThreadCatchupOutcome: Equatable {
-        let didRefreshTurnState: Bool
-        let isRunning: Bool
-        let didRunForcedResume: Bool
-    }
-
     func startSyncLoop() {
         guard canRunRealtimeSyncLoop else {
             stopSyncLoop()
@@ -103,10 +93,6 @@ extension CodexService {
             if isConnected && isInitialized {
                 startSyncLoop()
                 requestImmediateSync(threadId: activeThreadId)
-                // Re-check bridge-managed state when the app becomes active again.
-                Task { @MainActor [weak self] in
-                    await self?.refreshBridgeManagedState(allowAvailableBridgeUpdatePrompt: true)
-                }
             } else {
                 stopSyncLoop()
             }
@@ -136,32 +122,18 @@ extension CodexService {
         }
     }
 
-    // Thread opening should refresh the visible chat, not refetch the full sidebar list.
-    func requestImmediateActiveThreadSync(threadId: String? = nil) {
-        guard canRunRealtimeSyncLoop else {
-            return
-        }
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            if let threadId = threadId ?? self.activeThreadId {
-                await self.syncActiveThreadState(threadId: threadId)
-            }
-        }
-    }
-
     func syncThreadsList() async {
         guard isConnected, isInitialized else {
             return
         }
 
         do {
-            let activeThreads = try await fetchServerThreads(limit: recentActiveThreadListLimit)
+            let activeThreads = try await fetchServerThreads(limit: recentThreadListLimit)
 
             // Also fetch server-archived threads so they survive app restarts.
             var archivedThreads: [CodexThread] = []
             do {
-                archivedThreads = try await fetchServerThreads(limit: recentArchivedThreadListLimit, archived: true)
+                archivedThreads = try await fetchServerThreads(limit: recentThreadListLimit, archived: true)
             } catch {
                 debugSyncLog("thread/list archived fetch failed (non-fatal): \(error.localizedDescription)")
             }
@@ -203,6 +175,7 @@ extension CodexService {
         let localByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         let persistedArchivedIDs = locallyArchivedThreadIDs
         let persistedDeletedIDs = locallyDeletedThreadIDs
+        let serverArchivedIDs = Set(serverArchivedThreads.map(\.id))
 
         var merged: [String: CodexThread] = [:]
 
@@ -215,7 +188,7 @@ extension CodexService {
             var liveThread = serverThread
 
             if let localThread = localByID[liveThread.id] {
-                liveThread = mergedThread(liveThread, with: localThread, treatAsServerState: true)
+                liveThread = mergedThread(liveThread, with: localThread)
                 liveThread.syncState = localThread.syncState
             } else if persistedArchivedIDs.contains(liveThread.id) {
                 liveThread.syncState = .archivedLocal
@@ -237,7 +210,7 @@ extension CodexService {
 
             var archivedThread = serverThread
             if let localThread = localByID[archivedThread.id] {
-                archivedThread = mergedThread(archivedThread, with: localThread, treatAsServerState: true)
+                archivedThread = mergedThread(archivedThread, with: localThread)
             }
             archivedThread.syncState = .archivedLocal
 
@@ -255,11 +228,6 @@ extension CodexService {
             }
             merged[localThread.id] = localThread
         }
-
-        snapshotOnlyPinnedThreadIDs = injectPinnedSnapshotThreads(
-            into: &merged,
-            deletedThreadIDs: persistedDeletedIDs
-        )
 
         threads = sortThreads(Array(merged.values))
         assistantRevertStateCacheByThread.removeAll()
@@ -287,7 +255,7 @@ extension CodexService {
         if let index = threadIndex(for: threadId) {
             threads[index].syncState = .archivedLocal
         } else {
-            threads.append(CodexThread(id: threadId, title: CodexThread.defaultDisplayTitle, syncState: .archivedLocal))
+            threads.append(CodexThread(id: threadId, title: "Conversation", syncState: .archivedLocal))
             threads = sortThreads(threads)
         }
 
@@ -369,17 +337,6 @@ extension CodexService {
         sendThreadArchiveRPC(threadId: threadId, unarchive: false)
     }
 
-    func deleteThreadLocally(_ threadId: String) {
-        // Match deleteThread's local behavior without mutating the paired desktop runtime.
-        let descendants = collectDescendantThreadIDs(for: threadId)
-        for childId in descendants {
-            setThreadArchivedLocally(childId, isArchived: true)
-        }
-
-        removeThreadLocally(threadId, persistAsDeleted: true)
-        debugSyncLog("thread deleted locally by user: \(threadId) (cascaded \(descendants.count) children)")
-    }
-
     func renameThread(_ threadId: String, name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         // Optimistic local update.
@@ -390,55 +347,6 @@ extension CodexService {
         persistThreadRename(trimmedName, for: threadId)
         debugSyncLog("thread renamed by user: \(threadId) → \(trimmedName)")
         sendThreadNameSetRPC(threadId: threadId, name: trimmedName)
-    }
-
-    // Applies an automatic first-turn title only while the current title still matches the expected seed.
-    @discardableResult
-    func applyAutomaticThreadTitle(
-        _ title: String,
-        for threadId: String,
-        replacing allowedCurrentTitles: Set<String>
-    ) -> Bool {
-        let trimmedName = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedName.isEmpty,
-              let index = threadIndex(for: threadId) else {
-            return false
-        }
-
-        let currentName = threads[index].name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let currentTitle = threads[index].title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let currentDisplayTitle = threads[index].displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let persistedName = persistedThreadRename(for: threadId)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedAllowed = Set(allowedCurrentTitles.map(Self.normalizedAutomaticTitleComparisonValue))
-
-        let currentCandidates = [persistedName, currentName, currentTitle, currentDisplayTitle]
-            .compactMap { $0 }
-            .map(Self.normalizedAutomaticTitleComparisonValue)
-            .filter { !$0.isEmpty }
-        let defaultTitle = Self.normalizedAutomaticTitleComparisonValue(CodexThread.defaultDisplayTitle)
-        let legacyTitle = Self.normalizedAutomaticTitleComparisonValue("Conversation")
-        let canReplace = currentCandidates.isEmpty
-            || currentCandidates.allSatisfy { candidate in
-                normalizedAllowed.contains(candidate)
-                    || candidate == defaultTitle
-                    || candidate == legacyTitle
-            }
-
-        guard canReplace else {
-            debugSyncLog("automatic thread title skipped after user rename: \(threadId)")
-            return false
-        }
-
-        threads[index].name = trimmedName
-        threads[index].title = trimmedName
-        persistThreadRename(trimmedName, for: threadId)
-        debugSyncLog("thread renamed automatically: \(threadId) → \(trimmedName)")
-        sendThreadNameSetRPC(threadId: threadId, name: trimmedName)
-        return true
-    }
-
-    private static func normalizedAutomaticTitleComparisonValue(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func sendThreadNameSetRPC(threadId: String, name: String) {
@@ -511,9 +419,6 @@ extension CodexService {
 
         if isArchived {
             addLocallyArchivedThreadID(threadId)
-            if pinnedThreadIDs.contains(threadId) {
-                unpinThread(threadId)
-            }
         } else {
             removeLocallyArchivedThreadID(threadId)
         }
@@ -573,9 +478,6 @@ extension CodexService {
         if activeThreadId == threadId { activeThreadId = nil }
 
         removeLocallyArchivedThreadID(threadId)
-        if pinnedThreadIDs.contains(threadId) {
-            unpinThread(threadId)
-        }
         if persistAsDeleted {
             addLocallyDeletedThreadID(threadId)
         }
@@ -584,189 +486,6 @@ extension CodexService {
     func clearHydrationCaches() {
         hydratedThreadIDs.removeAll()
         loadingThreadIDs.removeAll()
-        cancelAllPerThreadRefreshWork()
-    }
-
-    // Bumps the invalidation token used to reject stale async refresh completions.
-    func invalidatePerThreadRefreshGeneration(for threadId: String) {
-        threadRefreshGenerationByThreadID[threadId, default: 0] &+= 1
-    }
-
-    // Captures the current invalidation token for a thread-local refresh task.
-    func currentPerThreadRefreshGeneration(for threadId: String) -> UInt64 {
-        threadRefreshGenerationByThreadID[threadId] ?? 0
-    }
-
-    // Rejects async completions that finished after the thread refresh state was torn down.
-    func isPerThreadRefreshCurrent(for threadId: String, generation: UInt64) -> Bool {
-        currentPerThreadRefreshGeneration(for: threadId) == generation
-    }
-
-    // Stops thread-local refresh tasks when a chat disappears so stale async work cannot write back later.
-    func cancelPerThreadRefreshWork(for threadId: String) {
-        invalidatePerThreadRefreshGeneration(for: threadId)
-        loadingThreadIDs.remove(threadId)
-        threadHistoryLoadTaskByThreadID[threadId]?.cancel()
-        threadHistoryLoadTaskByThreadID.removeValue(forKey: threadId)
-        forcedHistoryLoadThreadIDs.remove(threadId)
-        deferHydratedMarkForNotMaterializedThreadIDs.remove(threadId)
-        threadResumeTaskByThreadID[threadId]?.cancel()
-        threadResumeTaskByThreadID.removeValue(forKey: threadId)
-        threadResumeRequestSignatureByThreadID.removeValue(forKey: threadId)
-        forcedResumeEscalationThreadIDs.remove(threadId)
-        turnStateRefreshTaskByThreadID[threadId]?.cancel()
-        turnStateRefreshTaskByThreadID.removeValue(forKey: threadId)
-        runningThreadCatchupTaskByThreadID[threadId]?.cancel()
-        runningThreadCatchupTaskByThreadID.removeValue(forKey: threadId)
-        forcedRunningCatchupEscalationThreadIDs.remove(threadId)
-        lastForcedRunningResumeAtByThread.removeValue(forKey: threadId)
-        canonicalHistoryReconcileRetryTaskByThreadID[threadId]?.cancel()
-        canonicalHistoryReconcileRetryTaskByThreadID.removeValue(forKey: threadId)
-    }
-
-    // Clears all in-flight thread refresh work during reconnect/disconnect baselines.
-    func cancelAllPerThreadRefreshWork() {
-        let invalidatedThreadIDs = Set(threadHistoryLoadTaskByThreadID.keys)
-            .union(threadResumeTaskByThreadID.keys)
-            .union(turnStateRefreshTaskByThreadID.keys)
-            .union(runningThreadCatchupTaskByThreadID.keys)
-            .union(forcedHistoryLoadThreadIDs)
-            .union(deferHydratedMarkForNotMaterializedThreadIDs)
-            .union(forcedResumeEscalationThreadIDs)
-            .union(forcedRunningCatchupEscalationThreadIDs)
-            .union(threadResumeRequestSignatureByThreadID.keys)
-            .union(lastForcedRunningResumeAtByThread.keys)
-            .union(canonicalHistoryReconcileRetryTaskByThreadID.keys)
-        invalidatedThreadIDs.forEach { invalidatePerThreadRefreshGeneration(for: $0) }
-        loadingThreadIDs.removeAll()
-        threadHistoryLoadTaskByThreadID.values.forEach { $0.cancel() }
-        threadHistoryLoadTaskByThreadID.removeAll()
-        forcedHistoryLoadThreadIDs.removeAll()
-        deferHydratedMarkForNotMaterializedThreadIDs.removeAll()
-        threadResumeTaskByThreadID.values.forEach { $0.cancel() }
-        threadResumeTaskByThreadID.removeAll()
-        threadResumeRequestSignatureByThreadID.removeAll()
-        forcedResumeEscalationThreadIDs.removeAll()
-        turnStateRefreshTaskByThreadID.values.forEach { $0.cancel() }
-        turnStateRefreshTaskByThreadID.removeAll()
-        runningThreadCatchupTaskByThreadID.values.forEach { $0.cancel() }
-        runningThreadCatchupTaskByThreadID.removeAll()
-        forcedRunningCatchupEscalationThreadIDs.removeAll()
-        lastForcedRunningResumeAtByThread.removeAll()
-        workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }
-        workspaceCheckpointCopyTaskByTurnID.removeAll()
-        canonicalHistoryReconcileRetryTaskByThreadID.values.forEach { $0.cancel() }
-        canonicalHistoryReconcileRetryTaskByThreadID.removeAll()
-    }
-
-    // Runs the full "running thread catch-up" pipeline once per thread so the
-    // display-open, sync-loop, and post-connect flows do not stack duplicate work.
-    func catchUpRunningThreadIfNeeded(
-        threadId: String,
-        shouldForceResume: Bool,
-        didRefreshTurnState: Bool = false,
-        allowForceRefreshRetry: Bool = true
-    ) async -> RunningThreadCatchupOutcome {
-        let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
-        guard !normalizedThreadID.isEmpty else {
-            return RunningThreadCatchupOutcome(
-                didRefreshTurnState: didRefreshTurnState,
-                isRunning: false,
-                didRunForcedResume: false
-            )
-        }
-
-        let refreshGeneration = currentPerThreadRefreshGeneration(for: normalizedThreadID)
-        if let existingTask = runningThreadCatchupTaskByThreadID[normalizedThreadID] {
-            if shouldForceResume {
-                forcedRunningCatchupEscalationThreadIDs.insert(normalizedThreadID)
-            }
-
-            let outcome = await existingTask.value
-            guard shouldForceResume,
-                  allowForceRefreshRetry,
-                  outcome.isRunning,
-                  !outcome.didRunForcedResume else {
-                return outcome
-            }
-
-            forcedRunningCatchupEscalationThreadIDs.insert(normalizedThreadID)
-            return await catchUpRunningThreadIfNeeded(
-                threadId: normalizedThreadID,
-                shouldForceResume: true,
-                didRefreshTurnState: didRefreshTurnState || outcome.didRefreshTurnState,
-                allowForceRefreshRetry: false
-            )
-        }
-
-        let task = Task<RunningThreadCatchupOutcome, Never> { @MainActor in
-            defer {
-                // Only the current catch-up task is allowed to clear shared state.
-                if isPerThreadRefreshCurrent(for: normalizedThreadID, generation: refreshGeneration) {
-                    runningThreadCatchupTaskByThreadID.removeValue(forKey: normalizedThreadID)
-                    forcedRunningCatchupEscalationThreadIDs.remove(normalizedThreadID)
-                }
-            }
-
-            // Evaluate the async fallback explicitly so Swift does not form an async autoclosure for `||`.
-            var didRefresh = didRefreshTurnState
-            if !didRefresh {
-                didRefresh = await refreshInFlightTurnState(threadId: normalizedThreadID)
-            }
-            guard !Task.isCancelled,
-                  isPerThreadRefreshCurrent(for: normalizedThreadID, generation: refreshGeneration) else {
-                return RunningThreadCatchupOutcome(
-                    didRefreshTurnState: didRefresh,
-                    isRunning: false,
-                    didRunForcedResume: false
-                )
-            }
-
-            let isRunning = threadHasActiveOrRunningTurn(normalizedThreadID)
-            let effectiveShouldForceResume = shouldForceResume
-                || forcedRunningCatchupEscalationThreadIDs.contains(normalizedThreadID)
-            guard isRunning, effectiveShouldForceResume else {
-                return RunningThreadCatchupOutcome(
-                    didRefreshTurnState: didRefresh,
-                    isRunning: isRunning,
-                    didRunForcedResume: false
-                )
-            }
-
-            guard takeForcedRunningResumePermit(for: normalizedThreadID) else {
-                return RunningThreadCatchupOutcome(
-                    didRefreshTurnState: didRefresh,
-                    isRunning: true,
-                    didRunForcedResume: false
-                )
-            }
-
-            do {
-                _ = try await ensureThreadResumed(threadId: normalizedThreadID, force: true)
-                guard !Task.isCancelled,
-                      isPerThreadRefreshCurrent(for: normalizedThreadID, generation: refreshGeneration) else {
-                    return RunningThreadCatchupOutcome(
-                        didRefreshTurnState: didRefresh,
-                        isRunning: false,
-                        didRunForcedResume: false
-                    )
-                }
-                return RunningThreadCatchupOutcome(
-                    didRefreshTurnState: didRefresh,
-                    isRunning: threadHasActiveOrRunningTurn(normalizedThreadID),
-                    didRunForcedResume: true
-                )
-            } catch {
-                return RunningThreadCatchupOutcome(
-                    didRefreshTurnState: didRefresh,
-                    isRunning: threadHasActiveOrRunningTurn(normalizedThreadID),
-                    didRunForcedResume: false
-                )
-            }
-        }
-
-        runningThreadCatchupTaskByThreadID[normalizedThreadID] = task
-        return await task.value
     }
 
     func shouldTreatAsThreadNotFound(_ error: Error) -> Bool {
@@ -802,12 +521,9 @@ extension CodexService {
 #endif
     }
 
-    // Treats thread as active while a real turn id exists or while protected fallback
-    // is keeping the run recoverable before the server publishes that turn id.
+    // Treats thread as active if either turn mapping or runtime running fallback is present.
     func threadHasActiveOrRunningTurn(_ threadId: String) -> Bool {
-        activeTurnID(for: threadId) != nil
-            || runningThreadIDs.contains(threadId)
-            || protectedRunningFallbackThreadIDs.contains(threadId)
+        activeTurnID(for: threadId) != nil || runningThreadIDs.contains(threadId)
     }
 
     // Keeps short-lived background execution alive when a run is still in flight.
@@ -849,45 +565,24 @@ extension CodexService {
     // Polls the currently displayed thread even while it is running so missed socket events can recover.
     // If the live snapshot fails, fall back to a history refresh instead of trusting stale running state.
     func syncActiveThreadState(threadId: String) async {
-        var wasRunning = threadHasActiveOrRunningTurn(threadId)
-        var didRunMirroredCatchup = false
-        let shouldPreferDeferredClosedHydration = shouldDeferHeavyDisplayHydration(threadId: threadId)
-            || threadsNeedingCanonicalHistoryReconcile.contains(threadId)
-
-        // Long closed chats already have usable local rows. Avoid forcing a full thread/read
-        // every sync tick after selection, which can reproduce the same open-chat crash.
-        if !wasRunning, shouldPreferDeferredClosedHydration {
-            let outcome = await catchUpRunningThreadIfNeeded(
-                threadId: threadId,
-                shouldForceResume: false
-            )
-            wasRunning = outcome.isRunning
-            let shouldTrustClosedState = shouldTrustClosedStateAfterTurnRefresh(
-                threadId: threadId,
-                didRefreshTurnState: outcome.didRefreshTurnState
-            )
-            if shouldTrustClosedState {
-                // Keep deferred-hydration chats on the lightweight foreground path.
-                if threadsNeedingCanonicalHistoryReconcile.contains(threadId) {
-                    scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
-                } else if !threadsWithSatisfiedDeferredHistoryHydration.contains(threadId),
-                          hasLargePersistedTranscript(threadId: threadId) {
-                    markThreadNeedingCanonicalHistoryReconcile(threadId)
-                }
-                return
-            }
-        }
-
+        let wasRunning = threadHasActiveOrRunningTurn(threadId)
         let shouldRunMirroredCatchup = wasRunning && takeMirroredRunningCatchupPermit(for: threadId)
+        var didRunMirroredCatchup = false
 
         if wasRunning {
-            let outcome = await catchUpRunningThreadIfNeeded(
-                threadId: threadId,
-                shouldForceResume: shouldRunMirroredCatchup
-            )
-            didRunMirroredCatchup = outcome.didRunForcedResume
+            let didRefresh = await refreshInFlightTurnState(threadId: threadId)
+            let isStillRunning = threadHasActiveOrRunningTurn(threadId)
 
-            guard !outcome.didRefreshTurnState || !outcome.isRunning else {
+            if shouldRunMirroredCatchup && isStillRunning {
+                do {
+                    _ = try await ensureThreadResumed(threadId: threadId, force: true)
+                } catch {
+                    await syncThreadHistory(threadId: threadId, force: true)
+                }
+                didRunMirroredCatchup = true
+            }
+
+            guard !didRefresh || !isStillRunning else {
                 return
             }
         }
@@ -938,7 +633,6 @@ extension CodexService {
     // Starts or ends the iOS grace window that lets a just-backgrounded run finish cleanly.
     func updateBackgroundRunGraceTask() {
         guard !isAppInForeground else {
-            backgroundTurnGraceExpiredUntilForeground = false
             endBackgroundRunGraceTask(reason: "foreground")
             return
         }
@@ -948,26 +642,13 @@ extension CodexService {
             return
         }
 
-        guard !backgroundTurnGraceExpiredUntilForeground else {
-            return
-        }
-
         guard backgroundTurnGraceTaskID == .invalid else {
             return
         }
 
-        let taskBox = BackgroundTaskIdentifierBox()
-        let taskID = UIApplication.shared.beginBackgroundTask(withName: "CodexRunGrace") { [weak self, taskBox] in
-            let expiredTaskID = taskBox.taskID
-            guard expiredTaskID != .invalid else {
-                return
-            }
-
-            // UIKit expects the task to end inside the expiration handler, before
-            // we hop back into CodexService's MainActor-isolated state.
-            UIApplication.shared.endBackgroundTask(expiredTaskID)
+        let taskID = UIApplication.shared.beginBackgroundTask(withName: "CodexRunGrace") { [weak self] in
             Task { @MainActor [weak self] in
-                self?.recordBackgroundRunGraceTaskExpired(taskID: expiredTaskID)
+                self?.endBackgroundRunGraceTask(reason: "expired")
             }
         }
 
@@ -976,19 +657,8 @@ extension CodexService {
             return
         }
 
-        taskBox.taskID = taskID
         backgroundTurnGraceTaskID = taskID
         debugSyncLog("background run grace task started")
-    }
-
-    func recordBackgroundRunGraceTaskExpired(taskID: UIBackgroundTaskIdentifier) {
-        guard backgroundTurnGraceTaskID == taskID else {
-            return
-        }
-
-        backgroundTurnGraceTaskID = .invalid
-        backgroundTurnGraceExpiredUntilForeground = true
-        debugSyncLog("background run grace task ended reason=expired")
     }
 
     func endBackgroundRunGraceTask(reason: String) {

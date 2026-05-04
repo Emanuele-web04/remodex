@@ -70,7 +70,7 @@ extension CodexService {
         )
         guard serverHello.protocolVersion == codexSecureProtocolVersion else {
             presentBridgeUpdatePrompt(
-                message: "This bridge is using a different secure transport version. Update the Remodex package on your computer and try again."
+                message: "This bridge is using a different secure transport version. Update the Remodex package on your Mac and try again."
             )
             throw CodexSecureTransportError.incompatibleVersion(
                 "This bridge is using a different secure transport version. Update Remodex on the iPhone or Mac and try again."
@@ -368,127 +368,13 @@ extension CodexService {
         }
         rememberResolvedTrustedSession(resolved, relayURL: relayURL)
     }
-
-    // Resolves a short manual pairing code through the best-known relay for this app instance.
-    func resolvePairingCode(_ code: String) async throws -> CodexPairingQRPayload {
-        let normalizedCode = code
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .uppercased()
-            .replacingOccurrences(of: "-", with: "")
-            .replacingOccurrences(of: " ", with: "")
-        guard !normalizedCode.isEmpty else {
-            throw CodexSecureTransportError.invalidQR("Enter a valid pairing code.")
-        }
-
-        guard let relayURL = preferredPairingCodeRelayURL,
-              let resolveURL = pairingCodeResolveURL(from: relayURL) else {
-            throw CodexSecureTransportError.invalidQR(
-                "This iPhone does not know which relay to ask for that pairing code yet. Scan the QR code instead."
-            )
-        }
-
-        var request = URLRequest(url: resolveURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 8
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(["code": normalizedCode])
-
-        let session = trustedSessionResolveURLSession(for: resolveURL)
-        defer { session.invalidateAndCancel() }
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw CodexSecureTransportError.invalidQR("Could not reach the relay for this pairing code. Try again or scan the QR code.")
-        }
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw CodexSecureTransportError.invalidQR("The relay returned an invalid response for this pairing code.")
-        }
-
-        if (200..<300).contains(httpResponse.statusCode),
-           let resolved = try? JSONDecoder().decode(CodexPairingCodeResolveResponse.self, from: data),
-           resolved.ok {
-            return CodexPairingQRPayload(
-                v: resolved.v,
-                relay: relayURL,
-                sessionId: resolved.sessionId,
-                macDeviceId: resolved.macDeviceId,
-                macIdentityPublicKey: resolved.macIdentityPublicKey,
-                expiresAt: resolved.expiresAt
-            )
-        }
-
-        let errorResponse = try? JSONDecoder().decode(CodexRelayErrorResponse.self, from: data)
-        switch errorResponse?.code {
-        case "pairing_code_expired":
-            throw CodexSecureTransportError.invalidQR("This pairing code has expired. Generate a new one from the computer bridge.")
-        case "pairing_code_unavailable":
-            throw CodexSecureTransportError.invalidQR("That pairing code is not available right now. Make sure your computer bridge is running and try again.")
-        default:
-            if httpResponse.statusCode == 404 {
-                throw CodexSecureTransportError.invalidQR("This relay does not support pairing codes yet. Scan the QR code instead.")
-            }
-            throw CodexSecureTransportError.invalidQR(
-                errorResponse?.error ?? "The relay could not resolve that pairing code."
-            )
-        }
-    }
-}
-
-enum CodexTrustedSessionResolveURLBuilder {
-    // Builds both proxy-relative and root HTTP resolve routes from the remembered WebSocket relay URL.
-    static func candidates(from relayURL: String) -> [URL] {
-        guard var components = URLComponents(string: relayURL) else {
-            return []
-        }
-
-        normalizeRelayResolveComponents(&components)
-
-        var candidates: [URL] = []
-        let pathComponents = components.path.split(separator: "/").map(String.init)
-        if pathComponents.last == "relay" {
-            let prefix = pathComponents.dropLast()
-            components.path = "/" + (prefix + ["v1", "trusted", "session", "resolve"]).joined(separator: "/")
-        } else {
-            components.path = "/v1/trusted/session/resolve"
-        }
-        if let url = components.url {
-            candidates.append(url)
-        }
-
-        if var rootComponents = URLComponents(string: relayURL) {
-            normalizeRelayResolveComponents(&rootComponents)
-            rootComponents.path = "/v1/trusted/session/resolve"
-            if let rootURL = rootComponents.url,
-               !candidates.contains(where: { $0.absoluteString == rootURL.absoluteString }) {
-                candidates.append(rootURL)
-            }
-        }
-
-        return candidates
-    }
-
-    private static func normalizeRelayResolveComponents(_ components: inout URLComponents) {
-        if components.scheme == "wss" {
-            components.scheme = "https"
-        } else if components.scheme == "ws" {
-            components.scheme = "http"
-        }
-        components.query = nil
-        components.fragment = nil
-    }
 }
 
 private extension CodexService {
     // Centralizes the bridge-update guidance so every mismatch shows the same Mac command.
     func presentBridgeUpdatePrompt(message: String) {
         bridgeUpdatePrompt = CodexBridgeUpdatePrompt(
-            title: "Update the Remodex package on your computer",
+            title: "Update the Remodex package on your Mac",
             message: message,
             command: "npm install -g remodex@latest"
         )
@@ -661,6 +547,7 @@ private extension CodexService {
         lastTrustedMacDeviceId = deviceId
         secureMacFingerprint = codexSecureFingerprint(for: publicKey)
     }
+
     // Resolves the live relay session for the preferred trusted Mac before we reconnect the socket.
     func resolveTrustedMacSessionImpl() async throws -> CodexTrustedSessionResolveResponse {
         guard let trustedMac = preferredTrustedMacRecord else {
@@ -670,35 +557,10 @@ private extension CodexService {
               !relayURL.isEmpty else {
             throw CodexTrustedSessionResolveError.noTrustedMac
         }
-        let resolveURLs = CodexTrustedSessionResolveURLBuilder.candidates(from: relayURL)
-        guard !resolveURLs.isEmpty else {
-            throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay URL is invalid.")
+        guard let resolveURL = trustedSessionResolveURL(from: relayURL) else {
+            throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay URL is invalid.")
         }
 
-        var lastRetriableResolveError: CodexTrustedSessionResolveError?
-        for (index, resolveURL) in resolveURLs.enumerated() {
-            do {
-                return try await sendTrustedSessionResolveRequest(
-                    makeTrustedSessionResolveRequestBody(for: trustedMac),
-                    resolveURL: resolveURL,
-                    relayURL: relayURL
-                )
-            } catch let error as CodexTrustedSessionResolveError {
-                guard shouldTryNextTrustedResolveCandidate(after: error),
-                      index < resolveURLs.count - 1 else {
-                    throw error
-                }
-                lastRetriableResolveError = error
-                continue
-            }
-        }
-
-        throw lastRetriableResolveError ?? CodexTrustedSessionResolveError.unsupportedRelay
-    }
-
-    private func makeTrustedSessionResolveRequestBody(
-        for trustedMac: CodexTrustedMacRecord
-    ) throws -> CodexTrustedSessionResolveRequest {
         let nonce = UUID().uuidString
         let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
         let transcriptBytes = codexTrustedSessionResolveTranscriptBytes(
@@ -713,7 +575,7 @@ private extension CodexService {
         )
         let signature = try phonePrivateKey.signature(for: transcriptBytes).base64EncodedString()
 
-        return CodexTrustedSessionResolveRequest(
+        let requestBody = CodexTrustedSessionResolveRequest(
             macDeviceId: trustedMac.macDeviceId,
             phoneDeviceId: phoneIdentityState.phoneDeviceId,
             phoneIdentityPublicKey: phoneIdentityState.phoneIdentityPublicKey,
@@ -721,22 +583,7 @@ private extension CodexService {
             timestamp: timestamp,
             signature: signature
         )
-    }
 
-    private func shouldTryNextTrustedResolveCandidate(after error: CodexTrustedSessionResolveError) -> Bool {
-        switch error {
-        case .unsupportedRelay, .invalidResponse, .network:
-            return true
-        case .macOffline, .rePairRequired, .noTrustedMac:
-            return false
-        }
-    }
-
-    private func sendTrustedSessionResolveRequest(
-        _ requestBody: CodexTrustedSessionResolveRequest,
-        resolveURL: URL,
-        relayURL: String
-    ) async throws -> CodexTrustedSessionResolveResponse {
         var request = URLRequest(url: resolveURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 8
@@ -758,17 +605,17 @@ private extension CodexService {
                 || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) {
                 throw CancellationError()
             }
-            throw CodexTrustedSessionResolveError.network("Could not reach the trusted computer relay. Check your connection and try again.")
+            throw CodexTrustedSessionResolveError.network("Could not reach the trusted Mac relay. Check your connection and try again.")
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay returned an invalid response.")
+            throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay returned an invalid response.")
         }
 
         if (200..<300).contains(httpResponse.statusCode) {
             guard let resolved = try? JSONDecoder().decode(CodexTrustedSessionResolveResponse.self, from: data),
                   resolved.ok else {
-                throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay returned malformed session data.")
+                throw CodexTrustedSessionResolveError.invalidResponse("The trusted Mac relay returned malformed session data.")
             }
             applyResolvedTrustedSession(resolved, relayURL: relayURL)
             return resolved
@@ -778,11 +625,11 @@ private extension CodexService {
         switch errorResponse?.code {
         case "session_unavailable":
             secureConnectionState = .liveSessionUnresolved
-            throw CodexTrustedSessionResolveError.macOffline("Your trusted computer is offline right now.")
+            throw CodexTrustedSessionResolveError.macOffline("Your trusted Mac is offline right now.")
         case "phone_not_trusted", "invalid_signature":
             secureConnectionState = .rePairRequired
             throw CodexTrustedSessionResolveError.rePairRequired(
-                "This iPhone is no longer trusted by the paired computer. Scan a new QR code to reconnect."
+                "This iPhone is no longer trusted by the Mac. Scan a new QR code to reconnect."
             )
         case "resolve_request_replayed", "resolve_request_expired":
             throw CodexTrustedSessionResolveError.network(
@@ -794,7 +641,7 @@ private extension CodexService {
             }
             throw CodexTrustedSessionResolveError.network(
                 errorResponse?.error
-                ?? "The trusted computer relay could not resolve the current bridge session."
+                ?? "The trusted Mac relay could not resolve the current bridge session."
             )
         }
     }
@@ -828,19 +675,7 @@ private extension CodexService {
         }
     }
 
-    private var preferredPairingCodeRelayURL: String? {
-        if let normalizedRelayURL {
-            return normalizedRelayURL
-        }
-        if let trustedRelayURL = preferredTrustedMacRecord?.relayURL?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !trustedRelayURL.isEmpty {
-            return trustedRelayURL
-        }
-        let defaultRelayURL = AppEnvironment.relayBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        return defaultRelayURL.isEmpty ? nil : defaultRelayURL
-    }
-
-    private func pairingCodeResolveURL(from relayURL: String) -> URL? {
+    private func trustedSessionResolveURL(from relayURL: String) -> URL? {
         guard var components = URLComponents(string: relayURL) else {
             return nil
         }
@@ -854,9 +689,9 @@ private extension CodexService {
         let pathComponents = components.path.split(separator: "/").map(String.init)
         if pathComponents.last == "relay" {
             let prefix = pathComponents.dropLast()
-            components.path = "/" + (prefix + ["v1", "pairing", "code", "resolve"]).joined(separator: "/")
+            components.path = "/" + (prefix + ["v1", "trusted", "session", "resolve"]).joined(separator: "/")
         } else {
-            components.path = "/v1/pairing/code/resolve"
+            components.path = "/v1/trusted/session/resolve"
         }
 
         return components.url

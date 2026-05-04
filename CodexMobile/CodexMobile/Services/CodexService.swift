@@ -31,11 +31,6 @@ struct CodexRunningThreadWatch: Equatable, Sendable {
     let expiresAt: Date
 }
 
-struct CodexThreadResumeRequestSignature: Equatable, Sendable {
-    let projectPath: String?
-    let modelIdentifier: String?
-}
-
 struct CodexSubagentIdentityEntry: Equatable, Sendable {
     var threadId: String?
     var agentId: String?
@@ -131,17 +126,7 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
     let id = UUID()
     let title: String
     let message: String
-    let command: String?
-
-    init(
-        title: String,
-        message: String,
-        command: String?
-    ) {
-        self.title = title
-        self.message = message
-        self.command = command
-    }
+    let command: String
 }
 
 struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
@@ -189,11 +174,10 @@ enum CodexNotificationPayloadKeys {
     static let threadId = "threadId"
     static let turnId = "turnId"
     static let result = "result"
-    static let requestId = "requestId"
 }
 
 // Tracks the real terminal outcome of a run, including user interruption.
-enum CodexTurnTerminalState: String, Codable, Equatable, Sendable {
+enum CodexTurnTerminalState: String, Equatable, Sendable {
     case completed
     case failed
     case stopped
@@ -229,13 +213,10 @@ enum CodexPendingCodeReviewTarget: Equatable, Sendable {
 struct TurnTimelineRenderSnapshot: Equatable {
     let threadID: String
     let messages: [CodexMessage]
-    let messageIndexByID: [String: Int]
-    let planMatchingMessages: [CodexMessage]
     let timelineChangeToken: Int
     let activeTurnID: String?
     let isThreadRunning: Bool
     let latestTurnTerminalState: CodexTurnTerminalState?
-    let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
     let assistantRevertStatesByMessageID: [String: AssistantRevertPresentation]
     let repoRefreshSignal: String?
@@ -244,26 +225,15 @@ struct TurnTimelineRenderSnapshot: Equatable {
         TurnTimelineRenderSnapshot(
             threadID: threadID,
             messages: [],
-            messageIndexByID: [:],
-            planMatchingMessages: [],
             timelineChangeToken: 0,
             activeTurnID: nil,
             isThreadRunning: false,
             latestTurnTerminalState: nil,
-            completedTurnIDs: [],
             stoppedTurnIDs: [],
             assistantRevertStatesByMessageID: [:],
             repoRefreshSignal: nil
         )
     }
-}
-
-struct PendingSystemStreamingDeltas {
-    let threadId: String
-    let turnId: String?
-    let itemId: String
-    let kind: CodexMessageKind
-    var deltas: [String]
 }
 
 @MainActor
@@ -275,7 +245,6 @@ final class ThreadTimelineState {
     var activeTurnID: String?
     var isThreadRunning: Bool
     var latestTurnTerminalState: CodexTurnTerminalState?
-    var completedTurnIDs: Set<String>
     var stoppedTurnIDs: Set<String>
     var repoRefreshSignal: String?
     var renderSnapshot: TurnTimelineRenderSnapshot
@@ -287,7 +256,6 @@ final class ThreadTimelineState {
         self.activeTurnID = nil
         self.isThreadRunning = false
         self.latestTurnTerminalState = nil
-        self.completedTurnIDs = []
         self.stoppedTurnIDs = []
         self.repoRefreshSignal = nil
         self.renderSnapshot = TurnTimelineRenderSnapshot.empty(threadID: threadID)
@@ -304,14 +272,13 @@ struct AssistantRevertStateCacheEntry {
 @MainActor
 @Observable
 final class CodexService {
-    static let minimumSupportedBridgePackageVersion = "1.3.9"
+    static let minimumSupportedBridgePackageVersion = "1.3.5"
 
     // --- Public state ---------------------------------------------------------
 
     var threads: [CodexThread] = [] {
         didSet {
             rebuildThreadLookupCaches()
-            refreshPinnedThreadSnapshots()
         }
     }
     var isConnected = false
@@ -336,12 +303,9 @@ final class CodexService {
     var latestTurnTerminalStateByThread: [String: CodexTurnTerminalState] = [:]
     // Preserves terminal outcome per turn so completed/stopped blocks stay distinguishable.
     var terminalStateByTurnID: [String: CodexTurnTerminalState] = [:]
-    // Ordered pending runtime approvals keyed by request id so concurrent prompts do not overwrite each other.
-    var pendingApprovals: [CodexApprovalRequest] = []
+    var pendingApproval: CodexApprovalRequest?
     var lastRawMessage: String?
     var lastErrorMessage: String?
-    var keepMacAwakeWhileBridgeRuns = false
-    var runtimeDebugLogEntries: [String] = []
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     // Per-thread queued drafts for client-side turn queueing while a run is active.
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
@@ -353,7 +317,6 @@ final class CodexService {
     var syncRealtimeEnabled = true
     var availableModels: [CodexModelOption] = []
     var selectedModelId: String?
-    var selectedGitWriterModelId: String?
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
     // Per-chat runtime overrides let the composer diverge from app-wide defaults.
@@ -372,13 +335,10 @@ final class CodexService {
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     var pendingNotificationOpenThreadID: String?
     var supportsStructuredSkillInput = true
-    var supportsStructuredMentionInput = true
     // Runtime compatibility flag for `turn/start.collaborationMode` plan turns.
     var supportsTurnCollaborationMode = false
     // Runtime compatibility flag for `thread/start|turn/start.serviceTier` speed controls.
     var supportsServiceTier = true
-    // Runtime compatibility flag for the bridge-owned voice transcription flow.
-    var supportsBridgeVoiceAuth = true
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
     // Seeds brand-new chats with one-shot composer actions like code review.
@@ -408,8 +368,6 @@ final class CodexService {
     var hasPresentedServiceTierBridgeUpdatePrompt = false
     var hasPresentedThreadForkBridgeUpdatePrompt = false
     var hasPresentedMinimumBridgePackageUpdatePrompt = false
-    // Remembers the latest optional npm update we already surfaced so foreground refreshes stay non-spammy.
-    var lastPresentedAvailableBridgePackageVersion: String?
     // Mirrors the sidebar ready-dot with a tappable in-app banner when another chat finishes.
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.
@@ -433,20 +391,12 @@ final class CodexService {
     // Keeps the trusted-session HTTP lookup cancellable so manual retry can preempt a stuck resolve.
     @ObservationIgnored var trustedSessionResolveTask: Task<CodexTrustedSessionResolveResponse, Error>?
     @ObservationIgnored var trustedSessionResolveTaskID: UUID?
-    // Assistant streams keep turn fallback separate from item-specific identity to avoid cross-item overlap.
-    @ObservationIgnored var streamingAssistantFallbackMessageByTurnID: [String: String] = [:]
-    @ObservationIgnored var streamingAssistantMessageByItemKey: [String: String] = [:]
-    @ObservationIgnored var streamingSystemMessageByItemID: [String: String] = [:]
+    var streamingAssistantMessageByTurnID: [String: String] = [:]
+    var streamingSystemMessageByItemID: [String: String] = [:]
     /// Rich metadata for command execution tool calls, keyed by itemId.
     var commandExecutionDetailsByItemID: [String: CommandExecutionDetails] = [:]
     // Debounces disk writes while streaming to keep UI responsive.
-    @ObservationIgnored var messagePersistenceDebounceTask: Task<Void, Never>?
-    // Coalesces high-frequency assistant deltas before they mutate observed timeline state.
-    @ObservationIgnored var pendingAssistantDeltaByStreamID: [String: String] = [:]
-    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?)] = [:]
-    @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
-    @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
-    let assistantDeltaBatchIntervalNanoseconds: UInt64 = 50_000_000
+    var messagePersistenceDebounceTask: Task<Void, Never>?
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -464,36 +414,6 @@ final class CodexService {
     var loadingThreadIDs: Set<String> = []
     @ObservationIgnored var subagentMetadataLoadingThreadIDs: Set<String> = []
     var resumedThreadIDs: Set<String> = []
-    // Coalesces per-thread thread/read history fetches so reconcile work can await the same RPC.
-    @ObservationIgnored var threadHistoryLoadTaskByThreadID: [String: Task<ThreadHistoryLoadOutcome, Error>] = [:]
-    // Lets a late force caller upgrade an in-flight history load without spawning another thread/read.
-    @ObservationIgnored var forcedHistoryLoadThreadIDs: Set<String> = []
-    // Preserves callers that need "not materialized" reads to keep retrying instead of marking hydrated.
-    @ObservationIgnored var deferHydratedMarkForNotMaterializedThreadIDs: Set<String> = []
-    // Coalesces per-thread resume work so rapid thread switches reuse the same in-flight refresh.
-    @ObservationIgnored var threadResumeTaskByThreadID: [String: Task<CodexThread?, Error>] = [:]
-    // Remembers which cwd/model pair an in-flight resume is actually targeting.
-    @ObservationIgnored var threadResumeRequestSignatureByThreadID: [String: CodexThreadResumeRequestSignature] = [:]
-    // Lets a late force caller upgrade an in-flight resume without spawning another RPC.
-    @ObservationIgnored var forcedResumeEscalationThreadIDs: Set<String> = []
-    // Coalesces running-state refreshes so foreground recovery cannot stampede the same thread.
-    @ObservationIgnored var turnStateRefreshTaskByThreadID: [String: Task<Bool, Never>] = [:]
-    // Coalesces the full running-thread catch-up pipeline so open/foreground/reconnect share one path.
-    @ObservationIgnored var runningThreadCatchupTaskByThreadID: [String: Task<RunningThreadCatchupOutcome, Never>] = [:]
-    // Lets a late foreground/open caller upgrade an in-flight running catch-up into a forced resume.
-    @ObservationIgnored var forcedRunningCatchupEscalationThreadIDs: Set<String> = []
-    // Invalidates stale async completions after archive/delete/reconnect tears refresh work down.
-    @ObservationIgnored var threadRefreshGenerationByThreadID: [String: UInt64] = [:]
-    // Throttles expensive forced resumes while the user bounces between running chats.
-    @ObservationIgnored var lastForcedRunningResumeAtByThread: [String: Date] = [:]
-    // Marks threads that used a lightweight running catch-up and still need one canonical history pass later.
-    @ObservationIgnored var threadsNeedingCanonicalHistoryReconcile: Set<String> = []
-    // Remembers which large closed chats already completed the one required canonical refresh after local-first paint.
-    @ObservationIgnored var threadsWithSatisfiedDeferredHistoryHydration: Set<String> = []
-    // Keeps post-run canonical reconcile work coalesced to one task per thread.
-    @ObservationIgnored var canonicalHistoryReconcileTaskByThreadID: [String: Task<Void, Never>] = [:]
-    // Tracks delayed retry timers for canonical reconcile so teardown can cancel the backoff too.
-    @ObservationIgnored var canonicalHistoryReconcileRetryTaskByThreadID: [String: Task<Void, Never>] = [:]
     var isAppInForeground = true
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
@@ -503,44 +423,6 @@ final class CodexService {
     var gptAccountLoginSyncTask: Task<Void, Never>?
     var postConnectSyncToken: UUID?
     var connectedServerIdentity: String?
-    // Tracks whether the bridge is proxying a real Codex endpoint or a spawned local app-server.
-    var codexTransportMode: CodexRuntimeTransportMode = .unknown
-    var bridgeHostPlatform: CodexBridgeHostPlatform {
-        if let hostPlatform = gptAccountSnapshot.hostPlatform {
-            return hostPlatform
-        }
-        return preferredTrustedMacRecord == nil ? .unknown : .macOS
-    }
-    var bridgeHostCapabilities: CodexBridgeHostCapabilities {
-        if let hostCapabilities = gptAccountSnapshot.hostCapabilities {
-            return hostCapabilities
-        }
-        // Older bridges did not report capabilities; only apply that compatibility
-        // fallback when the remembered host is known to be macOS.
-        guard preferredTrustedMacRecord != nil,
-              bridgeHostPlatform == .macOS else {
-            return CodexBridgeHostCapabilities()
-        }
-        return .legacyMacOS
-    }
-    var supportsDesktopAppHandoff: Bool {
-        bridgeHostCapabilities.desktopHandoff
-    }
-    var supportsDisplayWake: Bool {
-        bridgeHostCapabilities.displayWake
-    }
-    var supportsKeepAwakeWhileBridgeRuns: Bool {
-        bridgeHostCapabilities.keepAwake
-    }
-    var hostComputerLabel: String {
-        bridgeHostPlatform.displayName
-    }
-    // Remembers whether the current plan flow is staying native or has fallen back to inferred UI.
-    var planSessionSourceByThread: [String: CodexPlanSessionSource] = [:] {
-        didSet {
-            persistPlanSessionSources()
-        }
-    }
     var runningThreadWatchByID: [String: CodexRunningThreadWatch] = [:]
     var mirroredRunningCatchupThreadIDs: Set<String> = []
     var lastMirroredRunningCatchupAtByThread: [String: Date] = [:]
@@ -548,7 +430,6 @@ final class CodexService {
     var backgroundTurnGraceTaskID: UIBackgroundTaskIdentifier = .invalid
     var hasConfiguredNotifications = false
     var runCompletionNotificationDedupedAt: [String: Date] = [:]
-    var structuredUserInputNotificationDedupedAt: [String: Date] = [:]
     var notificationCenterDelegateProxy: CodexNotificationCenterDelegateProxy?
     var notificationObserverTokens: [NSObjectProtocol] = []
     var remoteNotificationDeviceToken: String?
@@ -556,7 +437,6 @@ final class CodexService {
     var shouldAutoReconnectOnForeground = false
     // Test hook so connection handling can model `.inactive` without waiting for real app lifecycle changes.
     @ObservationIgnored var applicationStateProvider: () -> UIApplication.State = { UIApplication.shared.applicationState }
-    var backgroundTurnGraceExpiredUntilForeground = false
     var secureSession: CodexSecureSession?
     var pendingHandshake: CodexPendingHandshake?
     var phoneIdentityState: CodexPhoneIdentityState
@@ -568,7 +448,6 @@ final class CodexService {
     var aiChangeSetsByID: [String: AIChangeSet] = [:]
     var aiChangeSetIDByTurnID: [String: String] = [:]
     var aiChangeSetIDByAssistantMessageID: [String: String] = [:]
-    @ObservationIgnored var workspaceCheckpointCopyTaskByTurnID: [String: Task<Void, Never>] = [:]
     // Keeps hot-path thread lookups O(1) instead of rescanning the full sidebar list.
     @ObservationIgnored var threadByID: [String: CodexThread] = [:]
     @ObservationIgnored var threadIndexByID: [String: Int] = [:]
@@ -582,23 +461,15 @@ final class CodexService {
     @ObservationIgnored var threadTimelineStateByThread: [String: ThreadTimelineState] = [:]
     @ObservationIgnored var forkedFromThreadIDByThreadID: [String: String] = [:]
     @ObservationIgnored var renamedThreadNameByThreadID: [String: String] = [:]
-    @ObservationIgnored var associatedManagedWorktreePathByThreadID: [String: String] = [:]
-    @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
-    var pinnedThreadIDs: [String] = []
-    @ObservationIgnored var pinnedThreadSnapshotsByRootID: [String: [CodexThread]] = [:]
-    @ObservationIgnored var snapshotOnlyPinnedThreadIDs: Set<String> = []
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
     // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
     @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]
     @ObservationIgnored var latestAssistantOutputByThread: [String: String] = [:]
-    @ObservationIgnored var latestAssistantMessageIDByThread: [String: String] = [:]
     @ObservationIgnored var latestRepoAffectingMessageSignalByThread: [String: String] = [:]
     @ObservationIgnored var assistantRevertStateCacheByThread: [String: AssistantRevertStateCacheEntry] = [:]
     @ObservationIgnored var assistantRevertStateRevision: Int = 0
     @ObservationIgnored var busyRepoRoots: Set<String> = []
     @ObservationIgnored var busyRepoRootsRevision: Int = 0
-    @ObservationIgnored var pendingSystemDeltasByKey: [String: PendingSystemStreamingDeltas] = [:]
-    @ObservationIgnored var systemDeltaFlushTasksByKey: [String: Task<Void, Never>] = [:]
 
     let encoder: JSONEncoder
     let decoder: JSONDecoder
@@ -609,21 +480,14 @@ final class CodexService {
     let remoteNotificationRegistrar: CodexRemoteNotificationRegistering
 
     static let selectedModelIdDefaultsKey = "codex.selectedModelId"
-    static let selectedGitWriterModelIdDefaultsKey = "codex.selectedGitWriterModelId"
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
     static let threadRuntimeOverridesDefaultsKey = "codex.threadRuntimeOverrides"
-    static let planSessionSourcesDefaultsKey = "codex.planSessionSources"
     static let selectedAccessModeDefaultsKey = "codex.selectedAccessMode"
     static let locallyArchivedThreadIDsKey = "codex.locallyArchivedThreadIDs"
     static let forkedThreadOriginsDefaultsKey = "codex.forkedThreadOrigins"
     static let renamedThreadNamesDefaultsKey = "codex.renamedThreadNames"
-    static let pinnedThreadIDsDefaultsKey = "codex.pinnedThreadIDs"
-    static let pinnedThreadSnapshotsDefaultsKey = "codex.pinnedThreadSnapshots"
-    static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"
-    static let turnTerminalStatesDefaultsKey = "codex.turnTerminalStates"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
-    static let keepMacAwakeWhileBridgeRunsDefaultsKey = "codex.keepMacAwakeWhileBridgeRuns"
 
     init(
         encoder: JSONEncoder = JSONEncoder(),
@@ -669,19 +533,9 @@ final class CodexService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedModelId = (savedModelId?.isEmpty == false) ? savedModelId : nil
 
-        let savedGitWriterModelId = defaults.string(forKey: Self.selectedGitWriterModelIdDefaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        self.selectedGitWriterModelId = (savedGitWriterModelId?.isEmpty == false) ? savedGitWriterModelId : nil
-
         let savedReasoning = defaults.string(forKey: Self.selectedReasoningEffortDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         self.selectedReasoningEffort = (savedReasoning?.isEmpty == false) ? savedReasoning : nil
-
-        if defaults.object(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey) != nil {
-            self.keepMacAwakeWhileBridgeRuns = defaults.bool(forKey: Self.keepMacAwakeWhileBridgeRunsDefaultsKey)
-        } else {
-            self.keepMacAwakeWhileBridgeRuns = false
-        }
 
         if let savedThreadRuntimeOverrides = defaults.data(forKey: Self.threadRuntimeOverridesDefaultsKey),
            let decodedThreadRuntimeOverrides = try? decoder.decode(
@@ -691,16 +545,6 @@ final class CodexService {
             self.threadRuntimeOverridesByThreadID = decodedThreadRuntimeOverrides
         } else {
             self.threadRuntimeOverridesByThreadID = [:]
-        }
-
-        if let savedPlanSessionSources = defaults.data(forKey: Self.planSessionSourcesDefaultsKey),
-           let decodedPlanSessionSources = try? decoder.decode(
-               [String: CodexPlanSessionSource].self,
-               from: savedPlanSessionSources
-           ) {
-            self.planSessionSourceByThread = decodedPlanSessionSources
-        } else {
-            self.planSessionSourceByThread = [:]
         }
 
         if let savedForkOrigins = defaults.data(forKey: Self.forkedThreadOriginsDefaultsKey),
@@ -715,40 +559,6 @@ final class CodexService {
             self.renamedThreadNameByThreadID = decodedRenamedThreadNames
         } else {
             self.renamedThreadNameByThreadID = [:]
-        }
-
-        if let savedPinnedThreadIDs = defaults.data(forKey: Self.pinnedThreadIDsDefaultsKey),
-           let decodedPinnedThreadIDs = try? decoder.decode([String].self, from: savedPinnedThreadIDs) {
-            self.pinnedThreadIDs = decodedPinnedThreadIDs
-        } else {
-            self.pinnedThreadIDs = []
-        }
-
-        if let savedPinnedThreadSnapshots = defaults.data(forKey: Self.pinnedThreadSnapshotsDefaultsKey),
-           let decodedPinnedThreadSnapshots = try? decoder.decode([String: [CodexThread]].self, from: savedPinnedThreadSnapshots) {
-            self.pinnedThreadSnapshotsByRootID = decodedPinnedThreadSnapshots
-        } else {
-            self.pinnedThreadSnapshotsByRootID = [:]
-        }
-
-        if let savedAssociatedManagedWorktreePaths = defaults.data(forKey: Self.associatedManagedWorktreePathsDefaultsKey),
-           let decodedAssociatedManagedWorktreePaths = try? decoder.decode(
-               [String: String].self,
-               from: savedAssociatedManagedWorktreePaths
-           ) {
-            self.associatedManagedWorktreePathByThreadID = decodedAssociatedManagedWorktreePaths
-        } else {
-            self.associatedManagedWorktreePathByThreadID = [:]
-        }
-
-        if let savedTurnTerminalStates = defaults.data(forKey: Self.turnTerminalStatesDefaultsKey),
-           let decodedTurnTerminalStates = try? decoder.decode(
-               [String: CodexTurnTerminalState].self,
-               from: savedTurnTerminalStates
-           ) {
-            self.terminalStateByTurnID = decodedTurnTerminalStates
-        } else {
-            self.terminalStateByTurnID = [:]
         }
 
         let savedServiceTier = defaults.string(forKey: Self.selectedServiceTierDefaultsKey)?
@@ -784,8 +594,6 @@ final class CodexService {
                 email: nil,
                 displayName: nil,
                 planType: nil,
-                hostPlatform: self.gptAccountSnapshot.hostPlatform,
-                hostCapabilities: self.gptAccountSnapshot.hostCapabilities,
                 loginInFlight: true,
                 needsReauth: false,
                 expiresAt: pendingLogin.expiresAt,
@@ -820,21 +628,6 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
-    }
-
-    // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.
-    private func persistPlanSessionSources() {
-        guard !planSessionSourceByThread.isEmpty else {
-            defaults.removeObject(forKey: Self.planSessionSourcesDefaultsKey)
-            return
-        }
-
-        guard let data = try? encoder.encode(planSessionSourceByThread) else {
-            defaults.removeObject(forKey: Self.planSessionSourcesDefaultsKey)
-            return
-        }
-
-        defaults.set(data, forKey: Self.planSessionSourcesDefaultsKey)
     }
 
     // Remembers whether we can offer reconnect without forcing a fresh QR scan.
@@ -901,27 +694,6 @@ final class CodexService {
 
     var hasReconnectCandidate: Bool {
         hasSavedRelaySession || hasTrustedMacReconnectCandidate
-    }
-
-    // Chooses the relay base URL only when a saved live session can actually carry a wake request.
-    var preferredWakeRelayURL: String? {
-        guard !isConnected,
-              secureConnectionState != .rePairRequired,
-              hasTrustedReconnectContext else {
-            return nil
-        }
-
-        return normalizedRelayURL
-    }
-
-    // Wake needs a concrete live-session URL; trusted-Mac-only recovery should show Reconnect, not Wake Screen.
-    var canWakePreferredMacDisplay: Bool {
-        guard !isConnected,
-              secureConnectionState != .rePairRequired else {
-            return false
-        }
-
-        return preferredWakeRelayURL != nil
     }
 
     // Separates transport readiness from post-connect hydration so the UI can explain delays honestly.

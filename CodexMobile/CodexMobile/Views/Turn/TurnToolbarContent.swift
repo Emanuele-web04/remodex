@@ -4,7 +4,6 @@
 // Exports: TurnToolbarContent, TurnThreadNavigationContext
 
 import SwiftUI
-import UIKit
 
 struct TurnThreadNavigationContext {
     let folderName: String
@@ -19,7 +18,6 @@ struct TurnToolbarContent: ToolbarContent {
     let isHandingOffToMac: Bool
     let isStartingNewChat: Bool
     let canHandOffToWorktree: Bool
-    let worktreeHandoffTitle: String
     let isCreatingGitWorktree: Bool
     let repoDiffTotals: GitDiffTotals?
     let isLoadingRepoDiff: Bool
@@ -27,7 +25,6 @@ struct TurnToolbarContent: ToolbarContent {
     let isGitActionEnabled: Bool
     let disabledGitActions: Set<TurnGitActionKind>
     let isRunningGitAction: Bool
-    let gitActionLoadingTitle: String?
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
     var onTapMacHandoff: (() -> Void)?
@@ -83,7 +80,7 @@ struct TurnToolbarContent: ToolbarContent {
                     } label: {
                         HStack(spacing: 10) {
                             ResizableThreadActionSymbol(systemName: "arrow.left.arrow.right", pointSize: 13)
-                            Text("Continue on Desktop App")
+                            Text("Hand off to Mac")
                         }
                     }
                     .disabled(!canTapMacHandoff)
@@ -93,7 +90,7 @@ struct TurnToolbarContent: ToolbarContent {
                         onTapWorktreeHandoff?()
                     } label: {
                         CodexWorktreeMenuLabelRow(
-                            title: isCreatingGitWorktree ? "Preparing worktree..." : worktreeHandoffTitle,
+                            title: isCreatingGitWorktree ? "Creating worktree..." : "Hand off to worktree",
                             pointSize: 12,
                             weight: .regular
                         )
@@ -138,7 +135,6 @@ struct TurnToolbarContent: ToolbarContent {
                         isEnabled: isGitActionEnabled,
                         disabledActions: disabledGitActions,
                         isRunningAction: isRunningGitAction,
-                        loadingTitle: gitActionLoadingTitle,
                         showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
                         gitSyncState: gitSyncState,
                         onSelect: onGitAction
@@ -159,7 +155,7 @@ private struct TurnMacHandoffToolbarLabel: View {
                     .controlSize(.small)
                     .frame(width: 24, height: 24)
             } else {
-                ResizableThreadActionSymbol(systemName: "arrow.trianglehead.branch", pointSize: 14)
+                ResizableThreadActionSymbol(systemName: "arrow.up", pointSize: 14)
                     .foregroundStyle(.primary)
                     .frame(width: 24, height: 24)
             }
@@ -271,7 +267,6 @@ struct TurnThreadPathSheet: View {
     var onRenameThread: ((String) -> Void)? = nil
 
     @State private var renamePrompt = ThreadRenamePromptState()
-    @State private var didCopyPath = false
 
     var body: some View {
         NavigationStack {
@@ -307,34 +302,9 @@ struct TurnThreadPathSheet: View {
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 8) {
-                            Text("Path")
-                                .font(AppFont.caption(weight: .semibold))
-                                .foregroundStyle(.secondary)
-
-                            Button {
-                                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                                copyPathToPasteboard()
-                            } label: {
-                                Group {
-                                    if didCopyPath {
-                                        Image(systemName: "checkmark")
-                                            .font(AppFont.system(size: 12, weight: .semibold))
-                                    } else {
-                                        Image("copy")
-                                            .renderingMode(.template)
-                                            .resizable()
-                                            .scaledToFit()
-                                    }
-                                }
-                                .frame(width: 16, height: 16)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 32, height: 32)
-                                .contentShape(Circle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(didCopyPath ? "Path copied" : "Copy path")
-                        }
+                        Text("Path")
+                            .font(AppFont.caption(weight: .semibold))
+                            .foregroundStyle(.secondary)
 
                         Text(context.fullPath)
                             .font(AppFont.mono(.callout))
@@ -351,19 +321,6 @@ struct TurnThreadPathSheet: View {
         .presentationDetents([.fraction(0.4), .medium])
         .threadRenamePrompt(state: $renamePrompt) { newTitle in
             onRenameThread?(newTitle)
-        }
-    }
-
-    // Copies the full local project path while keeping the sheet visible.
-    private func copyPathToPasteboard() {
-        UIPasteboard.general.string = context.fullPath
-        withAnimation(.easeInOut(duration: 0.15)) {
-            didCopyPath = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                didCopyPath = false
-            }
         }
     }
 }

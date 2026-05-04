@@ -71,7 +71,6 @@ struct TurnComposerSecondaryBar: View {
                             onSelectGitBaseBranch: onSelectGitBaseBranch,
                             onRefreshGitBranches: onRefreshGitBranches
                         )
-                        .equatable()
                     }
 
                     statusControlCircle
@@ -101,8 +100,8 @@ struct TurnComposerSecondaryBar: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: selectedAccessMode == .fullAccess
-                      ? "hand.thumbsup"
-                      : "hand.raised")
+                      ? "exclamationmark.shield"
+                      : "checkmark.shield")
                     .font(branchTextFont)
 
                 Image(systemName: "chevron.down")
@@ -111,7 +110,7 @@ struct TurnComposerSecondaryBar: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .adaptiveGlass(.regular, in: Capsule())
-            .foregroundStyle(branchLabelColor)
+            .foregroundStyle(selectedAccessMode == .fullAccess ? .orange : branchLabelColor)
             .contentShape(Capsule())
         }
         .tint(branchLabelColor)
@@ -135,8 +134,8 @@ struct TurnComposerSecondaryBar: View {
                 } label: {
                     CodexWorktreeMenuLabelRow(
                         title: isCreatingGitWorktree
-                            ? "Preparing worktree..."
-                            : isWorktreeProject ? "Hand off to Local" : isEmptyThread ? "New worktree" : "Hand off to Worktree",
+                            ? "Creating worktree..."
+                            : isEmptyThread ? "New worktree" : "Hand off to worktree",
                         pointSize: 12,
                         weight: .regular
                     )

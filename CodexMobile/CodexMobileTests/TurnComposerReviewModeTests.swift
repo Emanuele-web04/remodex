@@ -88,18 +88,6 @@ final class TurnComposerReviewModeTests: XCTestCase {
         XCTAssertEqual(viewModel.slashCommandPanelState, .hidden)
     }
 
-    func testSelectingFeedbackClearsTrailingSlashTokenWithoutEnteringReviewMode() {
-        let viewModel = makeViewModel()
-        viewModel.input = "/feed"
-        viewModel.slashCommandPanelState = .commands(query: "feed")
-
-        viewModel.onSelectSlashCommand(.feedback)
-
-        XCTAssertEqual(viewModel.input, "")
-        XCTAssertNil(viewModel.composerReviewSelection)
-        XCTAssertEqual(viewModel.slashCommandPanelState, .hidden)
-    }
-
     func testSelectingSubagentsArmsChipAndClearsSlashToken() {
         let viewModel = makeViewModel()
         viewModel.input = "/sub"
@@ -135,7 +123,7 @@ final class TurnComposerReviewModeTests: XCTestCase {
                     allowsForkCommand: true
                 )
             ).map(\.commandToken),
-            ["/review", "/feedback", "/fork", "/status", "/subagents"]
+            ["/review", "/fork", "/status", "/subagents"]
         )
     }
 
@@ -145,7 +133,7 @@ final class TurnComposerReviewModeTests: XCTestCase {
                 supportsThreadFork: true,
                 allowsForkCommand: false
             ).map(\.commandToken),
-            ["/review", "/feedback", "/status", "/subagents"]
+            ["/review", "/status", "/subagents"]
         )
     }
 

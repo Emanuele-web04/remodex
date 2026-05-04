@@ -14,105 +14,20 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
         XCTAssertEqual(token?.query, "turnv")
     }
 
-    func testTrailingTokenStopsAtWhitespaceAfterAtToken() {
-        XCTAssertNil(
-            TurnViewModel.trailingFileAutocompleteToken(
-                in: "update @Codex Mobile App Plan/Codex iOS Recap TLDR.md"
-            )
+    func testTrailingTokenAllowsFilePathsWithSpacesWhenTheyLookLikeAPath() {
+        let token = TurnViewModel.trailingFileAutocompleteToken(
+            in: "update @Codex Mobile App Plan/Codex iOS Recap TLDR.md"
         )
+
+        XCTAssertEqual(token?.query, "Codex Mobile App Plan/Codex iOS Recap TLDR.md")
     }
 
     func testTrailingTokenDoesNotParseEmailAddress() {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "email@test.com"))
     }
 
-    func testTrailingTokenDoesNotParseSwiftAttribute() {
-        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "add @State"))
-    }
-
     func testTrailingTokenDoesNotParseWhenAtTokenIsNotFinal() {
         XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "fix @turnv please"))
-    }
-
-    func testTrailingTokenDoesNotStayOpenForSentencePunctuation() {
-        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "fix @turnv."))
-    }
-
-    func testTrailingTokenDoesNotParseTerminalScopedTaskLabel() {
-        XCTAssertNil(TurnViewModel.trailingFileAutocompleteToken(in: "paste @t3tools/contracts:build"))
-    }
-
-    func testTrailingTokenParsesBareLowercaseSearchAfterAt() {
-        let token = TurnViewModel.trailingFileAutocompleteToken(in: "paste @remodex")
-
-        XCTAssertEqual(token?.query, "remodex")
-    }
-
-    func testTrailingFileTokenParsesAfterFirstLowercaseLetter() {
-        let token = TurnViewModel.trailingFileAutocompleteToken(in: "open @r")
-
-        XCTAssertEqual(token?.query, "r")
-    }
-
-    func testTrailingPluginTokenParsesBareAtMention() {
-        let token = TurnViewModel.trailingPluginAutocompleteToken(in: "use @gmail")
-
-        XCTAssertEqual(token?.query, "gmail")
-    }
-
-    func testTrailingPluginTokenParsesBareAtTrigger() {
-        let token = TurnViewModel.trailingPluginAutocompleteToken(in: "use @")
-
-        XCTAssertEqual(token?.query, "")
-    }
-
-    func testTrailingPluginTokenUsesLastAdjacentAtMention() {
-        let token = TurnViewModel.trailingPluginAutocompleteToken(in: "@first@gma")
-
-        XCTAssertEqual(token?.query, "gma")
-    }
-
-    func testTrailingPluginTokenDoesNotParseEmailAddress() {
-        XCTAssertNil(TurnViewModel.trailingPluginAutocompleteToken(in: "email@test.com"))
-    }
-
-    func testReplacingTrailingPluginTokenUpdatesOnlyFinalAtToken() {
-        let updated = TurnViewModel.replacingTrailingPluginAutocompleteToken(
-            in: "compare @first and @gma",
-            with: "gmail"
-        )
-
-        XCTAssertEqual(updated, "compare @first and @gmail ")
-    }
-
-    func testProviderDiscoveryTextNormalizesSeparatorsLikeT3Code() {
-        XCTAssertEqual(
-            CodexPluginMetadata.normalizedDiscoveryText("openai-curated/gmail_plugin"),
-            "openai curated gmail plugin"
-        )
-    }
-
-    func testTrailingTokenStillParsesLineReferencedFile() {
-        let token = TurnViewModel.trailingFileAutocompleteToken(in: "open @Views/Turn/TurnView.swift:42")
-
-        XCTAssertEqual(token?.query, "Views/Turn/TurnView.swift:42")
-    }
-
-    func testTrailingTokenKeepsCommonExtensionlessFilesWorking() {
-        let token = TurnViewModel.trailingFileAutocompleteToken(in: "check @Makefile")
-
-        XCTAssertEqual(token?.query, "Makefile")
-    }
-
-    func testRemovingTrailingLineColumnSuffixKeepsBasePath() {
-        XCTAssertEqual(
-            TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: "Views/Turn/TurnView.swift:42:7"),
-            "Views/Turn/TurnView.swift"
-        )
-        XCTAssertEqual(
-            TurnMessageRegexCache.removingTrailingLineColumnSuffix(from: "Views/Turn/TurnView.swift"),
-            "Views/Turn/TurnView.swift"
-        )
     }
 
     func testReplacingTrailingTokenUpdatesOnlyFinalAtToken() {
@@ -200,7 +115,7 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
         )
     }
 
-    func testTrailingAutocompleteClosesForOpenPathWithSpaces() {
+    func testTrailingAutocompleteStillWorksForOpenPathWithSpaces() {
         let mentions = [
             TurnComposerMentionedFile(fileName: "terminal.svg", path: "assets/terminal.svg"),
         ]
@@ -211,10 +126,11 @@ final class TurnFileAutocompleteTokenTests: XCTestCase {
                 confirmedMentions: mentions
             )
         )
-        XCTAssertNil(
+        XCTAssertEqual(
             TurnViewModel.trailingFileAutocompleteToken(
                 in: "compare @Codex Mobile App Plan/Codex iOS Recap TLDR.md"
-            )
+            )?.query,
+            "Codex Mobile App Plan/Codex iOS Recap TLDR.md"
         )
     }
 }

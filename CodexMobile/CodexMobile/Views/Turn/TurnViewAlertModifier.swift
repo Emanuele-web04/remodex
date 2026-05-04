@@ -8,14 +8,13 @@ import SwiftUI
 
 private struct TurnViewAlertModifier: ViewModifier {
     @Binding var alertApprovalRequest: CodexApprovalRequest?
-    @Binding var isApprovalAlertPresented: Bool
     @Binding var isShowingNothingToCommitAlert: Bool
     @Binding var gitSyncAlert: TurnGitSyncAlert?
     @Binding var isShowingMacHandoffConfirm: Bool
     @Binding var macHandoffErrorMessage: String?
 
-    let onDeclineApproval: (CodexApprovalRequest) -> Void
-    let onApproveApproval: (CodexApprovalRequest) -> Void
+    let onDeclineApproval: () -> Void
+    let onApproveApproval: () -> Void
     let onConfirmGitSyncAction: (TurnGitSyncAlertAction) -> Void
     let onDismissGitSyncAlert: () -> Void
     let onConfirmMacHandoff: () -> Void
@@ -24,14 +23,16 @@ private struct TurnViewAlertModifier: ViewModifier {
         content
             .alert(
                 "Approval request",
-                isPresented: $isApprovalAlertPresented,
+                isPresented: approvalAlertIsPresented,
                 presenting: alertApprovalRequest
-            ) { request in
+            ) { _ in
                 Button("Decline", role: .destructive) {
-                    onDeclineApproval(request)
+                    alertApprovalRequest = nil
+                    onDeclineApproval()
                 }
                 Button("Approve") {
-                    onApproveApproval(request)
+                    alertApprovalRequest = nil
+                    onApproveApproval()
                 }
             } message: { request in
                 Text(approvalAlertMessage(for: request))
@@ -60,24 +61,35 @@ private struct TurnViewAlertModifier: ViewModifier {
             } message: { alert in
                 Text(alert.message)
             }
-            .alert("Continue on Desktop App", isPresented: $isShowingMacHandoffConfirm) {
+            .alert("Hand off to Mac app", isPresented: $isShowingMacHandoffConfirm) {
                 Button("Cancel", role: .cancel) {}
                 Button("Force Close & Continue") {
                     onConfirmMacHandoff()
                 }
             } message: {
-                Text("Remodex will force close and reopen Codex.app on this computer. Any desktop runs in progress will be stopped, and unsaved draft text there may be lost before this chat is opened.")
+                Text("Remodex will force close and reopen Codex.app on your Mac. Any desktop runs in progress will be stopped, and unsaved draft text there may be lost before this chat is opened.")
             }
             .alert(
-                "Couldn't continue on desktop app",
+                "Couldn't hand off to Mac app",
                 isPresented: macHandoffErrorIsPresented
             ) {
                 Button("OK", role: .cancel) {
                     macHandoffErrorMessage = nil
                 }
             } message: {
-                Text(macHandoffErrorMessage ?? "Could not continue this chat on the desktop app.")
+                Text(macHandoffErrorMessage ?? "Could not continue this chat on your Mac.")
             }
+    }
+
+    private var approvalAlertIsPresented: Binding<Bool> {
+        Binding(
+            get: { alertApprovalRequest != nil },
+            set: { isPresented in
+                if !isPresented {
+                    alertApprovalRequest = nil
+                }
+            }
+        )
     }
 
     private var gitSyncAlertIsPresented: Binding<Bool> {
@@ -137,13 +149,12 @@ private struct TurnViewAlertModifier: ViewModifier {
 extension View {
     func turnViewAlerts(
         alertApprovalRequest: Binding<CodexApprovalRequest?>,
-        isApprovalAlertPresented: Binding<Bool>,
         isShowingNothingToCommitAlert: Binding<Bool>,
         gitSyncAlert: Binding<TurnGitSyncAlert?>,
         isShowingMacHandoffConfirm: Binding<Bool>,
         macHandoffErrorMessage: Binding<String?>,
-        onDeclineApproval: @escaping (CodexApprovalRequest) -> Void,
-        onApproveApproval: @escaping (CodexApprovalRequest) -> Void,
+        onDeclineApproval: @escaping () -> Void,
+        onApproveApproval: @escaping () -> Void,
         onConfirmGitSyncAction: @escaping (TurnGitSyncAlertAction) -> Void,
         onDismissGitSyncAlert: @escaping () -> Void,
         onConfirmMacHandoff: @escaping () -> Void
@@ -151,7 +162,6 @@ extension View {
         modifier(
             TurnViewAlertModifier(
                 alertApprovalRequest: alertApprovalRequest,
-                isApprovalAlertPresented: isApprovalAlertPresented,
                 isShowingNothingToCommitAlert: isShowingNothingToCommitAlert,
                 gitSyncAlert: gitSyncAlert,
                 isShowingMacHandoffConfirm: isShowingMacHandoffConfirm,

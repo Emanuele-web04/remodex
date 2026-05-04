@@ -1,7 +1,7 @@
 // FILE: FileMentionChip.swift
 // Purpose: Shared file-mention chip UI used in the composer (removable) and message timeline (read-only).
 // Layer: View Component
-// Exports: FileMentionChip, SkillMentionChip, PluginMentionChip, ComposerActionChip, FileMentionChipRow, UserMentionChipRow, UserMessageParser, UserMessageParsed, SkillDisplayNameFormatter
+// Exports: FileMentionChip, SkillMentionChip, ComposerActionChip, FileMentionChipRow, UserMentionChipRow, UserMessageParser, UserMessageParsed, SkillDisplayNameFormatter
 // Depends on: SwiftUI
 
 import SwiftUI
@@ -73,40 +73,6 @@ struct SkillMentionChip: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
         .background(Color.indigo.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-    }
-}
-
-/// Compact inline `@ plugin` pill with optional remove affordance.
-struct PluginMentionChip: View {
-    let pluginName: String
-    var onRemove: (() -> Void)? = nil
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "circle.grid.2x2")
-                .font(AppFont.system(size: 9, weight: .semibold))
-                .foregroundStyle(.blue)
-
-            Text(SkillDisplayNameFormatter.displayName(for: pluginName))
-                .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(.blue)
-                .lineLimit(1)
-
-            if let onRemove {
-                Button(action: onRemove) {
-                    Image(systemName: "xmark")
-                        .font(AppFont.system(size: 8, weight: .bold))
-                        .foregroundStyle(.blue)
-                        .frame(width: 14, height: 14)
-                        .background(Color.blue.opacity(0.14), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Remove plugin mention")
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -329,22 +295,12 @@ enum UserMessageParser {
                 break
             }
 
-            let mention = String(workingText[mentionRange])
-            guard isAllowedFileMentionToken(mention) else {
-                break
-            }
-
-            mentions.append(mention)
+            mentions.append(String(workingText[mentionRange]))
             remainingText = workingText[fullMatchRange.upperBound...]
         }
 
         let body = String(remainingText).trimmingCharacters(in: .whitespacesAndNewlines)
 
         return UserMessageParsed(mentions: mentions, body: body)
-    }
-
-    // Keeps legacy `@filename` support while rejecting known Swift attribute syntax.
-    private static func isAllowedFileMentionToken(_ mention: String) -> Bool {
-        TurnFileMentionHeuristics.isAllowedInlineMentionToken(mention)
     }
 }
