@@ -149,7 +149,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     }
 
     // 1. Handle initialize response (special case)
-    if (parsed.id === "gemini-init-1" && parsed.result?.protocolVersion != null) {
+    if (parsed.id === \"gemini-init-1\" && parsed.result?.protocolVersion != null) {
       handleGeminiInitializeResponse(parsed);
       // Also clean up from pending requests if it was there
       if (pendingGeminiRequests.has(parsed.id)) {
@@ -174,14 +174,14 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       return;
     }
 
-    // 3. Handle response to generic requests
-    if (parsed.id != null && pendingGeminiRequests.has(parsed.id)) {
+    // 3. Handle response to generic requests (exclude session/prompt which is handled in step 5)
+    if (parsed.id != null && pendingGeminiRequests.has(parsed.id) && !parsed.result?.stopReason) {
       const waiter = pendingGeminiRequests.get(parsed.id);
       pendingGeminiRequests.delete(parsed.id);
       clearTimeout(waiter.timeout);
 
       if (parsed.error) {
-        waiter.reject?.(new Error(parsed.error.message || "Gemini request failed"));
+        waiter.reject?.(new Error(parsed.error.message || \"Gemini request failed\"));
       } else {
         waiter.resolve?.(parsed.result);
       }
@@ -189,7 +189,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     }
 
     // 4. Handle session/update notifications (streaming responses)
-    if (parsed.method === "session/update") {
+    if (parsed.method === \"session/update\") {
       handleGeminiSessionUpdate(parsed.params);
       return;
     }
@@ -198,6 +198,13 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     if (parsed.id != null && parsed.result) {
       // Find which thread this prompt belonged to
       const promptInfo = pendingGeminiRequests.get(parsed.id);
+      
+      // Cleanup the pending request now that we've used it
+      if (pendingGeminiRequests.has(parsed.id)) {
+        pendingGeminiRequests.delete(parsed.id);
+        if (promptInfo?.timeout) clearTimeout(promptInfo.timeout);
+      }
+
       const threadId = promptInfo?.threadId || currentPromptThreadId || activeThreadId;
       const state = getThreadState(threadId);
 
@@ -208,7 +215,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         state.totalOutputTokens += (meta.quota.token_count.output_tokens || 0);
         
         // Emit token usage update to iOS
-        emitCodexEvent("thread/tokenUsage/updated", {
+        emitCodexEvent(\"thread/tokenUsage/updated\", {
           threadId: threadId,
           usage: {
             tokensUsed: state.totalInputTokens + state.totalOutputTokens,
@@ -224,6 +231,11 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       }
       
       handleGeminiPromptResponse(parsed, threadId);
+      
+      // Resolve the waiter if it exists
+      if (promptInfo?.resolve) {
+        promptInfo.resolve(parsed.result);
+      }
       return;
     }
 
@@ -241,11 +253,11 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     }
 
     // Send initialized notification
-    transport.send(JSON.stringify({ jsonrpc: "2.0", method: "initialized" }));
+    transport.send(JSON.stringify({ jsonrpc: \"2.0\", method: \"initialized\" }));
 
     // Create a session
     const sessionRequestId = nextGeminiRequestId();
-    sendGeminiRequest(sessionRequestId, "session/new", {
+    sendGeminiRequest(sessionRequestId, \"session/new\", {
       cwd: process.cwd(),
       mcpServers: [],
     });
@@ -257,12 +269,12 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     geminiCurrentModeId = parsed.result.modes?.currentModeId || null;
 
     geminiModels = (parsed.result.models?.availableModels || []).map(m => {
-      const modelId = typeof m === "string" ? m : (m.modelId || m.id || m.name);
+      const modelId = typeof m === \"string\" ? m : (m.modelId || m.id || m.name);
       return {
         id: modelId,
         model: modelId,
         displayName: modelId,
-        description: "",
+        description: \"\",
         isDefault: modelId === geminiCurrentModelId,
         supportedReasoningEfforts: []
       };
@@ -270,7 +282,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     geminiModes = parsed.result.modes?.availableModes || [];
 
     log(`Gemini session ready: ${geminiSessionId}`);
-    log(`Models: ${geminiModels.map(m => m.id).join(", ")}`);
+    log(`Models: ${geminiModels.map(m => m.id).join(\", \")}`);
     sessionReady = true;
 
     // Flush any pending messages
@@ -289,65 +301,65 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     const sessionUpdate = update.sessionUpdate;
 
     switch (sessionUpdate) {
-      case "message_start":
+      case \"message_start\":
         handleMessageStart(update, threadId);
         break;
-      case "message_part":
+      case \"message_part\":
         handleMessagePart(update, threadId);
         break;
-      case "agent_message_chunk":
+      case \"agent_message_chunk\":
         if (!state.activeMessageId) {
           handleMessageStart(update, threadId);
         }
         handleMessagePart({
-          text: update.content?.text || update.text || "",
+          text: update.content?.text || update.text || \"\",
         }, threadId);
         break;
-      case "message_complete":
+      case \"message_complete\":
         handleMessageComplete(update, threadId);
         break;
-      case "turn_complete":
+      case \"turn_complete\":
         handleTurnComplete(update, threadId);
         break;
-      case "thinking_start":
+      case \"thinking_start\":
         break;
-      case "thinking_part":
+      case \"thinking_part\":
         if (update.text) {
-          emitCodexEvent("item/reasoning/textDelta", {
+          emitCodexEvent(\"item/reasoning/textDelta\", {
             threadId: threadId,
             turnId: state.activeTurnId,
             delta: update.text,
           });
         }
         break;
-      case "thinking_complete":
+      case \"thinking_complete\":
         break;
-      case "tool_call":
-        emitCodexEvent("item/commandExecution/outputDelta", {
+      case \"tool_call\":
+        emitCodexEvent(\"item/commandExecution/outputDelta\", {
           threadId: threadId,
           turnId: state.activeTurnId,
-          delta: `Running: ${update.name || "tool"}`,
+          delta: `Running: ${update.name || \"tool\"}`,
         });
         break;
-      case "tool_result":
-        emitCodexEvent("item/commandExecution/outputDelta", {
+      case \"tool_result\":
+        emitCodexEvent(\"item/commandExecution/outputDelta\", {
           threadId: threadId,
           turnId: state.activeTurnId,
-          delta: update.output || "",
+          delta: update.output || \"\",
         });
         break;
-      case "mode_change":
+      case \"mode_change\":
         geminiCurrentModeId = update.modeId || geminiCurrentModeId;
         break;
-      case "model_change":
+      case \"model_change\":
         geminiCurrentModelId = update.modelId || geminiCurrentModelId;
         break;
       default:
         // Forward as agent delta if it has text
         if (update.text || update.message) {
-          const deltaText = update.text || update.message || "";
+          const deltaText = update.text || update.message || \"\";
           if (deltaText && state.activeTurnId) {
-            emitCodexEvent("item/agentMessage/delta", {
+            emitCodexEvent(\"item/agentMessage/delta\", {
               threadId: threadId,
               turnId: state.activeTurnId,
               delta: deltaText,
@@ -360,18 +372,18 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
   function handleMessageStart(update, threadId) {
     const state = getThreadState(threadId);
-    state.activeMessageId = `msg-${randomBytes(8).toString("hex")}`;
+    state.activeMessageId = `msg-${randomBytes(8).toString(\"hex\")}`;
   }
 
   function handleMessagePart(update, threadId) {
     const state = getThreadState(threadId);
-    const text = update.text || update.content || "";
+    const text = update.text || update.content || \"\";
     if (!text) return;
 
-    if (state.accumulatedText === undefined) state.accumulatedText = "";
+    if (state.accumulatedText === undefined) state.accumulatedText = \"\";
     state.accumulatedText += text;
 
-    emitCodexEvent("item/agentMessage/delta", {
+    emitCodexEvent(\"item/agentMessage/delta\", {
       threadId: threadId,
       turnId: state.activeTurnId,
       itemId: state.activeMessageId,
@@ -381,35 +393,35 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
   function handleMessageComplete(update, threadId) {
     const state = getThreadState(threadId);
-    const finalText = update.text || update.content || state.accumulatedText || "";
-    emitCodexEvent("item/completed", {
+    const finalText = update.text || update.content || state.accumulatedText || \"\";
+    emitCodexEvent(\"item/completed\", {
       threadId: threadId,
       turnId: state.activeTurnId,
       item: {
         id: state.activeMessageId,
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: finalText }],
+        type: \"message\",
+        role: \"assistant\",
+        content: [{ type: \"output_text\", text: finalText }],
       },
     });
     state.activeMessageId = null;
-    state.accumulatedText = "";
+    state.accumulatedText = \"\";
   }
 
   function handleTurnComplete(update, threadId) {
     const state = getThreadState(threadId);
-    emitCodexEvent("turn/completed", {
+    emitCodexEvent(\"turn/completed\", {
       threadId: threadId,
       turnId: state.activeTurnId,
       turn: {
         id: state.activeTurnId,
         threadId: threadId,
-        status: "completed",
+        status: \"completed\",
       },
     });
     state.activeTurnId = null;
     state.activeMessageId = null;
-    state.accumulatedText = "";
+    state.accumulatedText = \"\";
     state.pendingTurnRequestId = null;
     savePersistedState();
   }
@@ -417,14 +429,14 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   function handleGeminiPromptResponse(parsed, threadId) {
     const state = getThreadState(threadId);
     // The prompt RPC completed — emit message_complete + turn_complete
-    if (parsed.result && parsed.result.stopReason === "end_turn") {
+    if (parsed.result && parsed.result.stopReason === \"end_turn\") {
       // Save assistant response in thread history
-      const finalText = state.accumulatedText || "";
+      const finalText = state.accumulatedText || \"\";
       const threadData = threadHistory.get(threadId);
       if (threadData && finalText) {
         threadData.turns.push({
           id: state.activeTurnId,
-          role: "assistant",
+          role: \"assistant\",
           text: finalText,
           timestamp: new Date().toISOString(),
         });
@@ -450,20 +462,20 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       return;
     }
 
-    const method = typeof parsed?.method === "string" ? parsed.method.trim() : "";
+    const method = typeof parsed?.method === \"string\" ? parsed.method.trim() : \"\";
     const requestId = parsed?.id;
     
     log(`[Codex Inbound] method: ${method}, id: ${requestId}`);
 
     // If session not ready yet, buffer the message
-    if (!sessionReady && method !== "initialize" && method !== "initialized") {
+    if (!sessionReady && method !== \"initialize\" && method !== \"initialized\") {
       log(`[Codex Inbound] Buffering message ${method} because session is not ready`);
       pendingMessages.push(rawMessage);
       return;
     }
 
     switch (method) {
-      case "initialize":
+      case \"initialize\":
         // Phone sends initialize - respond with our adapter
         if (requestId != null) {
           emitCodexResponse(requestId, {
@@ -476,65 +488,65 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         }
         return;
 
-      case "initialized":
+      case \"initialized\":
         // Silently consume
         return;
 
-      case "thread/start":
+      case \"thread/start\":
         handleThreadStart(parsed);
         return;
 
-      case "turn/start":
+      case \"turn/start\":
         handleTurnStart(parsed);
         return;
 
-      case "turn/cancel":
-      case "turn/interrupt":
+      case \"turn/cancel\":
+      case \"turn/interrupt\":
         handleTurnCancel(parsed);
         return;
 
-      case "account/read":
-      case "getAuthStatus":
-      case "account/status/read":
+      case \"account/read\":
+      case \"getAuthStatus\":
+      case \"account/status/read\":
         handleAccountStatus(parsed);
         return;
 
-      case "account/login/start":
-      case "account/login/cancel":
-      case "account/logout":
+      case \"account/login/start\":
+      case \"account/login/cancel\":
+      case \"account/logout\":
         handleAuthAction(parsed);
         return;
 
-      case "model/list":
-      case "models/list":
+      case \"model/list\":
+      case \"models/list\":
         handleModelsList(parsed);
         return;
 
-      case "collaborationMode/list":
+      case \"collaborationMode/list\":
         if (requestId != null) {
           emitCodexResponse(requestId, { modes: [] });
         }
         return;
 
-      case "model/set":
+      case \"model/set\":
         handleModelSet(parsed);
         return;
 
-      case "mode/set":
+      case \"mode/set\":
         handleModeSet(parsed);
         return;
 
-      case "thread/list":
+      case \"thread/list\":
         if (requestId != null) {
           const threads = [];
           // Add persisted threads
           for (const [tid, tdata] of threadHistory) {
             threads.push({
               id: tid,
-              title: tdata.title || "Gemini Session",
+              title: tdata.title || \"Gemini Session\",
               updatedAt: tdata.updatedAt || new Date().toISOString(),
               createdAt: tdata.createdAt || new Date().toISOString(),
-              syncState: "live",
+              syncState: \"live\",
               cwd: process.cwd(),
               model: geminiCurrentModelId,
             });
@@ -543,9 +555,9 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
           if (threads.length === 0 && activeThreadId) {
             threads.push({
               id: activeThreadId,
-              title: "Gemini CLI",
+              title: \"Gemini CLI\",
               updatedAt: new Date().toISOString(),
-              syncState: "live",
+              syncState: \"live\",
               cwd: process.cwd(),
               model: geminiCurrentModelId,
             });
@@ -554,14 +566,14 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         }
         return;
 
-      case "thread/read": {
-        const readThreadId = parsed.params?.threadId || activeThreadId || "gemini-default-session";
+      case \"thread/read\": {
+        const readThreadId = parsed.params?.threadId || activeThreadId || \"gemini-default-session\";
         const threadData = threadHistory.get(readThreadId);
         if (requestId != null) {
           emitCodexResponse(requestId, {
             thread: {
               id: readThreadId,
-              title: threadData?.title || "Gemini CLI",
+              title: threadData?.title || \"Gemini CLI\",
               cwd: process.cwd(),
               model: geminiCurrentModelId,
             },
@@ -571,7 +583,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         return;
       }
 
-      case "thread/resume":
+      case \"thread/resume\":
         if (requestId != null) {
           const resumeThreadId = parsed.params?.threadId || activeThreadId;
           if (resumeThreadId) activeThreadId = resumeThreadId;
@@ -579,22 +591,22 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
             threadId: activeThreadId,
             thread: {
               id: activeThreadId,
-              title: threadHistory.get(activeThreadId)?.title || "Gemini CLI",
+              title: threadHistory.get(activeThreadId)?.title || \"Gemini CLI\",
               cwd: process.cwd(),
             },
           });
         }
         return;
 
-      case "account/rateLimits/read":
+      case \"account/rateLimits/read\":
         if (requestId != null) {
           const state = getThreadState(activeThreadId);
           const usedTokens = state.totalInputTokens + state.totalOutputTokens;
           emitCodexResponse(requestId, {
             rateLimitsByLimitId: {
               gemini: {
-                limitId: "gemini",
-                limitName: "Gemini API",
+                limitId: \"gemini\",
+                limitName: \"Gemini API\",
                 primary: {
                   usedPercent: Math.min(Math.round(usedTokens / RATE_LIMIT_THRESHOLD * 100), 100),
                   windowDurationMins: 60,
@@ -606,7 +618,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         }
         return;
 
-      case "thread/contextWindow/read":
+      case \"thread/contextWindow/read\":
         if (requestId != null) {
           const tid = parsed.params?.threadId || activeThreadId;
           const state = getThreadState(tid);
@@ -641,23 +653,23 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
   function handleThreadStart(parsed) {
     const requestId = parsed.id;
-    activeThreadId = `gemini-${randomBytes(8).toString("hex")}`;
+    activeThreadId = `gemini-${randomBytes(8).toString(\"hex\")}`;
 
     const now = new Date().toISOString();
     const newThread = {
       id: activeThreadId,
       threadId: activeThreadId,
-      title: "Gemini Session",
+      title: \"Gemini Session\",
       updatedAt: now,
       createdAt: now,
-      syncState: "live",
+      syncState: \"live\",
       cwd: process.cwd(),
       model: geminiCurrentModelId,
     };
 
     // Persist the thread
     threadHistory.set(activeThreadId, {
-      title: "Gemini Session",
+      title: \"Gemini Session\",
       turns: [],
       createdAt: now,
       updatedAt: now,
@@ -669,7 +681,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     totalOutputTokens = 0;
 
     // Emit thread/started
-    emitCodexEvent("thread/started", {
+    emitCodexEvent(\"thread/started\", {
       threadId: activeThreadId,
       thread: newThread,
     });
@@ -689,24 +701,24 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     // Dump the full params to see if image is there
     log(`[Codex Inbound] turn/start params: ${JSON.stringify(params).slice(0, 1000)}`);
     
-    const prompt = params.prompt || params.input || params.message || params.content || "";
-    const threadId = params.threadId || activeThreadId || `gemini-${randomBytes(8).toString("hex")}`;
-    activeThreadId = threadId; // Update the "most recent" thread
+    const prompt = params.prompt || params.input || params.message || params.content || \"\";
+    const threadId = params.threadId || activeThreadId || `gemini-${randomBytes(8).toString(\"hex\")}`;
+    activeThreadId = threadId; // Update the \"most recent\" thread
     
     const state = getThreadState(threadId);
-    state.activeTurnId = `turn-${randomBytes(8).toString("hex")}`;
+    state.activeTurnId = `turn-${randomBytes(8).toString(\"hex\")}`;
     state.pendingTurnRequestId = requestId;
-    state.collaborationMode = params.collaborationMode || "default";
+    state.collaborationMode = params.collaborationMode || \"default\";
     currentPromptThreadId = threadId;
 
     // Emit turn/started to phone
-    emitCodexEvent("turn/started", {
+    emitCodexEvent(\"turn/started\", {
       threadId: threadId,
       turnId: state.activeTurnId,
       turn: {
         id: state.activeTurnId,
         threadId: threadId,
-        status: "in_progress",
+        status: \"in_progress\",
       },
     });
 
@@ -722,66 +734,69 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     let promptItems = [];
     
     // If in plan mode, add a system-like instruction
-    if (state.collaborationMode === "plan") {
+    if (state.collaborationMode === \"plan\") {
       promptItems.push({ 
-        type: "text", 
-        text: "[SYSTEM INSTRUCTION: You are in PLAN MODE. Focus on architectural steps and breaking down the task into logical slices. Use the plan structure if possible.]" 
+        type: \"text\", 
+        text: \"[SYSTEM INSTRUCTION: You are in PLAN MODE. Focus on architectural steps and breaking down the task into logical slices. Use the plan structure if possible.]\" 
       });
     }
 
     function extractFromItem(p) {
-      if (!p || typeof p !== "object") return;
+      if (!p || typeof p !== \"object\") return;
       
       // Text
-      if ((p.type === "text" || p.type === "input_text") && p.text) {
-        promptItems.push({ type: "text", text: p.text });
-      } else if (typeof p.text === "string" && p.text.trim()) {
-        promptItems.push({ type: "text", text: p.text });
+      if ((p.type === \"text\" || p.type === \"input_text\") && p.text) {
+        promptItems.push({ type: \"text\", text: p.text });
+      } else if (typeof p.text === \"string\" && p.text.trim()) {
+        promptItems.push({ type: \"text\", text: p.text });
       }
       
       // Image or File/Document
-      const imageUrl = p.url || p.image_url || (p.image_url && typeof p.image_url === "object" ? p.image_url.url : null);
-      if (imageUrl && typeof imageUrl === "string") {
+      let imageUrl = p.url || p.image_url;
+      if (imageUrl && typeof imageUrl === \"object\" && imageUrl.url) {
+        imageUrl = imageUrl.url;
+      }
+      if (imageUrl && typeof imageUrl === \"string\") {
         const parsed = parseDataUrl(imageUrl);
         if (parsed) {
-          if (imageUrl.startsWith("data:image")) {
+          if (imageUrl.startsWith(\"data:image\")) {
             promptItems.push({ 
-              type: "image", 
+              type: \"image\", 
               data: parsed.data, 
               mimeType: parsed.mimeType 
             });
           } else {
             promptItems.push({ 
-              type: "file", 
+              type: \"file\", 
               data: parsed.data, 
               mimeType: parsed.mimeType 
             });
           }
-        } else if (p.type === "image") {
-          promptItems.push({ type: "image", url: imageUrl });
-        } else if (p.type === "file" || p.type === "document") {
-          promptItems.push({ type: "file", url: imageUrl });
+        } else if (p.type === \"image\") {
+          promptItems.push({ type: \"image\", url: imageUrl });
+        } else if (p.type === \"file\" || p.type === \"document\") {
+          promptItems.push({ type: \"file\", url: imageUrl });
         }
       }
     }
 
-    if (typeof prompt === "string" && prompt.trim()) {
-      promptItems.push({ type: "text", text: prompt });
+    if (typeof prompt === \"string\" && prompt.trim()) {
+      promptItems.push({ type: \"text\", text: prompt });
     } else if (Array.isArray(prompt)) {
       prompt.forEach(extractFromItem);
     } else if (params.instructions) {
-      promptItems.push({ type: "text", text: params.instructions });
+      promptItems.push({ type: \"text\", text: params.instructions });
     }
 
     // Also check the items array (Codex format)
     if (promptItems.length === 0 && Array.isArray(params.items)) {
       for (const item of params.items) {
-        if (item.role === "user") {
+        if (item.role === \"user\") {
           if (Array.isArray(item.content)) {
             item.content.forEach(extractFromItem);
-          } else if (typeof item.content === "string") {
-            promptItems.push({ type: "text", text: item.content });
-          } else if (typeof item.content === "object") {
+          } else if (typeof item.content === \"string\") {
+            promptItems.push({ type: \"text\", text: item.content });
+          } else if (typeof item.content === \"object\") {
             extractFromItem(item.content);
           }
         }
@@ -789,31 +804,31 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     }
 
     if (promptItems.length === 0) {
-      log("warn: empty prompt in turn/start");
-      emitCodexEvent("turn/completed", {
+      log(\"warn: empty prompt in turn/start\");
+      emitCodexEvent(\"turn/completed\", {
         threadId: threadId,
         turnId: state.activeTurnId,
-        turn: { id: state.activeTurnId, threadId: threadId, status: "completed" },
+        turn: { id: state.activeTurnId, threadId: threadId, status: \"completed\" },
       });
       return;
     }
 
     // Persist the user message in thread history
-    const userText = promptItems.filter(p => p.type === "text").map(p => p.text).join("\n");
+    const userText = promptItems.filter(p => p.type === \"text\").map(p => p.text).join(\"\\n\");
     const threadData = threadHistory.get(threadId);
     if (threadData) {
       threadData.turns.push({
         id: state.activeTurnId,
-        role: "user",
+        role: \"user\",
         text: userText,
         timestamp: new Date().toISOString(),
       });
       threadData.updatedAt = new Date().toISOString();
       // Auto-title from first message
-      if (threadData.title === "Gemini Session" && userText.length > 0) {
-        threadData.title = userText.slice(0, 60) + (userText.length > 60 ? "..." : "");
+      if (threadData.title === \"Gemini Session\" && userText.length > 0) {
+        threadData.title = userText.slice(0, 60) + (userText.length > 60 ? \"...\" : \"\");
         // Notify iOS of the title update
-        emitCodexEvent("thread/name/updated", {
+        emitCodexEvent(\"thread/name/updated\", {
           threadId: threadId,
           threadName: threadData.title,
         });
@@ -823,12 +838,12 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
     // Send prompt to Gemini
     if (!geminiSessionId) {
-      log("error: no Gemini session for prompt");
+      log(\"error: no Gemini session for prompt\");
       return;
     }
 
     const geminiReqId = nextGeminiRequestId();
-    sendGeminiRequest(geminiReqId, "session/prompt", {
+    sendGeminiRequest(geminiReqId, \"session/prompt\", {
       sessionId: geminiSessionId,
       prompt: promptItems,
     }, threadId);
@@ -841,18 +856,18 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
     if (geminiSessionId) {
       const cancelId = nextGeminiRequestId();
-      sendGeminiRequest(cancelId, "cancel", {
+      sendGeminiRequest(cancelId, \"cancel\", {
         sessionId: geminiSessionId,
       }, threadId);
     }
 
-    emitCodexEvent("turn/completed", {
+    emitCodexEvent(\"turn/completed\", {
       threadId: threadId,
       turnId: state.activeTurnId,
       turn: {
         id: state.activeTurnId,
         threadId: threadId,
-        status: "cancelled",
+        status: \"cancelled\",
       },
     });
 
@@ -873,15 +888,15 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
     // Return Gemini-specific auth status
     emitCodexResponse(requestId, {
-      status: "authenticated",
-      authMethod: "google",
+      status: \"authenticated\",
+      authMethod: \"google\",
       email: null,
-      planType: geminiCurrentModelId || "gemini",
+      planType: geminiCurrentModelId || \"gemini\",
       loginInFlight: false,
       needsReauth: false,
       tokenReady: true,
       expiresAt: null,
-      bridgeVersion: require("../package.json").version || "1.0.0",
+      bridgeVersion: require(\"../package.json\").version || \"1.0.0\",
       bridgeLatestVersion: null,
       // Gemini-specific extras
       geminiModels: geminiModels,
@@ -899,7 +914,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     // Gemini doesn't have the same login flow as Codex/OpenAI
     emitCodexResponse(requestId, {
       success: true,
-      message: "Gemini CLI uses Google authentication. Please authenticate via 'gemini' CLI directly.",
+      message: \"Gemini CLI uses Google authentication. Please authenticate via 'gemini' CLI directly.\",
     });
   }
 
@@ -920,7 +935,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
     if (modelId && geminiSessionId) {
       const setModelId = nextGeminiRequestId();
-      sendGeminiRequest(setModelId, "session/set_model", {
+      sendGeminiRequest(setModelId, \"session/set_model\", {
         sessionId: geminiSessionId,
         modelId,
       });
@@ -942,7 +957,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
     if (modeId && geminiSessionId) {
       const setModeId = nextGeminiRequestId();
-      sendGeminiRequest(setModeId, "session/set_mode", {
+      sendGeminiRequest(setModeId, \"session/set_mode\", {
         sessionId: geminiSessionId,
         modeId,
       });
@@ -974,12 +989,12 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
   function sendGeminiRequest(id, method, params, threadId = null) {
     const msg = JSON.stringify({
-      jsonrpc: "2.0",
+      jsonrpc: \"2.0\",
       id,
       method,
       params,
     });
-    log(`[Gemini Outbound] ${msg.slice(0, 500)}${msg.length > 500 ? "..." : ""}`);
+    log(`[Gemini Outbound] ${msg.slice(0, 500)}${msg.length > 500 ? \"...\" : \"\"}`);
 
     pendingGeminiRequests.set(id, {
       id,
@@ -1015,11 +1030,11 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   // ─── Start Gemini initialization ────────────────────────────
 
   // Send initialize to Gemini ACP
-  sendGeminiRequest("gemini-init-1", "initialize", {
+  sendGeminiRequest(\"gemini-init-1\", \"initialize\", {
     protocolVersion: 1,
     clientInfo: {
-      name: "remodex",
-      version: require("../package.json").version || "1.0.0",
+      name: \"remodex\",
+      version: require(\"../package.json\").version || \"1.0.0\",
     },
     capabilities: {},
   });
