@@ -73,13 +73,23 @@ function setupRelay(
     const urlPath = req.url || "";
     const match = urlPath.match(/^\/relay\/([^/?]+)/);
     const sessionId = match?.[1];
-    const role = normalizeRelayRole(req.headers["x-role"]);
+    // Accept role from `x-role` header (preferred) or `?role=...` query string.
+    // The query-string fallback exists for WebSocket clients that can't send
+    // custom request headers — notably React Native's WebSocket on Android,
+    // and Web browsers (which have never allowed custom WS headers). The
+    // header path is unchanged for the bridge and the iOS app.
+    const headerRole = normalizeRelayRole(req.headers["x-role"]);
+    const queryUrl = (() => {
+      try { return new URL(urlPath, "http://relay.local"); } catch { return null; }
+    })();
+    const queryRole = queryUrl ? normalizeRelayRole(queryUrl.searchParams.get("role")) : "";
+    const role = headerRole || queryRole;
     relayMetrics.acceptedConnections += 1;
     ws._relaySessionId = sessionId;
     ws._relayRole = role;
 
     if (!sessionId || (role !== "mac" && !isRelayMobileRole(role))) {
-      ws.close(4000, "Missing sessionId or invalid x-role header");
+      ws.close(4000, "Missing sessionId or invalid x-role header/query");
       return;
     }
 
