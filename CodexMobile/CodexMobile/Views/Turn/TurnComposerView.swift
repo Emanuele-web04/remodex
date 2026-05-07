@@ -8,7 +8,6 @@ import SwiftUI
 import UIKit
 
 struct TurnComposerView: View {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Binding var input: String
     let isInputFocused: Binding<Bool>
 
@@ -254,15 +253,8 @@ struct TurnComposerView: View {
         .padding(.horizontal, 12)
         .padding(.top, 4)
         .padding(.bottom, 4)
-        .frame(maxWidth: composerMaxWidth, alignment: .leading)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.easeInOut(duration: 0.18), value: isInputFocused.wrappedValue)
-    }
-
-    // Caps the composer at a readable width on iPad so the rounded input rect and
-    // the secondary bar below it share identical edges and stay centered together.
-    private var composerMaxWidth: CGFloat {
-        PadPresentationStyle.usesPadPresentation(horizontalSizeClass: horizontalSizeClass) ? 860 : .infinity
     }
 
     private var placeholderText: String {

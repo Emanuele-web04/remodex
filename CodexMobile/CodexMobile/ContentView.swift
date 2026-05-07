@@ -34,6 +34,7 @@ struct ContentView: View {
     @State private var isSidebarPrewarmed = false
     @State private var selectedThread: CodexThread?
     @State private var navigationPath = NavigationPath()
+    @State private var splitColumnVisibility = NavigationSplitViewVisibility.automatic
     @State private var showSettings = false
     @State private var isShowingManualScanner = false
     @State private var hasDismissedAutomaticScanner = false
@@ -43,7 +44,6 @@ struct ContentView: View {
     @State private var manualPairingErrorMessage: String?
     @State private var isResolvingManualPairingCode = false
     @State private var isSearchActive = false
-    @State private var preferredSplitCompactColumn = NavigationSplitViewColumn.detail
     @State private var isRetryingBridgeUpdate = false
     @State private var isPreparingManualScanner = false
     @State private var isWakingSavedMacDisplay = false
@@ -63,8 +63,6 @@ struct ContentView: View {
     @AppStorage("codex.whatsNew.lastPresentedVersion") private var lastPresentedWhatsNewVersion = ""
 
     private let sidebarWidth: CGFloat = 330
-    private let iPadSidebarIdealWidth: CGFloat = 360
-    private let iPadSidebarMaxWidth: CGFloat = 420
     // Lets the drawer gesture start a bit inside the content instead of only on the bezel edge.
     private let sidebarOpenActivationWidth: CGFloat = 80
     private let sidebarPrewarmDelayNanoseconds: UInt64 = 700_000_000
@@ -101,7 +99,6 @@ struct ContentView: View {
             }
             .onChange(of: showSettings) { _, show in
                 if show {
-                    preferredSplitCompactColumn = .detail
                     navigationPath.append("settings")
                     showSettings = false
                 }
@@ -126,6 +123,15 @@ struct ContentView: View {
                 debugSidebarLog("navigation path changed count=\(navigationPath.count) sidebarOpen=\(isSidebarOpen)")
                 if isSidebarOpen {
                     closeSidebar()
+                }
+            }
+            .onChange(of: usesPersistentSidebar) { _, usesPersistentSidebar in
+                if usesPersistentSidebar {
+                    isSidebarOpen = false
+                    sidebarDragOffset = 0
+                    isSearchActive = false
+                    isSidebarPrewarmed = false
+                    resetSidebarGestureDebug()
                 }
             }
             .onChange(of: selectedThread) { previousThread, thread in
@@ -247,7 +253,7 @@ struct ContentView: View {
                     manualPairingCode = ""
                 }
             } message: {
-                Text("Paste the pairing code shown in the terminal on your computer or in your iPad shell.")
+                Text("Paste the pairing code shown in the terminal on your computer or in your phone shell.")
             }
     }
 
@@ -321,7 +327,6 @@ struct ContentView: View {
     private var qrScannerBody: some View {
         QRScannerView(
             onBack: scannerBackAction,
-            onPairWithCode: presentManualPairingEntryAfterStoppingReconnect,
             onScan: { pairingPayload in
                 Task {
                     isShowingManualScanner = false
@@ -339,70 +344,49 @@ struct ContentView: View {
     // Expands the drawer to the full container width on compact layouts so the sidebar
     // can comfortably host longer titles, paths, and search results.
     private var shouldUseFullWidthSidebar: Bool {
-        horizontalSizeClass == .compact || isSearchActive
+        !usesPersistentSidebar && (horizontalSizeClass == .compact || isSearchActive)
     }
 
     private func effectiveSidebarWidth(for availableWidth: CGFloat) -> CGFloat {
         shouldUseFullWidthSidebar ? availableWidth : min(sidebarWidth, availableWidth)
     }
 
+    private var usesPersistentSidebar: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
+    }
+
     @ViewBuilder
     private var mainAppBody: some View {
-        if usesSplitNavigationShell {
-            splitMainAppBody
+        if usesPersistentSidebar {
+            persistentSidebarAppBody
         } else {
-            drawerMainAppBody
+            overlaySidebarAppBody
         }
     }
 
-    // Uses the PR #24 iPad proportions while keeping the current sidebar/detail behavior.
-    private var splitMainAppBody: some View {
-        NavigationSplitView(preferredCompactColumn: $preferredSplitCompactColumn) {
-            SidebarView(
-                selectedThread: $selectedThread,
-                showSettings: $showSettings,
-                isSearchActive: $isSearchActive,
+    private var persistentSidebarAppBody: some View {
+        NavigationSplitView(columnVisibility: $splitColumnVisibility) {
+            sidebarContent(
                 showsInlineCloseButton: false,
-                isVisible: true,
-                onClose: {},
-                onNewChatCreationStateChange: { isCreating in
-                    setNewChatOpeningState(isCreating)
-                },
-                onOpenThread: { thread in
-                    openThreadFromSidebar(thread)
-                }
+                isVisible: true
             )
-            .navigationSplitViewColumnWidth(
-                min: sidebarWidth,
-                ideal: iPadSidebarIdealWidth,
-                max: iPadSidebarMaxWidth
-            )
+            .navigationSplitViewColumnWidth(min: 300, ideal: sidebarWidth, max: 390)
         } detail: {
-            detailNavigationLayer
+            mainNavigationLayer
         }
         .navigationSplitViewStyle(.balanced)
     }
 
-    private var drawerMainAppBody: some View {
+    private var overlaySidebarAppBody: some View {
         GeometryReader { proxy in
             let currentSidebarWidth = effectiveSidebarWidth(for: proxy.size.width)
             let currentSidebarRevealWidth = sidebarRevealWidth(for: currentSidebarWidth)
 
             ZStack(alignment: .leading) {
                 if sidebarVisible || isSidebarPrewarmed {
-                    SidebarView(
-                        selectedThread: $selectedThread,
-                        showSettings: $showSettings,
-                        isSearchActive: $isSearchActive,
+                    sidebarContent(
                         showsInlineCloseButton: shouldUseFullWidthSidebar,
-                        isVisible: sidebarVisible,
-                        onClose: { closeSidebar() },
-                        onNewChatCreationStateChange: { isCreating in
-                            setNewChatOpeningState(isCreating)
-                        },
-                        onOpenThread: { thread in
-                            openThreadFromSidebar(thread)
-                        }
+                        isVisible: sidebarVisible
                     )
                     .frame(width: currentSidebarWidth)
                     .animation(.easeInOut(duration: 0.25), value: shouldUseFullWidthSidebar)
@@ -441,30 +425,30 @@ struct ContentView: View {
         .simultaneousGesture(edgeDragGesture)
     }
 
-    // MARK: - Layers
-
-    private var usesSplitNavigationShell: Bool {
-        PadPresentationStyle.usesPadPresentation(horizontalSizeClass: horizontalSizeClass)
-    }
-
-    private var detailNavigationLayer: some View {
-        GeometryReader { proxy in
-            ZStack {
-                mainNavigationLayer
-                    .id(selectedThread?.id ?? "home")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                PetCompanionStatusSyncView()
-
-                PetCompanionOverlay(
-                    isInteractionEnabled: true,
-                    bottomExclusionHeight: 16
-                )
-                .frame(width: proxy.size.width, height: proxy.size.height)
+    private func sidebarContent(
+        showsInlineCloseButton: Bool,
+        isVisible: Bool
+    ) -> some View {
+        SidebarView(
+            selectedThread: $selectedThread,
+            showSettings: $showSettings,
+            isSearchActive: $isSearchActive,
+            showsInlineCloseButton: showsInlineCloseButton,
+            isVisible: isVisible,
+            onClose: {
+                guard !usesPersistentSidebar else { return }
+                closeSidebar()
+            },
+            onNewChatCreationStateChange: { isCreating in
+                setNewChatOpeningState(isCreating)
+            },
+            onOpenThread: { thread in
+                openThreadFromSidebar(thread)
             }
-            .background(Color(.systemBackground))
-        }
+        )
     }
+
+    // MARK: - Layers
 
     private var mainNavigationLayer: some View {
         NavigationStack(path: $navigationPath) {
@@ -485,7 +469,11 @@ struct ContentView: View {
         if isOpeningNewChatFromSidebar {
             NewChatOpeningStateView()
                 .toolbar {
-                    sidebarToggleToolbarItem
+                    if !usesPersistentSidebar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            hamburgerButton
+                        }
+                    }
                 }
         } else if let thread = selectedThread {
             TurnView(
@@ -500,7 +488,11 @@ struct ContentView: View {
                 })
                 .environment(\.wakeMacDisplayAction, wakeMacDisplayRecoveryAction)
                 .toolbar {
-                    sidebarToggleToolbarItem
+                    if !usesPersistentSidebar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            hamburgerButton
+                        }
+                    }
                 }
         } else {
             HomeEmptyStateView(
@@ -541,16 +533,11 @@ struct ContentView: View {
                 }
             }
             .toolbar {
-                sidebarToggleToolbarItem
-            }
-        }
-    }
-
-    @ToolbarContentBuilder
-    private var sidebarToggleToolbarItem: some ToolbarContent {
-        if !usesSplitNavigationShell {
-            ToolbarItem(placement: .topBarLeading) {
-                hamburgerButton
+                if !usesPersistentSidebar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        hamburgerButton
+                    }
+                }
             }
         }
     }
@@ -820,8 +807,10 @@ struct ContentView: View {
             closeSidebar()
         }
 
+        if !navigationPath.isEmpty {
+            navigationPath = NavigationPath()
+        }
         selectedThread = thread
-        preferredSplitCompactColumn = .detail
         codex.activeThreadId = thread.id
         codex.markThreadAsViewed(thread.id)
         Task { @MainActor in
@@ -857,7 +846,6 @@ struct ContentView: View {
         isOpeningNewChatFromSidebar = isOpening
         if isOpening {
             selectedThread = nil
-            preferredSplitCompactColumn = .detail
             codex.activeThreadId = nil
         }
     }
@@ -953,6 +941,7 @@ struct ContentView: View {
               hasSeenOnboarding,
               subscriptions.hasAppAccess,
               !isShowingManualScanner,
+              !usesPersistentSidebar,
               !isSidebarPrewarmed,
               sidebarPrewarmTask == nil,
               (codex.isConnected || !codex.threads.isEmpty) else {
@@ -1431,7 +1420,6 @@ struct ContentView: View {
         do {
             let thread = try await codex.startThread()
             selectedThread = thread
-            preferredSplitCompactColumn = .detail
         } catch {
             codex.lastErrorMessage = codex.userFacingTurnErrorMessage(from: error)
         }

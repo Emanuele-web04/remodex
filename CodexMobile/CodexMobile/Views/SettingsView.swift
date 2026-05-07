@@ -8,6 +8,7 @@ import StoreKit
 import UIKit
 
 struct SettingsView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
 
     var body: some View {
@@ -25,9 +26,15 @@ struct SettingsView: View {
                 SettingsConnectionCard()
             }
             .padding()
+            .frame(maxWidth: contentMaxWidth, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
         .font(AppFont.body())
         .navigationTitle("Settings")
+    }
+
+    private var contentMaxWidth: CGFloat {
+        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular ? 760 : .infinity
     }
 
     private var appFontStyleBinding: Binding<AppFont.Style> {

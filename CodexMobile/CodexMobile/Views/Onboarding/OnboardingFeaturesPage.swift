@@ -34,7 +34,7 @@ struct OnboardingFeaturesPage: View {
                     featureRow(
                         icon: "arrow.triangle.branch",
                         color: .green,
-                        title: "Git from your iPad",
+                        title: "Git from your phone",
                         subtitle: "Commit, push, pull, and switch branches"
                     )
                     featureRow(
@@ -53,15 +53,17 @@ struct OnboardingFeaturesPage: View {
                         icon: "point.3.connected.trianglepath.dotted",
                         color: .orange,
                         title: "Subagents, skills and /commands",
-                        subtitle: "Spawn and monitor parallel agents from your iPad"
+                        subtitle: "Spawn and monitor parallel agents from your phone"
                     )
                 }
                 .padding(.horizontal, 4)
             }
             .padding(.horizontal, 28)
+            .frame(maxWidth: 560)
 
             Spacer()
         }
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder

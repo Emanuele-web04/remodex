@@ -2,15 +2,13 @@
 // Purpose: Bottom bar with attachment/runtime/access menus, queue controls, and send button.
 // Layer: View Component
 // Exports: ComposerBottomBar
-// Depends on: SwiftUI, TurnComposerMetaMapper, PadPresentationStyle
+// Depends on: SwiftUI, TurnComposerMetaMapper
 
 import SwiftUI
 
 struct ComposerBottomBar: View {
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showsAllModelsSheet = false
-    @State private var showsAttachmentSheet = false
 
     // Data
     let orderedModelOptions: [CodexModelOption]
@@ -71,6 +69,7 @@ struct ComposerBottomBar: View {
                 runtimeActions: runtimeActions,
                 showsAllModelsSheet: $showsAllModelsSheet
             )
+            .equatable()
             if isPlanModeArmed {
                 Divider()
                     .frame(height: 16)
@@ -154,7 +153,7 @@ struct ComposerBottomBar: View {
                     showsAllModelsSheet = false
                 }
             )
-            .presentationDetents(PadPresentationStyle.modelPickerDetents)
+            .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
     }
@@ -182,107 +181,52 @@ struct ComposerBottomBar: View {
         }
     }
 
-    // MARK: - Attachment presentation
+    // MARK: - Menus
 
-    @ViewBuilder
     private var attachmentMenu: some View {
-        if usesPadPresentation {
-            attachmentSheetButton
-        } else {
-            attachmentCompactMenu
-        }
-    }
-
-    private var attachmentSheetButton: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            showsAttachmentSheet = true
-        } label: {
-            attachmentMenuLabel
-        }
-        .buttonStyle(.plain)
-        .tint(metaLabelColor)
-        .disabled(isComposerInteractionLocked)
-        .accessibilityLabel("Composer options")
-        .sheet(isPresented: $showsAttachmentSheet) {
-            NavigationStack {
-                List {
-                    attachmentOptions
-                }
-                .listStyle(.insetGrouped)
-                .navigationTitle("Composer")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Done") { showsAttachmentSheet = false }
-                    }
-                }
-            }
-            .presentationDetents([.medium])
-            .presentationDragIndicator(.visible)
-        }
-    }
-
-    private var attachmentCompactMenu: some View {
         Menu {
-            attachmentOptions
-        } label: {
-            attachmentMenuLabel
-        }
-        .tint(metaLabelColor)
-        .disabled(isComposerInteractionLocked)
-        .accessibilityLabel("Composer options")
-    }
-
-    @ViewBuilder
-    private var attachmentOptions: some View {
-        Toggle(isOn: Binding(
-            get: { isPlanModeArmed },
-            set: { newValue in
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onSetPlanModeArmed(newValue)
+            Toggle(isOn: Binding(
+                get: { isPlanModeArmed },
+                set: { newValue in
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    onSetPlanModeArmed(newValue)
+                }
+            )) {
+                Label("Plan mode", systemImage: "checklist")
             }
-        )) {
-            Label("Plan mode", systemImage: "checklist")
-        }
 
-        if runtimeState.supportsFastMode {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                toggleFastMode()
-                showsAttachmentSheet = false
-            } label: {
-                Label("Fast Mode", systemImage: fastModePlusMenuIconName)
+            if runtimeState.supportsFastMode {
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    toggleFastMode()
+                } label: {
+                    Label("Fast Mode", systemImage: fastModePlusMenuIconName)
+                }
             }
-        }
 
-        Section {
-            Button("Photo library") {
-                HapticFeedback.shared.triggerImpactFeedback()
-                showsAttachmentSheet = false
-                DispatchQueue.main.async {
+            Section {
+                Button("Photo library") {
+                    HapticFeedback.shared.triggerImpactFeedback()
                     onTapAddImage()
                 }
-            }
-            .disabled(remainingAttachmentSlots == 0)
+                .disabled(remainingAttachmentSlots == 0)
 
-            Button("Take a photo") {
-                HapticFeedback.shared.triggerImpactFeedback()
-                showsAttachmentSheet = false
-                DispatchQueue.main.async {
+                Button("Take a photo") {
+                    HapticFeedback.shared.triggerImpactFeedback()
                     onTapTakePhoto()
                 }
+                .disabled(remainingAttachmentSlots == 0)
             }
-            .disabled(remainingAttachmentSlots == 0)
+        } label: {
+            Image(systemName: "plus")
+                .font(metaTextFont)
+                .fontWeight(.regular)
+                .frame(width: plusTapTargetSide, height: plusTapTargetSide)
+                .contentShape(Capsule())
         }
-    }
-
-    private var attachmentMenuLabel: some View {
-        Image(systemName: "plus")
-            .font(metaTextFont)
-            .fontWeight(.regular)
-            .frame(width: plusTapTargetSide, height: plusTapTargetSide)
-            .contentShape(Capsule())
+        .tint(metaLabelColor)
+        .disabled(isComposerInteractionLocked)
+        .accessibilityLabel("Composer options")
     }
 
     private var planModeIndicator: some View {
@@ -306,10 +250,6 @@ struct ComposerBottomBar: View {
 
     private var fastModePlusMenuIconName: String {
         runtimeState.isSelectedServiceTier(.fast) ? "bolt.fill" : "bolt"
-    }
-
-    private var usesPadPresentation: Bool {
-        PadPresentationStyle.usesPadPresentation(horizontalSizeClass: horizontalSizeClass)
     }
 
     // Mirrors the bridge-provided runtime capability instead of guessing from the model name.
@@ -337,8 +277,6 @@ struct ComposerBottomBar: View {
 
 // Keeps the SwiftUI Menu from rebuilding during unrelated thread-sync updates.
 private struct ComposerRuntimeMenuControl: View, Equatable {
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
     let selectedModelTitle: String
@@ -347,7 +285,6 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     @Binding var showsAllModelsSheet: Bool
-    @State private var showsRuntimeSheet = false
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
@@ -364,149 +301,90 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     }
 
     // One consolidated runtime pill: Effort + featured models + Speed as flat sections.
-    @ViewBuilder
     var body: some View {
-        if usesPadPresentation {
-            runtimeSheetButton
-        } else {
-            runtimeCompactMenu
-        }
-    }
-
-    private var runtimeSheetButton: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            showsRuntimeSheet = true
-        } label: {
-            runtimeMenuLabel
-        }
-        .buttonStyle(.plain)
-        .fixedSize(horizontal: true, vertical: false)
-        .layoutPriority(1)
-        .tint(metaLabelColor)
-        .sheet(isPresented: $showsRuntimeSheet) {
-            runtimeSelectionSheet
-        }
-    }
-
-    private var runtimeCompactMenu: some View {
         Menu {
-            runtimeSections
+            Section("Effort") {
+                if runtimeState.reasoningDisplayOptions.isEmpty {
+                    Text("No reasoning options")
+                } else {
+                    ForEach(runtimeState.reasoningDisplayOptions, id: \.id) { option in
+                        Button {
+                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                            runtimeActions.selectReasoning(option.effort)
+                        } label: {
+                            if runtimeState.isSelectedReasoning(option.effort) {
+                                Label(option.title, systemImage: "checkmark")
+                            } else {
+                                Text(option.title)
+                            }
+                        }
+                        .disabled(runtimeState.reasoningMenuDisabled)
+                    }
+                }
+            }
+
+            Section("Change model") {
+                if isLoadingModels {
+                    Text("Loading models...")
+                } else if orderedModelOptions.isEmpty {
+                    Text("No models available")
+                } else {
+                    ForEach(featuredModelOptions, id: \.id) { model in
+                        Button {
+                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                            runtimeActions.selectModel(model.id)
+                        } label: {
+                            modelMenuRow(for: model)
+                        }
+                    }
+
+                    if hasNonFeaturedModels {
+                        Button("Other models") {
+                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                            DispatchQueue.main.async {
+                                showsAllModelsSheet = true
+                            }
+                        }
+                    }
+                }
+            }
+
+            if runtimeState.supportsFastMode {
+                Section("Speed") {
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        runtimeActions.selectServiceTier(nil)
+                    } label: {
+                        if runtimeState.isSelectedServiceTier(nil) {
+                            Label("Normal", systemImage: "checkmark")
+                        } else {
+                            Text("Normal")
+                        }
+                    }
+
+                    ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
+                        Button {
+                            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                            runtimeActions.selectServiceTier(tier)
+                        } label: {
+                            if runtimeState.isSelectedServiceTier(tier) {
+                                Label(tier.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(tier.displayName)
+                            }
+                        }
+                    }
+                }
+            }
         } label: {
-            runtimeMenuLabel
+            composerMenuLabel(
+                title: compactRuntimeTitle,
+                leadingImageName: runtimeState.showsSpeedBadgeInModelMenu ? "bolt.fill" : nil
+            )
         }
         .fixedSize(horizontal: true, vertical: false)
         .layoutPriority(1)
         .tint(metaLabelColor)
-    }
-
-    private var runtimeSelectionSheet: some View {
-        NavigationStack {
-            List {
-                effortSection
-                modelSection(showsAllModels: true)
-                speedSection
-            }
-            .listStyle(.insetGrouped)
-            .navigationTitle("Runtime")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") { showsRuntimeSheet = false }
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-    }
-
-    @ViewBuilder
-    private var runtimeSections: some View {
-        effortSection
-        modelSection(showsAllModels: false)
-        speedSection
-    }
-
-    @ViewBuilder
-    private var effortSection: some View {
-        Section("Effort") {
-            if runtimeState.reasoningDisplayOptions.isEmpty {
-                Text("No reasoning options")
-            } else {
-                ForEach(runtimeState.reasoningDisplayOptions, id: \.id) { option in
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        runtimeActions.selectReasoning(option.effort)
-                    } label: {
-                        if runtimeState.isSelectedReasoning(option.effort) {
-                            Label(option.title, systemImage: "checkmark")
-                        } else {
-                            Text(option.title)
-                        }
-                    }
-                    .disabled(runtimeState.reasoningMenuDisabled)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func modelSection(showsAllModels: Bool) -> some View {
-        Section("Change model") {
-            if isLoadingModels {
-                Text("Loading models...")
-            } else if orderedModelOptions.isEmpty {
-                Text("No models available")
-            } else {
-                ForEach(modelOptionsForRuntimeSection(showsAllModels: showsAllModels), id: \.id) { model in
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        runtimeActions.selectModel(model.id)
-                        showsRuntimeSheet = false
-                    } label: {
-                        modelMenuRow(for: model)
-                    }
-                }
-
-                if !showsAllModels, hasNonFeaturedModels {
-                    Button("Other models") {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        showsAllModelsSheet = true
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var speedSection: some View {
-        if runtimeState.supportsFastMode {
-            Section("Speed") {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    runtimeActions.selectServiceTier(nil)
-                } label: {
-                    if runtimeState.isSelectedServiceTier(nil) {
-                        Label("Normal", systemImage: "checkmark")
-                    } else {
-                        Text("Normal")
-                    }
-                }
-
-                ForEach(CodexServiceTier.allCases, id: \.rawValue) { tier in
-                    Button {
-                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                        runtimeActions.selectServiceTier(tier)
-                    } label: {
-                        if runtimeState.isSelectedServiceTier(tier) {
-                            Label(tier.displayName, systemImage: "checkmark")
-                        } else {
-                            Text(tier.displayName)
-                        }
-                    }
-                }
-            }
-        }
     }
 
     private var compactRuntimeTitle: String {
@@ -514,10 +392,6 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
             return isRuntimeSelectionLoading ? "Loading…" : "5.5 Medium"
         }
         return "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
-    }
-
-    private var usesPadPresentation: Bool {
-        PadPresentationStyle.usesPadPresentation(horizontalSizeClass: horizontalSizeClass)
     }
 
     // Keeps the family suffix visible while shortening the common GPT prefix.
@@ -569,10 +443,6 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
         }
     }
 
-    private func modelOptionsForRuntimeSection(showsAllModels: Bool) -> [CodexModelOption] {
-        showsAllModels ? orderedModelOptions : featuredModelOptions
-    }
-
     private static let featuredModelIdentifiers: Set<String> = [
         "gpt-5.5",
         "gpt-5.4",
@@ -608,13 +478,6 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
         .foregroundStyle(metaLabelColor)
         .fixedSize(horizontal: true, vertical: false)
         .contentShape(Rectangle())
-    }
-
-    private var runtimeMenuLabel: some View {
-        composerMenuLabel(
-            title: compactRuntimeTitle,
-            leadingImageName: runtimeState.showsSpeedBadgeInModelMenu ? "bolt.fill" : nil
-        )
     }
 }
 

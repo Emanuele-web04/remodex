@@ -375,6 +375,8 @@ private struct TurnTimelineFooterContainer<Composer: View>: View {
     let onScrollToLatest: (() -> Void)?
     @ViewBuilder let composer: () -> Composer
 
+    private let readableFooterMaxWidth: CGFloat = 900
+
     var body: some View {
         let footerContent = VStack(spacing: 0) {
             if !hidesErrorMessage, let errorMessage, !errorMessage.isEmpty {
@@ -391,7 +393,7 @@ private struct TurnTimelineFooterContainer<Composer: View>: View {
         }
 
         footerContent
-            .frame(maxWidth: footerMaxWidth)
+            .frame(maxWidth: footerMaxWidth, alignment: .center)
             .frame(maxWidth: .infinity)
             .overlay(alignment: .top) {
                 if shouldShowScrollToLatestButton, let onScrollToLatest {
@@ -403,7 +405,11 @@ private struct TurnTimelineFooterContainer<Composer: View>: View {
     }
 
     private var footerMaxWidth: CGFloat {
-        PadPresentationStyle.usesPadPresentation(horizontalSizeClass: horizontalSizeClass) ? 860 : .infinity
+        shouldConstrainReadableWidth ? readableFooterMaxWidth : .infinity
+    }
+
+    private var shouldConstrainReadableWidth: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
     }
 
     private func scrollToLatestButton(action: @escaping () -> Void) -> some View {
@@ -571,14 +577,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         shouldWarmRecentTailProgressively && visibleTailCount == 0
     }
 
+    private let readableTimelineContentMaxWidth: CGFloat = 900
+
     // Keeps larger accessibility text inside a slightly roomier gutter so assistant
     // prose does not read as edge-to-edge when Dynamic Type is bumped up.
     private var timelineHorizontalPadding: CGFloat {
         dynamicTypeSize.isAccessibilitySize ? 20 : 16
-    }
-
-    private var readableTimelineMaxWidth: CGFloat {
-        PadPresentationStyle.usesPadPresentation(horizontalSizeClass: horizontalSizeClass) ? 860 : .infinity
     }
 
     private var shouldStageHeavyThreadOpen: Bool {
@@ -635,6 +639,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             ScrollViewReader { proxy in
                 GeometryReader { viewport in
                     let contentWidth = timelineContentWidth(for: viewport.size.width)
+                    let sidePadding = timelineSidePadding(for: viewport.size.width)
                     ScrollView(.vertical) {
                         TurnTimelineRowsSection(
                             shouldWarmRecentTailProgressively: shouldWarmRecentTailProgressively,
@@ -664,8 +669,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         // SwiftUI can otherwise let a streaming text row report an
                         // over-wide ideal size, which makes the vertical timeline pan sideways.
                         .frame(width: contentWidth, alignment: .leading)
-                        .padding(.horizontal, timelineHorizontalPadding)
-                        .frame(width: viewport.size.width, alignment: .center)
+                        .padding(.horizontal, sidePadding)
+                        .frame(width: viewport.size.width, alignment: .leading)
                         .clipped()
                         .background(VerticalScrollAxisGuard())
                         .padding(.top, 12)
@@ -675,8 +680,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         // reachable by scrollTo regardless of VStack layout timing.
                         Color.clear
                             .frame(width: contentWidth, height: 1)
-                            .padding(.horizontal, timelineHorizontalPadding)
-                            .frame(width: viewport.size.width, alignment: .center)
+                            .padding(.horizontal, sidePadding)
+                            .frame(width: viewport.size.width, alignment: .leading)
                             .clipped()
                             .id(scrollBottomAnchorID)
                             .allowsHitTesting(false)
@@ -835,10 +840,20 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Keeps the padded timeline exactly viewport-wide so streaming rows cannot
     // expand the vertical ScrollView into a horizontally draggable surface.
     private func timelineContentWidth(for viewportWidth: CGFloat) -> CGFloat {
-        min(
-            max(0, viewportWidth - (timelineHorizontalPadding * 2)),
-            readableTimelineMaxWidth
-        )
+        let usableWidth = max(0, viewportWidth - (timelineHorizontalPadding * 2))
+        guard shouldConstrainReadableTimelineWidth else {
+            return usableWidth
+        }
+        return min(usableWidth, readableTimelineContentMaxWidth)
+    }
+
+    private func timelineSidePadding(for viewportWidth: CGFloat) -> CGFloat {
+        let contentWidth = timelineContentWidth(for: viewportWidth)
+        return max(timelineHorizontalPadding, (viewportWidth - contentWidth) / 2)
+    }
+
+    private var shouldConstrainReadableTimelineWidth: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
     }
 
     private func recomputeRenderItemsIfNeeded() {

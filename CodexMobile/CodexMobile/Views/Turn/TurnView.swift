@@ -18,7 +18,6 @@ struct TurnView: View {
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.wakeMacDisplayAction) private var wakeMacDisplayAction
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
@@ -400,15 +399,7 @@ struct TurnView: View {
         .sheet(isPresented: $isShowingVoiceSetupSheet) {
             GPTVoiceSetupSheet()
         }
-        .sheet(item: repositoryDiffSheetBinding) { presentation in
-            TurnDiffSheet(
-                title: presentation.title,
-                entries: presentation.entries,
-                bodyText: presentation.bodyText,
-                messageID: presentation.messageID
-            )
-        }
-        .fullScreenCover(item: repositoryDiffFullScreenBinding) { presentation in
+        .sheet(item: $repositoryDiffPresentation) { presentation in
             TurnDiffSheet(
                 title: presentation.title,
                 entries: presentation.entries,
@@ -1717,7 +1708,7 @@ struct TurnView: View {
                 snapshot: ConnectionRecoverySnapshot(
                     title: "Voice Mode",
                     summary: "This bridge session does not support voice mode yet.",
-                    detail: "Restart Remodex on your computer, then reconnect this iPad. If it still happens, update Remodex on your computer and pair again.",
+                    detail: "Restart Remodex on your computer, then reconnect this iPhone. If it still happens, update Remodex on your computer and pair again.",
                     status: .actionRequired,
                     trailingStyle: .action("Reconnect")
                 ),
@@ -1772,7 +1763,7 @@ struct TurnView: View {
                 snapshot: ConnectionRecoverySnapshot(
                     title: "Voice Mode",
                     summary: "Microphone access is off for Remodex.",
-                    detail: "Open iPad Settings, allow Microphone for Remodex, then try recording again.",
+                    detail: "Open iPhone Settings, allow Microphone for Remodex, then try recording again.",
                     status: .actionRequired,
                     trailingStyle: .action("Open Settings")
                 ),
@@ -2082,27 +2073,6 @@ private struct RuntimeDebugLogSheet: View {
                 }
             }
         }
-    }
-}
-
-private extension TurnView {
-    var usesPadDiffPresentation: Bool {
-        PadPresentationStyle.usesPadPresentation(horizontalSizeClass: horizontalSizeClass)
-    }
-
-    // Sends repo-wide diffs to a full-screen iPad surface while preserving sheet behavior in compact layouts.
-    var repositoryDiffSheetBinding: Binding<TurnDiffPresentation?> {
-        Binding(
-            get: { usesPadDiffPresentation ? nil : repositoryDiffPresentation },
-            set: { repositoryDiffPresentation = $0 }
-        )
-    }
-
-    var repositoryDiffFullScreenBinding: Binding<TurnDiffPresentation?> {
-        Binding(
-            get: { usesPadDiffPresentation ? repositoryDiffPresentation : nil },
-            set: { repositoryDiffPresentation = $0 }
-        )
     }
 }
 

@@ -96,9 +96,11 @@ struct OnboardingStepPage: View {
                     }
                 }
                 .padding(.horizontal, 28)
+                .frame(maxWidth: 560)
 
                 Spacer()
             }
+            .frame(maxWidth: .infinity)
         }
     }
 }
@@ -112,7 +114,7 @@ struct OnboardingStepPage: View {
             stepNumber: 1,
             icon: "terminal",
             title: "Install Codex CLI",
-            description: "The AI coding agent that lives in your terminal. Remodex connects to it from your iPad.",
+            description: "The AI coding agent that lives in your terminal. Remodex connects to it from your iPhone.",
             command: "npm install -g @openai/codex@latest"
         )
     }
@@ -126,7 +128,7 @@ struct OnboardingStepPage: View {
             stepNumber: 2,
             icon: "link",
             title: "Install the Bridge",
-            description: "A lightweight relay that securely connects your Mac to your iPad.",
+            description: "A lightweight relay that securely connects your Mac to your iPhone.",
             command: "npm install -g remodex@latest",
             commandCaption: "Remodex can keep your Mac awake with macOS caffeinate while the bridge is running, but it starts disabled by default. You can enable it later in Settings if you want."
         )
