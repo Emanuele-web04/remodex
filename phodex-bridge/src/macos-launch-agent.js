@@ -52,6 +52,7 @@ function runMacOSBridgeService({ env = process.env } = {}) {
 
   startBridge({
     config,
+    backendType: config.backendType || "codex",
     printPairingQr: false,
     onPairingSession(pairingSession) {
       writePairingSession(pairingSession, { env });
@@ -77,9 +78,11 @@ async function startMacOSBridgeService({
   waitForPairing = false,
   pairingTimeoutMs = DEFAULT_PAIRING_WAIT_TIMEOUT_MS,
   pairingPollIntervalMs = DEFAULT_PAIRING_WAIT_INTERVAL_MS,
+  backendType = "codex",
 } = {}) {
   assertDarwinPlatform(platform);
   const config = readBridgeConfig({ env });
+  config.backendType = backendType === "gemini" ? "gemini" : "codex";
   assertRelayConfigured(config);
   const startedAt = Date.now();
 

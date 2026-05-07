@@ -73,6 +73,14 @@ struct CodexGPTAccountSnapshot: Codable, Equatable, Sendable {
     }
 
     var detailText: String? {
+        if AppEnvironment.shared.backendType == .gemini {
+            var parts = ["Gemini CLI"]
+            if let planType, !planType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                parts.append(planType)
+            }
+            return parts.joined(separator: " • ")
+        }
+
         var parts: [String] = []
         if let email, !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             parts.append(email)

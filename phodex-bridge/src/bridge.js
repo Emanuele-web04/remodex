@@ -15,6 +15,8 @@ const {
   readBridgeConfig,
 } = require("./codex-desktop-refresher");
 const { createCodexTransport } = require("./codex-transport");
+const { createGeminiProtocolAdapter } = require("./gemini-protocol-adapter");
+const { createGeminiTransport } = require("./gemini-transport");
 const { createThreadRolloutActivityWatcher } = require("./rollout-watch");
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
@@ -86,8 +88,10 @@ function startBridge({
   printPairingQr = true,
   onPairingSession = null,
   onBridgeStatus = null,
+  backendType = "codex",
 } = {}) {
   const config = explicitConfig || readBridgeConfig();
+  const activeBackendType = backendType === "gemini" || config.backendType === "gemini" ? "gemini" : "codex";
   config.keepMacAwakeEnabled = config.keepMacAwakeEnabled === true;
   const bridgeWakeAssertion = createMacOSBridgeWakeAssertion({
     enabled: config.keepMacAwakeEnabled,
@@ -161,6 +165,7 @@ function startBridge({
     "account/logout",
   ]);
   const relaySanitizedRequestMethods = new Set([
+    "initialize",
     "thread/read",
     "thread/resume",
     "thread/turns/list",
@@ -207,12 +212,19 @@ function startBridge({
   let contextUsageWatcher = null;
   let watchedContextUsageKey = null;
 
-  const codex = createCodexTransport({
-    endpoint: config.codexEndpoint,
-    env: process.env,
-    appPath: config.codexAppPath,
-    logPrefix: "[remodex]",
-  });
+  const codex = activeBackendType === "gemini"
+    ? createGeminiProtocolAdapter({
+      transport: createGeminiTransport({
+        env: process.env,
+      }),
+      logPrefix: "[remodex-gemini]",
+    })
+    : createCodexTransport({
+      endpoint: config.codexEndpoint,
+      env: process.env,
+      appPath: config.codexAppPath,
+      logPrefix: "[remodex]",
+    });
   const voiceHandler = createVoiceHandler({
     sendCodexRequest,
     logPrefix: "[remodex]",
@@ -236,9 +248,13 @@ function startBridge({
     if (config.codexEndpoint) {
       console.error(`[remodex] Failed to connect to Codex endpoint: ${config.codexEndpoint}`);
     } else {
-      console.error("[remodex] Failed to start `codex app-server`.");
+      console.error(activeBackendType === "gemini"
+        ? "[remodex] Failed to start `gemini --acp`."
+        : "[remodex] Failed to start `codex app-server`.");
       console.error(`[remodex] Launch command: ${codex.describe()}`);
-      console.error("[remodex] Make sure the Codex CLI is installed and that the launcher works on this OS.");
+      console.error(activeBackendType === "gemini"
+        ? "[remodex] Make sure the Gemini CLI is installed and authenticated."
+        : "[remodex] Make sure the Codex CLI is installed and that the launcher works on this OS.");
     }
     console.error(error.message);
     process.exit(1);
@@ -796,6 +812,11 @@ function startBridge({
       return rawMessage;
     }
     relaySanitizedResponseMethodsById.delete(String(responseId));
+
+    if (trackedRequest.method === "initialize" && parsed?.result && typeof parsed.result === "object") {
+      parsed.result.backendType = activeBackendType;
+      rawMessage = JSON.stringify(parsed);
+    }
 
     return sanitizeThreadHistoryImagesForRelay(rawMessage, trackedRequest.method);
   }

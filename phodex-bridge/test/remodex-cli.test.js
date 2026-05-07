@@ -7,7 +7,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { execFileSync } = require("child_process");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
+const { Readable, Writable } = require("stream");
 const { version } = require("../package.json");
 const { main } = require("../bin/remodex");
 
@@ -62,12 +65,15 @@ test("remodex restart reuses the macOS service start flow", async () => {
 });
 
 test("remodex up shows a startup indicator while waiting for the pairing QR", async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
   const calls = [];
   const messages = [];
 
   await main({
     argv: ["node", "remodex", "up"],
     platform: "darwin",
+    env: { HOME: tempHome },
+    stdin: nonTTYInput(),
     consoleImpl: {
       log(message) {
         messages.push(message);
@@ -93,12 +99,104 @@ test("remodex up shows a startup indicator while waiting for the pairing QR", as
   });
 
   assert.deepEqual(messages, [
+    "[remodex] No saved AI backend and stdin is not interactive; defaulting to Codex. Run `remodex up --switch` in a terminal to choose Gemini.",
     "[remodex] Starting bridge and pairing QR...",
   ]);
   assert.deepEqual(calls, [
-    ["start-service", { waitForPairing: true }],
+    ["start-service", { waitForPairing: true, backendType: "codex" }],
     ["print-qr", { pairingSession: { pairingPayload: { sessionId: "session-up" } } }],
   ]);
+});
+
+test("remodex up uses the saved backend and passes it to the foreground bridge", async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
+  fs.mkdirSync(path.join(tempHome, ".remodex"), { recursive: true });
+  fs.writeFileSync(
+    path.join(tempHome, ".remodex", "config.json"),
+    JSON.stringify({ backend: "gemini" }),
+    "utf8"
+  );
+  const calls = [];
+
+  await main({
+    argv: ["node", "remodex", "up"],
+    platform: "linux",
+    env: { HOME: tempHome },
+    stdin: nonTTYInput(),
+    consoleImpl: quietConsole(),
+    deps: {
+      startBridge(options) {
+        calls.push(["start-bridge", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["start-bridge", { backendType: "gemini" }],
+  ]);
+});
+
+test("remodex up defaults to Codex when backend selection is non-interactive", async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
+  const calls = [];
+  const errors = [];
+
+  await main({
+    argv: ["node", "remodex", "up"],
+    platform: "linux",
+    env: { HOME: tempHome },
+    stdin: nonTTYInput(),
+    consoleImpl: {
+      log() {},
+      error(message) {
+        errors.push(message);
+      },
+    },
+    deps: {
+      startBridge(options) {
+        calls.push(["start-bridge", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["start-bridge", { backendType: "codex" }],
+  ]);
+  assert.match(errors.join("\n"), /defaulting to Codex/);
+  const saved = JSON.parse(fs.readFileSync(path.join(tempHome, ".remodex", "config.json"), "utf8"));
+  assert.equal(saved.backend, "codex");
+});
+
+test("remodex up --switch can save Gemini from an interactive terminal", async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
+  const input = Readable.from(["2\n"]);
+  input.isTTY = true;
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  const calls = [];
+
+  await main({
+    argv: ["node", "remodex", "up", "--switch"],
+    platform: "linux",
+    env: { HOME: tempHome },
+    stdin: input,
+    stdout: output,
+    consoleImpl: quietConsole(),
+    deps: {
+      startBridge(options) {
+        calls.push(["start-bridge", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["start-bridge", { backendType: "gemini" }],
+  ]);
+  const saved = JSON.parse(fs.readFileSync(path.join(tempHome, ".remodex", "config.json"), "utf8"));
+  assert.equal(saved.backend, "gemini");
 });
 
 test("remodex status --json exposes daemon metadata for companion apps", async () => {
@@ -159,3 +257,16 @@ test("remodex status --json exposes daemon metadata for companion apps", async (
   assert.equal(payload.bridgeStatus?.connectionStatus, "connected");
   assert.equal(payload.pairingSession?.pairingPayload?.sessionId, "session-json");
 });
+
+function quietConsole() {
+  return {
+    log() {},
+    error() {},
+  };
+}
+
+function nonTTYInput() {
+  const input = Readable.from([]);
+  input.isTTY = false;
+  return input;
+}

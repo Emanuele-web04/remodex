@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const readline = require("readline");
 // FILE: remodex.js
 // Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and macOS service control.
 // Layer: CLI binary
@@ -47,9 +51,12 @@ async function main({
   platform = process.platform,
   consoleImpl = console,
   exitImpl = process.exit,
+  env = process.env,
+  stdin = process.stdin,
+  stdout = process.stdout,
   deps = defaultDeps,
 } = {}) {
-  const { command, jsonOutput, watchThreadId } = parseCliArgs(argv.slice(2));
+  const { command, jsonOutput, watchThreadId, switchBackend } = parseCliArgs(argv.slice(2));
 
   if (isVersionCommand(command)) {
     emitVersion({ jsonOutput, consoleImpl });
@@ -57,10 +64,18 @@ async function main({
   }
 
   if (command === "up") {
+    const backendType = await resolveSelectedBackend({
+      forceSwitch: switchBackend,
+      env,
+      stdin,
+      stdout,
+      consoleImpl,
+    });
     if (platform === "darwin") {
       consoleImpl.log("[remodex] Starting bridge and pairing QR...");
       const result = await deps.startMacOSBridgeService({
         waitForPairing: true,
+        backendType,
       });
       deps.printMacOSBridgePairingQr({
         pairingSession: result.pairingSession,
@@ -68,12 +83,19 @@ async function main({
       return;
     }
 
-    deps.startBridge();
+    deps.startBridge({ backendType });
     return;
   }
 
   if (command === "run") {
-    deps.startBridge();
+    const backendType = await resolveSelectedBackend({
+      forceSwitch: switchBackend,
+      env,
+      stdin,
+      stdout,
+      consoleImpl,
+    });
+    deps.startBridge({ backendType });
     return;
   }
 
@@ -243,10 +265,15 @@ async function main({
 function parseCliArgs(rawArgs) {
   const positionals = [];
   let jsonOutput = false;
+  let switchBackend = false;
 
   for (const arg of rawArgs) {
     if (arg === "--json") {
       jsonOutput = true;
+      continue;
+    }
+    if (arg === "--switch") {
+      switchBackend = true;
       continue;
     }
 
@@ -256,8 +283,84 @@ function parseCliArgs(rawArgs) {
   return {
     command: positionals[0] || "up",
     jsonOutput,
+    switchBackend,
     watchThreadId: positionals[1] || "",
   };
+}
+
+async function resolveSelectedBackend({
+  forceSwitch = false,
+  env = process.env,
+  stdin = process.stdin,
+  stdout = process.stdout,
+  consoleImpl = console,
+} = {}) {
+  const configPath = resolveUserConfigPath({ env });
+  let config = readUserConfig(configPath);
+  const configuredBackend = normalizeBackendType(config.backend);
+  if (configuredBackend && !forceSwitch) {
+    return configuredBackend;
+  }
+
+  let backend = "codex";
+  if (stdin?.isTTY) {
+    backend = await promptForBackend({ stdin, stdout, consoleImpl });
+  } else {
+    consoleImpl.error("[remodex] No saved AI backend and stdin is not interactive; defaulting to Codex. Run `remodex up --switch` in a terminal to choose Gemini.");
+  }
+
+  config = {
+    ...config,
+    backend,
+  };
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  return backend;
+}
+
+function resolveUserConfigPath({ env = process.env } = {}) {
+  const home = env.HOME || os.homedir();
+  return path.join(home, ".remodex", "config.json");
+}
+
+function readUserConfig(configPath) {
+  try {
+    if (fs.existsSync(configPath)) {
+      const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+    }
+  } catch {
+    // Ignore malformed user config and re-prompt/default safely.
+  }
+  return {};
+}
+
+function normalizeBackendType(value) {
+  return value === "gemini" || value === "codex" ? value : "";
+}
+
+async function promptForBackend({
+  stdin = process.stdin,
+  stdout = process.stdout,
+  consoleImpl = console,
+} = {}) {
+  const rl = readline.createInterface({
+    input: stdin,
+    output: stdout,
+  });
+  const ask = (question) => new Promise((resolve) => rl.question(question, resolve));
+  try {
+    consoleImpl.log("");
+    consoleImpl.log("Which AI backend do you want to use?");
+    consoleImpl.log("  1) Codex (OpenAI)");
+    consoleImpl.log("  2) Gemini CLI (Google)");
+    const answer = (await ask("Enter 1 or 2: ")).trim();
+    return answer === "2" ? "gemini" : "codex";
+  } finally {
+    rl.close();
+  }
 }
 
 function emitVersion({
@@ -312,4 +415,7 @@ function isVersionCommand(value) {
 module.exports = {
   isVersionCommand,
   main,
+  normalizeBackendType,
+  parseCliArgs,
+  resolveSelectedBackend,
 };

@@ -327,6 +327,7 @@ extension CodexService {
                 timeoutMessage: "Connection timed out while reconnecting. Try again."
             )
             learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
+            learnBackendTypeFromInitializeResponse(initializeResponse)
             // A successful modern initialize means the runtime accepted the experimental
             // capability negotiation. Keep plan-mode sends enabled unless the runtime
             // explicitly rejects `collaborationMode` on a turn request later.
@@ -360,6 +361,7 @@ extension CodexService {
                     timeoutMessage: "Connection timed out while reconnecting. Try again."
                 )
                 learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
+                learnBackendTypeFromInitializeResponse(initializeResponse)
             } catch {
                 if let incompatibleAppVersionError = incompatibleBridgeAppVersionError(from: error) {
                     throw incompatibleAppVersionError
@@ -572,6 +574,7 @@ extension CodexService {
         supportsTurnCollaborationMode = false
         bridgeInstalledVersion = nil
         latestBridgePackageVersion = nil
+        AppEnvironment.shared.backendType = .codex
         resumedThreadIDs.removeAll()
         clearHydrationCaches()
         resetSecureTransportState()
@@ -582,6 +585,17 @@ extension CodexService {
         bridgeUpdatePrompt = nil
         threadCompletionBanner = nil
         missingNotificationThreadPrompt = nil
+    }
+
+    func learnBackendTypeFromInitializeResponse(_ response: RPCMessage) {
+        guard let rawValue = response.result?.objectValue?["backendType"]?.stringValue,
+              let backendType = BackendType(rawValue: rawValue) else {
+            AppEnvironment.shared.backendType = .codex
+            return
+        }
+
+        AppEnvironment.shared.backendType = backendType
+        debugRuntimeLog("backend type: \(backendType.rawValue)")
     }
 
     // Removes the current socket reference before reconnect/teardown logic mutates shared state.
