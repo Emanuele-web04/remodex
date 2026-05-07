@@ -197,7 +197,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertTrue(service.isRetryableSavedSessionConnectError(error))
         XCTAssertEqual(
             service.userFacingConnectFailureMessage(error),
-            "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
+            "Trying to reach your saved computer. Remodex will keep retrying. If you restarted the bridge on that computer, scan the new QR code."
         )
     }
 
@@ -233,7 +233,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
         XCTAssertEqual(
             service.lastErrorMessage,
-            "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
+            "Trying to reach your saved computer. Remodex will keep retrying. If you restarted the bridge on that computer, scan the new QR code."
         )
     }
 
@@ -270,7 +270,7 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertTrue(service.isRecoverableTransientConnectionError(error))
         XCTAssertEqual(
             service.userFacingConnectFailureMessage(error),
-            "Connection timed out. Check server/network."
+            "Connection was interrupted. Tap Reconnect to try again."
         )
     }
 

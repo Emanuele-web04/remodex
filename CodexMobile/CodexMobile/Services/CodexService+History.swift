@@ -888,6 +888,12 @@ extension CodexService {
         if shouldAttachMissingItemId
             || shouldRebindRunningAssistantItem
             || (
+                value.role == .assistant
+                    && !preservesRunningPresentation
+                    && serverItemId != nil
+                    && localItemId != serverItemId
+            )
+            || (
                 value.role == .system
                     && value.kind == .toolActivity
                     && serverItemId != nil
@@ -1433,7 +1439,6 @@ extension CodexService {
             guard !imageOnlyIndices.isEmpty,
                   let targetIndex = assistantIndices.last(where: { index in
                       !imageOnlyIndices.contains(index)
-                          && result[index].assistantPhase == "final_answer"
                   }) else {
                 continue
             }
@@ -2009,7 +2014,6 @@ extension CodexService {
                     "modelProvider", "model_provider",
                     "modelProviderId", "model_provider_id",
                     "modelName", "model_name",
-                    "model",
                 ]
             )
         )

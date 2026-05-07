@@ -417,7 +417,7 @@ final class CodexService {
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
     // Runtime compatibility flag for `thread/turns/list` and `excludeTurns`.
-    var supportsTurnPagination = true
+    var supportsTurnPagination = false
     // Seeds brand-new chats with one-shot composer actions like code review.
     var pendingComposerActionByThreadID: [String: CodexPendingThreadComposerAction] = [:]
     // In-memory identity directory for subagents, keyed by thread id and agent id.
@@ -669,6 +669,7 @@ final class CodexService {
     static let pinnedThreadSnapshotsDefaultsKey = "codex.pinnedThreadSnapshots"
     static let associatedManagedWorktreePathsDefaultsKey = "codex.associatedManagedWorktreePaths"
     static let turnTerminalStatesDefaultsKey = "codex.turnTerminalStates"
+    static let structuredUserInputPromptsDefaultsKey = "codex.structuredUserInputPrompts"
     static let threadHistoryPaginationStateDefaultsKey = "codex.threadHistoryPaginationState"
     static let notificationsPromptedDefaultsKey = "codex.notifications.prompted"
     static let keepMacAwakeWhileBridgeRunsDefaultsKey = "codex.keepMacAwakeWhileBridgeRuns"
@@ -688,12 +689,23 @@ final class CodexService {
         self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
         self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
         self.lastTrustedMacDeviceId = SecureStore.readString(for: CodexSecureKeys.lastTrustedMacDeviceId)
-        let loadedMessages = messagePersistence.load().mapValues { messages in
+        var loadedMessages = messagePersistence.load().mapValues { messages in
             messages.map { message in
                 var value = message
                 // Streaming cannot survive app relaunch; clear stale flags loaded from disk.
                 value.isStreaming = false
                 return value
+            }
+        }
+        if let promptData = defaults.data(forKey: Self.structuredUserInputPromptsDefaultsKey),
+           let promptMessages = try? decoder.decode([String: [CodexMessage]].self, from: promptData) {
+            for (threadId, prompts) in promptMessages {
+                var existing = loadedMessages[threadId] ?? []
+                for prompt in prompts where !existing.contains(where: { $0.id == prompt.id }) {
+                    existing.append(prompt)
+                }
+                existing.sort(by: { $0.orderIndex < $1.orderIndex })
+                loadedMessages[threadId] = existing
             }
         }
         CodexMessageOrderCounter.seed(from: loadedMessages)

@@ -647,6 +647,11 @@ extension CodexService {
                 terminalStateByTurnID[turnId] = state
                 persistTurnTerminalStates()
             }
+            if state == .stopped {
+                stoppedTurnIDsByThread[threadId, default: []].insert(turnId)
+            } else {
+                stoppedTurnIDsByThread[threadId]?.remove(turnId)
+            }
         }
         refreshThreadTimelineState(for: threadId)
         triggerRunCompletionHapticIfNeeded(
@@ -1650,6 +1655,7 @@ extension CodexService {
             messagesByThread[threadId]?[existingIndex].itemId = itemId
             messagesByThread[threadId]?[existingIndex].structuredUserInputRequest = request
             persistMessages()
+            persistStructuredUserInputPrompts()
             updateCurrentOutput(for: threadId)
             return
         }
@@ -1665,6 +1671,8 @@ extension CodexService {
                 structuredUserInputRequest: request
             )
         )
+        messagePersistence.save(messagesByThread)
+        persistStructuredUserInputPrompts()
     }
 
     // Removes resolved inline prompt cards once the server confirms the request lifecycle ended.
@@ -1694,6 +1702,7 @@ extension CodexService {
         }
 
         persistMessages()
+        persistStructuredUserInputPrompts()
         if let activeThreadId {
             updateCurrentOutput(for: activeThreadId)
         }
@@ -1716,6 +1725,7 @@ extension CodexService {
 
         messagesByThread[threadId] = threadMessages
         persistMessages()
+        persistStructuredUserInputPrompts()
         if let activeThreadId {
             updateCurrentOutput(for: activeThreadId)
         }
@@ -3124,6 +3134,42 @@ extension CodexService {
         }
 
         if let resolvedTurnId,
+           let explicitItemId,
+           trimmedText.localizedCaseInsensitiveContains("image"),
+           let imagePreviewIndex = imagePreviewAssistantCompletionIndex(
+               threadId: threadId,
+               turnId: resolvedTurnId,
+               itemId: nil,
+               text: trimmedText
+           ) {
+            let existingText = messagesByThread[threadId]?[imagePreviewIndex].text ?? ""
+            messagesByThread[threadId]?[imagePreviewIndex].text = Self.assistantCompletionTextPreservingImages(
+                existingText: existingText,
+                canonicalText: trimmedText
+            )
+            messagesByThread[threadId]?[imagePreviewIndex].isStreaming = false
+            messagesByThread[threadId]?[imagePreviewIndex].itemId = explicitItemId
+            applyAssistantPhaseIfNeeded(
+                threadId: threadId,
+                messageIndex: imagePreviewIndex,
+                assistantPhase: normalizedPhase
+            )
+            refreshDerivedPlanMetadata(threadId: threadId, messageIndex: imagePreviewIndex)
+            let messageId = messagesByThread[threadId]?[imagePreviewIndex].id
+            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            if let messageId {
+                persistMessages()
+                noteAssistantMessage(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    assistantMessageId: messageId
+                )
+                updateCurrentOutput(for: threadId)
+            }
+            return
+        }
+
+        if let resolvedTurnId,
            explicitItemId == nil,
            let duplicateIndex = completedAssistantMessageIndices(
                threadId: threadId,
@@ -3443,7 +3489,6 @@ extension CodexService {
             return candidate.role == .assistant
                 && candidate.kind == .chat
                 && candidate.turnId == turnId
-                && Self.isFinalAnswerAssistantPhase(candidate.assistantPhase)
                 && !candidate.isStreaming
                 && !Self.isGeneratedImageArtifactOnly(candidate.text)
                 && !candidate.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -3979,7 +4024,6 @@ extension CodexService {
                     let belongsToTurn = belongsToCompletedTurn(threadMessages[index])
                         || fallbackPlanIndex == index
                     guard belongsToTurn,
-                          threadMessages[index].resolvedPlanPresentation == .progress,
                           let planState = threadMessages[index].planState,
                           !planState.steps.isEmpty,
                           planState.steps.contains(where: { $0.status != .completed }) else {
@@ -4100,6 +4144,21 @@ extension CodexService {
                 messagePersistence.save(snapshot)
             }
         }
+    }
+
+    func persistStructuredUserInputPrompts() {
+        let prompts = messagesByThread.compactMapValues { messages in
+            let promptMessages = messages.filter { $0.kind == .userInputPrompt }
+            return promptMessages.isEmpty ? nil : promptMessages
+        }
+
+        guard !prompts.isEmpty,
+              let data = try? encoder.encode(prompts) else {
+            defaults.removeObject(forKey: Self.structuredUserInputPromptsDefaultsKey)
+            return
+        }
+
+        defaults.set(data, forKey: Self.structuredUserInputPromptsDefaultsKey)
     }
 
     // Persists per-turn terminal state so completed-turn grouping survives app relaunch.
@@ -4470,10 +4529,10 @@ extension CodexService {
 
     // Keeps stopped-turn lookup thread-local so scroll/render code never rescans full transcripts.
     func rebuildStoppedTurnIDs(for threadId: String, messages: [CodexMessage]) -> Set<String> {
-        let stoppedTurnIDs = Set(
+        let stoppedTurnIDs = (stoppedTurnIDsByThread[threadId] ?? []).union(Set(
             messages.compactMap(\.turnId)
                 .filter { terminalStateByTurnID[$0] == .stopped }
-        )
+        ))
         stoppedTurnIDsByThread[threadId] = stoppedTurnIDs
         return stoppedTurnIDs
     }
@@ -4748,7 +4807,6 @@ extension CodexService {
                 return candidate?.role == .system
                     && candidate?.kind == .plan
                     && candidate?.turnId == turnId
-                    && candidate?.resolvedPlanPresentation == planPresentation
             })
         }
 
@@ -4756,7 +4814,6 @@ extension CodexService {
             let candidate = messagesByThread[threadId]?[index]
             return candidate?.role == .system
                 && candidate?.kind == .plan
-                && candidate?.resolvedPlanPresentation == planPresentation
         })
     }
 
@@ -4837,8 +4894,21 @@ extension CodexService {
            let messageIndex = findMessageIndex(threadId: threadId, messageId: turnMessageID) {
             if let normalizedItemId {
                 let existingItemId = normalizedStreamingItemID(messagesByThread[threadId]?[messageIndex].itemId)
+                let existingMessage = messagesByThread[threadId]?[messageIndex]
 
                 if existingItemId == nil {
+                    if createStreamingMessage == false,
+                       existingMessage?.isStreaming == false,
+                       existingMessage?.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                        return createAssistantMessage(
+                            threadId: threadId,
+                            turnId: turnId,
+                            itemId: normalizedItemId,
+                            assistantPhase: normalizedPhase,
+                            isStreaming: false,
+                            promoteTurnFallback: false
+                        )
+                    }
                     messagesByThread[threadId]?[messageIndex].itemId = normalizedItemId
                     applyAssistantPhaseIfNeeded(
                         threadId: threadId,

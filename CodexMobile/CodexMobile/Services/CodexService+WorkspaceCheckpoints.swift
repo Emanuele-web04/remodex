@@ -118,6 +118,7 @@ extension CodexService {
     // Starts pre-turn checkpointing early; sendTurnStart awaits it before the runtime can mutate files.
     @discardableResult
     func scheduleMessageStartWorkspaceCheckpointIfPossible(threadId: String, messageId: String) -> Task<Void, Never>? {
+        guard requestTransportOverride == nil else { return nil }
         guard normalizedCheckpointIdentifier(messageId) != nil else { return nil }
         return Task { @MainActor [weak self] in
             await self?.captureMessageStartWorkspaceCheckpointIfPossible(
@@ -135,6 +136,7 @@ extension CodexService {
         turnId: String,
         after messageStartCheckpointTask: Task<Void, Never>? = nil
     ) -> Task<Void, Never>? {
+        guard requestTransportOverride == nil else { return nil }
         guard normalizedCheckpointIdentifier(messageId) != nil,
               let normalizedTurnId = normalizedCheckpointIdentifier(turnId) else { return nil }
         let task = Task { @MainActor [weak self] in
@@ -171,6 +173,7 @@ extension CodexService {
 
     // Best-effort pre-turn snapshot; normal chat send must not fail because checkpointing is unavailable.
     func captureMessageStartWorkspaceCheckpointIfPossible(threadId: String, messageId: String) async {
+        guard requestTransportOverride == nil else { return }
         guard normalizedCheckpointIdentifier(messageId) != nil else { return }
         do {
             _ = try await captureWorkspaceCheckpoint(
@@ -190,6 +193,7 @@ extension CodexService {
         messageId: String,
         turnId: String
     ) async {
+        guard requestTransportOverride == nil else { return }
         guard normalizedCheckpointIdentifier(messageId) != nil,
               normalizedCheckpointIdentifier(turnId) != nil else { return }
         do {
@@ -209,6 +213,7 @@ extension CodexService {
 
     // Captures the settled workspace so future diffs can be derived from refs instead of streamed patch text.
     func captureTurnEndWorkspaceCheckpointIfPossible(threadId: String, turnId: String?) async {
+        guard requestTransportOverride == nil else { return }
         guard let turnId = normalizedCheckpointIdentifier(turnId) else { return }
         await awaitTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: turnId)
         do {
@@ -235,6 +240,7 @@ extension CodexService {
 
     // Fallback for remotely-started turns where there was no local optimistic message snapshot.
     func captureTurnStartWorkspaceCheckpointIfPossible(threadId: String, turnId: String?) async {
+        guard requestTransportOverride == nil else { return }
         guard let turnId = normalizedCheckpointIdentifier(turnId) else { return }
         do {
             _ = try await captureWorkspaceCheckpoint(

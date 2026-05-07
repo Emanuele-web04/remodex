@@ -92,6 +92,13 @@ enum TurnTimelineReducer {
                     let aIsOpeningUser = openingUserID != nil && a.id == openingUserID
                     let bIsOpeningUser = openingUserID != nil && b.id == openingUserID
                     if aIsOpeningUser != bIsOpeningUser { return aIsOpeningUser }
+                    if a.role == .assistant,
+                       b.role == .assistant,
+                       !a.isStreaming,
+                       !b.isStreaming,
+                       a.createdAt != b.createdAt {
+                        return a.createdAt < b.createdAt
+                    }
                     return a.orderIndex < b.orderIndex
                 }
                 sorted = movingFileChangesToTurnTail(in: chronological)

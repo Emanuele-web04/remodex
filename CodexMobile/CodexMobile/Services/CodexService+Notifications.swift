@@ -172,6 +172,7 @@ extension CodexService {
         SecureStore.writeString(token, for: CodexSecureKeys.pushDeviceToken)
 
         Task { @MainActor [weak self] in
+            await self?.refreshNotificationAuthorizationStatus()
             await self?.syncManagedPushRegistrationIfNeeded(force: true)
         }
     }
@@ -283,6 +284,7 @@ extension CodexService {
             return false
         }
 
+        let originalActiveThreadId = activeThreadId
         if hasNotificationRoutingCandidate(threadId: pendingThreadId) {
             missingNotificationThreadPrompt = nil
             if await prepareThreadForDisplay(threadId: pendingThreadId) {
@@ -291,8 +293,8 @@ extension CodexService {
                 }
                 return true
             }
-            if hasNotificationRoutingCandidate(threadId: pendingThreadId) {
-                return false
+            if pendingNotificationOpenThreadID == pendingThreadId {
+                activeThreadId = originalActiveThreadId
             }
         }
 
@@ -309,12 +311,17 @@ extension CodexService {
 
         guard hasNotificationRoutingCandidate(threadId: pendingThreadId) else {
             guard didRefreshThreads else {
+                activeThreadId = originalActiveThreadId
                 return false
             }
-            return finalizeMissingNotificationRouteIfNeeded(
+            let finalized = finalizeMissingNotificationRouteIfNeeded(
                 threadId: pendingThreadId,
                 isAuthoritativeMissingResult: isNotificationRouteKnownMissing(threadId: pendingThreadId)
             )
+            if !finalized, pendingNotificationOpenThreadID == pendingThreadId {
+                activeThreadId = originalActiveThreadId
+            }
+            return finalized
         }
 
         missingNotificationThreadPrompt = nil

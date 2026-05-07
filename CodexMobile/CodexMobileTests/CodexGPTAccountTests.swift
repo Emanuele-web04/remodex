@@ -148,7 +148,7 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertEqual(service.latestBridgePackageVersion, "1.4.0")
         XCTAssertEqual(
             service.bridgeUpdatePrompt?.title,
-            "A newer Remodex update is available on your Mac"
+            "A newer Remodex update is available on your computer"
         )
         XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
         XCTAssertEqual(service.gptAccountSnapshot.status, .unknown)
@@ -245,7 +245,7 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertEqual(service.latestBridgePackageVersion, "1.4.0")
         XCTAssertEqual(
             service.bridgeUpdatePrompt?.title,
-            "A newer Remodex update is available on your Mac"
+            "A newer Remodex update is available on your computer"
         )
     }
 
@@ -632,7 +632,7 @@ final class CodexGPTAccountTests: XCTestCase {
                 durationSeconds: 1
             )
         }) { error in
-            XCTAssertEqual(error.localizedDescription, "Connect to your Mac before using voice transcription.")
+            XCTAssertEqual(error.localizedDescription, "WebSocket not connected")
         }
     }
 

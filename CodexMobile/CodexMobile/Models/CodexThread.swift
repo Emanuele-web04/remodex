@@ -418,7 +418,7 @@ extension CodexThread {
     // Distinguishes Codex-managed worktrees from the main repo in compact sidebar UIs.
     static func projectDisplayLabel(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
-            return "Cloud"
+            return "No Project"
         }
 
         let baseLabel = projectBaseDisplayName(for: normalizedProjectPath)
@@ -431,7 +431,7 @@ extension CodexThread {
 
     static func projectIconSystemName(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
-            return "cloud"
+            return "folder"
         }
 
         return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "folder" : "arrow.triangle.branch"
@@ -650,6 +650,7 @@ extension CodexThread {
             return nil
         }
 
-        return "[\(token)]"
+        let displayToken = token.drop { !$0.isNumber }
+        return displayToken.isEmpty ? token : String(displayToken)
     }
 }

@@ -113,9 +113,9 @@ final class SidebarThreadGroupingTests: XCTestCase {
             pinnedThreadIDs: ["archived-thread", "live-thread"]
         )
 
-        XCTAssertEqual(groups.map(\.id), ["pinned", "project:/Users/me/work/app", "archived"])
+        XCTAssertEqual(groups.map(\.id), ["pinned", "archived"])
         XCTAssertEqual(groups.first?.threads.map(\.id), ["live-thread"])
-        XCTAssertEqual(groups[2].threads.map(\.id), ["archived-thread"])
+        XCTAssertEqual(groups.last?.threads.map(\.id), ["archived-thread"])
     }
 
     func testMakeGroupsKeepsPinnedRootSubtreeTogetherAndOutOfProjectSection() {

@@ -206,28 +206,32 @@ extension CodexService {
             preserveExisting: preservePlanSessionState
         )
 
-        do {
-            try await ensureThreadResumed(threadId: initialThreadId)
-        } catch {
-            if shouldTreatAsThreadNotFound(error) {
-                handleMissingThread(initialThreadId)
+        let shouldPreflightThreadResume = requestTransportOverride == nil
+            || (effectiveCollaborationMode == .plan && !isConnected)
+        if shouldPreflightThreadResume {
+            do {
+                try await ensureThreadResumed(threadId: initialThreadId)
+            } catch {
+                if shouldTreatAsThreadNotFound(error) {
+                    handleMissingThread(initialThreadId)
 
-                let continuationThread = try await createContinuationThread(from: initialThreadId)
-                migratePlanSessionState(from: initialThreadId, to: continuationThread.id)
-                try await ensureThreadResumed(threadId: continuationThread.id)
-                try await sendTurnStart(
-                    trimmedInput,
-                    attachments: attachments,
-                    skillMentions: skillMentions,
-                    mentionMentions: mentionMentions,
-                    fileMentions: fileMentions,
-                    to: continuationThread.id,
-                    shouldAppendUserMessage: shouldAppendUserMessage,
-                    collaborationMode: effectiveCollaborationMode
-                )
-                activeThreadId = continuationThread.id
-                lastErrorMessage = nil
-                return
+                    let continuationThread = try await createContinuationThread(from: initialThreadId)
+                    migratePlanSessionState(from: initialThreadId, to: continuationThread.id)
+                    try await ensureThreadResumed(threadId: continuationThread.id)
+                    try await sendTurnStart(
+                        trimmedInput,
+                        attachments: attachments,
+                        skillMentions: skillMentions,
+                        mentionMentions: mentionMentions,
+                        fileMentions: fileMentions,
+                        to: continuationThread.id,
+                        shouldAppendUserMessage: shouldAppendUserMessage,
+                        collaborationMode: effectiveCollaborationMode
+                    )
+                    activeThreadId = continuationThread.id
+                    lastErrorMessage = nil
+                    return
+                }
             }
         }
 
@@ -1179,11 +1183,13 @@ extension CodexService {
                         turnId: resolvedTurnID
                     )
                 }
-                scheduleAutomaticThreadTitleGenerationIfNeeded(
-                    seed: automaticTitleSeed,
-                    threadId: threadId,
-                    attachments: attachments
-                )
+                if requestTransportOverride == nil {
+                    scheduleAutomaticThreadTitleGenerationIfNeeded(
+                        seed: automaticTitleSeed,
+                        threadId: threadId,
+                        attachments: attachments
+                    )
+                }
                 if didDowngradePlanModeForRuntime {
                     appendSystemMessage(
                         threadId: threadId,
@@ -1526,6 +1532,10 @@ extension CodexService {
             return ""
         }
 
+        if shouldSuppressRecoverableConnectionError(error) {
+            return ""
+        }
+
         if shouldTreatSendFailureAsDisconnect(error)
             || isRetryableSavedSessionConnectError(error)
             || isRecoverableTransientConnectionError(error)
@@ -1796,10 +1806,16 @@ extension CodexService {
             return nil
         }
 
-        let resolvedModel = runtimeModelIdentifierForTurn()
-            ?? selectedModelOption()?.model
-            ?? availableModels.first?.model
-            ?? selectedModelId
+        let resolvedModel: String? = {
+            if mode == .plan {
+                return selectedModelOption()?.model ?? availableModels.first?.model
+            }
+
+            return runtimeModelIdentifierForTurn()
+                ?? selectedModelOption()?.model
+                ?? availableModels.first?.model
+                ?? selectedModelId
+        }()
         guard let resolvedModel,
               !resolvedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw CodexServiceError.invalidResponse(
@@ -1843,10 +1859,11 @@ extension CodexService {
 
         // The approved plan is already part of the thread history, so keep the
         // handoff prompt minimal instead of replaying the full plan body.
-        let userInput = "Implement plan."
+        let userInput = "Implement the latest approved plan from the most recent <proposed_plan> in this thread."
 
         var expectedTurnID = activeTurnID(for: normalizedThreadID)
-        if expectedTurnID == nil {
+        if expectedTurnID == nil,
+           requestTransportOverride == nil {
             do {
                 expectedTurnID = try await resolveInFlightTurnID(threadId: normalizedThreadID)
             } catch {
@@ -1885,19 +1902,23 @@ extension CodexService {
     }
 
     func allowsInferredPlanQuestionnaireFallback(for threadId: String) -> Bool {
-        currentPlanSessionSource(for: threadId) == .compatibilityFallback
+        switch currentPlanSessionSource(for: threadId) {
+        case .requested, .compatibilityFallback:
+            return true
+        case .nativeDesktopEndpoint, .nativeAppServer, nil:
+            return false
+        }
     }
 
-    // Plain-text questionnaire recovery belongs only to explicit compatibility mode.
+    // Final-plan recovery remains available for active plan sessions even when
+    // clarification fallback stays limited to compatibility mode.
     func allowsAssistantPlanFallbackRecovery(for threadId: String) -> Bool {
-        currentPlanSessionSource(for: threadId) == .compatibilityFallback
+        currentPlanSessionSource(for: threadId) != nil
     }
 
-    // Native/requested plan threads should rely on official requestUserInput events,
-    // not on heuristics over assistant prose.
     func allowsAssistantPlanFallbackRecovery(for threadId: String, turnId: String?) -> Bool {
         let _ = turnId
-        return currentPlanSessionSource(for: threadId) == .compatibilityFallback
+        return currentPlanSessionSource(for: threadId) != nil
     }
 
     func markRequestedPlanSession(for threadId: String) {
@@ -2509,6 +2530,14 @@ extension CodexService {
                     ?? turnObject["turn_id"]?.stringValue
             )
         }.first
+
+        if let newestTurnObject = newestTurnObjects.first {
+            let newestStatus = normalizedInterruptTurnStatus(from: newestTurnObject)
+            if newestStatus != nil,
+               !isInterruptibleTurnStatus(newestStatus) {
+                return (nil, false, latestTurnID)
+            }
+        }
 
         // Newest-first scanning avoids interrupting an older completed turn when recovery is stale.
         var hasInterruptibleTurnWithoutID = false

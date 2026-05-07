@@ -290,6 +290,7 @@ struct MarkdownTextView: View {
             renderedContent
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+                .frame(minHeight: text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : 1)
                 .clipped()
         } else {
             renderedContent

@@ -413,6 +413,7 @@ private struct FileChangeBlockAggregate {
     var action: TurnFileChangeAction?
     var diffSections: [String]
     var totalsBySourceIndex: [Int: TurnDiffLineTotals]
+    var summarySignatures: Set<String>
 }
 
 private struct RawFileChangeDiffSection {
@@ -426,7 +427,15 @@ private struct RawFileChangeDiffSection {
 // Builds one per-file diff model from raw file-change messages. Summary Totals
 // override same-message diff counts, then separate messages for the same file add up.
 enum FileChangeBlockPresentationBuilder {
-    static func build(from messages: [CodexMessage]) -> FileChangeBlockPresentation? {
+    enum SummaryMergeStrategy {
+        case latestSnapshot
+        case additive
+    }
+
+    static func build(
+        from messages: [CodexMessage],
+        summaryMergeStrategy: SummaryMergeStrategy = .latestSnapshot
+    ) -> FileChangeBlockPresentation? {
         guard !messages.isEmpty else {
             return nil
         }
@@ -446,7 +455,12 @@ enum FileChangeBlockPresentationBuilder {
             }
 
             for entry in parsedEntries {
-                mergeSummaryEntry(entry, sourceIndex: messageIndex, into: &aggregates)
+                mergeSummaryEntry(
+                    entry,
+                    sourceIndex: messageIndex,
+                    summaryMergeStrategy: summaryMergeStrategy,
+                    into: &aggregates
+                )
             }
         }
 
@@ -487,6 +501,7 @@ enum FileChangeBlockPresentationBuilder {
     private static func mergeSummaryEntry(
         _ entry: TurnFileChangeSummaryEntry,
         sourceIndex: Int,
+        summaryMergeStrategy: SummaryMergeStrategy,
         into aggregates: inout [FileChangeBlockAggregate]
     ) {
         if let existingIndex = aggregates.firstIndex(where: {
@@ -494,12 +509,26 @@ enum FileChangeBlockPresentationBuilder {
         }) {
             let existing = aggregates[existingIndex]
             var updated = existing
+            let signature = summarySignature(
+                for: entry,
+                sourceIndex: summaryMergeStrategy == .additive ? sourceIndex : nil
+            )
+            if updated.summarySignatures.contains(signature) {
+                return
+            }
             updated.path = FileChangePathIdentity.preferredDisplayPath(existing.path, entry.path)
             updated.action = mergedFileChangeAction(existing: existing.action, incoming: entry.action)
-            updated.totalsBySourceIndex[sourceIndex] = TurnDiffLineTotals(
+            let totals = TurnDiffLineTotals(
                 additions: entry.additions,
                 deletions: entry.deletions
             )
+            switch summaryMergeStrategy {
+            case .latestSnapshot:
+                updated.totalsBySourceIndex = [sourceIndex: totals]
+            case .additive:
+                updated.totalsBySourceIndex[sourceIndex] = totals
+            }
+            updated.summarySignatures.insert(signature)
             applyTotals(from: updated.totalsBySourceIndex, to: &updated)
 
             aggregates[existingIndex] = updated
@@ -518,9 +547,30 @@ enum FileChangeBlockPresentationBuilder {
                         additions: entry.additions,
                         deletions: entry.deletions
                     ),
+                ],
+                summarySignatures: [
+                    summarySignature(
+                        for: entry,
+                        sourceIndex: summaryMergeStrategy == .additive ? sourceIndex : nil
+                    ),
                 ]
             )
         )
+    }
+
+    private static func summarySignature(
+        for entry: TurnFileChangeSummaryEntry,
+        sourceIndex: Int?
+    ) -> String {
+        var parts = [
+            "\(entry.additions)",
+            "\(entry.deletions)",
+            entry.action?.rawValue ?? "",
+        ]
+        if let sourceIndex {
+            parts.insert("source:\(sourceIndex)", at: 0)
+        }
+        return parts.joined(separator: "|")
     }
 
     private static func mergeDiffSection(
@@ -565,7 +615,8 @@ enum FileChangeBlockPresentationBuilder {
                         additions: section.additions,
                         deletions: section.deletions
                     ),
-                ]
+                ],
+                summarySignatures: []
             )
         )
     }

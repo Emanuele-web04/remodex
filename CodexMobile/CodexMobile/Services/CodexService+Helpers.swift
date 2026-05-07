@@ -907,8 +907,19 @@ extension CodexService {
 
     func sortThreads(_ value: [CodexThread]) -> [CodexThread] {
         value.sorted { lhs, rhs in
-            let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? Date.distantPast
-            let rhsDate = rhs.updatedAt ?? rhs.createdAt ?? Date.distantPast
+            switch (lhs.updatedAt, rhs.updatedAt) {
+            case (nil, nil):
+                break
+            case (.some, nil):
+                return true
+            case (nil, .some):
+                return false
+            case (.some, .some):
+                break
+            }
+
+            let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
+            let rhsDate = rhs.updatedAt ?? rhs.createdAt ?? .distantPast
             return lhsDate > rhsDate
         }
     }

@@ -1154,6 +1154,15 @@ final class TurnViewModel {
             return
         }
 
+        if isPlanModeArmed {
+            do {
+                _ = try codex.buildCollaborationModePayload(for: .plan, threadId: threadID)
+            } catch {
+                codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
+                return
+            }
+        }
+
         let queuedDraft = reviewSelection == nil ? QueuedTurnDraft(
             id: UUID().uuidString,
             text: payload,
@@ -1764,14 +1773,13 @@ final class TurnViewModel {
             return nil
         }
 
-        let isBareLowercaseSearch = query.first?.isLowercase == true && !query.contains(":")
-        guard isBareLowercaseSearch || isAllowedFileAutocompleteQuery(query) else {
+        if let lastCharacter = query.last,
+           ",.;:!?)]}".contains(lastCharacter) {
             return nil
         }
 
-        if let lastCharacter = query.last,
-           ",.;:!?)]}".contains(lastCharacter),
-           !TurnFileMentionHeuristics.isAllowedInlineMentionToken(query) {
+        let isBareLowercaseSearch = query.first?.isLowercase == true && !query.contains(":")
+        guard isBareLowercaseSearch || isAllowedFileAutocompleteQuery(query) else {
             return nil
         }
 
@@ -2011,7 +2019,10 @@ final class TurnViewModel {
             return wasBusy
         }
 
-        _ = await codex.refreshInFlightTurnState(threadId: threadID)
+        let didRefresh = await codex.refreshInFlightTurnState(threadId: threadID)
+        guard didRefresh else {
+            return wasBusy
+        }
         return isThreadBusy(codex: codex, threadID: threadID)
     }
 
