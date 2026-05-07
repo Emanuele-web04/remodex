@@ -217,9 +217,11 @@ extension CodexService {
 
             if let localThread = localByID[liveThread.id] {
                 liveThread = mergedThread(liveThread, with: localThread, treatAsServerState: true)
-                liveThread.syncState = localThread.syncState
+                liveThread.syncState = .live
+                removeLocallyArchivedThreadID(liveThread.id)
             } else if persistedArchivedIDs.contains(liveThread.id) {
-                liveThread.syncState = .archivedLocal
+                removeLocallyArchivedThreadID(liveThread.id)
+                liveThread.syncState = .live
             } else {
                 liveThread.syncState = .live
             }

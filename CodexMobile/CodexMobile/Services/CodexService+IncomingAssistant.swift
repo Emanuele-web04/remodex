@@ -50,6 +50,13 @@ extension CodexService {
             assistantPhase: context.identity.phase,
             delta: delta
         )
+        if paramsObject["msg"] != nil {
+            flushPendingAssistantDeltas(
+                for: context.threadId,
+                turnId: turnId,
+                itemId: context.identity.itemId
+            )
+        }
     }
 
     // Mirrors a user message coming from a desktop-origin rollout so reopened

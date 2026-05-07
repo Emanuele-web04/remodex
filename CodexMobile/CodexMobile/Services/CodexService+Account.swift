@@ -466,6 +466,9 @@ extension CodexService {
 
     // Re-polls account status while the user is finishing login in the browser.
     func startGPTLoginSyncIfNeeded() {
+        guard requestTransportOverride == nil else {
+            return
+        }
         guard gptAccountLoginSyncTask == nil, currentPendingGPTLogin() != nil else {
             return
         }

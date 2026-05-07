@@ -297,6 +297,9 @@ enum TurnComposerCommandLogic {
         guard let token = trailingSlashCommandToken(in: text) else {
             return false
         }
+        guard token.tokenRange.lowerBound == text.startIndex else {
+            return false
+        }
 
         var remainingDraft = text
         remainingDraft.replaceSubrange(token.tokenRange, with: "")

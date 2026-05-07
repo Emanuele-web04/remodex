@@ -1,5 +1,5 @@
 // FILE: CodexService+SecureTransport.swift
-// Purpose: Performs the iPhone-side E2EE handshake, wire control routing, and encrypted envelope handling.
+// Purpose: Performs the iPad-side E2EE handshake, wire control routing, and encrypted envelope handling.
 // Layer: Service
 // Exports: CodexService secure transport helpers
 // Depends on: CryptoKit, Foundation, Security, Network
@@ -73,7 +73,7 @@ extension CodexService {
                 message: "This bridge is using a different secure transport version. Update the Remodex package on your computer and try again."
             )
             throw CodexSecureTransportError.incompatibleVersion(
-                "This bridge is using a different secure transport version. Update Remodex on the iPhone or Mac and try again."
+                "This bridge is using a different secure transport version. Update Remodex on the iPad or Mac and try again."
             )
         }
         guard serverHello.sessionId == sessionId else {
@@ -221,7 +221,7 @@ extension CodexService {
         processIncomingText(text)
     }
 
-    // Encrypts JSON-RPC requests/responses before they leave the iPhone.
+    // Encrypts JSON-RPC requests/responses before they leave the iPad.
     func secureWireText(for plaintext: String) throws -> String {
         guard var secureSession else {
             throw CodexSecureTransportError.invalidHandshake(
@@ -383,7 +383,7 @@ extension CodexService {
         guard let relayURL = preferredPairingCodeRelayURL,
               let resolveURL = pairingCodeResolveURL(from: relayURL) else {
             throw CodexSecureTransportError.invalidQR(
-                "This iPhone does not know which relay to ask for that pairing code yet. Scan the QR code instead."
+                "This iPad does not know which relay to ask for that pairing code yet. Scan the QR code instead."
             )
         }
 
@@ -782,7 +782,7 @@ private extension CodexService {
         case "phone_not_trusted", "invalid_signature":
             secureConnectionState = .rePairRequired
             throw CodexTrustedSessionResolveError.rePairRequired(
-                "This iPhone is no longer trusted by the paired computer. Scan a new QR code to reconnect."
+                "This iPad is no longer trusted by the paired computer. Scan a new QR code to reconnect."
             )
         case "resolve_request_replayed", "resolve_request_expired":
             throw CodexTrustedSessionResolveError.network(

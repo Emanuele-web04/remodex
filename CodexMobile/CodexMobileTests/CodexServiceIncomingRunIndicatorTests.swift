@@ -28,8 +28,8 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         let turnID = "turn-\(UUID().uuidString)"
         let itemID = "item-\(UUID().uuidString)"
 
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Hello")
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: " world")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Hello")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: " world")
 
         XCTAssertTrue(service.messages(for: threadID).isEmpty)
 
@@ -48,9 +48,9 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         let turnID = "turn-\(UUID().uuidString)"
         let itemID = "item-\(UUID().uuidString)"
 
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes")
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the")
-        service.enqueueAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the imagegen skill")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the")
+        service.appendAssistantDelta(threadId: threadID, turnId: turnID, itemId: itemID, delta: "Yes, the imagegen skill")
 
         service.flushAllPendingStreamingDeltas()
 
@@ -647,7 +647,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             XCTAssertNil(service.relayUrl)
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "This relay session was replaced by another Mac connection. Scan a new QR code to reconnect."
+                "This relay session was replaced by another computer connection. Scan a new QR code to reconnect."
             )
         }
     }
@@ -675,7 +675,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             XCTAssertEqual(service.relayUrl, SecureStore.readString(for: CodexSecureKeys.relayUrl))
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "The saved Mac session is temporarily unavailable. Remodex will keep retrying. If you restarted the bridge on your Mac, scan the new QR code."
+                "Trying to reach your saved computer. Remodex will keep retrying. If you restarted the bridge on that computer, scan the new QR code."
             )
             XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
         }
@@ -721,7 +721,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             XCTAssertEqual(service.relayUrl, SecureStore.readString(for: CodexSecureKeys.relayUrl))
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "The Mac was temporarily unavailable and this message could not be delivered. Wait a moment, then try again."
+                "The paired computer was temporarily unavailable and this message could not be delivered. Wait a moment, then try again."
             )
         }
     }
@@ -832,7 +832,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(service.isRecoverableTransientConnectionError(NWError.posix(.ETIMEDOUT)))
         XCTAssertEqual(
             service.userFacingConnectFailureMessage(NWError.posix(.ETIMEDOUT)),
-            "Connection timed out. Check server/network."
+            "Connection was interrupted. Tap Reconnect to try again."
         )
     }
 

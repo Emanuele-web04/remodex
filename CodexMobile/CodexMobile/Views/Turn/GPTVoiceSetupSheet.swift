@@ -23,7 +23,7 @@ struct GPTVoiceSetupSheet: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("GPT voice uses the ChatGPT session on your computer")
                             .font(AppFont.subheadline(weight: .semibold))
-                        Text("Remodex does not keep a separate GPT voice login on the iPhone. It uses the ChatGPT session already active on your paired computer.")
+                        Text("Remodex does not keep a separate GPT voice login on the iPad. It uses the ChatGPT session already active on your paired computer.")
                             .font(AppFont.caption())
                             .foregroundStyle(.secondary)
                     }
@@ -32,12 +32,12 @@ struct GPTVoiceSetupSheet: View {
                 VStack(alignment: .leading, spacing: 12) {
                     infoStep(
                         number: "1",
-                        title: "You speak on the iPhone",
-                        detail: "Remodex records the voice clip locally on the phone when you hold to talk."
+                        title: "You speak on the iPad",
+                        detail: "Remodex records the voice clip locally on the iPad when you hold to talk."
                     )
                     infoStep(
                         number: "2",
-                        title: "The phone checks your paired computer",
+                        title: "The iPad checks your paired computer",
                         detail: "Remodex asks the paired computer bridge for the active ChatGPT session that is already connected there."
                     )
                     infoStep(
@@ -52,7 +52,7 @@ struct GPTVoiceSetupSheet: View {
                     )
                 }
 
-                Text("In short: iPhone voice in, computer ChatGPT session for auth, GPT transcript back to the iPhone.")
+                Text("In short: iPad voice in, computer ChatGPT session for auth, GPT transcript back to the iPad.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 

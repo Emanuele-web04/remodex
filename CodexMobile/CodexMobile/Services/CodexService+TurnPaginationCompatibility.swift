@@ -31,6 +31,18 @@ extension CodexService {
         }
 
         switch serviceError {
+        case .invalidResponse(let reason):
+            let message = reason.lowercased()
+            let attemptedTurnList = attemptedMethod == "thread/turns/list"
+            guard attemptedTurnList || message.contains("thread/turns/list") else {
+                return false
+            }
+
+            // New or bridge-wrapped runtimes can acknowledge the method but return a
+            // non-page payload; use the older thread/read path instead of surfacing it.
+            return message.contains("missing payload")
+                || message.contains("missing data array")
+                || message.contains("missing turns")
         case .rpcError(let rpcError):
             let message = rpcError.message.lowercased()
             let attemptedTurnList = attemptedMethod == "thread/turns/list"

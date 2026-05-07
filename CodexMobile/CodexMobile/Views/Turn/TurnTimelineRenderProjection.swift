@@ -225,7 +225,10 @@ enum TurnTimelineRenderProjection {
             defer { pendingFileChanges.removeAll(keepingCapacity: true) }
 
             guard pendingFileChanges.count > 1,
-                  let presentation = FileChangeBlockPresentationBuilder.build(from: pendingFileChanges),
+                  let presentation = FileChangeBlockPresentationBuilder.build(
+                    from: pendingFileChanges,
+                    summaryMergeStrategy: .additive
+                  ),
                   var replacement = pendingFileChanges.last else {
                 mergedItems.append(contentsOf: pendingFileChanges.map(TurnTimelineRenderItem.message))
                 return

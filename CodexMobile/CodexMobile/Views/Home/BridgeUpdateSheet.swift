@@ -72,14 +72,14 @@ struct BridgeUpdateSheet: View {
                                 .fill(Color(.tertiarySystemFill).opacity(0.75))
                         )
                     } else {
-                        Text("Install the latest Remodex build on this iPhone, then come back here and reconnect.")
+                        Text("Install the latest Remodex build on this iPad, then come back here and reconnect.")
                             .font(AppFont.body())
                             .foregroundStyle(.secondary)
                     }
                 }
 
                 Text(prompt.command == nil
-                    ? "After the app finishes updating on your iPhone, reconnect to the computer bridge."
+                    ? "After the app finishes updating on your iPad, reconnect to the computer bridge."
                     : "After the package finishes updating, restart the bridge on your computer and come back here."
                 )
                     .font(AppFont.caption())

@@ -910,15 +910,18 @@ extension CodexService {
                     kind: .toolActivity,
                     delta: activityText
                 )
+                flushPendingSystemDeltas(threadId: threadId, itemId: itemId)
                 return
             }
             if let resolvedTurnId, !resolvedTurnId.isEmpty {
+                let syntheticItemId = syntheticStreamingItemId(turnId: resolvedTurnId, kind: .toolActivity)
                 appendStreamingSystemTurnDelta(
                     threadId: threadId,
                     turnId: resolvedTurnId,
                     kind: .toolActivity,
                     delta: activityText
                 )
+                flushPendingSystemDeltas(threadId: threadId, itemId: syntheticItemId)
                 return
             }
             appendSystemMessage(

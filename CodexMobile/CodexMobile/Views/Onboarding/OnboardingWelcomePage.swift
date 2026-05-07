@@ -53,7 +53,7 @@ struct OnboardingWelcomePage: View {
                         Text("Remodex")
                             .font(AppFont.system(size: 32, weight: .bold))
 
-                        Text("Control Codex from your iPhone.")
+                        Text("Control Codex from your iPad.")
                             .font(AppFont.subheadline(weight: .regular))
                             .foregroundStyle(.white.opacity(0.5))
                     }

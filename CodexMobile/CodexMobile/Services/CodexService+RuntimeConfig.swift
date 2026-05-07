@@ -56,6 +56,10 @@ extension CodexService {
                 return try await sendRequest(method: method, params: .object(params))
             } catch {
                 lastError = error
+                if method == "turn/start",
+                   shouldRetryTurnStartWithoutCollaborationMode(error) {
+                    throw error
+                }
                 let hasMorePolicies = index < (policies.count - 1)
                 if hasMorePolicies, shouldRetryWithApprovalPolicyFallback(error) {
                     debugRuntimeLog("\(method) \(context) fallback approvalPolicy=\(policy)")
@@ -370,6 +374,10 @@ extension CodexService {
                 context: "sandboxPolicy"
             )
         } catch {
+            if method == "turn/start",
+               shouldRetryTurnStartWithoutCollaborationMode(error) {
+                throw error
+            }
             guard shouldFallbackFromSandboxPolicy(error) else {
                 throw error
             }

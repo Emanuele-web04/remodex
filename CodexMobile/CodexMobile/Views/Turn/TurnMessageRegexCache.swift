@@ -11,10 +11,10 @@ enum TurnMessageRegexCache {
         pattern: #"(?i)^(edited|updated|added|created|deleted|removed|renamed|moved)\s+(.+?)$"#
     )
     static let inlineTotals = try? NSRegularExpression(
-        pattern: #"[+\u{FF0B}]\s*(\d+)\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\s*(\d+)"#
+        pattern: #"[+\x{FF0B}]\s*(\d+)\s*[-\x{2212}\x{2013}\x{2014}\x{FE63}\x{FF0D}]\s*(\d+)"#
     )
     static let trailingInlineTotals = try? NSRegularExpression(
-        pattern: #"\s*[+\u{FF0B}]\s*\d+\s*[-\u{2212}\u{2013}\u{2014}\u{FE63}\u{FF0D}]\s*\d+\s*$"#
+        pattern: #"\s*[+\x{FF0B}]\s*\d+\s*[-\x{2212}\x{2013}\x{2014}\x{FE63}\x{FF0D}]\s*\d+\s*$"#
     )
     static let trailingLineColumn = try? NSRegularExpression(pattern: #":\d+(?::\d+)?$"#)
     static let fileLikeToken = try? NSRegularExpression(pattern: #"[A-Za-z0-9_+.-]+\.[A-Za-z0-9]+$"#)

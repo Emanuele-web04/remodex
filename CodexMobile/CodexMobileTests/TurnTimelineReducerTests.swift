@@ -2960,13 +2960,13 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         XCTAssertEqual(
             normalized,
-            "W -->|Yes| X[Relay replaces old Mac socket<br/>4001 to old connection]"
+            "W -->|Yes| X[\"Relay replaces old Mac socket<br/>4001 to old connection\"]"
         )
     }
 
     func testMermaidSourceNormalizerLeavesValidArrowLabelsUntouched() {
         let source = """
-        W -->|Yes| X[Relay replaces old Mac socket<br/>4001 to old connection]
+        W -->|Yes| X["Relay replaces old Mac socket<br/>4001 to old connection"]
         """
 
         let normalized = MermaidSourceNormalizer.normalized(source)

@@ -38,6 +38,8 @@ enum TurnComposerMetaMapper {
     // Normalizes backend ids into consistent menu labels.
     static func modelTitle(for model: CodexModelOption) -> String {
         switch model.model.lowercased() {
+        case "gpt-5.5":
+            return "GPT-5.5"
         case "gpt-5.3-codex":
             return "GPT-5.3-Codex"
         case "gpt-5.2-codex":
