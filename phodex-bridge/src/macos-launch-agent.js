@@ -50,6 +50,14 @@ function runMacOSBridgeService({ env = process.env } = {}) {
     return;
   }
 
+  if (typeof config.projectCwd === "string" && config.projectCwd.trim()) {
+    try {
+      process.chdir(config.projectCwd);
+    } catch (error) {
+      console.error(`[remodex] Failed to switch to project cwd ${config.projectCwd}: ${error.message}`);
+    }
+  }
+
   startBridge({
     config,
     backendType: config.backendType || "codex",
@@ -83,6 +91,7 @@ async function startMacOSBridgeService({
   assertDarwinPlatform(platform);
   const config = readBridgeConfig({ env });
   config.backendType = backendType === "gemini" ? "gemini" : "codex";
+  config.projectCwd = process.cwd();
   assertRelayConfigured(config);
   const startedAt = Date.now();
 
