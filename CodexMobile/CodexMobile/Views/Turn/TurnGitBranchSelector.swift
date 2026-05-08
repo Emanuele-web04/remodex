@@ -6,11 +6,11 @@
 
 import SwiftUI
 
-// Normalizes newly created local branch names toward the repo's preferred prefix without double-prefixing.
+// Defaults bare branch names to the repo prefix while preserving explicit slash prefixes.
 func remodexNormalizedCreatedBranchName(_ rawName: String) -> String {
     let trimmedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmedName.isEmpty else { return "" }
-    if trimmedName.hasPrefix("remodex/") {
+    if trimmedName.contains("/") {
         return trimmedName
     }
     return "remodex/\(trimmedName)"
@@ -386,7 +386,7 @@ struct TurnGitBranchPickerSheet: View {
         .environment(\.defaultMinListRowHeight, 28)
         .searchable(text: $searchText, prompt: "Search branches")
         .alert("New branch", isPresented: $isShowingCreateBranchPrompt) {
-            TextField("remodex/my-feature", text: $newBranchName)
+            TextField("my-feature or drew/my-feature", text: $newBranchName)
             Button("Cancel", role: .cancel) {
                 newBranchName = ""
             }

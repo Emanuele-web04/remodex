@@ -1,5 +1,5 @@
 // FILE: TurnGitBranchSelectorTests.swift
-// Purpose: Verifies new branch creation names normalize toward the remodex/ prefix without double-prefixing.
+// Purpose: Verifies new branch creation names preserve explicit prefixes while defaulting bare names.
 // Layer: Unit Test
 // Exports: TurnGitBranchSelectorTests
 // Depends on: XCTest, CodexMobile
@@ -8,10 +8,15 @@ import XCTest
 @testable import CodexMobile
 
 final class TurnGitBranchSelectorTests: XCTestCase {
-    func testNormalizesCreatedBranchNamesTowardRemodexPrefix() {
+    func testNormalizesBareCreatedBranchNamesTowardRemodexPrefix() {
         XCTAssertEqual(remodexNormalizedCreatedBranchName("foo"), "remodex/foo")
         XCTAssertEqual(remodexNormalizedCreatedBranchName("remodex/foo"), "remodex/foo")
         XCTAssertEqual(remodexNormalizedCreatedBranchName("  foo  "), "remodex/foo")
+    }
+
+    func testPreservesExplicitCreatedBranchPrefixes() {
+        XCTAssertEqual(remodexNormalizedCreatedBranchName("drew/new-branch"), "drew/new-branch")
+        XCTAssertEqual(remodexNormalizedCreatedBranchName("feature/login-page"), "feature/login-page")
     }
 
     func testNormalizesEmptyBranchNamesToEmptyString() {

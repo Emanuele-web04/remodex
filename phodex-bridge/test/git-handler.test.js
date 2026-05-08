@@ -316,11 +316,26 @@ test("gitCreateBranch normalizes bare names into remodex/* and checks out the ne
   }
 });
 
-test("normalizeCreatedBranchName avoids double-prefixing remodex branches", () => {
-  assert.equal(__test.normalizeCreatedBranchName("feature/foo"), "remodex/feature/foo");
+test("gitCreateBranch preserves explicit slash prefixes", async () => {
+  const repoDir = makeTempRepo();
+
+  try {
+    const result = await __test.gitCreateBranch(repoDir, { name: "drew/new-branch" });
+
+    assert.equal(result.branch, "drew/new-branch");
+    assert.equal(result.status?.branch, "drew/new-branch");
+    assert.equal(git(repoDir, "rev-parse", "--abbrev-ref", "HEAD"), "drew/new-branch");
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("normalizeCreatedBranchName preserves explicit prefixes and defaults bare names", () => {
+  assert.equal(__test.normalizeCreatedBranchName("feature/foo"), "feature/foo");
+  assert.equal(__test.normalizeCreatedBranchName("drew/new-branch"), "drew/new-branch");
   assert.equal(__test.normalizeCreatedBranchName("remodex/feature/foo"), "remodex/feature/foo");
   assert.equal(__test.normalizeCreatedBranchName("my new branch"), "remodex/my-new-branch");
-  assert.equal(__test.normalizeCreatedBranchName("feature / login page"), "remodex/feature/login-page");
+  assert.equal(__test.normalizeCreatedBranchName("feature / login page"), "feature/login-page");
   assert.equal(__test.normalizeCreatedBranchName("   "), "");
 });
 

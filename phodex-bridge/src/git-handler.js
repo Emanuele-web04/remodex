@@ -2077,7 +2077,7 @@ function normalizeCreatedBranchName(rawName) {
     .map((segment) => segment.trim().replace(/\s+/g, "-"))
     .join("/");
 
-  if (normalized.startsWith("remodex/")) {
+  if (normalized.includes("/")) {
     return normalized;
   }
   return `remodex/${normalized}`;
