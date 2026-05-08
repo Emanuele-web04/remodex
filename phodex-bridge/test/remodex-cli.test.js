@@ -10,6 +10,7 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { EventEmitter } = require("events");
 const { Readable, Writable } = require("stream");
 const { version } = require("../package.json");
 const { main } = require("../bin/remodex");
@@ -72,7 +73,7 @@ test("remodex up runs the bridge in the foreground on macOS", async () => {
   await main({
     argv: ["node", "remodex", "up"],
     platform: "darwin",
-    env: { HOME: tempHome },
+    env: { HOME: tempHome, REMODEX_RELAY: "ws://127.0.0.1:9000/relay" },
     stdin: nonTTYInput(),
     consoleImpl: {
       log() {},
@@ -98,7 +99,12 @@ test("remodex up runs the bridge in the foreground on macOS", async () => {
   ]);
   assert.deepEqual(calls, [
     ["stop-service"],
-    ["start-bridge", { backendType: "codex" }],
+    ["start-bridge", {
+      backendType: "codex",
+      config: {
+        relayUrl: "ws://127.0.0.1:9000/relay",
+      },
+    }],
   ]);
 });
 
@@ -115,7 +121,7 @@ test("remodex up uses the saved backend and passes it to the foreground bridge",
   await main({
     argv: ["node", "remodex", "up"],
     platform: "linux",
-    env: { HOME: tempHome },
+    env: { HOME: tempHome, REMODEX_RELAY: "ws://127.0.0.1:9000/relay" },
     stdin: nonTTYInput(),
     consoleImpl: quietConsole(),
     deps: {
@@ -126,7 +132,12 @@ test("remodex up uses the saved backend and passes it to the foreground bridge",
   });
 
   assert.deepEqual(calls, [
-    ["start-bridge", { backendType: "gemini" }],
+    ["start-bridge", {
+      backendType: "gemini",
+      config: {
+        relayUrl: "ws://127.0.0.1:9000/relay",
+      },
+    }],
   ]);
 });
 
@@ -138,7 +149,7 @@ test("remodex up defaults to Codex when backend selection is non-interactive", a
   await main({
     argv: ["node", "remodex", "up"],
     platform: "linux",
-    env: { HOME: tempHome },
+    env: { HOME: tempHome, REMODEX_RELAY: "ws://127.0.0.1:9000/relay" },
     stdin: nonTTYInput(),
     consoleImpl: {
       log() {},
@@ -154,7 +165,12 @@ test("remodex up defaults to Codex when backend selection is non-interactive", a
   });
 
   assert.deepEqual(calls, [
-    ["start-bridge", { backendType: "codex" }],
+    ["start-bridge", {
+      backendType: "codex",
+      config: {
+        relayUrl: "ws://127.0.0.1:9000/relay",
+      },
+    }],
   ]);
   assert.match(errors.join("\n"), /defaulting to Codex/);
   const saved = JSON.parse(fs.readFileSync(path.join(tempHome, ".remodex", "config.json"), "utf8"));
@@ -175,7 +191,7 @@ test("remodex up --switch can save Gemini from an interactive terminal", async (
   await main({
     argv: ["node", "remodex", "up", "--switch"],
     platform: "linux",
-    env: { HOME: tempHome },
+    env: { HOME: tempHome, REMODEX_RELAY: "ws://127.0.0.1:9000/relay" },
     stdin: input,
     stdout: output,
     consoleImpl: quietConsole(),
@@ -187,10 +203,66 @@ test("remodex up --switch can save Gemini from an interactive terminal", async (
   });
 
   assert.deepEqual(calls, [
-    ["start-bridge", { backendType: "gemini" }],
+    ["start-bridge", {
+      backendType: "gemini",
+      config: {
+        relayUrl: "ws://127.0.0.1:9000/relay",
+      },
+    }],
   ]);
   const saved = JSON.parse(fs.readFileSync(path.join(tempHome, ".remodex", "config.json"), "utf8"));
   assert.equal(saved.backend, "gemini");
+});
+
+test("remodex up starts an embedded relay when no relay URL is configured", async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
+  const calls = [];
+  const logs = [];
+  const server = createFakeRelayServer({ port: 54321 });
+
+  await main({
+    argv: ["node", "remodex", "up"],
+    platform: "linux",
+    env: {
+      HOME: tempHome,
+      REMODEX_RELAY_HOST: "192.168.1.50",
+    },
+    stdin: nonTTYInput(),
+    consoleImpl: {
+      log(message) {
+        logs.push(message);
+      },
+      error() {},
+    },
+    deps: {
+      createRelayServer() {
+        return () => ({ server });
+      },
+      readBridgeConfig() {
+        return {
+          keepMacAwakeEnabled: true,
+        };
+      },
+      startBridge(options) {
+        calls.push(["start-bridge", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(server.listenArgs, {
+    host: "0.0.0.0",
+    port: 0,
+  });
+  assert.deepEqual(calls, [
+    ["start-bridge", {
+      backendType: "codex",
+      config: {
+        keepMacAwakeEnabled: true,
+        relayUrl: "ws://192.168.1.50:54321/relay",
+      },
+    }],
+  ]);
+  assert.match(logs.join("\n"), /local relay listening on 0\.0\.0\.0:54321/);
 });
 
 test("remodex status --json exposes daemon metadata for companion apps", async () => {
@@ -257,6 +329,23 @@ function quietConsole() {
     log() {},
     error() {},
   };
+}
+
+function createFakeRelayServer({ port }) {
+  const server = new EventEmitter();
+  server.listenArgs = null;
+  server.listen = (listenPort, host) => {
+    server.listenArgs = {
+      host,
+      port: listenPort,
+    };
+    queueMicrotask(() => server.emit("listening"));
+  };
+  server.address = () => ({ port });
+  server.close = (callback) => {
+    callback?.();
+  };
+  return server;
 }
 
 function nonTTYInput() {
