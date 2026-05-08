@@ -70,6 +70,7 @@ struct ComposerBottomBar: View {
                 showsAllModelsSheet: $showsAllModelsSheet
             )
             .equatable()
+            .frame(maxWidth: 172, alignment: .leading)
             if isPlanModeArmed {
                 Divider()
                     .frame(height: 16)
@@ -382,14 +383,16 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 leadingImageName: runtimeState.showsSpeedBadgeInModelMenu ? "bolt.fill" : nil
             )
         }
-        .fixedSize(horizontal: true, vertical: false)
-        .layoutPriority(1)
+        .layoutPriority(0)
         .tint(metaLabelColor)
     }
 
     private var compactRuntimeTitle: String {
         if selectedModelID == nil {
             return isRuntimeSelectionLoading ? "Loading…" : "5.5 Medium"
+        }
+        if runtimeState.reasoningDisplayOptions.isEmpty || runtimeState.reasoningMenuDisabled {
+            return compactModelTitle
         }
         return "\(compactModelTitle) \(runtimeState.selectedReasoningTitle)"
     }
@@ -469,6 +472,8 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 .font(metaTextFont)
                 .fontWeight(.regular)
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
             Image(systemName: "chevron.down")
                 .font(metaChevronFont)
@@ -476,7 +481,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
         .foregroundStyle(metaLabelColor)
-        .fixedSize(horizontal: true, vertical: false)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
     }
 }
