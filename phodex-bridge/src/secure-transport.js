@@ -344,7 +344,7 @@ function createBridgeSecureTransport({
       macToPhoneKey: deriveAesKey(sharedSecret, salt, `${infoPrefix}|macToPhone`),
       lastInboundCounter: -1,
       nextOutboundCounter: 0,
-      isResumed: false,
+      isResumed: true,
       sendWireMessage: liveSendWireMessage,
     };
 
