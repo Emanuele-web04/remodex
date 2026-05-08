@@ -152,3 +152,85 @@ test("Gemini adapter returns paginated thread turns instead of an RPC error", as
   assert.equal(response.result.data[0].items[0].text, "Кто ты?");
   assert.equal(response.result.data[0].items[1].text, "Я Gemini CLI.");
 });
+
+test("Gemini adapter opens a Gemini session in the turn cwd selected by iOS", async (t) => {
+  const previousHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-gemini-adapter-"));
+  process.env.HOME = tempHome;
+  t.after(() => {
+    process.env.HOME = previousHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const fake = createFakeGeminiTransport();
+  const adapter = createGeminiProtocolAdapter({
+    transport: fake.transport,
+    logPrefix: "[test-gemini]",
+  });
+  const outbound = [];
+  adapter.onMessage((rawMessage) => outbound.push(JSON.parse(rawMessage)));
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-init-1",
+    result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Gemini CLI", version: "test" },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1000",
+    result: {
+      sessionId: "root-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+
+  adapter.send(JSON.stringify({
+    id: "turn-start-documents",
+    method: "turn/start",
+    params: {
+      threadId: "gemini-documents-thread",
+      cwd: "/Users/ivankovalev/Documents",
+      input: [{ type: "text", text: "Где ты?" }],
+    },
+  }));
+
+  const sessionRequest = fake.sent.find((message) =>
+    message.method === "session/new"
+    && message.params?.cwd === "/Users/ivankovalev/Documents"
+  );
+  assert.ok(sessionRequest, "expected Gemini session/new to use the iOS-selected cwd");
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: sessionRequest.id,
+    result: {
+      sessionId: "documents-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const promptRequest = fake.sent.find((message) =>
+    message.method === "session/prompt"
+    && message.params?.sessionId === "documents-session"
+  );
+  assert.ok(promptRequest, "expected turn prompt to use the cwd-scoped Gemini session");
+  assert.ok(responseById(outbound, "turn-start-documents"));
+});

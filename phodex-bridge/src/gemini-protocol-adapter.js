@@ -12,9 +12,12 @@ const path = require("path");
 // ─── State tracking ─────────────────────────────────────────
 
 function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]" }) {
+  const verboseLogging = process.env.REMODEX_GEMINI_DEBUG === "1"
+    || process.env.REMODEX_GEMINI_DEBUG === "true";
   // Gemini ACP state
   let geminiInitialized = false;
   let geminiSessionId = null;
+  let geminiSessionCwd = null;
   let geminiModels = [];
   let geminiModes = [];
   let geminiCurrentModelId = null;
@@ -64,6 +67,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   const pendingGeminiRequests = new Map();
   const pendingPermissions = new Map(); // Store stepId -> { geminiRequestId, threadId }
   const threadHistory = new Map(); // Store threadId -> { turns: [], updatedAt, ... }
+  const geminiSessionByThread = new Map(); // Store threadId -> { sessionId, cwd }
 
   // Load persisted sessions
   function loadPersistedState() {
@@ -118,6 +122,12 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     return threadHistory.get(threadId)?.cwd
       || threadHistory.get(activeThreadId)?.cwd
       || process.cwd();
+  }
+
+  function normalizeCwd(rawValue) {
+    return typeof rawValue === "string" && rawValue.trim()
+      ? rawValue.trim()
+      : process.cwd();
   }
 
   function ensureThreadHistory(threadId, cwd = process.cwd()) {
@@ -282,10 +292,13 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
     // 2. Handle session/new response (special case)
     if (parsed.id != null && parsed.result?.sessionId) {
-      handleGeminiSessionNewResponse(parsed);
+      const waiter = pendingGeminiRequests.get(parsed.id);
+      handleGeminiSessionNewResponse(parsed, {
+        threadId: waiter?.threadId,
+        cwd: waiter?.params?.cwd,
+      });
       // Also clean up from pending requests
-      if (pendingGeminiRequests.has(parsed.id)) {
-        const waiter = pendingGeminiRequests.get(parsed.id);
+      if (waiter) {
         pendingGeminiRequests.delete(parsed.id);
         clearTimeout(waiter.timeout);
         waiter.resolve?.(parsed.result);
@@ -427,8 +440,15 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     });
   }
 
-  function handleGeminiSessionNewResponse(parsed) {
+  function handleGeminiSessionNewResponse(parsed, { threadId = null, cwd = null } = {}) {
     geminiSessionId = parsed.result.sessionId;
+    geminiSessionCwd = normalizeCwd(cwd);
+    if (threadId) {
+      geminiSessionByThread.set(threadId, {
+        sessionId: geminiSessionId,
+        cwd: geminiSessionCwd,
+      });
+    }
     geminiCurrentModelId = parsed.result.models?.currentModelId || null;
     geminiCurrentModeId = parsed.result.modes?.currentModeId || null;
 
@@ -462,8 +482,8 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       geminiCurrentModelId = geminiModels[0].id;
     }
 
-    log(`Gemini session ready: ${geminiSessionId}`);
-    log(`Models: ${geminiModels.map(m => m.id).join(", ")}`);
+    log(`Gemini session ready (${geminiSessionCwd})`, "debug");
+    log(`Models: ${geminiModels.map(m => m.id).join(", ")}`, "debug");
     sessionReady = true;
 
     // Flush any pending messages
@@ -549,6 +569,43 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         }
         break;
     }
+  }
+
+  function existingGeminiSessionForThread(threadId, cwd) {
+    const requestedCwd = normalizeCwd(cwd);
+    const existing = geminiSessionByThread.get(threadId);
+    if (existing?.sessionId && existing.cwd === requestedCwd) {
+      return existing.sessionId;
+    }
+
+    if (!existing && geminiSessionId && geminiSessionCwd === requestedCwd) {
+      geminiSessionByThread.set(threadId, {
+        sessionId: geminiSessionId,
+        cwd: requestedCwd,
+      });
+      return geminiSessionId;
+    }
+
+    return null;
+  }
+
+  async function createGeminiSessionForThread(threadId, cwd) {
+    const requestedCwd = normalizeCwd(cwd);
+
+    const sessionRequestId = nextGeminiRequestId();
+    const result = await sendGeminiRequest(sessionRequestId, "session/new", {
+      cwd: requestedCwd,
+      mcpServers: [],
+    }, threadId);
+    const sessionId = result?.sessionId;
+    if (!sessionId) {
+      throw new Error("Gemini did not return a session id.");
+    }
+    geminiSessionByThread.set(threadId, {
+      sessionId,
+      cwd: requestedCwd,
+    });
+    return sessionId;
   }
 
   function handleMessageStart(update, threadId) {
@@ -710,7 +767,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         return;
 
       case "turn/start":
-        handleTurnStart(parsed);
+        void handleTurnStart(parsed);
         return;
 
       case "turn/cancel":
@@ -953,12 +1010,11 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     }
   }
 
-  function handleTurnStart(parsed) {
+  async function handleTurnStart(parsed) {
     const requestId = parsed.id;
     const params = parsed.params || {};
     
-    // Dump the full params to see if image is there
-    log(`[Codex Inbound] turn/start params: ${JSON.stringify(params).slice(0, 1000)}`);
+    log(`[Codex Inbound] turn/start params: ${JSON.stringify(params).slice(0, 1000)}`, "debug");
 
     // Sync model if phone requested a specific one
     const modelId = params.model;
@@ -975,9 +1031,12 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     const prompt = params.prompt || params.input || params.message || params.content || "";
     const threadId = params.threadId || activeThreadId || `gemini-${randomBytes(8).toString("hex")}`;
     activeThreadId = threadId; // Update the "most recent" thread
-    const requestedCwd = params.workingDirectory || params.cwd || threadCwd(threadId);
+    const explicitCwd = params.workingDirectory || params.cwd;
+    const requestedCwd = normalizeCwd(explicitCwd || threadCwd(threadId));
     const threadData = ensureThreadHistory(threadId, requestedCwd);
-    threadData.cwd = threadData.cwd || requestedCwd;
+    if (explicitCwd || !threadData.cwd) {
+      threadData.cwd = requestedCwd;
+    }
     
     const state = getThreadState(threadId);
     state.activeTurnId = `turn-${randomBytes(8).toString("hex")}`;
@@ -1122,15 +1181,22 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       savePersistedState();
     }
 
-    // Send prompt to Gemini
-    if (!geminiSessionId) {
-      log("error: no Gemini session for prompt");
+    let promptSessionId = existingGeminiSessionForThread(threadId, requestedCwd);
+    try {
+      promptSessionId = promptSessionId || await createGeminiSessionForThread(threadId, requestedCwd);
+    } catch (error) {
+      log(`error: failed to create Gemini session for ${requestedCwd}: ${error.message || error}`);
+      emitCodexEvent("turn/completed", {
+        threadId: threadId,
+        turnId: state.activeTurnId,
+        turn: { id: state.activeTurnId, threadId: threadId, status: "failed" },
+      });
       return;
     }
 
     const geminiReqId = nextGeminiRequestId();
     sendGeminiRequest(geminiReqId, "session/prompt", {
-      sessionId: geminiSessionId,
+      sessionId: promptSessionId,
       prompt: promptItems,
     }, threadId);
   }
@@ -1369,6 +1435,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     pendingGeminiRequests.set(id, {
       id,
       method,
+      params,
       threadId: threadId || activeThreadId,
       resolve: null,
       reject: null,
@@ -1379,6 +1446,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         }
       }, 30000),
     });
+    pendingGeminiRequests.get(id)?.timeout?.unref?.();
 
     transport.send(msg);
 
@@ -1393,7 +1461,16 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     return `gemini-adapter-${geminiRequestCounter++}`;
   }
 
-  function log(message) {
+  function log(message, level = "debug") {
+    const normalizedLevel = String(level || "debug").toLowerCase();
+    if (
+      !verboseLogging
+      && normalizedLevel === "debug"
+      && !String(message).startsWith("warn:")
+      && !String(message).startsWith("error:")
+    ) {
+      return;
+    }
     console.log(`${logPrefix} ${message}`);
   }
 

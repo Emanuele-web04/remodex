@@ -1778,6 +1778,11 @@ extension CodexService {
            let serviceTier = runtimeServiceTierForTurn(threadId: threadId) {
             params["serviceTier"] = .string(serviceTier)
         }
+        if let workingDirectory = thread(for: threadId)?.gitWorkingDirectory?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !workingDirectory.isEmpty {
+            params["cwd"] = .string(workingDirectory)
+        }
         if let collaborationModePayload = try buildCollaborationModePayload(
             for: collaborationMode,
             threadId: threadId
