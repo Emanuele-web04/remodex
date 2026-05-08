@@ -366,11 +366,11 @@ EOF
 
 start_bridge() {
   log "Starting bridge"
-  cd "${BRIDGE_DIR}"
+  cd "${ROOT_DIR}"
   # This local helper should print the QR in the current terminal immediately.
   # Use the foreground bridge path instead of the macOS launchd wrapper so QR
   # rendering does not depend on daemon state being written back first.
-  REMODEX_RELAY="${RELAY_URL}" node ./bin/remodex.js run &
+  REMODEX_RELAY="${RELAY_URL}" node "${BRIDGE_DIR}/bin/remodex.js" run &
   BRIDGE_PID=$!
 }
 
