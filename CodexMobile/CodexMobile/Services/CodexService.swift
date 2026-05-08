@@ -378,6 +378,11 @@ final class CodexService {
     var keepMacAwakeWhileBridgeRuns = false
     var runtimeDebugLogEntries: [String] = []
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
+    var backendType: BackendType = .codex {
+        didSet {
+            gptAccountSnapshot.backendType = backendType
+        }
+    }
     // Per-thread queued drafts for client-side turn queueing while a run is active.
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
     // Per-thread queue pause state (active by default when absent).

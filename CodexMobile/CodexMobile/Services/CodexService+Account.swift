@@ -38,6 +38,23 @@ struct CodexGPTAccountSnapshot: Codable, Equatable, Sendable {
     var tokenReady: Bool? = nil
     var tokenUnavailableSince: Date? = nil
     var updatedAt: Date
+    var backendType: BackendType = .codex
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case authMethod
+        case email
+        case displayName
+        case planType
+        case hostPlatform
+        case hostCapabilities
+        case loginInFlight
+        case needsReauth
+        case expiresAt
+        case tokenReady
+        case tokenUnavailableSince
+        case updatedAt
+    }
 
     var hasActiveLogin: Bool {
         loginInFlight || status == .loginPending
@@ -73,7 +90,7 @@ struct CodexGPTAccountSnapshot: Codable, Equatable, Sendable {
     }
 
     var detailText: String? {
-        if AppEnvironment.shared.backendType == .gemini {
+        if backendType == .gemini {
             var parts = ["Gemini CLI"]
             if let planType, !planType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 parts.append(planType)

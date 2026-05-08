@@ -574,7 +574,7 @@ extension CodexService {
         supportsTurnCollaborationMode = false
         bridgeInstalledVersion = nil
         latestBridgePackageVersion = nil
-        AppEnvironment.shared.backendType = .codex
+        backendType = .codex
         resumedThreadIDs.removeAll()
         clearHydrationCaches()
         resetSecureTransportState()
@@ -590,11 +590,11 @@ extension CodexService {
     func learnBackendTypeFromInitializeResponse(_ response: RPCMessage) {
         guard let rawValue = response.result?.objectValue?["backendType"]?.stringValue,
               let backendType = BackendType(rawValue: rawValue) else {
-            AppEnvironment.shared.backendType = .codex
+            self.backendType = .codex
             return
         }
 
-        AppEnvironment.shared.backendType = backendType
+        self.backendType = backendType
         debugRuntimeLog("backend type: \(backendType.rawValue)")
     }
 

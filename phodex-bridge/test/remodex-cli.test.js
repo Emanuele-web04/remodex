@@ -64,10 +64,10 @@ test("remodex restart reuses the macOS service start flow", async () => {
   ]);
 });
 
-test("remodex up shows a startup indicator while waiting for the pairing QR", async () => {
+test("remodex up runs the bridge in the foreground on macOS", async () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
   const calls = [];
-  const messages = [];
+  const errors = [];
 
   await main({
     argv: ["node", "remodex", "up"],
@@ -75,36 +75,26 @@ test("remodex up shows a startup indicator while waiting for the pairing QR", as
     env: { HOME: tempHome },
     stdin: nonTTYInput(),
     consoleImpl: {
-      log(message) {
-        messages.push(message);
-      },
+      log() {},
       error(message) {
-        messages.push(message);
+        errors.push(message);
       },
     },
     exitImpl(code) {
       throw new Error(`unexpected exit ${code}`);
     },
     deps: {
-      async startMacOSBridgeService(options) {
-        calls.push(["start-service", options]);
-        return {
-          pairingSession: { pairingPayload: { sessionId: "session-up" } },
-        };
-      },
-      printMacOSBridgePairingQr(options) {
-        calls.push(["print-qr", options]);
+      startBridge(options) {
+        calls.push(["start-bridge", options]);
       },
     },
   });
 
-  assert.deepEqual(messages, [
+  assert.deepEqual(errors, [
     "[remodex] No saved AI backend and stdin is not interactive; defaulting to Codex. Run `remodex up --switch` in a terminal to choose Gemini.",
-    "[remodex] Starting bridge and pairing QR...",
   ]);
   assert.deepEqual(calls, [
-    ["start-service", { waitForPairing: true, backendType: "codex" }],
-    ["print-qr", { pairingSession: { pairingPayload: { sessionId: "session-up" } } }],
+    ["start-bridge", { backendType: "codex" }],
   ]);
 });
 

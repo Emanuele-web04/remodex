@@ -2,22 +2,11 @@
 // Purpose: Centralizes local runtime endpoint and public app config lookups.
 // Layer: Service
 // Exports: AppEnvironment
-// Depends on: Foundation, Observation
+// Depends on: Foundation
 
 import Foundation
-import Observation
 
-enum BackendType: String, Codable, Sendable {
-    case codex
-    case gemini
-}
-
-@Observable
-final class AppEnvironment {
-    static let shared = AppEnvironment()
-
-    var backendType: BackendType = .codex
-
+enum AppEnvironment {
     private static let defaultRelayURLInfoPlistKey = "PHODEX_DEFAULT_RELAY_URL"
     private static let revenueCatPublicAPIKeyInfoPlistKey = "REVENUECAT_PUBLIC_API_KEY"
     private static let revenueCatEntitlementNameInfoPlistKey = "REVENUECAT_ENTITLEMENT_NAME"
@@ -88,7 +77,6 @@ final class AppEnvironment {
         return components.url!
     }
 
-    private init() {}
 }
 
 private extension AppEnvironment {
