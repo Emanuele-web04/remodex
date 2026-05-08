@@ -197,6 +197,33 @@ test("readBridgeConfig does not use the hosted fallback inside a source checkout
   assert.equal(config.pushServiceUrl, "");
 });
 
+test("readBridgeConfig reuses persisted relay settings inside a source checkout", () => {
+  const config = readBridgeConfig({
+    env: {
+      REMODEX_DEVICE_STATE_DIR: "/tmp/remodex-state",
+    },
+    runtimeRoot: "/workspace/phodex-bridge",
+    fsImpl: {
+      existsSync(targetPath) {
+        return targetPath === "/workspace/.git"
+          || targetPath === "/tmp/remodex-state/daemon-config.json";
+      },
+      readFileSync(targetPath) {
+        if (targetPath === "/tmp/remodex-state/daemon-config.json") {
+          return JSON.stringify({
+            relayUrl: "ws://Mac-mini-Ivan.local:9000/relay",
+            pushServiceUrl: "",
+          });
+        }
+        throw new Error("unexpected read");
+      },
+    },
+  });
+
+  assert.equal(config.relayUrl, "ws://Mac-mini-Ivan.local:9000/relay");
+  assert.equal(config.pushServiceUrl, "");
+});
+
 test("readBridgeConfig preserves reverse-proxy subpaths when deriving push URLs", () => {
   const config = readBridgeConfig({
     env: {

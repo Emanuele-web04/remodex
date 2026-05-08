@@ -526,8 +526,10 @@ function readBridgeConfig({
   const daemonConfig = readDaemonConfig({ env, fsImpl }) || {};
   const privateDefaults = readPrivatePackageDefaults({ runtimeRoot, fsImpl });
   const sourceCheckout = isSourceCheckout(runtimeRoot, fsImpl);
+  const persistedRelayUrl = readString(daemonConfig.relayUrl) || "";
+  const persistedPushServiceUrl = readString(daemonConfig.pushServiceUrl) || "";
   const defaultRelayUrl = sourceCheckout
-    ? ""
+    ? persistedRelayUrl
     : privateDefaults.relayUrl;
   const explicitRelayUrl = readFirstDefinedEnv(
     ["REMODEX_RELAY", "PHODEX_RELAY"],
@@ -540,7 +542,7 @@ function readBridgeConfig({
     env
   );
   const defaultPushServiceUrl = sourceCheckout || explicitRelayUrl
-    ? ""
+    ? persistedPushServiceUrl
     : privateDefaults.pushServiceUrl;
   const codexEndpoint = readFirstDefinedEnv(
     ["REMODEX_CODEX_ENDPOINT", "PHODEX_CODEX_ENDPOINT"],
