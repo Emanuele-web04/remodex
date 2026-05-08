@@ -84,6 +84,9 @@ test("remodex up runs the bridge in the foreground on macOS", async () => {
       throw new Error(`unexpected exit ${code}`);
     },
     deps: {
+      stopMacOSBridgeService() {
+        calls.push(["stop-service"]);
+      },
       startBridge(options) {
         calls.push(["start-bridge", options]);
       },
@@ -94,6 +97,7 @@ test("remodex up runs the bridge in the foreground on macOS", async () => {
     "[remodex] No saved AI backend and stdin is not interactive; defaulting to Codex. Run `remodex up --switch` in a terminal to choose Gemini.",
   ]);
   assert.deepEqual(calls, [
+    ["stop-service"],
     ["start-bridge", { backendType: "codex" }],
   ]);
 });

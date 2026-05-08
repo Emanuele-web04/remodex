@@ -71,6 +71,11 @@ async function main({
       stdout,
       consoleImpl,
     });
+    stopMacOSServiceBeforeForegroundRun({
+      platform,
+      deps,
+      consoleImpl,
+    });
     deps.startBridge({ backendType });
     return;
   }
@@ -81,6 +86,11 @@ async function main({
       env,
       stdin,
       stdout,
+      consoleImpl,
+    });
+    stopMacOSServiceBeforeForegroundRun({
+      platform,
+      deps,
       consoleImpl,
     });
     deps.startBridge({ backendType });
@@ -394,6 +404,22 @@ function assertMacOSCommand(name, {
 
   consoleImpl.error(`[remodex] \`${name}\` is only available on macOS. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
   exitImpl(1);
+}
+
+function stopMacOSServiceBeforeForegroundRun({
+  platform,
+  deps,
+  consoleImpl,
+}) {
+  if (platform !== "darwin" || typeof deps.stopMacOSBridgeService !== "function") {
+    return;
+  }
+
+  try {
+    deps.stopMacOSBridgeService();
+  } catch (error) {
+    consoleImpl.error(`[remodex] Could not stop the existing macOS bridge service: ${error.message}`);
+  }
 }
 
 function isVersionCommand(value) {
