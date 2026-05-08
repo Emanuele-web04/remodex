@@ -38,6 +38,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         totalOutputTokens: 0,
         collaborationMode: "default",
         approvalPolicy: "on-request",
+        completedAssistantText: "",
       });
     }
     return threadStates.get(threadId);
@@ -131,6 +132,91 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       });
     }
     return threadHistory.get(threadId);
+  }
+
+  function buildThreadTurnsPage(threadId, {
+    limit = 20,
+    cursor = null,
+    sortDirection = "desc",
+  } = {}) {
+    const threadData = threadHistory.get(threadId);
+    const allTurns = normalizeThreadTurns(threadData?.turns || [], threadId);
+    const orderedTurns = String(sortDirection).toLowerCase() === "asc"
+      ? allTurns
+      : [...allTurns].reverse();
+    const offset = Math.max(0, Number.parseInt(String(cursor || "0"), 10) || 0);
+    const pageLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
+    const data = orderedTurns.slice(offset, offset + pageLimit);
+    const nextOffset = offset + data.length;
+
+    return {
+      data,
+      nextCursor: nextOffset < orderedTurns.length ? String(nextOffset) : null,
+    };
+  }
+
+  function normalizeThreadTurns(rawTurns, threadId) {
+    const groupedTurns = [];
+    const turnIndexById = new Map();
+
+    for (const rawTurn of rawTurns) {
+      if (!rawTurn || typeof rawTurn !== "object") continue;
+
+      if (Array.isArray(rawTurn.items)) {
+        groupedTurns.push({
+          id: rawTurn.id || rawTurn.turnId || `turn-${randomBytes(8).toString("hex")}`,
+          threadId: rawTurn.threadId || threadId,
+          status: rawTurn.status || "completed",
+          createdAt: rawTurn.createdAt || rawTurn.timestamp,
+          updatedAt: rawTurn.updatedAt || rawTurn.timestamp,
+          items: rawTurn.items,
+        });
+        continue;
+      }
+
+      const turnId = rawTurn.id || rawTurn.turnId || `turn-${randomBytes(8).toString("hex")}`;
+      let turn = turnIndexById.get(turnId);
+      if (!turn) {
+        turn = {
+          id: turnId,
+          threadId,
+          status: "completed",
+          createdAt: rawTurn.createdAt || rawTurn.timestamp,
+          updatedAt: rawTurn.updatedAt || rawTurn.timestamp,
+          items: [],
+        };
+        turnIndexById.set(turnId, turn);
+        groupedTurns.push(turn);
+      }
+
+      const item = historyRecordToCodexItem(rawTurn, turnId);
+      if (item) {
+        turn.items.push(item);
+      }
+      turn.updatedAt = rawTurn.updatedAt || rawTurn.timestamp || turn.updatedAt;
+    }
+
+    return groupedTurns.filter((turn) => Array.isArray(turn.items) && turn.items.length > 0);
+  }
+
+  function historyRecordToCodexItem(record, turnId) {
+    const role = typeof record.role === "string" ? record.role.toLowerCase() : "";
+    const text = typeof record.text === "string" ? record.text : "";
+    if (!text.trim()) return null;
+
+    const isUser = role.includes("user");
+    const itemId = record.itemId || `${turnId}-${isUser ? "user" : "assistant"}`;
+    return {
+      id: itemId,
+      type: isUser ? "user_message" : "agent_message",
+      role: isUser ? "user" : "assistant",
+      text,
+      content: [{
+        type: isUser ? "input_text" : "output_text",
+        text,
+      }],
+      createdAt: record.createdAt || record.timestamp,
+    };
   }
 
   // Buffered messages from phone while Gemini session spins up
@@ -468,6 +554,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   function handleMessageStart(update, threadId) {
     const state = getThreadState(threadId);
     state.activeMessageId = `msg-${randomBytes(8).toString("hex")}`;
+    state.completedAssistantText = "";
   }
 
   function handleMessagePart(update, threadId) {
@@ -489,6 +576,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   function handleMessageComplete(update, threadId) {
     const state = getThreadState(threadId);
     const finalText = update.text || update.content || state.accumulatedText || "";
+    state.completedAssistantText = finalText;
     emitCodexEvent("item/completed", {
       threadId: threadId,
       turnId: state.activeTurnId,
@@ -517,6 +605,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     state.activeTurnId = null;
     state.activeMessageId = null;
     state.accumulatedText = "";
+    state.completedAssistantText = "";
     state.pendingTurnRequestId = null;
     savePersistedState();
   }
@@ -526,7 +615,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     // The prompt RPC completed — emit message_complete + turn_complete
     if (parsed.result && parsed.result.stopReason === "end_turn") {
       // Save assistant response in thread history
-      const finalText = state.accumulatedText || "";
+      const finalText = state.completedAssistantText || state.accumulatedText || "";
       const threadData = threadHistory.get(threadId);
       if (threadData && finalText) {
         threadData.turns.push({
@@ -701,8 +790,21 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
               cwd: threadData?.cwd || threadCwd(readThreadId),
               model: geminiCurrentModelId,
             },
-            turns: threadData?.turns || [],
+            turns: normalizeThreadTurns(threadData?.turns || [], readThreadId),
           });
+        }
+        return;
+      }
+
+      case "thread/turns/list": {
+        if (requestId != null) {
+          const params = parsed.params || {};
+          const turnsThreadId = params.threadId || activeThreadId || "gemini-default-session";
+          emitCodexResponse(requestId, buildThreadTurnsPage(turnsThreadId, {
+            limit: params.limit,
+            cursor: params.cursor,
+            sortDirection: params.sortDirection,
+          }));
         }
         return;
       }

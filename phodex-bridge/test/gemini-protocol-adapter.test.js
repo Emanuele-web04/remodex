@@ -1,0 +1,154 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { createGeminiProtocolAdapter } = require("../src/gemini-protocol-adapter");
+
+function createFakeGeminiTransport() {
+  let messageHandler = null;
+  const sent = [];
+
+  return {
+    sent,
+    transport: {
+      mode: "test",
+      describe() {
+        return "fake gemini transport";
+      },
+      send(rawMessage) {
+        sent.push(JSON.parse(rawMessage));
+      },
+      onMessage(handler) {
+        messageHandler = handler;
+      },
+      onClose() {},
+      onError() {},
+      onStarted() {},
+      shutdown() {},
+    },
+    emit(message) {
+      messageHandler?.(JSON.stringify(message));
+    },
+  };
+}
+
+function responseById(messages, id) {
+  return messages.find((message) => message.id === id && message.result);
+}
+
+test("Gemini adapter returns paginated thread turns instead of an RPC error", async (t) => {
+  const previousHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-gemini-adapter-"));
+  process.env.HOME = tempHome;
+  t.after(() => {
+    process.env.HOME = previousHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const fake = createFakeGeminiTransport();
+  const adapter = createGeminiProtocolAdapter({
+    transport: fake.transport,
+    logPrefix: "[test-gemini]",
+  });
+  const outbound = [];
+  adapter.onMessage((rawMessage) => outbound.push(JSON.parse(rawMessage)));
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-init-1",
+    result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Gemini CLI", version: "test" },
+    },
+  });
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1000",
+    result: {
+      sessionId: "gemini-session-1",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+
+  adapter.send(JSON.stringify({
+    id: "thread-start-1",
+    method: "thread/start",
+    params: { cwd: "/Users/ivankovalev/remodex" },
+  }));
+  const threadId = responseById(outbound, "thread-start-1").result.threadId;
+
+  adapter.send(JSON.stringify({
+    id: "turn-start-1",
+    method: "turn/start",
+    params: {
+      threadId,
+      prompt: "Кто ты?",
+    },
+  }));
+  const turnId = responseById(outbound, "turn-start-1").result.turnId;
+
+  fake.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_start",
+      },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_part",
+        text: "Я Gemini CLI.",
+      },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_complete",
+      },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1001",
+    result: { stopReason: "end_turn" },
+  });
+
+  adapter.send(JSON.stringify({
+    id: "turns-list-1",
+    method: "thread/turns/list",
+    params: {
+      threadId,
+      limit: 10,
+      sortDirection: "desc",
+    },
+  }));
+
+  const response = responseById(outbound, "turns-list-1");
+  assert.ok(response, "expected thread/turns/list response");
+  assert.equal(response.error, undefined);
+  assert.equal(response.result.data.length, 1);
+  assert.equal(response.result.data[0].id, turnId);
+  assert.deepEqual(
+    response.result.data[0].items.map((item) => item.type),
+    ["user_message", "agent_message"]
+  );
+  assert.equal(response.result.data[0].items[0].text, "Кто ты?");
+  assert.equal(response.result.data[0].items[1].text, "Я Gemini CLI.");
+});
