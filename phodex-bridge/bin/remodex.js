@@ -4,6 +4,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const readline = require("readline");
+const { execFile, spawn } = require("child_process");
 // FILE: remodex.js
 // Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and macOS service control.
 // Layer: CLI binary
@@ -28,6 +29,7 @@ const { version } = require("../package.json");
 
 const defaultDeps = {
   createRelayServer: loadLocalRelayServer,
+  verifyGeminiCliReady,
   getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
@@ -273,6 +275,16 @@ async function runForegroundBridge({
     stdout,
     consoleImpl,
   });
+  if (backendType === "gemini") {
+    const geminiReady = await runGeminiPreflight({
+      deps,
+      consoleImpl,
+      exitImpl,
+    });
+    if (!geminiReady) {
+      return;
+    }
+  }
   stopMacOSServiceBeforeForegroundRun({
     platform,
     deps,
@@ -465,6 +477,125 @@ function loadLocalRelayServer() {
   return require("../src/local-relay").createRelayServer;
 }
 
+async function runGeminiPreflight({
+  deps = defaultDeps,
+  consoleImpl = console,
+  exitImpl = process.exit,
+} = {}) {
+  const verify = typeof deps.verifyGeminiCliReady === "function"
+    ? deps.verifyGeminiCliReady
+    : verifyGeminiCliReady;
+
+  try {
+    await verify();
+  } catch (error) {
+    consoleImpl.error("[remodex] Gemini backend is not ready.");
+    consoleImpl.error(`[remodex] ${(error && error.message) || "Gemini CLI preflight failed."}`);
+    consoleImpl.error("[remodex] Install and authenticate Gemini CLI, then run `remodex up --switch` again.");
+    exitImpl(1);
+    return false;
+  }
+  return true;
+}
+
+async function verifyGeminiCliReady({
+  command = "gemini",
+  execFileImpl = execFile,
+  spawnImpl = spawn,
+  timeoutMs = 1_500,
+} = {}) {
+  const helpOutput = await execFileText(execFileImpl, command, ["--help"], { timeoutMs })
+    .catch((error) => {
+      if (error?.code === "ENOENT") {
+        throw new Error("Gemini CLI was not found in PATH. Install Gemini CLI or make `gemini` available in your terminal PATH.");
+      }
+      throw new Error(`Could not run \`${command} --help\`: ${error.message || error}`);
+    });
+
+  if (!helpOutput.includes("--acp") && !helpOutput.includes("--experimental-acp")) {
+    throw new Error("Gemini CLI is installed, but this version does not advertise `--acp`. Update Gemini CLI before using the Gemini bridge.");
+  }
+
+  await probeGeminiAcp({
+    command,
+    spawnImpl,
+    timeoutMs,
+  });
+}
+
+function execFileText(execFileImpl, command, args, { timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    execFileImpl(command, args, {
+      encoding: "utf8",
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+    }, (error, stdout = "", stderr = "") => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(`${stdout || ""}\n${stderr || ""}`);
+    });
+  });
+}
+
+function probeGeminiAcp({
+  command,
+  spawnImpl,
+  timeoutMs,
+}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stderrBuffer = "";
+    const child = spawnImpl(command, ["--acp"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+
+    const finish = (error = null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (child && !child.killed) {
+        child.kill("SIGTERM");
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+
+    const timer = setTimeout(() => {
+      finish();
+    }, timeoutMs);
+    timer.unref?.();
+
+    child.on("spawn", () => {
+      finish();
+    });
+    child.on("error", (error) => {
+      if (error?.code === "ENOENT") {
+        finish(new Error("Gemini CLI was not found in PATH. Install Gemini CLI or make `gemini` available in your terminal PATH."));
+        return;
+      }
+      finish(new Error(`Could not start \`${command} --acp\`: ${error.message || error}`));
+    });
+    child.on("close", (code, signal) => {
+      if (settled) {
+        return;
+      }
+      const details = stderrBuffer.trim() ? ` ${stderrBuffer.trim()}` : "";
+      finish(new Error(`\`${command} --acp\` exited before it was ready (code ${code ?? "unknown"}, signal ${signal || "none"}).${details}`));
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBuffer = `${stderrBuffer}${chunk.toString("utf8")}`.slice(-2000);
+    });
+  });
+}
+
 async function resolveSelectedBackend({
   forceSwitch = false,
   env = process.env,
@@ -610,5 +741,7 @@ module.exports = {
   main,
   normalizeBackendType,
   parseCliArgs,
+  runGeminiPreflight,
   resolveSelectedBackend,
+  verifyGeminiCliReady,
 };

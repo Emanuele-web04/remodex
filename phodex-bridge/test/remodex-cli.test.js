@@ -125,6 +125,9 @@ test("remodex up uses the saved backend and passes it to the foreground bridge",
     stdin: nonTTYInput(),
     consoleImpl: quietConsole(),
     deps: {
+      async verifyGeminiCliReady() {
+        calls.push(["verify-gemini"]);
+      },
       startBridge(options) {
         calls.push(["start-bridge", options]);
       },
@@ -132,6 +135,7 @@ test("remodex up uses the saved backend and passes it to the foreground bridge",
   });
 
   assert.deepEqual(calls, [
+    ["verify-gemini"],
     ["start-bridge", {
       backendType: "gemini",
       config: {
@@ -139,6 +143,60 @@ test("remodex up uses the saved backend and passes it to the foreground bridge",
       },
     }],
   ]);
+});
+
+test("remodex up stops before relay and QR when saved Gemini backend is not ready", async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
+  fs.mkdirSync(path.join(tempHome, ".remodex"), { recursive: true });
+  fs.writeFileSync(
+    path.join(tempHome, ".remodex", "config.json"),
+    JSON.stringify({ backend: "gemini" }),
+    "utf8"
+  );
+  const calls = [];
+  const errors = [];
+
+  await main({
+    argv: ["node", "remodex", "up"],
+    platform: "linux",
+    env: {
+      HOME: tempHome,
+      REMODEX_RELAY_HOST: "192.168.1.50",
+    },
+    stdin: nonTTYInput(),
+    consoleImpl: {
+      log() {},
+      error(message) {
+        errors.push(message);
+      },
+    },
+    exitImpl(code) {
+      calls.push(["exit", code]);
+      throw new Error(`exit ${code}`);
+    },
+    deps: {
+      async verifyGeminiCliReady() {
+        calls.push(["verify-gemini"]);
+        throw new Error("Gemini CLI was not found in PATH.");
+      },
+      createRelayServer() {
+        calls.push(["create-relay"]);
+        return () => ({ server: createFakeRelayServer({ port: 54321 }) });
+      },
+      startBridge(options) {
+        calls.push(["start-bridge", options]);
+      },
+    },
+  }).catch((error) => {
+    assert.equal(error.message, "exit 1");
+  });
+
+  assert.deepEqual(calls, [
+    ["verify-gemini"],
+    ["exit", 1],
+  ]);
+  assert.match(errors.join("\n"), /Gemini backend is not ready/);
+  assert.match(errors.join("\n"), /Gemini CLI was not found in PATH/);
 });
 
 test("remodex up defaults to Codex when backend selection is non-interactive", async () => {
@@ -196,6 +254,9 @@ test("remodex up --switch can save Gemini from an interactive terminal", async (
     stdout: output,
     consoleImpl: quietConsole(),
     deps: {
+      async verifyGeminiCliReady() {
+        calls.push(["verify-gemini"]);
+      },
       startBridge(options) {
         calls.push(["start-bridge", options]);
       },
@@ -203,6 +264,7 @@ test("remodex up --switch can save Gemini from an interactive terminal", async (
   });
 
   assert.deepEqual(calls, [
+    ["verify-gemini"],
     ["start-bridge", {
       backendType: "gemini",
       config: {
