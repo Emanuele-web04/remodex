@@ -207,8 +207,15 @@ extension CodexService {
 
         var merged: [String: CodexThread] = [:]
 
+        let isCurrentBackendThread: (CodexThread) -> Bool = { [weak self] thread in
+            let isGemini = (thread.model?.lowercased().contains("gemini") == true) ||
+                          (thread.modelProvider?.lowercased().contains("gemini") == true)
+            return self?.backendType == .gemini ? isGemini : !isGemini
+        }
+
         // Merge active server threads.
         for serverThread in serverThreads {
+            guard isCurrentBackendThread(serverThread) else { continue }
             if persistedDeletedIDs.contains(serverThread.id) {
                 continue
             }
@@ -229,6 +236,7 @@ extension CodexService {
 
         // Merge server-archived threads (from thread/list?archived=true).
         for serverThread in serverArchivedThreads {
+            guard isCurrentBackendThread(serverThread) else { continue }
             if persistedDeletedIDs.contains(serverThread.id) {
                 continue
             }
@@ -251,6 +259,7 @@ extension CodexService {
         // caused by server-side pagination or temporary visibility mismatch.
         // We archive only on explicit "thread not found" from thread/read/turn/start.
         for localThread in threads where merged[localThread.id] == nil {
+            guard isCurrentBackendThread(localThread) else { continue }
             if persistedDeletedIDs.contains(localThread.id) {
                 continue
             }

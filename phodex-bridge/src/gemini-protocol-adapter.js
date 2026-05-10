@@ -818,7 +818,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
               createdAt: tdata.createdAt || new Date().toISOString(),
               syncState: "live",
               cwd: tdata.cwd || threadCwd(tid),
-              model: geminiCurrentModelId,
+              model: tdata.model || geminiCurrentModelId || "gemini",
             });
           }
           // If no threads exist, show at least one
@@ -829,7 +829,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
               updatedAt: new Date().toISOString(),
               syncState: "live",
               cwd: threadCwd(activeThreadId),
-              model: geminiCurrentModelId,
+              model: geminiCurrentModelId || "gemini",
             });
           }
           emitCodexResponse(requestId, { threads });
@@ -969,6 +969,21 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     const requestedCwd = params.workingDirectory || params.cwd || process.cwd();
     activeThreadId = `gemini-${randomBytes(8).toString("hex")}`;
 
+    // Respect requested model from the start
+    let targetModel = geminiCurrentModelId;
+    if (params.model && params.model !== geminiCurrentModelId) {
+      targetModel = params.model;
+      if (geminiSessionId) {
+        log(`[Codex Inbound] Switching model to ${targetModel} on thread start`);
+        const setModelId = nextGeminiRequestId();
+        sendGeminiRequest(setModelId, "session/set_model", {
+          sessionId: geminiSessionId,
+          modelId: targetModel,
+        });
+        geminiCurrentModelId = targetModel;
+      }
+    }
+
     const now = new Date().toISOString();
     const newThread = {
       id: activeThreadId,
@@ -978,7 +993,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       createdAt: now,
       syncState: "live",
       cwd: requestedCwd,
-      model: geminiCurrentModelId,
+      model: targetModel,
     };
 
     // Persist the thread
@@ -988,6 +1003,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       createdAt: now,
       updatedAt: now,
       cwd: requestedCwd,
+      model: targetModel,
     });
     savePersistedState();
 
@@ -1477,13 +1493,21 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   // ─── Start Gemini initialization ────────────────────────────
 
   // Send initialize to Gemini ACP
-  sendGeminiRequest("gemini-init-1", "initialize", {
+  void sendGeminiRequest("gemini-init-1", "initialize", {
     protocolVersion: 1,
     clientInfo: {
       name: "remodex",
       version: require("../package.json").version || "1.0.0",
     },
     capabilities: {},
+  }).catch((error) => {
+    const message = error?.message || "Gemini initialization failed";
+    log(`error: ${message}`, "error");
+    emitCodexEvent("bridge/status/updated", {
+      status: "error",
+      error: { code: -32000, message },
+    });
+    onError?.(error);
   });
 
   // ─── Public API (matches codex transport interface) ─────────

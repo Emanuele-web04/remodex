@@ -70,7 +70,6 @@ struct ComposerBottomBar: View {
                 showsAllModelsSheet: $showsAllModelsSheet
             )
             .equatable()
-            .frame(maxWidth: 172, alignment: .leading)
             if isPlanModeArmed {
                 Divider()
                     .frame(height: 16)
@@ -473,16 +472,15 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 .fontWeight(.regular)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
 
             Image(systemName: "chevron.down")
                 .font(metaChevronFont)
         }
         .padding(.vertical, 6)
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 8)
         .foregroundStyle(metaLabelColor)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
+        .background(Color(.systemGray6), in: Capsule())
+        .contentShape(Capsule())
     }
 }
 
