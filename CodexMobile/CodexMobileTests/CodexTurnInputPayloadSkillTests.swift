@@ -55,6 +55,119 @@ final class CodexTurnInputPayloadSkillTests: XCTestCase {
         XCTAssertFalse(hasSkillItem)
     }
 
+    func testMakeTurnInputPayloadUsesLegacyTextForSkillOnlyFallback() {
+        let service = makeService()
+        let payload = service.makeTurnInputPayload(
+            userInput: "",
+            attachments: [],
+            imageURLKey: "url",
+            skillMentions: [
+                CodexTurnSkillMention(id: "check-code", name: "check-code", path: nil),
+            ],
+            includeStructuredSkillItems: false
+        )
+
+        let textItem = payload
+            .compactMap(\.objectValue)
+            .first(where: { $0["type"]?.stringValue == "text" })
+
+        XCTAssertEqual(textItem?["text"]?.stringValue, "$check-code")
+    }
+
+    func testMakeTurnInputPayloadAppendsMissingLegacySkillToTextFallback() {
+        let service = makeService()
+        let payload = service.makeTurnInputPayload(
+            userInput: "Review these changes",
+            attachments: [],
+            imageURLKey: "url",
+            skillMentions: [
+                CodexTurnSkillMention(id: "check-code", name: "check-code", path: nil),
+            ],
+            includeStructuredSkillItems: false
+        )
+
+        let textItem = payload
+            .compactMap(\.objectValue)
+            .first(where: { $0["type"]?.stringValue == "text" })
+
+        XCTAssertEqual(textItem?["text"]?.stringValue, "Review these changes\n\n$check-code")
+    }
+
+    func testMakeTurnInputPayloadDoesNotDuplicateExistingLegacySkillInTextFallback() {
+        let service = makeService()
+        let payload = service.makeTurnInputPayload(
+            userInput: "Run $check-code on this",
+            attachments: [],
+            imageURLKey: "url",
+            skillMentions: [
+                CodexTurnSkillMention(id: "check-code", name: "check-code", path: nil),
+            ],
+            includeStructuredSkillItems: false
+        )
+
+        let textItem = payload
+            .compactMap(\.objectValue)
+            .first(where: { $0["type"]?.stringValue == "text" })
+
+        XCTAssertEqual(textItem?["text"]?.stringValue, "Run $check-code on this")
+    }
+
+    func testGenericInputItemErrorsDisableStructuredSkillRetry() {
+        let service = makeService()
+        let error = CodexServiceError.rpcError(
+            RPCError(code: -32602, message: "Invalid input item type")
+        )
+
+        XCTAssertTrue(service.shouldRetryTurnStartWithoutSkillItems(error))
+    }
+
+    func testStartTurnRejectsEmptyStructuredMentions() async {
+        let service = makeService()
+        service.isConnected = true
+
+        do {
+            try await service.startTurn(
+                userInput: "",
+                threadId: "thread-empty-skill",
+                skillMentions: [
+                    CodexTurnSkillMention(id: " ", name: nil, path: nil),
+                ]
+            )
+            XCTFail("Expected empty structured mention to be rejected.")
+        } catch let error as CodexServiceError {
+            XCTAssertEqual(error.localizedDescription, "User input, images, and mentions cannot all be empty")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testStartTurnOptimisticMessageIncludesMissingSkillToken() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.resumedThreadIDs.insert("thread-skill-display")
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-skill-display")]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.startTurn(
+            userInput: "Review these changes",
+            threadId: "thread-skill-display",
+            skillMentions: [
+                CodexTurnSkillMention(id: "check-code", name: "check-code", path: nil),
+            ]
+        )
+
+        XCTAssertEqual(
+            service.messagesByThread["thread-skill-display"]?.last?.text,
+            "Review these changes\n\n$check-code"
+        )
+    }
+
     func testMakeTurnInputPayloadIncludesPluginMentionItemsWhenEnabled() {
         let service = makeService()
         let payload = service.makeTurnInputPayload(

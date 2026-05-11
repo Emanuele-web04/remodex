@@ -13,6 +13,7 @@ const {
   buildLaunchAgentPlist,
   getMacOSBridgeServiceStatus,
   mergeBridgeStatusForDaemon,
+  printMacOSBridgePairingQr,
   resetMacOSBridgePairing,
   resolveLaunchAgentPlistPath,
   runMacOSBridgeService,
@@ -22,6 +23,7 @@ const {
 const {
   writeDaemonConfig,
   readBridgeStatus,
+  readDaemonConfig,
   readPairingSession,
   writeBridgeStatus,
   writePairingSession,
@@ -69,6 +71,66 @@ test("stopMacOSBridgeService clears stale pairing and status files", () => {
     });
 
     assert.equal(readPairingSession(), null);
+    assert.equal(readBridgeStatus(), null);
+  });
+});
+
+test("stopMacOSBridgeService terminates the recorded run-service process when launchd is stale", () => {
+  withTempDaemonEnv(() => {
+    writeBridgeStatus({ state: "running", connectionStatus: "connected", pid: 4242 });
+
+    const killed = [];
+    stopMacOSBridgeService({
+      platform: "darwin",
+      execFileSyncImpl(command, args) {
+        if (command === "launchctl") {
+          const error = new Error("Could not find service");
+          error.stderr = Buffer.from("Could not find service");
+          throw error;
+        }
+
+        assert.equal(command, "ps");
+        assert.deepEqual(args, ["-p", "4242", "-o", "command="]);
+        return "/usr/local/bin/node /usr/local/bin/remodex run-service";
+      },
+      processImpl: {
+        pid: 9999,
+        kill(pid, signal) {
+          killed.push([pid, signal]);
+        },
+      },
+    });
+
+    assert.deepEqual(killed, [[4242, "SIGTERM"]]);
+    assert.equal(readBridgeStatus(), null);
+  });
+});
+
+test("stopMacOSBridgeService does not kill an unrelated stale pid", () => {
+  withTempDaemonEnv(() => {
+    writeBridgeStatus({ state: "running", connectionStatus: "connected", pid: 4243 });
+
+    const killed = [];
+    stopMacOSBridgeService({
+      platform: "darwin",
+      execFileSyncImpl(command) {
+        if (command === "launchctl") {
+          const error = new Error("Could not find service");
+          error.stderr = Buffer.from("Could not find service");
+          throw error;
+        }
+
+        return "/Applications/Other.app/Contents/MacOS/Other";
+      },
+      processImpl: {
+        pid: 9999,
+        kill(pid, signal) {
+          killed.push([pid, signal]);
+        },
+      },
+    });
+
+    assert.deepEqual(killed, []);
     assert.equal(readBridgeStatus(), null);
   });
 });
@@ -142,6 +204,39 @@ test("startMacOSBridgeService kickstarts the launch agent after bootstrap", () =
         ["launchctl", "kickstart", "-k", `gui/${process.getuid()}/com.remodex.bridge`],
       ]
     );
+    assert.equal(readDaemonConfig({ env })?.extraRelaySessions, undefined);
+  });
+});
+
+test("printMacOSBridgePairingQr renders the daemon pairing session", () => {
+  withTempDaemonEnv(() => {
+    writePairingSession({
+      pairingPayload: {
+        v: 1,
+        relay: "ws://127.0.0.1:9000/relay",
+        sessionId: "session-primary",
+        macDeviceId: "mac-1",
+        macIdentityPublicKey: "mac-pub",
+        expiresAt: Date.now() + 60_000,
+      },
+      pairingCode: "ABC123",
+    });
+
+    const logs = [];
+    const errors = [];
+    const originalLog = console.log;
+    const originalError = console.error;
+    console.log = (message = "") => logs.push(String(message));
+    console.error = (message = "") => errors.push(String(message));
+    try {
+      printMacOSBridgePairingQr();
+    } finally {
+      console.log = originalLog;
+      console.error = originalError;
+    }
+
+    assert.deepEqual(errors, []);
+    assert.ok(logs.some((line) => line.includes("ABC123")));
   });
 });
 

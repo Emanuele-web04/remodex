@@ -60,7 +60,7 @@ function createRelayServer({
     const loggedPathname = redactRelayPathname(pathname);
     console.log(
       `[relay] upgrade request path=${loggedPathname} remote=${clientAddressKey(req, { trustProxy })} `
-      + `role=${readHeaderString(req.headers["x-role"]) || "missing"}`
+      + `role=${readUpgradeRole(req) || "missing"}`
     );
     if (!pathname.startsWith("/relay/")) {
       console.log(`[relay] rejecting upgrade for non-relay path: ${loggedPathname}`);
@@ -324,6 +324,19 @@ function forwardedClientAddress(req) {
 function readHeaderString(value) {
   const candidate = Array.isArray(value) ? value[0] : value;
   return typeof candidate === "string" && candidate.trim() ? candidate.trim() : "";
+}
+
+function readUpgradeRole(req) {
+  const headerRole = readHeaderString(req?.headers?.["x-role"]);
+  if (headerRole) {
+    return headerRole;
+  }
+
+  try {
+    return readHeaderString(new URL(req?.url || "/", "http://localhost").searchParams.get("role"));
+  } catch {
+    return "";
+  }
 }
 
 // Reads an opt-in boolean flag for hosted deployments without changing local/self-host defaults.

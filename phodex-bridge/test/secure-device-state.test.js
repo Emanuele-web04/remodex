@@ -49,6 +49,25 @@ test("rememberTrustedPhone stores the trusted phone identity", () => {
   });
 });
 
+test("rememberTrustedPhone replaces the previous trusted phone identity", () => {
+  const state = makeDeviceState({
+    trustedPhones: {
+      "phone-old": "phone-public-key-old",
+    },
+  });
+
+  const nextState = rememberTrustedPhone(
+    state,
+    "phone-new",
+    "phone-public-key-new",
+    { persist: false }
+  );
+
+  assert.deepEqual(nextState.trustedPhones, {
+    "phone-new": "phone-public-key-new",
+  });
+});
+
 test("rememberLastSeenPhoneAppVersion stores the latest App Store version", () => {
   const state = makeDeviceState();
 

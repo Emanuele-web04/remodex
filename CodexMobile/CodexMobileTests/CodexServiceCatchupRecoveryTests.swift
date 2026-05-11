@@ -97,6 +97,53 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         XCTAssertTrue(service.hydratedThreadIDs.contains(threadID))
     }
 
+    func testHistoryOpenFallsBackToLegacyThreadReadWhenTurnPaginationPayloadIsInvalid() async throws {
+        let service = makeService()
+        let threadID = "thread-invalid-pagination-payload"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.upsertThread(CodexThread(id: threadID, title: "Invalid page"))
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            switch method {
+            case "thread/turns/list":
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, threadID)
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .null,
+                    includeJSONRPC: false
+                )
+            case "thread/read":
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, threadID)
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(threadID),
+                            "title": .string("Invalid page"),
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        let outcome = try await service.loadThreadHistoryIfNeeded(threadId: threadID, forceRefresh: true)
+
+        XCTAssertEqual(outcome, .loadedCanonicalHistory)
+        XCTAssertEqual(recordedMethods, ["thread/turns/list", "thread/read"])
+        XCTAssertFalse(service.supportsTurnPagination)
+        XCTAssertTrue(service.initialTurnsLoadedByThreadID.contains(threadID))
+        XCTAssertTrue(service.hydratedThreadIDs.contains(threadID))
+    }
+
     func testForcedHistorySkipsFreshFirstTurnWhileThreadIsStillMaterializing() async throws {
         let service = makeService()
         let threadID = "thread-first-turn-materializing"

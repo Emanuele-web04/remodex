@@ -364,7 +364,10 @@ function createBridgeSecureTransport({
         pendingHandshake.phoneIdentityPublicKey
       );
       if (previousTrustedPhonePublicKey !== pendingHandshake.phoneIdentityPublicKey) {
-        onTrustedPhoneUpdate?.(currentDeviceState);
+        onTrustedPhoneUpdate?.(currentDeviceState, {
+          phoneDeviceId: pendingHandshake.phoneDeviceId,
+          phoneIdentityPublicKey: pendingHandshake.phoneIdentityPublicKey,
+        });
       }
     }
     if (pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {

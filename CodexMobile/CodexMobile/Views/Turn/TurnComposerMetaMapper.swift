@@ -37,7 +37,16 @@ enum TurnComposerMetaMapper {
 
     // Normalizes backend ids into consistent menu labels.
     static func modelTitle(for model: CodexModelOption) -> String {
-        switch model.model.lowercased() {
+        let normalizedModel = model.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        return modelTitle(forIdentifier: normalizedModel, fallback: model.displayName)
+    }
+
+    // Formats persisted model ids before the full model list has refreshed.
+    static func modelTitle(forIdentifier identifier: String?, fallback: String? = nil) -> String {
+        let normalizedIdentifier = identifier?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch normalizedIdentifier.lowercased() {
+        case "gpt-5.5":
+            return "GPT-5.5"
         case "gpt-5.3-codex":
             return "GPT-5.3-Codex"
         case "gpt-5.2-codex":
@@ -46,12 +55,21 @@ enum TurnComposerMetaMapper {
             return "GPT-5.1-Codex-Max"
         case "gpt-5.4":
             return "GPT-5.4"
+        case "gpt-5.4-mini":
+            return "GPT-5.4-Mini"
         case "gpt-5.2":
             return "GPT-5.2"
         case "gpt-5.1-codex-mini":
             return "GPT-5.1-Codex-Mini"
         default:
-            return model.displayName
+            let fallback = fallback?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !fallback.isEmpty {
+                return fallback
+            }
+            if normalizedIdentifier.lowercased().hasPrefix("gpt-") {
+                return "GPT-" + String(normalizedIdentifier.dropFirst("gpt-".count))
+            }
+            return normalizedIdentifier.isEmpty ? "GPT-5.5" : normalizedIdentifier
         }
     }
 

@@ -14,10 +14,16 @@ const {
   createMacOSBridgeWakeAssertion,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
+  normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeThreadHistoryImagesForRelay,
 } = require("../src/bridge");
+
+function expectedGeneratedImagePath(threadId, fileName) {
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  return path.join(codexHome, "generated_images", threadId, fileName);
+}
 
 test("hasRelayConnectionGoneStale returns true once the relay silence crosses the timeout", () => {
   assert.equal(
@@ -27,6 +33,129 @@ test("hasRelayConnectionGoneStale returns true once the relay silence crosses th
     }),
     true
   );
+});
+
+test("normalizeRelayBoundJsonRpcMessage rewrites payload-only responses to result", () => {
+  const normalized = normalizeRelayBoundJsonRpcMessage(JSON.stringify({
+    id: "req-payload-only",
+    payload: {
+      data: [{ id: "turn-1" }],
+      nextCursor: null,
+    },
+  }));
+
+  assert.deepEqual(JSON.parse(normalized), {
+    id: "req-payload-only",
+    result: {
+      data: [{ id: "turn-1" }],
+      nextCursor: null,
+    },
+  });
+});
+
+test("normalizeRelayBoundJsonRpcMessage unwraps nested app-server result payloads", () => {
+  const normalized = normalizeRelayBoundJsonRpcMessage(JSON.stringify({
+    id: "req-nested-payload",
+    result: {
+      payload: {
+        data: [{ id: "thread-1" }],
+        nextCursor: null,
+      },
+    },
+  }));
+
+  assert.deepEqual(JSON.parse(normalized), {
+    id: "req-nested-payload",
+    result: {
+      payload: {
+        data: [{ id: "thread-1" }],
+        nextCursor: null,
+      },
+      data: [{ id: "thread-1" }],
+      nextCursor: null,
+    },
+  });
+});
+
+test("normalizeRelayBoundJsonRpcMessage drops non-RPC relay payloads before iOS decode", () => {
+  assert.equal(normalizeRelayBoundJsonRpcMessage("not-json"), null);
+  assert.equal(normalizeRelayBoundJsonRpcMessage(JSON.stringify({ kind: "debug" })), null);
+});
+
+test("normalizeRelayBoundJsonRpcMessage drops client-origin RPC requests before iOS handles them", () => {
+  assert.equal(
+    normalizeRelayBoundJsonRpcMessage(JSON.stringify({
+      id: "req-thread-list",
+      method: "thread/list",
+      params: {},
+    })),
+    null
+  );
+});
+
+test("normalizeRelayBoundJsonRpcMessage converts tracked method-bearing responses for iOS", () => {
+  const pendingRequestMethodsById = new Map([
+    ["req-thread-list", {
+      method: "thread/list",
+      createdAt: Date.now(),
+    }],
+    ["req-turns-list", {
+      method: "thread/turns/list",
+      createdAt: Date.now(),
+    }],
+  ]);
+
+  const threadListResponse = normalizeRelayBoundJsonRpcMessage(JSON.stringify({
+    id: "req-thread-list",
+    method: "thread/list",
+    payload: {
+      data: [{ id: "thread-1" }],
+      nextCursor: null,
+    },
+  }), { pendingRequestMethodsById });
+
+  assert.deepEqual(JSON.parse(threadListResponse), {
+    id: "req-thread-list",
+    result: {
+      data: [{ id: "thread-1" }],
+      nextCursor: null,
+    },
+  });
+
+  const turnsListResponse = normalizeRelayBoundJsonRpcMessage(JSON.stringify({
+    id: "req-turns-list",
+    method: "thread/turns/list",
+    result: {
+      payload: {
+        data: [{ id: "turn-1" }],
+        nextCursor: null,
+      },
+    },
+  }), { pendingRequestMethodsById });
+
+  assert.deepEqual(JSON.parse(turnsListResponse), {
+    id: "req-turns-list",
+    result: {
+      payload: {
+        data: [{ id: "turn-1" }],
+        nextCursor: null,
+      },
+      data: [{ id: "turn-1" }],
+      nextCursor: null,
+    },
+  });
+});
+
+test("normalizeRelayBoundJsonRpcMessage keeps server-origin approval requests", () => {
+  const raw = JSON.stringify({
+    id: "approval-1",
+    method: "item/fileChange/requestApproval",
+    params: {
+      threadId: "thread-1",
+    },
+  });
+
+  assert.equal(normalizeRelayBoundJsonRpcMessage(raw), raw);
 });
 
 test("hasRelayConnectionGoneStale returns false for fresh or missing activity timestamps", () => {
@@ -117,7 +246,7 @@ function makeTurns(start, count) {
   }));
 }
 
-test("fetchAdaptiveThreadTurnsListForRelay expands small turns-list pages to the requested limit", async () => {
+test("fetchAdaptiveThreadTurnsListForRelay caps initial mobile pages to five turns", async () => {
   const request = {
     id: "req-turns-list",
     method: "thread/turns/list",
@@ -142,28 +271,27 @@ test("fetchAdaptiveThreadTurnsListForRelay expands small turns-list pages to the
   });
 
   assert.equal(response.id, "req-turns-list");
-  assert.equal(response.result.data.length, 20);
+  assert.equal(response.result.data.length, 5);
   assert.deepEqual(
     response.result.data.map((turn) => turn.id),
-    makeTurns(1, 20).map((turn) => turn.id)
+    makeTurns(1, 5).map((turn) => turn.id)
   );
   assert.equal(
     response.result.data.some((turn) => turn.id.startsWith("remodex-history-compacted-")),
     false
   );
-  assert.equal(response.result.stableMeta, "first-page");
-  assert.equal(response.result.nextCursor, "cursor-after-20");
+  assert.equal(response.result.stableMeta, undefined);
+  assert.equal(response.result.nextCursor, "cursor-after-5");
   assert.deepEqual(
     fetches.map((params) => ({ limit: params.limit, cursor: params.cursor })),
     [
       { limit: 1, cursor: undefined },
       { limit: 4, cursor: "cursor-after-1" },
-      { limit: 15, cursor: "cursor-after-5" },
     ]
   );
 });
 
-test("fetchAdaptiveThreadTurnsListForRelay stops at one turn for a huge first turns-list page", async () => {
+test("fetchAdaptiveThreadTurnsListForRelay returns a compacted single turn when one huge first turn is still too large", async () => {
   const request = {
     id: "req-turns-list-large-first",
     method: "thread/turns/list",
@@ -194,13 +322,19 @@ test("fetchAdaptiveThreadTurnsListForRelay stops at one turn for a huge first tu
         nextCursor: "cursor-after-1",
       };
     },
+    sanitizeForRelay: (raw) => raw,
+    payloadSoftLimitBytes: 1_000,
   });
 
   assert.deepEqual(
     response.result.data.map((turn) => turn.id),
     ["turn-1"]
   );
+  assert.equal(response.result.data[0].remodexEmergencySingleTurnForRelay, true);
+  assert.equal(response.result.data[0].items.length, 1);
+  assert.equal(response.result.data[0].items[0].relayPayloadTruncated, true);
   assert.equal(response.result.nextCursor, "cursor-after-1");
+  assert.equal(Buffer.byteLength(JSON.stringify(response), "utf8") < 1_000, true);
   assert.equal(fetches.length, 1);
 });
 
@@ -275,16 +409,39 @@ test("fetchAdaptiveThreadTurnsListForRelay forwards input and returned cursors",
     },
   });
 
-  assert.equal(response.result.items.length, 6);
-  assert.equal(response.result.nextCursor, "cursor-after-third");
+  assert.equal(response.result.items.length, 5);
+  assert.equal(response.result.nextCursor, "cursor-after-second");
   assert.deepEqual(
     fetches.map((params) => ({ limit: params.limit, cursor: params.cursor })),
     [
       { limit: 1, cursor: "cursor-before-page" },
       { limit: 4, cursor: "cursor-after-first" },
-      { limit: 1, cursor: "cursor-after-second" },
     ]
   );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay reads nested result payload pages", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-nested-payload",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-nested-payload",
+      limit: 5,
+    },
+  }, {
+    fetchPage: async () => ({
+      payload: {
+        data: makeTurns(1, 1),
+        nextCursor: null,
+      },
+    }),
+  });
+
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    ["turn-1"]
+  );
+  assert.equal(response.result.nextCursor, null);
 });
 
 test("fetchAdaptiveThreadTurnsListForRelay preserves turns-list response array shapes", async () => {
@@ -337,6 +494,222 @@ test("fetchAdaptiveThreadTurnsListForRelay returns fetched turns when a later ba
     ["turn-1"]
   );
   assert.equal(response.result.nextCursor, "cursor-after-first");
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay retries the first page with a safe limit after an error", async () => {
+  const fetches = [];
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-first-error",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-first-error",
+      limit: 20,
+      sortDirection: "desc",
+    },
+  }, {
+    fetchPage: async (params) => {
+      fetches.push(params);
+      if (fetches.length === 1) {
+        throw new Error("missing payload");
+      }
+      return {
+        data: makeTurns(1, 5),
+        nextCursor: "cursor-after-safe",
+      };
+    },
+  });
+
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    ["turn-1", "turn-2", "turn-3", "turn-4", "turn-5"]
+  );
+  assert.equal(response.result.nextCursor, "cursor-after-safe");
+  assert.deepEqual(
+    fetches.map((params) => ({ limit: params.limit, cursor: params.cursor })),
+    [
+      { limit: 1, cursor: undefined },
+      { limit: 5, cursor: undefined },
+    ]
+  );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay retries malformed first pages with a safe limit", async () => {
+  const fetches = [];
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-first-malformed",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-first-malformed",
+      limit: 20,
+      sortDirection: "desc",
+    },
+  }, {
+    fetchPage: async (params) => {
+      fetches.push(params);
+      if (fetches.length === 1) {
+        return {
+          unexpected: "server-shape",
+          nextCursor: "cursor-that-should-not-survive",
+        };
+      }
+      return {
+        data: makeTurns(1, 5),
+        nextCursor: "cursor-after-safe",
+      };
+    },
+  });
+
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    ["turn-1", "turn-2", "turn-3", "turn-4", "turn-5"]
+  );
+  assert.equal(response.result.nextCursor, "cursor-after-safe");
+  assert.deepEqual(
+    fetches.map((params) => ({ limit: params.limit, cursor: params.cursor })),
+    [
+      { limit: 1, cursor: undefined },
+      { limit: 5, cursor: undefined },
+    ]
+  );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay keeps only a safe slice when the combined page stays too large", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-large-combined",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-large-combined",
+      limit: 20,
+    },
+  }, {
+    fetchPage: async (params) => {
+      if (params.cursor !== "cursor-after-first") {
+        return {
+          data: makeTurns(1, 1),
+          nextCursor: "cursor-after-first",
+        };
+      }
+      return {
+        data: makeTurns(2, 10).map((turn, index) => ({
+          ...turn,
+          items: turn.items.map((item) => ({
+            ...item,
+            text: index < 4 ? "small-enough" : "X".repeat(1024 * 1024),
+          })),
+        })),
+        nextCursor: "cursor-after-large",
+      };
+    },
+    sanitizeForRelay: (raw) => raw,
+    payloadSoftLimitBytes: 10_000,
+  });
+
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    ["turn-1", "turn-2", "turn-3", "turn-4", "turn-5"]
+  );
+  assert.equal(response.result.nextCursor, "cursor-after-large");
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay falls back to one turn when five are still too large", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-large-five",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-large-five",
+      limit: 20,
+    },
+  }, {
+    fetchPage: async (params) => {
+      if (params.cursor !== "cursor-after-first") {
+        return {
+          data: makeTurns(1, 1),
+          nextCursor: "cursor-after-first",
+        };
+      }
+      return {
+        data: makeTurns(2, 10).map((turn) => ({
+          ...turn,
+          items: turn.items.map((item) => ({
+            ...item,
+            text: "X".repeat(1024 * 1024),
+          })),
+        })),
+        nextCursor: "cursor-after-large",
+      };
+    },
+    sanitizeForRelay: (raw) => raw,
+    payloadSoftLimitBytes: 2_000,
+  });
+
+  assert.deepEqual(
+    response.result.data.map((turn) => turn.id),
+    ["turn-1"]
+  );
+  assert.equal(response.result.nextCursor, "cursor-after-large");
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay returns an empty page when the first page has no payload", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-missing-payload",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-missing-payload",
+      limit: 2,
+      sortDirection: "desc",
+    },
+  }, {
+    fetchPage: async () => null,
+  });
+
+  assert.equal(response.id, "req-turns-list-missing-payload");
+  assert.deepEqual(response.result.data, []);
+  assert.equal(response.result.nextCursor, null);
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay returns an empty page when no fallback is available", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-empty-fallback",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-empty-fallback",
+      limit: 10,
+    },
+  }, {
+    fetchPage: async () => null,
+  });
+
+  assert.deepEqual(response, {
+    id: "req-turns-list-empty-fallback",
+    result: {
+      data: [],
+      nextCursor: null,
+    },
+  });
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay does not copy malformed page fields into empty fallback", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-malformed-object",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-malformed-object",
+      limit: 10,
+    },
+  }, {
+    fetchPage: async () => ({
+      unexpected: { nested: ["server-shape"] },
+      next_cursor: "cursor-that-should-not-survive",
+    }),
+  });
+
+  assert.deepEqual(response, {
+    id: "req-turns-list-malformed-object",
+    result: {
+      data: [],
+      nextCursor: null,
+    },
+  });
 });
 
 test("sanitizeThreadHistoryImagesForRelay replaces inline history images with lightweight references", () => {
@@ -455,7 +828,7 @@ test("sanitizeThreadHistoryImagesForRelay annotates generated image calls with l
 
   assert.equal(
     item.saved_path,
-    path.join(os.homedir(), ".codex", "generated_images", "thread-generated-image", "ig_123.png")
+    expectedGeneratedImagePath("thread-generated-image", "ig_123.png")
   );
   assert.equal(item.result, undefined);
   assert.equal(item.result_elided_for_relay, true);
@@ -490,7 +863,7 @@ test("sanitizeThreadHistoryImagesForRelay annotates image generation items with 
 
   assert.equal(
     item.saved_path,
-    path.join(os.homedir(), ".codex", "generated_images", "thread-image-generation", "ig_generation.png")
+    expectedGeneratedImagePath("thread-image-generation", "ig_generation.png")
   );
   assert.equal(item.result, undefined);
   assert.equal(item.result_elided_for_relay, true);
@@ -526,7 +899,7 @@ test("sanitizeThreadHistoryImagesForRelay annotates image end history with local
 
   assert.equal(
     item.saved_path,
-    path.join(os.homedir(), ".codex", "generated_images", "thread-generated-image-end", "ig_end.png")
+    expectedGeneratedImagePath("thread-generated-image-end", "ig_end.png")
   );
   assert.equal(item.result, undefined);
   assert.equal(item.result_elided_for_relay, true);
@@ -630,7 +1003,7 @@ test("sanitizeLiveGeneratedImageMessageForRelay annotates completed image items"
 
   assert.equal(
     item.saved_path,
-    path.join(os.homedir(), ".codex", "generated_images", "thread-live-image", "ig_live.png")
+    expectedGeneratedImagePath("thread-live-image", "ig_live.png")
   );
   assert.equal(item.result, undefined);
   assert.equal(item.result_elided_for_relay, true);
@@ -658,7 +1031,7 @@ test("sanitizeLiveGeneratedImageMessageForRelay elides nested completed image it
 
   assert.equal(
     item.saved_path,
-    path.join(os.homedir(), ".codex", "generated_images", "thread-live-nested-image", "ig_nested.png")
+    expectedGeneratedImagePath("thread-live-nested-image", "ig_nested.png")
   );
   assert.equal(item.result, undefined);
   assert.equal(item.result_elided_for_relay, true);
@@ -680,7 +1053,7 @@ test("sanitizeLiveGeneratedImageMessageForRelay uses call id for image end event
 
   assert.equal(
     sanitized.params.saved_path,
-    path.join(os.homedir(), ".codex", "generated_images", "thread-live-event", "ig_event.png")
+    expectedGeneratedImagePath("thread-live-event", "ig_event.png")
   );
   assert.equal(sanitized.params.result, undefined);
   assert.equal(sanitized.params.result_elided_for_relay, true);

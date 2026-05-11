@@ -100,10 +100,12 @@ struct TurnComposerHostView: View {
             reasoningDisplayOptions: reasoningDisplayOptions
         )
         let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
-        // Keep the runtime pill in a loading state until both chat metadata and models finish hydrating.
-        let isRuntimeSelectionLoading = codex.isBootstrappingConnectionSync
-            || codex.isLoadingThreads
-            || codex.isLoadingModels
+        let selectedModelID = codex.selectedModelOption()?.id
+            ?? (codex.hasPersistedSelectedModelId ? codex.selectedModelId : nil)
+        let hasVisibleModelSelection = selectedModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        // Keep the saved model visible while the bridge refreshes models in the background.
+        let isRuntimeSelectionLoading = !hasVisibleModelSelection
+            && (codex.isBootstrappingConnectionSync || codex.isLoadingThreads || codex.isLoadingModels)
 
         TurnComposerView(
             input: $viewModel.input,
@@ -122,7 +124,7 @@ struct TurnComposerHostView: View {
             isEmptyThread: isEmptyThread,
             isWorktreeProject: isWorktreeProject,
             orderedModelOptions: orderedModelOptions,
-            selectedModelID: isRuntimeSelectionLoading ? nil : (codex.selectedModelOption()?.id ?? codex.selectedModelId),
+            selectedModelID: selectedModelID,
             selectedModelTitle: selectedModelTitle,
             isLoadingModels: codex.isLoadingModels,
             isRuntimeSelectionLoading: isRuntimeSelectionLoading,

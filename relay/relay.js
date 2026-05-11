@@ -37,7 +37,25 @@ function normalizeRelayRole(headerValue) {
 function isRelayMobileRole(role) {
   return role === "iphone" || role === "android";
 }
+
+function readRelayRole(req, urlPath) {
+  const headerRole = normalizeRelayRole(req.headers["x-role"]);
+  if (headerRole) {
+    return headerRole;
+  }
+
+  // Some WebSocket clients cannot send custom headers, so mobile clients may
+  // pass the same untrusted role value through the relay URL query string.
+  try {
+    const queryUrl = new URL(urlPath || "/", "http://relay.local");
+    return normalizeRelayRole(queryUrl.searchParams.get("role"));
+  } catch {
+    return "";
+  }
+}
+
 const liveSessionsByMacDeviceId = new Map();
+const liveSessionsByMacAndPhoneDeviceId = new Map();
 const liveSessionsByPairingCode = new Map();
 const usedResolveNonces = new Map();
 
@@ -73,13 +91,13 @@ function setupRelay(
     const urlPath = req.url || "";
     const match = urlPath.match(/^\/relay\/([^/?]+)/);
     const sessionId = match?.[1];
-    const role = normalizeRelayRole(req.headers["x-role"]);
+    const role = readRelayRole(req, urlPath);
     relayMetrics.acceptedConnections += 1;
     ws._relaySessionId = sessionId;
     ws._relayRole = role;
 
     if (!sessionId || (role !== "mac" && !isRelayMobileRole(role))) {
-      ws.close(4000, "Missing sessionId or invalid x-role header");
+      ws.close(4000, "Missing sessionId or invalid x-role header/query");
       return;
     }
 
@@ -355,7 +373,12 @@ function resolveTrustedMacSession({
     throw createRelayError(409, "resolve_request_replayed", "This trusted-session resolve request was already used.");
   }
 
-  const liveSession = liveSessionsByMacDeviceId.get(normalizedMacDeviceId);
+  const phoneSpecificSession = liveSessionsByMacAndPhoneDeviceId.get(
+    macPhoneSessionKey(normalizedMacDeviceId, normalizedPhoneDeviceId)
+  );
+  const liveSession = phoneSpecificSession && hasActiveMacSession(phoneSpecificSession.sessionId)
+    ? phoneSpecificSession
+    : liveSessionsByMacDeviceId.get(normalizedMacDeviceId);
   if (!liveSession || !hasActiveMacSession(liveSession.sessionId)) {
     throw createRelayError(404, "session_unavailable", "The trusted Mac is offline right now.");
   }
@@ -506,6 +529,12 @@ function registerLiveMacSession(macRegistration) {
     return;
   }
   liveSessionsByMacDeviceId.set(macRegistration.macDeviceId, macRegistration);
+  if (macRegistration.trustedPhoneDeviceId) {
+    liveSessionsByMacAndPhoneDeviceId.set(
+      macPhoneSessionKey(macRegistration.macDeviceId, macRegistration.trustedPhoneDeviceId),
+      macRegistration
+    );
+  }
   if (macRegistration.pairingCode && Number.isFinite(macRegistration.pairingExpiresAt)) {
     liveSessionsByPairingCode.set(macRegistration.pairingCode, macRegistration);
   }
@@ -534,6 +563,15 @@ function unregisterLiveMacSession(macRegistration, sessionId) {
     liveSessionsByMacDeviceId.delete(macDeviceId);
   }
 
+  const trustedPhoneDeviceId = macRegistration?.trustedPhoneDeviceId;
+  if (trustedPhoneDeviceId) {
+    const phoneKey = macPhoneSessionKey(macDeviceId, trustedPhoneDeviceId);
+    const existingPhoneSession = liveSessionsByMacAndPhoneDeviceId.get(phoneKey);
+    if (existingPhoneSession?.sessionId === sessionId) {
+      liveSessionsByMacAndPhoneDeviceId.delete(phoneKey);
+    }
+  }
+
   const pairingCode = macRegistration?.pairingCode;
   if (pairingCode) {
     const existingPairingCode = liveSessionsByPairingCode.get(pairingCode);
@@ -541,6 +579,10 @@ function unregisterLiveMacSession(macRegistration, sessionId) {
       liveSessionsByPairingCode.delete(pairingCode);
     }
   }
+}
+
+function macPhoneSessionKey(macDeviceId, phoneDeviceId) {
+  return `${macDeviceId}\u0000${phoneDeviceId}`;
 }
 
 function readMacRegistrationHeaders(headers, sessionId) {

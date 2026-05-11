@@ -1324,11 +1324,11 @@ struct TurnView: View {
     }
 
     private var selectedModelTitle: String {
-        guard let selectedModel = codex.selectedModelOption() else {
-            return "GPT-5.5"
+        if let selectedModel = codex.selectedModelOption() {
+            return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }
 
-        return TurnComposerMetaMapper.modelTitle(for: selectedModel)
+        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.selectedModelId)
     }
 
     private var approvalForThread: CodexApprovalRequest? {

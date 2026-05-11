@@ -1,10 +1,11 @@
 {
   "name": "remodex",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Local bridge between Codex and the Remodex mobile app. Run `remodex up` to start.",
   "main": "src/index.js",
   "bin": {
-    "remodex": "./bin/remodex.js"
+    "remodex": "./bin/remodex.js",
+    "remodex-jsonl-diagnose": "./bin/remodex-jsonl-diagnose.js"
   },
   "files": [
     "bin/",

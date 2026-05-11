@@ -14,6 +14,8 @@ struct TurnComposerSendAvailability {
     let trimmedInput: String
     let hasReadyImages: Bool
     let hasBlockingAttachmentState: Bool
+    let hasSkillSelection: Bool
+    let hasPluginSelection: Bool
     let hasReviewSelection: Bool
     let hasPendingReviewSelection: Bool
     let hasSubagentsSelection: Bool
@@ -23,7 +25,14 @@ struct TurnComposerSendAvailability {
         isSending
             || !isConnected
             || hasPendingReviewSelection
-            || (trimmedInput.isEmpty && !hasReadyImages && !hasReviewSelection && !hasSubagentsSelection)
+            || (
+                trimmedInput.isEmpty
+                    && !hasReadyImages
+                    && !hasSkillSelection
+                    && !hasPluginSelection
+                    && !hasReviewSelection
+                    && !hasSubagentsSelection
+            )
             || hasBlockingAttachmentState
     }
 }
@@ -482,6 +491,8 @@ final class TurnViewModel {
             trimmedInput: trimmedComposerInput,
             hasReadyImages: hasReadyImages,
             hasBlockingAttachmentState: hasBlockingAttachmentState,
+            hasSkillSelection: !composerMentionedSkills.isEmpty,
+            hasPluginSelection: !composerMentionedPlugins.isEmpty,
             hasReviewSelection: hasComposerReviewSelection,
             hasPendingReviewSelection: hasPendingComposerReviewSelection,
             hasSubagentsSelection: isSubagentsSelectionArmed
@@ -660,7 +671,6 @@ final class TurnViewModel {
     ) {
         guard !isComposerInteractionLocked(activeTurnID: activeTurnID),
               codex.isConnected,
-              let root = normalizedAutocompleteRoot(for: thread),
               let token = Self.trailingSkillAutocompleteToken(in: text) else {
             resetSkillAutocompleteState()
             return
@@ -672,13 +682,14 @@ final class TurnViewModel {
         resetSlashCommandState(clearPendingSelection: true)
 
         let query = token.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedRoot = root
+        let normalizedRoot = normalizedAutocompleteRoot(for: thread)
+        let cacheKey = autocompleteCacheKey(forRoot: normalizedRoot)
         skillAutocompleteQuery = query
         isSkillAutocompleteVisible = true
-        let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[normalizedRoot] != nil
-        let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(normalizedRoot)
+        let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[cacheKey] != nil
+        let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(cacheKey)
         isSkillAutocompleteLoading = !hasCachedSkillIndex && !rootIsUnsupported
-        if let cachedIndex = cachedSkillSearchIndexByRoot[normalizedRoot] {
+        if let cachedIndex = cachedSkillSearchIndexByRoot[cacheKey] {
             skillAutocompleteItems = filteredSkillAutocompleteItems(for: query, indexedSkills: cachedIndex)
         } else {
             skillAutocompleteItems = []
@@ -699,8 +710,8 @@ final class TurnViewModel {
             guard !Task.isCancelled else { return }
 
             do {
-                if unsupportedSkillsAutocompleteRoots.contains(normalizedRoot),
-                   cachedSkillSearchIndexByRoot[normalizedRoot] == nil {
+                if unsupportedSkillsAutocompleteRoots.contains(cacheKey),
+                   cachedSkillSearchIndexByRoot[cacheKey] == nil {
                     guard self.skillAutocompleteQuery == expectedQuery else { return }
                     self.skillAutocompleteItems = []
                     self.isSkillAutocompleteLoading = false
@@ -709,15 +720,18 @@ final class TurnViewModel {
                 }
 
                 let indexedSkills: [TurnSkillSearchIndexEntry]
-                if let cachedIndex = self.cachedSkillSearchIndexByRoot[normalizedRoot] {
+                if let cachedIndex = self.cachedSkillSearchIndexByRoot[cacheKey] {
                     indexedSkills = cachedIndex
                 } else {
-                    let listedSkills = try await codex.listSkills(cwds: [normalizedRoot], forceReload: false)
+                    let listedSkills = try await codex.listSkills(
+                        cwds: normalizedRoot.map { [$0] },
+                        forceReload: false
+                    )
                     guard !Task.isCancelled else { return }
                     indexedSkills = listedSkills
                         .filter { $0.enabled }
                         .map(TurnSkillSearchIndexEntry.init(skill:))
-                    self.cachedSkillSearchIndexByRoot[normalizedRoot] = indexedSkills
+                    self.cachedSkillSearchIndexByRoot[cacheKey] = indexedSkills
                 }
 
                 guard !Task.isCancelled else { return }
@@ -733,7 +747,7 @@ final class TurnViewModel {
                 guard self.skillAutocompleteQuery == expectedQuery else { return }
 
                 if Self.isMethodNotFoundRPCError(error) {
-                    self.unsupportedSkillsAutocompleteRoots.insert(normalizedRoot)
+                    self.unsupportedSkillsAutocompleteRoots.insert(cacheKey)
                 }
 
                 self.skillAutocompleteItems = []
@@ -1137,7 +1151,7 @@ final class TurnViewModel {
         }
         let reviewSelection = composerReviewSelection
 
-        guard (!payload.isEmpty || !attachments.isEmpty || reviewSelection != nil),
+        guard (!payload.isEmpty || !attachments.isEmpty || reviewSelection != nil || !skillMentions.isEmpty || !mentionMentions.isEmpty),
               !isSending,
               codex.isConnected,
               !hasBlockingAttachmentState else {
@@ -1992,6 +2006,10 @@ final class TurnViewModel {
 
     private func normalizedAutocompleteRoot(for thread: CodexThread) -> String? {
         thread.gitWorkingDirectory
+    }
+
+    private func autocompleteCacheKey(forRoot root: String?) -> String {
+        root ?? "__global__"
     }
 
     private func fileAutocompleteCancellationToken(for threadID: String) -> String {
