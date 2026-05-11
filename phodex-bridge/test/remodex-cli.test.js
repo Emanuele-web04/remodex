@@ -161,7 +161,7 @@ test("remodex up stops before relay and QR when saved Gemini backend is not read
     platform: "linux",
     env: {
       HOME: tempHome,
-      REMODEX_RELAY_HOST: "192.168.1.50",
+      REMODEX_RELAY_HOST: "developer-mac.local",
     },
     stdin: nonTTYInput(),
     consoleImpl: {
@@ -287,7 +287,7 @@ test("remodex up starts an embedded relay when no relay URL is configured", asyn
     platform: "linux",
     env: {
       HOME: tempHome,
-      REMODEX_RELAY_HOST: "192.168.1.50",
+      REMODEX_RELAY_HOST: "developer-mac.local",
     },
     stdin: nonTTYInput(),
     consoleImpl: {
@@ -320,7 +320,7 @@ test("remodex up starts an embedded relay when no relay URL is configured", asyn
       backendType: "codex",
       config: {
         keepMacAwakeEnabled: true,
-        relayUrl: "ws://192.168.1.50:54321/relay",
+        relayUrl: "ws://developer-mac.local:54321/relay",
       },
     }],
   ]);
