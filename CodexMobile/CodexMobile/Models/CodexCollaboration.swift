@@ -238,7 +238,7 @@ enum CodexProposedPlanParser {
     }
 }
 
-struct CodexStructuredUserInputOption: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct CodexStructuredUserInputOption: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let label: String
     let description: String
@@ -250,7 +250,7 @@ struct CodexStructuredUserInputOption: Identifiable, Codable, Hashable, Sendable
     }
 }
 
-struct CodexStructuredUserInputQuestion: Identifiable, Codable, Hashable, Sendable {
+nonisolated struct CodexStructuredUserInputQuestion: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let header: String
     let question: String

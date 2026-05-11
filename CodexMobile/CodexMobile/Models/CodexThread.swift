@@ -57,7 +57,7 @@ enum CodexTimestampParser {
     }
 
     // Filters out placeholder dates so local optimistic timestamps are not replaced by epoch fallbacks.
-    static func isTrustworthyServerDate(_ date: Date) -> Bool {
+    nonisolated static func isTrustworthyServerDate(_ date: Date) -> Bool {
         date.timeIntervalSince1970 >= 946_684_800 // 2000-01-01T00:00:00Z
     }
 }

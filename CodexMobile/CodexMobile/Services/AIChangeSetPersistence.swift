@@ -6,7 +6,7 @@
 
 import Foundation
 
-struct AIChangeSetPersistence {
+nonisolated struct AIChangeSetPersistence {
     private let fileName = "codex-ai-change-sets-v1.json"
 
     // Loads the stored change-set ledger from disk. Returns an empty array on failure.

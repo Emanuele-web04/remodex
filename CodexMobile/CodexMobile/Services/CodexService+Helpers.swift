@@ -708,7 +708,7 @@ extension CodexService {
         defer { subagentMetadataLoadingThreadIDs.remove(threadId) }
 
         let shouldForceRefresh = hydratedThreadIDs.contains(threadId)
-        try? await loadThreadHistoryIfNeeded(
+        _ = try? await loadThreadHistoryIfNeeded(
             threadId: threadId,
             forceRefresh: shouldForceRefresh,
             markHydratedWhenNotMaterialized: false

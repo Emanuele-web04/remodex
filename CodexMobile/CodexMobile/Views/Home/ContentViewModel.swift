@@ -457,6 +457,12 @@ extension ContentViewModel {
             codex.lastErrorMessage = message
             return .stop
         case .rePairRequired(let message):
+            if codex.hasSavedRelaySession {
+                // Trusted-session lookup is only a shortcut; the saved socket handshake is the authority.
+                codex.restoreTrustedPairPresentationState()
+                codex.lastErrorMessage = nil
+                return .fallbackToSaved
+            }
             codex.connectionRecoveryState = .idle
             codex.shouldAutoReconnectOnForeground = false
             codex.lastErrorMessage = message

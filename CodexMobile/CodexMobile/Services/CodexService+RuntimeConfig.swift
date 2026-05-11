@@ -392,7 +392,7 @@ extension CodexService {
             }
         }
 
-        var finalAttemptParams = baseParams
+        let finalAttemptParams = baseParams
         debugRuntimeLog("\(method) fallback using minimal payload")
         return try await sendRequestWithApprovalPolicyFallback(
             method: method,

@@ -133,7 +133,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
     )
 }
 
-func codexGPTAccountInitialSnapshot() -> CodexGPTAccountSnapshot {
+nonisolated func codexGPTAccountInitialSnapshot() -> CodexGPTAccountSnapshot {
     CodexGPTAccountSnapshot(
         status: .unknown,
         authMethod: nil,
@@ -322,7 +322,10 @@ extension CodexService {
         clearGPTLoginState()
         clearGPTLoginCallbackState()
         stopGPTLoginSync()
-        applyGPTAccountSnapshot(loggedOutGPTAccountSnapshot(status: .notLoggedIn))
+        applyGPTAccountSnapshot(loggedOutGPTAccountSnapshot(
+            status: .notLoggedIn,
+            retaining: codexGPTAccountInitialSnapshot()
+        ))
         gptAccountErrorMessage = nil
     }
 
@@ -1041,7 +1044,7 @@ extension CodexService {
     func loggedOutGPTAccountSnapshot(
         status: CodexGPTAccountStatus,
         needsReauth: Bool = false,
-        retaining snapshot: CodexGPTAccountSnapshot = codexGPTAccountInitialSnapshot()
+        retaining snapshot: CodexGPTAccountSnapshot
     ) -> CodexGPTAccountSnapshot {
         CodexGPTAccountSnapshot(
             status: status,

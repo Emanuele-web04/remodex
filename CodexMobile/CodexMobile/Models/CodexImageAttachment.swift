@@ -35,7 +35,7 @@ struct CodexImageAttachment: Identifiable, Codable, Hashable, Sendable {
     }
 
     // Keeps attachment matching stable without hashing giant inline data URLs.
-    var stableIdentityKey: String {
+    nonisolated var stableIdentityKey: String {
         if let normalizedSourceURL {
             return normalizedSourceURL
         }

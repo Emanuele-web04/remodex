@@ -77,6 +77,64 @@ final class ContentViewModelReconnectTests: XCTestCase {
         XCTAssertNil(service.lastErrorMessage)
     }
 
+    func testPreferredReconnectURLFallsBackToSavedSessionWhenTrustedResolveReportsRePairRequired() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let relayURL = "wss://relay.local/relay"
+        let macPublicKey = Data(repeating: 19, count: 32).base64EncodedString()
+
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: macPublicKey,
+            lastPairedAt: Date(),
+            relayURL: relayURL
+        )
+        service.lastTrustedMacDeviceId = macDeviceID
+        service.relaySessionId = "saved-session"
+        service.relayUrl = relayURL
+        service.relayMacDeviceId = macDeviceID
+        service.relayMacIdentityPublicKey = macPublicKey
+        service.secureConnectionState = .rePairRequired
+        service.lastErrorMessage = "This iPhone is no longer trusted by the paired computer."
+        service.trustedSessionResolverOverride = {
+            throw CodexTrustedSessionResolveError.rePairRequired("Resolve says this phone is not trusted.")
+        }
+
+        let reconnectURL = await viewModel.preferredReconnectURL(codex: service)
+
+        XCTAssertEqual(reconnectURL, "\(relayURL)/saved-session")
+        XCTAssertEqual(service.secureConnectionState, .trustedMac)
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testPreferredReconnectURLStopsWhenTrustedResolveReportsRePairRequiredWithoutSavedSession() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let relayURL = "wss://relay.local/relay"
+
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: Data(repeating: 20, count: 32).base64EncodedString(),
+            lastPairedAt: Date(),
+            relayURL: relayURL
+        )
+        service.lastTrustedMacDeviceId = macDeviceID
+        service.shouldAutoReconnectOnForeground = true
+        service.secureConnectionState = .rePairRequired
+        service.trustedSessionResolverOverride = {
+            throw CodexTrustedSessionResolveError.rePairRequired("Resolve says this phone is not trusted.")
+        }
+
+        let reconnectURL = await viewModel.preferredReconnectURL(codex: service)
+
+        XCTAssertNil(reconnectURL)
+        XCTAssertEqual(service.secureConnectionState, .rePairRequired)
+        XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.lastErrorMessage, "Resolve says this phone is not trusted.")
+    }
+
     func testPreferredReconnectURLStopsWhenTrustedResolveReportsOfflineAndNoSavedSessionExists() async {
         let service = makeService()
         let viewModel = ContentViewModel()

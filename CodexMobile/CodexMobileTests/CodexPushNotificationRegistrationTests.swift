@@ -406,6 +406,7 @@ private func makeThreadJSON(id: String, title: String) -> JSONValue {
 private final class MockRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
     private(set) var registerCallCount = 0
 
+    @MainActor
     func registerForRemoteNotifications() {
         registerCallCount += 1
     }
