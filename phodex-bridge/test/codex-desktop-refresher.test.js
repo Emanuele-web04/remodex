@@ -211,7 +211,7 @@ test("readBridgeConfig reuses persisted relay settings inside a source checkout"
       readFileSync(targetPath) {
         if (targetPath === "/tmp/remodex-state/daemon-config.json") {
           return JSON.stringify({
-            relayUrl: "ws://Mac-mini-Ivan.local:9000/relay",
+            relayUrl: "ws://developer-mac.local:9000/relay",
             pushServiceUrl: "",
           });
         }
@@ -220,7 +220,7 @@ test("readBridgeConfig reuses persisted relay settings inside a source checkout"
     },
   });
 
-  assert.equal(config.relayUrl, "ws://Mac-mini-Ivan.local:9000/relay");
+  assert.equal(config.relayUrl, "ws://developer-mac.local:9000/relay");
   assert.equal(config.pushServiceUrl, "");
 });
 

@@ -82,7 +82,7 @@ test("Gemini adapter returns paginated thread turns instead of an RPC error", as
   adapter.send(JSON.stringify({
     id: "thread-start-1",
     method: "thread/start",
-    params: { cwd: "/Users/ivankovalev/remodex" },
+    params: { cwd: "/Users/developer/remodex" },
   }));
   const threadId = responseById(outbound, "thread-start-1").result.threadId;
 
@@ -199,14 +199,14 @@ test("Gemini adapter opens a Gemini session in the turn cwd selected by iOS", as
     method: "turn/start",
     params: {
       threadId: "gemini-documents-thread",
-      cwd: "/Users/ivankovalev/Documents",
+      cwd: "/Users/developer/Documents",
       input: [{ type: "text", text: "Где ты?" }],
     },
   }));
 
   const sessionRequest = fake.sent.find((message) =>
     message.method === "session/new"
-    && message.params?.cwd === "/Users/ivankovalev/Documents"
+    && message.params?.cwd === "/Users/developer/Documents"
   );
   assert.ok(sessionRequest, "expected Gemini session/new to use the iOS-selected cwd");
 
