@@ -117,13 +117,19 @@ test("remodex up uses the saved backend and passes it to the foreground bridge",
     "utf8"
   );
   const calls = [];
+  const logs = [];
 
   await main({
     argv: ["node", "remodex", "up"],
     platform: "linux",
     env: { HOME: tempHome, REMODEX_RELAY: "ws://127.0.0.1:9000/relay" },
     stdin: nonTTYInput(),
-    consoleImpl: quietConsole(),
+    consoleImpl: {
+      log(message) {
+        logs.push(message);
+      },
+      error() {},
+    },
     deps: {
       async verifyGeminiCliReady() {
         calls.push(["verify-gemini"]);
@@ -143,6 +149,7 @@ test("remodex up uses the saved backend and passes it to the foreground bridge",
       },
     }],
   ]);
+  assert.match(logs.join("\n"), /AI backend: Gemini CLI\. Run `remodex up --switch` to change\./);
 });
 
 test("remodex up stops before relay and QR when saved Gemini backend is not ready", async () => {
@@ -324,6 +331,7 @@ test("remodex up starts an embedded relay when no relay URL is configured", asyn
       },
     }],
   ]);
+  assert.match(logs.join("\n"), /AI backend: Codex\. Run `remodex up --switch` to change\./);
   assert.match(logs.join("\n"), /local relay listening on 0\.0\.0\.0:54321/);
 });
 

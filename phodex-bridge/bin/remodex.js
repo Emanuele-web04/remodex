@@ -275,6 +275,10 @@ async function runForegroundBridge({
     stdout,
     consoleImpl,
   });
+  logSelectedBackend({
+    backendType,
+    consoleImpl,
+  });
   if (backendType === "gemini") {
     const geminiReady = await runGeminiPreflight({
       deps,
@@ -647,6 +651,14 @@ function readUserConfig(configPath) {
 
 function normalizeBackendType(value) {
   return value === "gemini" || value === "codex" ? value : "";
+}
+
+function logSelectedBackend({
+  backendType,
+  consoleImpl = console,
+} = {}) {
+  const label = backendType === "gemini" ? "Gemini CLI" : "Codex";
+  consoleImpl.log(`[remodex] AI backend: ${label}. Run \`remodex up --switch\` to change.`);
 }
 
 async function promptForBackend({
