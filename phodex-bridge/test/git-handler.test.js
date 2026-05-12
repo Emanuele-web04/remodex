@@ -15,6 +15,7 @@ const { __test, gitStatus, handleGitRequest } = require("../src/git-handler");
 
 test.afterEach(() => {
   __test.resetRunStructuredCodexJsonImplementation();
+  __test.resetRunStructuredGeminiJsonImplementation();
   __test.resetRunGitHubCliImplementation();
 });
 
@@ -622,6 +623,74 @@ test("gitGeneratePullRequestDraft summarizes branch changes against the default 
     assert.match(capturedInvocation?.prompt || "", /Current branch: remodex\/pr-draft/);
     assert.match(capturedInvocation?.prompt || "", /Update readme on branch/);
     assert.match(capturedInvocation?.prompt || "", /branch change/);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(remoteDir, { recursive: true, force: true });
+  }
+});
+
+test("gitGenerateCommitMessage uses Gemini drafting when the bridge backend is Gemini", async () => {
+  const repoDir = makeTempRepo();
+  let capturedInvocation = null;
+
+  try {
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\ngemini draft\n");
+
+    __test.setRunStructuredGeminiJsonImplementation(async (payload) => {
+      capturedInvocation = payload;
+      return {
+        subject: "Polish Gemini commit flow",
+        body: "- Generate the commit draft through Gemini CLI\n- Keep the bridge-owned Git pipeline unchanged",
+        fullMessage: "ignored by normalization",
+      };
+    });
+
+    const result = await __test.gitGenerateCommitMessage(
+      repoDir,
+      { model: "gpt-5.4-mini" },
+      { backendType: "gemini" }
+    );
+
+    assert.equal(result.subject, "Polish Gemini commit flow");
+    assert.equal(capturedInvocation?.model, "gemini-2.5-flash-lite");
+    assert.equal(capturedInvocation?.cwd, repoDir);
+    assert.match(capturedInvocation?.prompt || "", /gemini draft/);
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
+test("gitGeneratePullRequestDraft keeps an explicit Gemini model for Gemini drafting", async () => {
+  const repoDir = makeTempRepo();
+  const remoteDir = makeBareRemote();
+  let capturedInvocation = null;
+
+  try {
+    git(remoteDir, "init", "--bare");
+    git(repoDir, "remote", "add", "origin", remoteDir);
+    git(repoDir, "push", "-u", "origin", "main");
+    git(repoDir, "checkout", "-b", "remodex/gemini-pr-draft");
+    fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n\ngemini pr draft\n");
+    git(repoDir, "add", "README.md");
+    git(repoDir, "commit", "-m", "Prepare Gemini PR draft");
+
+    __test.setRunStructuredGeminiJsonImplementation(async (payload) => {
+      capturedInvocation = payload;
+      return {
+        title: "Prepare Gemini PR draft",
+        body: "## Summary\n- Draft the PR through Gemini CLI\n\n## Testing\n- Not run\n\n## Notes\n- Uses the selected Gemini model",
+      };
+    });
+
+    const result = await __test.gitGeneratePullRequestDraft(
+      repoDir,
+      { model: "gemini-2.5-pro", baseBranch: "main" },
+      { backendType: "gemini" }
+    );
+
+    assert.equal(result.title, "Prepare Gemini PR draft");
+    assert.equal(capturedInvocation?.model, "gemini-2.5-pro");
+    assert.match(capturedInvocation?.prompt || "", /Prepare Gemini PR draft/);
   } finally {
     fs.rmSync(repoDir, { recursive: true, force: true });
     fs.rmSync(remoteDir, { recursive: true, force: true });

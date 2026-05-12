@@ -20,13 +20,25 @@ const GITHUB_CLI_TIMEOUT_MS = 120_000;
 const GIT_DRAFT_PATCH_MAX_BYTES = 80_000;
 const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const DEFAULT_GIT_WRITER_MODEL = "gpt-5.4-mini";
+const DEFAULT_GEMINI_WRITER_MODEL = "gemini-2.5-flash-lite";
 
 let runStructuredCodexJsonImpl = runStructuredCodexJson;
+let runStructuredGeminiJsonImpl = runStructuredGeminiJson;
 let runGitHubCliImpl = runGitHubCli;
 
-function resolveGitWriterModel(rawModel) {
+function resolveGitWriterModel(rawModel, { backendType = "codex" } = {}) {
   const trimmed = typeof rawModel === "string" ? rawModel.trim() : "";
+  if (backendType === "gemini") {
+    return resolveGeminiWriterModel(trimmed);
+  }
   return trimmed || DEFAULT_GIT_WRITER_MODEL;
+}
+
+function resolveGeminiWriterModel(rawModel) {
+  if (!rawModel) {
+    return DEFAULT_GEMINI_WRITER_MODEL;
+  }
+  return rawModel.toLowerCase().startsWith("gemini-") ? rawModel : DEFAULT_GEMINI_WRITER_MODEL;
 }
 
 /**
@@ -294,7 +306,7 @@ async function gitCommit(cwd, params) {
 // ─── Git Draft Generation ────────────────────────────────────
 
 async function gitGenerateCommitMessage(cwd, params, options = {}) {
-  const model = resolveGitWriterModel(params.model);
+  const model = resolveGitWriterModel(params.model, { backendType: options.backendType });
 
   try {
     const context = await buildCommitDraftContext(cwd);
@@ -309,7 +321,8 @@ async function gitGenerateCommitMessage(cwd, params, options = {}) {
       required: ["subject", "body", "fullMessage"],
       additionalProperties: false,
     };
-    const draft = await runStructuredCodexJsonImpl({
+    const draft = await runStructuredGitAiJson({
+      backendType: options.backendType,
       cwd,
       model,
       prompt,
@@ -327,7 +340,7 @@ async function gitGenerateCommitMessage(cwd, params, options = {}) {
 }
 
 async function gitGeneratePullRequestDraft(cwd, params, options = {}) {
-  const model = resolveGitWriterModel(params.model);
+  const model = resolveGitWriterModel(params.model, { backendType: options.backendType });
 
   try {
     const context = await buildPullRequestDraftContext(cwd, params);
@@ -341,7 +354,8 @@ async function gitGeneratePullRequestDraft(cwd, params, options = {}) {
       required: ["title", "body"],
       additionalProperties: false,
     };
-    const draft = await runStructuredCodexJsonImpl({
+    const draft = await runStructuredGitAiJson({
+      backendType: options.backendType,
       cwd,
       model,
       prompt,
@@ -359,7 +373,7 @@ async function gitGeneratePullRequestDraft(cwd, params, options = {}) {
 }
 
 async function threadGenerateTitle(params, options = {}) {
-  const model = resolveGitWriterModel(params.model);
+  const model = resolveGitWriterModel(params.model, { backendType: options.backendType });
   const message = normalizeNonEmptyMultilineString(params.message || params.prompt);
   if (!message) {
     throw gitError("missing_thread_title_message", "A first message is required to generate a thread title.");
@@ -379,7 +393,8 @@ async function threadGenerateTitle(params, options = {}) {
       required: ["title"],
       additionalProperties: false,
     };
-    const draft = await runStructuredCodexJsonImpl({
+    const draft = await runStructuredGitAiJson({
+      backendType: options.backendType,
       cwd,
       model,
       prompt,
@@ -1690,6 +1705,36 @@ async function runStructuredCodexJson({
   }
 }
 
+async function runStructuredGitAiJson({
+  backendType = "codex",
+  cwd,
+  model,
+  prompt,
+  schema,
+  codexAppPath,
+  skipGitRepoCheck = false,
+  sandboxMode = null,
+}) {
+  if (backendType === "gemini") {
+    return runStructuredGeminiJsonImpl({
+      cwd,
+      model,
+      prompt,
+      schema,
+    });
+  }
+
+  return runStructuredCodexJsonImpl({
+    cwd,
+    model,
+    prompt,
+    schema,
+    codexAppPath,
+    skipGitRepoCheck,
+    sandboxMode,
+  });
+}
+
 function resolveCodexExecCommands(codexAppPath) {
   const commands = ["codex"];
   const bundledCommand = resolveBundledCodexCommand(codexAppPath);
@@ -1816,6 +1861,162 @@ function createCodexExecFailure(code, signal, stdout, stderr) {
     signal
       ? `Codex CLI was interrupted while generating the draft.${suffix}`
       : `Codex CLI exited with code ${code} while generating the draft.${suffix}`
+  );
+  error.code = code;
+  error.signal = signal;
+  return error;
+}
+
+async function runStructuredGeminiJson({
+  cwd,
+  model,
+  prompt,
+  schema,
+}) {
+  const responseText = await runGeminiCliPrompt({
+    cwd,
+    model,
+    prompt: buildGeminiStructuredPrompt(prompt, schema),
+  });
+  try {
+    return JSON.parse(extractJsonObjectText(responseText));
+  } catch {
+    const repairedResponseText = await runGeminiCliPrompt({
+      cwd,
+      model,
+      prompt: buildGeminiJsonRepairPrompt(responseText, schema),
+    });
+    return JSON.parse(extractJsonObjectText(repairedResponseText));
+  }
+}
+
+function buildGeminiStructuredPrompt(prompt, schema) {
+  return [
+    "Return exactly one valid JSON object.",
+    "Do not wrap the JSON in markdown fences.",
+    "Do not add any prose before or after the JSON.",
+    "The JSON must match this schema exactly:",
+    JSON.stringify(schema, null, 2),
+    "",
+    prompt,
+  ].join("\n");
+}
+
+function buildGeminiJsonRepairPrompt(responseText, schema) {
+  return [
+    "Convert the following content into exactly one valid JSON object.",
+    "Do not wrap the JSON in markdown fences.",
+    "Do not add any prose before or after the JSON.",
+    "The JSON must match this schema exactly:",
+    JSON.stringify(schema, null, 2),
+    "",
+    "Content to convert:",
+    responseText,
+  ].join("\n");
+}
+
+function runGeminiCliPrompt({
+  cwd,
+  model,
+  prompt,
+}) {
+  const args = [
+    "--prompt",
+    prompt,
+    "--output-format",
+    "json",
+    "--approval-mode",
+    "yolo",
+    "--skip-trust",
+    "--model",
+    model,
+  ];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn("gemini", args, {
+      cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, GIT_DRAFT_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timeout);
+
+      if (timedOut) {
+        reject(new Error("Gemini CLI timed out while generating the draft."));
+        return;
+      }
+
+      if (code !== 0) {
+        reject(createGeminiExecFailure(code, signal, stdout, stderr));
+        return;
+      }
+
+      try {
+        const cliPayload = JSON.parse(stdout.trim());
+        resolve(extractGeminiResponseText(cliPayload));
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
+function extractGeminiResponseText(cliPayload) {
+  if (typeof cliPayload?.response === "string" && cliPayload.response.trim()) {
+    return cliPayload.response.trim();
+  }
+  throw new Error("Gemini CLI returned an empty structured response.");
+}
+
+function extractJsonObjectText(responseText) {
+  let trimmed = typeof responseText === "string" ? responseText.trim() : "";
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    trimmed = fenced[1].trim();
+  }
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    return trimmed.slice(firstBrace, lastBrace + 1);
+  }
+  throw new Error("Gemini CLI did not return a valid JSON object.");
+}
+
+function createGeminiExecFailure(code, signal, stdout, stderr) {
+  const detail = [stderr, stdout]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .flatMap((value) => value.split("\n"))
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .pop();
+
+  const suffix = detail ? ` ${detail}` : "";
+  const error = new Error(
+    signal
+      ? `Gemini CLI was interrupted while generating the draft.${suffix}`
+      : `Gemini CLI exited with code ${code} while generating the draft.${suffix}`
   );
   error.code = code;
   error.signal = signal;
@@ -2711,6 +2912,12 @@ module.exports = {
     },
     resetRunStructuredCodexJsonImplementation() {
       runStructuredCodexJsonImpl = runStructuredCodexJson;
+    },
+    setRunStructuredGeminiJsonImplementation(fn) {
+      runStructuredGeminiJsonImpl = typeof fn === "function" ? fn : runStructuredGeminiJson;
+    },
+    resetRunStructuredGeminiJsonImplementation() {
+      runStructuredGeminiJsonImpl = runStructuredGeminiJson;
     },
     setRunGitHubCliImplementation(fn) {
       runGitHubCliImpl = typeof fn === "function" ? fn : runGitHubCli;

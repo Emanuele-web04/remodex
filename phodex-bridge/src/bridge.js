@@ -569,6 +569,7 @@ function startBridge({
       return;
     }
     if (handleGitRequest(rawMessage, sendApplicationResponse, {
+      backendType: activeBackendType,
       codexAppPath: config.codexAppPath,
       onThreadNameSet: sendThreadNameUpdatedNotification,
     })) {
