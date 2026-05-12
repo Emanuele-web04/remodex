@@ -706,6 +706,22 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
   function handleTurnComplete(update, threadId) {
     const state = getThreadState(threadId);
+
+    // Persist assistant response before clearing state —
+    // this fires from session/update "turn_complete" which arrives
+    // BEFORE the prompt RPC response, so we must capture the text here.
+    const finalText = state.completedAssistantText || state.accumulatedText || "";
+    const threadData = threadHistory.get(threadId);
+    if (threadData && finalText && state.activeTurnId) {
+      threadData.turns.push({
+        id: state.activeTurnId,
+        role: "assistant",
+        text: finalText,
+        timestamp: new Date().toISOString(),
+      });
+      threadData.updatedAt = new Date().toISOString();
+    }
+
     emitCodexEvent("turn/completed", {
       threadId: threadId,
       turnId: state.activeTurnId,
@@ -727,10 +743,11 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     const state = getThreadState(threadId);
     // The prompt RPC completed — emit message_complete + turn_complete
     if (parsed.result && parsed.result.stopReason === "end_turn") {
-      // Save assistant response in thread history
+      // Save assistant response in thread history (fallback — turn_complete may have saved already)
       const finalText = state.completedAssistantText || state.accumulatedText || "";
       const threadData = threadHistory.get(threadId);
-      if (threadData && finalText) {
+      const alreadySaved = !state.activeTurnId; // turn_complete already cleared it
+      if (threadData && finalText && !alreadySaved) {
         threadData.turns.push({
           id: state.activeTurnId,
           role: "assistant",
@@ -744,7 +761,9 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       if (state.activeMessageId) {
         handleMessageComplete({}, threadId);
       }
-      handleTurnComplete({}, threadId);
+      if (state.activeTurnId) {
+        handleTurnComplete({}, threadId);
+      }
     }
   }
 

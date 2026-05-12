@@ -1002,6 +1002,7 @@ function startBridge({
         id: parsed.id,
         result: {
           bridgeManaged: true,
+          backendType: activeBackendType,
         },
       }));
       return true;
