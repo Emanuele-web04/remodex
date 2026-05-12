@@ -43,6 +43,8 @@ let geminiModels = [];
         collaborationMode: "default",
         approvalPolicy: "on-request",
         completedAssistantText: "",
+        isGenerating: false,
+        promptQueue: [],
       });
     }
     return threadStates.get(threadId);
@@ -580,6 +582,17 @@ let geminiModels = [];
         handleTurnComplete(update, threadId);
         break;
       case "thinking_start":
+        state.activeThinkingId = update.id || `think-${Date.now()}`;
+        emitCodexEvent("item/started", {
+          threadId: threadId,
+          turnId: state.activeTurnId,
+          item: {
+            id: state.activeThinkingId,
+            type: "reasoning",
+            role: "assistant",
+            text: "",
+          }
+        });
         break;
       case "thinking_part":
         if (update.text) {
@@ -591,9 +604,28 @@ let geminiModels = [];
         }
         break;
       case "thinking_complete":
+        if (state.activeThinkingId) {
+          emitCodexEvent("item/completed", {
+            threadId: threadId,
+            turnId: state.activeTurnId,
+            item: {
+              id: state.activeThinkingId,
+              type: "reasoning",
+              role: "assistant",
+              status: "completed"
+            }
+          });
+          state.activeThinkingId = null;
+        }
         break;
       case "tool_call":
-        state.activeToolName = update.name || "tool";
+        let rawCommandName = update.name || "tool";
+        let resolvedCommand = rawCommandName;
+        if (update.arguments) {
+          resolvedCommand = update.arguments.CommandLine || update.arguments.command || update.arguments.cmd || update.arguments.query || rawCommandName;
+        }
+        state.activeToolName = resolvedCommand;
+        
         emitCodexEvent("item/started", {
           threadId: threadId,
           turnId: state.activeTurnId,
@@ -786,6 +818,12 @@ let geminiModels = [];
       }
       if (state.activeTurnId) {
         handleTurnComplete({}, threadId);
+      }
+      
+      state.isGenerating = false;
+      if (state.promptQueue && state.promptQueue.length > 0) {
+        const nextPrompt = state.promptQueue.shift();
+        handleTurnStart(nextPrompt);
       }
     }
   }
@@ -1152,6 +1190,14 @@ let geminiModels = [];
     threadData.backendType = "gemini";
     
     const state = getThreadState(threadId);
+    
+    if (state.isGenerating) {
+      log(`[Codex Inbound] Turn is generating, queuing prompt for ${threadId}`);
+      state.promptQueue.push(parsed);
+      return;
+    }
+    
+    state.isGenerating = true;
     state.activeTurnId = `turn-${randomBytes(8).toString("hex")}`;
     state.pendingTurnRequestId = requestId;
     state.approvalPolicy = params.approvalPolicy || "on-request";
@@ -1304,6 +1350,12 @@ let geminiModels = [];
         turnId: state.activeTurnId,
         turn: { id: state.activeTurnId, threadId: threadId, status: "failed" },
       });
+      state.isGenerating = false;
+      state.activeTurnId = null;
+      if (state.promptQueue && state.promptQueue.length > 0) {
+        const nextPrompt = state.promptQueue.shift();
+        handleTurnStart(nextPrompt);
+      }
       return;
     }
 
@@ -1345,8 +1397,15 @@ let geminiModels = [];
 
     state.activeTurnId = null;
     state.pendingTurnRequestId = null;
+    state.isGenerating = false;
+    
     if (threadId === currentPromptThreadId) {
       currentPromptThreadId = null;
+    }
+    
+    if (state.promptQueue && state.promptQueue.length > 0) {
+      const nextPrompt = state.promptQueue.shift();
+      handleTurnStart(nextPrompt);
     }
   }
 
