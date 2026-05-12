@@ -186,7 +186,7 @@ test("remodex up stops before relay and QR when saved Gemini backend is not read
         calls.push(["verify-gemini"]);
         throw new Error("Gemini CLI was not found in PATH.");
       },
-      createRelayServer() {
+      createGeminiRelayServer() {
         calls.push(["create-relay"]);
         return () => ({ server: createFakeRelayServer({ port: 54321 }) });
       },
@@ -283,7 +283,7 @@ test("remodex up --switch can save Gemini from an interactive terminal", async (
   assert.equal(saved.backend, "gemini");
 });
 
-test("remodex up starts an embedded relay when no relay URL is configured", async () => {
+test("remodex up starts the Codex relay server when no relay URL is configured", async () => {
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
   const calls = [];
   const logs = [];
@@ -304,7 +304,8 @@ test("remodex up starts an embedded relay when no relay URL is configured", asyn
       error() {},
     },
     deps: {
-      createRelayServer() {
+      createCodexRelayServer() {
+        calls.push(["create-codex-relay"]);
         return () => ({ server });
       },
       readBridgeConfig() {
@@ -323,6 +324,7 @@ test("remodex up starts an embedded relay when no relay URL is configured", asyn
     port: 0,
   });
   assert.deepEqual(calls, [
+    ["create-codex-relay"],
     ["start-bridge", {
       backendType: "codex",
       config: {
@@ -332,7 +334,68 @@ test("remodex up starts an embedded relay when no relay URL is configured", asyn
     }],
   ]);
   assert.match(logs.join("\n"), /AI backend: Codex\. Run `remodex up --switch` to change\./);
-  assert.match(logs.join("\n"), /local relay listening on 0\.0\.0\.0:54321/);
+  assert.match(logs.join("\n"), /codex relay listening on 0\.0\.0\.0:54321/);
+});
+
+test("remodex up starts the Gemini local relay when Gemini is selected", async () => {
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-cli-home-"));
+  fs.mkdirSync(path.join(tempHome, ".remodex"), { recursive: true });
+  fs.writeFileSync(
+    path.join(tempHome, ".remodex", "config.json"),
+    JSON.stringify({ backend: "gemini" }),
+    "utf8"
+  );
+  const calls = [];
+  const logs = [];
+  const server = createFakeRelayServer({ port: 54322 });
+
+  await main({
+    argv: ["node", "remodex", "up"],
+    platform: "linux",
+    env: {
+      HOME: tempHome,
+      REMODEX_RELAY_HOST: "developer-mac.local",
+    },
+    stdin: nonTTYInput(),
+    consoleImpl: {
+      log(message) {
+        logs.push(message);
+      },
+      error() {},
+    },
+    deps: {
+      async verifyGeminiCliReady() {
+        calls.push(["verify-gemini"]);
+      },
+      createGeminiRelayServer() {
+        calls.push(["create-gemini-relay"]);
+        return () => ({ server });
+      },
+      createCodexRelayServer() {
+        throw new Error("Codex relay should not be used for Gemini");
+      },
+      startBridge(options) {
+        calls.push(["start-bridge", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(server.listenArgs, {
+    host: "0.0.0.0",
+    port: 0,
+  });
+  assert.deepEqual(calls, [
+    ["verify-gemini"],
+    ["create-gemini-relay"],
+    ["start-bridge", {
+      backendType: "gemini",
+      config: {
+        relayUrl: "ws://developer-mac.local:54322/relay",
+      },
+    }],
+  ]);
+  assert.match(logs.join("\n"), /AI backend: Gemini CLI\. Run `remodex up --switch` to change\./);
+  assert.match(logs.join("\n"), /gemini relay listening on 0\.0\.0\.0:54322/);
 });
 
 test("remodex status --json exposes daemon metadata for companion apps", async () => {

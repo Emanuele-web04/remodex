@@ -28,7 +28,8 @@ const {
 const { version } = require("../package.json");
 
 const defaultDeps = {
-  createRelayServer: loadLocalRelayServer,
+  createCodexRelayServer: loadCodexRelayServer,
+  createGeminiRelayServer: loadLocalRelayServer,
   verifyGeminiCliReady,
   getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
@@ -295,6 +296,7 @@ async function runForegroundBridge({
     consoleImpl,
   });
   const relay = await ensureForegroundRelay({
+    backendType,
     env,
     deps,
     consoleImpl,
@@ -337,6 +339,7 @@ function parseCliArgs(rawArgs) {
 }
 
 async function ensureForegroundRelay({
+  backendType = "codex",
   env = process.env,
   deps = defaultDeps,
   consoleImpl = console,
@@ -350,11 +353,19 @@ async function ensureForegroundRelay({
     };
   }
 
-  const createRelayServer = typeof deps.createRelayServer === "function"
-    ? deps.createRelayServer()
+  const relayKind = backendType === "gemini" ? "gemini" : "codex";
+  const relayLoader = relayKind === "gemini"
+    ? deps.createGeminiRelayServer
+    : deps.createCodexRelayServer;
+  const createRelayServer = typeof relayLoader === "function"
+    ? relayLoader()
     : null;
   if (typeof createRelayServer !== "function") {
-    consoleImpl.error("[remodex] Unable to start the local relay bundled with this CLI.");
+    consoleImpl.error(
+      relayKind === "gemini"
+        ? "[remodex] Unable to start the Gemini local relay bundled with this CLI."
+        : "[remodex] Unable to start the Codex relay server from this checkout."
+    );
     exitImpl(1);
     return { relayUrl: "", server: null };
   }
@@ -378,7 +389,7 @@ async function ensureForegroundRelay({
   const actualPort = typeof address === "object" && address ? address.port : port;
   const relayUrl = `ws://${formatRelayHost(advertisedHost)}:${actualPort}/relay`;
 
-  consoleImpl.log(`[remodex] local relay listening on ${bindHost}:${actualPort}`);
+  consoleImpl.log(`[remodex] ${relayKind} relay listening on ${bindHost}:${actualPort}`);
   consoleImpl.log(`[remodex] advertising relay as ${relayUrl}`);
   installRelayShutdownHandlers({
     server,
@@ -479,6 +490,21 @@ function formatRelayHost(host) {
 
 function loadLocalRelayServer() {
   return require("../src/local-relay").createRelayServer;
+}
+
+function loadCodexRelayServer() {
+  const candidatePaths = [
+    path.resolve(__dirname, "..", "..", "relay", "server.js"),
+    path.resolve(process.cwd(), "relay", "server.js"),
+  ];
+
+  for (const candidatePath of candidatePaths) {
+    if (fs.existsSync(candidatePath)) {
+      return require(candidatePath).createRelayServer;
+    }
+  }
+
+  return null;
 }
 
 async function runGeminiPreflight({
