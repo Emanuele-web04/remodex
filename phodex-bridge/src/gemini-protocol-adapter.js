@@ -18,7 +18,8 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   let geminiInitialized = false;
   let geminiSessionId = null;
   let geminiSessionCwd = null;
-  let geminiModels = [];
+  let sessionCwd = process.cwd();
+let geminiModels = [];
   let geminiModes = [];
   let geminiCurrentModelId = null;
   let geminiCurrentModeId = null;
@@ -480,7 +481,7 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     // Create a session
     const sessionRequestId = nextGeminiRequestId();
     sendGeminiRequest(sessionRequestId, "session/new", {
-      cwd: process.cwd(),
+      cwd: sessionCwd,
       mcpServers: [],
     });
   }
@@ -592,16 +593,38 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       case "thinking_complete":
         break;
       case "tool_call":
+        state.activeToolName = update.name || "tool";
+        emitCodexEvent("item/started", {
+          threadId: threadId,
+          turnId: state.activeTurnId,
+          item: {
+            id: update.id || `tool-${Date.now()}`,
+            type: "commandExecution",
+            command: state.activeToolName,
+          }
+        });
         emitCodexEvent("item/commandExecution/outputDelta", {
           threadId: threadId,
           turnId: state.activeTurnId,
-          delta: `Running: ${update.name || "tool"}`,
+          itemId: update.id,
+          item: {
+            id: update.id || `tool-${Date.now()}`,
+            type: "commandExecution",
+            command: state.activeToolName,
+          },
+          delta: `Running: ${state.activeToolName}\n`,
         });
         break;
       case "tool_result":
         emitCodexEvent("item/commandExecution/outputDelta", {
           threadId: threadId,
           turnId: state.activeTurnId,
+          itemId: update.id,
+          item: {
+            id: update.id || `tool-${Date.now()}`,
+            type: "commandExecution",
+            command: state.activeToolName || "tool",
+          },
           delta: update.output || "",
         });
         break;
@@ -1034,7 +1057,8 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   function handleThreadStart(parsed) {
     const requestId = parsed.id;
     const params = parsed.params || {};
-    const requestedCwd = params.workingDirectory || params.cwd || process.cwd();
+    const requestedCwd = params.workingDirectory || params.cwd || sessionCwd;
+    sessionCwd = requestedCwd;
     activeThreadId = `gemini-${randomBytes(8).toString("hex")}`;
 
     // Respect requested model from the start
