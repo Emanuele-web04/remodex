@@ -2,7 +2,7 @@
 // Purpose: Runs Codex locally, bridges relay traffic, and coordinates desktop refreshes for Codex.app.
 // Layer: CLI service
 // Exports: startBridge
-// Depends on: ws, crypto, os, ./codex-home, ./qr, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch, ./voice-handler, ./ios-app-compatibility
+// Depends on: ws, crypto, os, ./bridge-status, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch, ./voice-handler
 
 const WebSocket = require("ws");
 const { randomBytes } = require("crypto");
@@ -14,6 +14,11 @@ const {
   CodexDesktopRefresher,
   readBridgeConfig,
 } = require("./codex-desktop-refresher");
+const {
+  buildHeartbeatBridgeStatus,
+  createBridgeStatusPublisher,
+  hasRelayConnectionGoneStale,
+} = require("./bridge-status");
 const { createCodexTransport } = require("./codex-transport");
 const {
   createThreadRolloutActivityWatcher,
@@ -62,10 +67,6 @@ const {
 
 const execFileAsync = promisify(execFile);
 const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
-// Keep the watchdog above the relay heartbeat cadence so quiet healthy sockets survive idle gaps.
-const RELAY_WATCHDOG_STALE_AFTER_MS = 70_000;
-const BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS = 5_000;
-const STALE_RELAY_STATUS_MESSAGE = "Relay heartbeat stalled; reconnect pending.";
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
@@ -157,9 +158,7 @@ function startBridge({
   let reconnectAttempt = 0;
   let reconnectTimer = null;
   let relayWatchdogTimer = null;
-  let statusHeartbeatTimer = null;
   let lastRelayActivityAt = 0;
-  let lastPublishedBridgeStatus = null;
   let lastConnectionStatus = null;
   let codexLaunchState = config.codexEndpoint ? "connected" : "starting";
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
@@ -230,7 +229,14 @@ function startBridge({
     sendCodexRequest,
     logPrefix: "[remodex]",
   });
-  startBridgeStatusHeartbeat();
+  const bridgeStatusPublisher = createBridgeStatusPublisher({
+    onBridgeStatus,
+    getCodexLaunchState: () => codexLaunchState,
+  });
+  bridgeStatusPublisher.startHeartbeat({
+    shouldPublish: () => !isShuttingDown,
+    getLastRelayActivityAt: () => lastRelayActivityAt,
+  });
   publishBridgeStatus({
     state: "starting",
     connectionStatus: "starting",
@@ -259,6 +265,7 @@ function startBridge({
   // Marks the local Codex runtime as launchable before relay/network recovery updates.
   codex.onStarted(() => {
     codexLaunchState = "connected";
+    const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
     if (!lastPublishedBridgeStatus) {
       return;
     }
@@ -273,31 +280,6 @@ function startBridge({
 
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
-  }
-
-  // Periodically rewrites the latest bridge snapshot so CLI status does not stay frozen.
-  function startBridgeStatusHeartbeat() {
-    if (statusHeartbeatTimer) {
-      return;
-    }
-
-    statusHeartbeatTimer = setInterval(() => {
-      if (!lastPublishedBridgeStatus || isShuttingDown) {
-        return;
-      }
-
-      onBridgeStatus?.(buildHeartbeatBridgeStatus(lastPublishedBridgeStatus, lastRelayActivityAt));
-    }, BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS);
-    statusHeartbeatTimer.unref?.();
-  }
-
-  function clearBridgeStatusHeartbeat() {
-    if (!statusHeartbeatTimer) {
-      return;
-    }
-
-    clearInterval(statusHeartbeatTimer);
-    statusHeartbeatTimer = null;
   }
 
   // Tracks relay liveness locally so sleep/wake zombie sockets can be force-reconnected.
@@ -373,7 +355,7 @@ function startBridge({
         bridgeWakeAssertion.stop();
         clearReconnectTimer();
         clearRelayWatchdog();
-        clearBridgeStatusHeartbeat();
+        bridgeStatusPublisher.stopHeartbeat();
       });
       return;
     }
@@ -494,7 +476,7 @@ function startBridge({
 
   codex.onClose(() => {
     clearRelayWatchdog();
-    clearBridgeStatusHeartbeat();
+    bridgeStatusPublisher.stopHeartbeat();
     logConnectionStatus("disconnected");
     publishBridgeStatus({
       state: "stopped",
@@ -521,14 +503,14 @@ function startBridge({
     bridgeWakeAssertion.stop();
     clearReconnectTimer();
     clearRelayWatchdog();
-    clearBridgeStatusHeartbeat();
+    bridgeStatusPublisher.stopHeartbeat();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
     bridgeWakeAssertion.stop();
     clearReconnectTimer();
     clearRelayWatchdog();
-    clearBridgeStatusHeartbeat();
+    bridgeStatusPublisher.stopHeartbeat();
   }));
 
   // Routes decrypted app payloads through the same bridge handlers as before.
@@ -1224,12 +1206,7 @@ function startBridge({
   }
 
   function publishBridgeStatus(status) {
-    const nextStatus = {
-      ...status,
-      codexLaunchState,
-    };
-    lastPublishedBridgeStatus = nextStatus;
-    onBridgeStatus?.(nextStatus);
+    bridgeStatusPublisher.publish(status);
   }
 
   // Refreshes the relay's trusted-mac index after the QR bootstrap locks in a phone identity.
@@ -2788,48 +2765,6 @@ function truncateRelayTextTail(value, maxChars) {
 
   const tail = value.slice(-maxChars).trimStart();
   return `…\n${tail}`;
-}
-
-// Treats silent relay sockets as stale so the daemon can self-heal after sleep/wake.
-function hasRelayConnectionGoneStale(
-  lastActivityAt,
-  {
-    now = Date.now(),
-    staleAfterMs = RELAY_WATCHDOG_STALE_AFTER_MS,
-  } = {}
-) {
-  return Number.isFinite(lastActivityAt)
-    && Number.isFinite(now)
-    && now - lastActivityAt >= staleAfterMs;
-}
-
-// Keeps persisted daemon status honest by downgrading stale "connected" snapshots.
-function buildHeartbeatBridgeStatus(
-  status,
-  lastActivityAt,
-  {
-    now = Date.now(),
-    staleAfterMs = RELAY_WATCHDOG_STALE_AFTER_MS,
-    staleMessage = STALE_RELAY_STATUS_MESSAGE,
-  } = {}
-) {
-  if (!status || typeof status !== "object") {
-    return status;
-  }
-
-  if (status.connectionStatus !== "connected") {
-    return status;
-  }
-
-  if (!hasRelayConnectionGoneStale(lastActivityAt, { now, staleAfterMs })) {
-    return status;
-  }
-
-  return {
-    ...status,
-    connectionStatus: "disconnected",
-    lastError: staleMessage,
-  };
 }
 
 function persistBridgePreferences(

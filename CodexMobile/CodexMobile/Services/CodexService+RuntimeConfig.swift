@@ -478,8 +478,12 @@ private extension CodexService {
 
     func normalizeRuntimeSelectionsAfterModelsUpdate() {
         guard !availableModels.isEmpty else {
-            selectedModelId = selectedModelId ?? RuntimeSelectionDefaults.modelId
-            selectedReasoningEffort = selectedReasoningEffort ?? RuntimeSelectionDefaults.reasoningEffort
+            if selectedModelId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                selectedModelId = nil
+            }
+            if selectedReasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                selectedReasoningEffort = nil
+            }
             persistRuntimeSelections()
             return
         }

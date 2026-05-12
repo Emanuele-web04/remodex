@@ -318,6 +318,7 @@ extension CodexService {
                 "experimentalApi": .bool(true),
             ]),
         ])
+        var shouldProbePlanCollaborationMode = false
 
         do {
             let initializeResponse = try await sendRequest(
@@ -332,14 +333,7 @@ extension CodexService {
             // explicitly rejects `collaborationMode` on a turn request later.
             supportsTurnCollaborationMode = true
             debugRuntimeLog("initialize success experimentalApi=true")
-
-            let runtimeReportedPlanSupport = await runtimeSupportsPlanCollaborationMode()
-            debugRuntimeLog("collaborationMode/list plan=\(runtimeReportedPlanSupport)")
-            if !runtimeReportedPlanSupport {
-                debugRuntimeLog(
-                    "collaborationMode/list did not report plan; will still attempt collaborationMode until runtime rejects it"
-                )
-            }
+            shouldProbePlanCollaborationMode = true
         } catch {
             if let incompatibleAppVersionError = incompatibleBridgeAppVersionError(from: error) {
                 throw incompatibleAppVersionError
@@ -372,6 +366,9 @@ extension CodexService {
 
         try await sendNotification(method: "initialized", params: nil)
         isInitialized = true
+        if shouldProbePlanCollaborationMode {
+            schedulePlanCollaborationModeProbe()
+        }
     }
 
     // Converts a bridge-declared "your iPhone app is too old" initialize failure into
@@ -497,7 +494,7 @@ extension CodexService {
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
         // Thread metadata drives the visible app shell, so do it before slower runtime option sync.
         try? await listThreads()
-        try? await listModels()
+        scheduleRuntimeOptionRefresh()
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
             return
         }
@@ -528,6 +525,28 @@ extension CodexService {
                     requestImmediateSync: activeThreadId == threadId
                 )
             }
+        }
+    }
+
+    // Checks optional plan-mode metadata after the socket is usable so reconnect is not gated by it.
+    private func schedulePlanCollaborationModeProbe() {
+        Task { @MainActor [weak self] in
+            guard let self, self.isConnected, self.isInitialized else { return }
+            let runtimeReportedPlanSupport = await self.runtimeSupportsPlanCollaborationMode()
+            self.debugRuntimeLog("collaborationMode/list plan=\(runtimeReportedPlanSupport)")
+            if !runtimeReportedPlanSupport {
+                self.debugRuntimeLog(
+                    "collaborationMode/list did not report plan; will still attempt collaborationMode until runtime rejects it"
+                )
+            }
+        }
+    }
+
+    // Refreshes model/reasoning options in parallel with chat catch-up; the composer has its own loading state.
+    private func scheduleRuntimeOptionRefresh() {
+        Task { @MainActor [weak self] in
+            guard let self, self.isConnected, self.isInitialized else { return }
+            try? await self.listModels()
         }
     }
 
