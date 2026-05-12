@@ -13,6 +13,8 @@ const path = require("path");
 const {
   createCodexLaunchPlans,
   createCodexTransport,
+  extractMissingEnvironmentVariable,
+  formatCodexLaunchFailure,
 } = require("../src/codex-transport");
 
 class FakeWebSocket {
@@ -160,6 +162,47 @@ test("spawn transport retries with the bundled Codex binary after an ENOENT laun
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("spawn transport explains Codex API-key environment failures without asking Remodex to store secrets", () => {
+  const children = [];
+  const transport = createCodexTransport({
+    env: { PATH: "/usr/bin:/bin" },
+    spawnImpl() {
+      const child = createFakeChild();
+      children.push(child);
+      return child;
+    },
+  });
+
+  let reportedError = null;
+  transport.onError((error) => {
+    reportedError = error;
+  });
+
+  children[0].emitStderr("data", Buffer.from("Error: Missing environment variable: `CODEX_API_KEY`.\n"));
+  children[0].emit("close", 1, null);
+
+  assert.ok(reportedError);
+  assert.match(reportedError.message, /Codex launcher `codex app-server` failed/);
+  assert.match(reportedError.message, /Codex is asking for CODEX_API_KEY/);
+  assert.match(reportedError.message, /Remodex does not store or forward OpenAI API keys/);
+  assert.match(reportedError.message, /codex login/);
+});
+
+test("missing environment variable diagnostics are extracted from Codex stderr", () => {
+  assert.equal(
+    extractMissingEnvironmentVariable("Error: Missing environment variable: `CODEX_API_KEY`."),
+    "CODEX_API_KEY"
+  );
+  assert.equal(extractMissingEnvironmentVariable("Process exited with code 1."), "");
+
+  const message = formatCodexLaunchFailure({
+    launchDescription: "`codex app-server`",
+    reason: "Missing environment variable: `CUSTOM_PROVIDER_KEY`.",
+  });
+  assert.match(message, /CUSTOM_PROVIDER_KEY/);
+  assert.match(message, /custom provider env var/);
 });
 
 function createFakeChild() {

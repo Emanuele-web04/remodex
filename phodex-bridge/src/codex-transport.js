@@ -254,7 +254,32 @@ function shutdownCodexProcess(codex) {
 function createCodexCloseError({ code, signal, stderrBuffer, launchDescription }) {
   const details = stderrBuffer.trim();
   const reason = details || `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ""}.`;
-  return new Error(`Codex launcher ${launchDescription} failed: ${reason}`);
+  return new Error(formatCodexLaunchFailure({
+    launchDescription,
+    reason,
+  }));
+}
+
+// Turns common Codex auth/config failures into recovery guidance without handling secrets in Remodex.
+function formatCodexLaunchFailure({ launchDescription, reason }) {
+  const message = `Codex launcher ${launchDescription} failed: ${reason}`;
+  const missingEnvVar = extractMissingEnvironmentVariable(reason);
+  if (!missingEnvVar) {
+    return message;
+  }
+
+  const guidance = [
+    `Codex is asking for ${missingEnvVar}, which usually means your Codex config forces API-key auth or a custom provider env var.`,
+    "Remodex does not store or forward OpenAI API keys.",
+    "Recommended fix: run `codex login` on this Mac, then restart Remodex.",
+    "If you intentionally use API-key auth, run `printenv OPENAI_API_KEY | codex login --with-api-key` or make that env var available to the Remodex daemon yourself.",
+  ];
+  return `${message}\n${guidance.join("\n")}`;
+}
+
+function extractMissingEnvironmentVariable(reason) {
+  const match = String(reason || "").match(/Missing environment variable:\s*`?([A-Za-z_][A-Za-z0-9_]*)`?/i);
+  return match ? match[1] : "";
 }
 
 function appendOutputBuffer(buffer, chunk) {
@@ -350,4 +375,6 @@ function createListenerBag() {
 module.exports = {
   createCodexLaunchPlans,
   createCodexTransport,
+  extractMissingEnvironmentVariable,
+  formatCodexLaunchFailure,
 };

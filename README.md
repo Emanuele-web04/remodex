@@ -93,10 +93,36 @@ This repo contains the local bridge, the iOS app target, and their tests:
 
 - **Node.js** v18+
 - **[Codex CLI](https://github.com/openai/codex)** installed and in your PATH
+- **Codex CLI authenticated on the Mac** (`codex login status` should succeed)
 - **[Codex desktop app](https://openai.com/index/codex/)** (optional — for viewing threads on your Mac)
 - **A signed Remodex iOS build** installed on your iPhone or iPad before scanning the pairing QR
 - **macOS** (for desktop refresh features — the core bridge works on any OS)
 - **Xcode 16+** (only if building the iOS app from source)
+
+## Codex Authentication
+
+Remodex does not manage OpenAI credentials. It expects the local Codex CLI to be installed and authenticated before the bridge starts:
+
+```sh
+codex login status
+codex login
+```
+
+If startup fails with `Missing environment variable: CODEX_API_KEY`, that error is coming from your Codex CLI configuration, not from Remodex. The safest recovery is to authenticate Codex directly, then restart Remodex:
+
+```sh
+codex login
+remodex restart
+```
+
+If you intentionally use API-key auth, configure Codex itself rather than storing keys in Remodex:
+
+```sh
+printenv OPENAI_API_KEY | codex login --with-api-key
+remodex restart
+```
+
+Do not put live OpenAI API keys into the Remodex launchd plist or relay configuration.
 
 ## Install the Bridge
 

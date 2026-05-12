@@ -257,7 +257,7 @@ function startBridge({
     } else {
       console.error("[remodex] Failed to start `codex app-server`.");
       console.error(`[remodex] Launch command: ${codex.describe()}`);
-      console.error("[remodex] Make sure the Codex CLI is installed and that the launcher works on this OS.");
+      console.error("[remodex] Make sure the Codex CLI is installed, authenticated, and launchable on this OS.");
     }
     console.error(error.message);
     process.exit(1);
