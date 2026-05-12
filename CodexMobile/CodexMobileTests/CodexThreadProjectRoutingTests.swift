@@ -170,6 +170,84 @@ final class CodexThreadProjectRoutingTests: XCTestCase {
         XCTAssertEqual(service.associatedManagedWorktreePath(for: "thread-1"), worktreePath)
     }
 
+    func testProjectlessThreadResumeDoesNotInjectCwd() async throws {
+        let service = makeService()
+        service.upsertThread(CodexThread(id: "quick-chat", title: "Quick Chat", cwd: nil))
+
+        var resumeParams: RPCObject?
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "thread/resume")
+            resumeParams = params?.objectValue
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "id": .string("quick-chat"),
+                        "title": .string("Quick Chat"),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let resumedThread = try await service.ensureThreadResumed(
+            threadId: "quick-chat",
+            force: true
+        )
+
+        XCTAssertNil(resumeParams?["cwd"])
+        XCTAssertNil(resumedThread?.gitWorkingDirectory)
+        XCTAssertNil(service.thread(for: "quick-chat")?.gitWorkingDirectory)
+    }
+
+    func testProjectlessThreadTurnStartDoesNotInjectCwd() async throws {
+        let service = makeService()
+        service.upsertThread(CodexThread(id: "quick-chat", title: "Quick Chat", cwd: nil))
+
+        var recordedMethods: [String] = []
+        var resumeParams: RPCObject?
+        var turnStartParams: RPCObject?
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            switch method {
+            case "thread/resume":
+                resumeParams = params?.objectValue
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string("quick-chat"),
+                            "title": .string("Quick Chat"),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "turn/start":
+                turnStartParams = params?.objectValue
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["turnId": .string("turn-quick-chat")]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        try await service.startTurn(
+            userInput: "follow up",
+            threadId: "quick-chat",
+            shouldAppendUserMessage: false
+        )
+
+        XCTAssertEqual(recordedMethods, ["thread/resume", "turn/start"])
+        XCTAssertNil(resumeParams?["cwd"])
+        XCTAssertNil(turnStartParams?["cwd"])
+        XCTAssertEqual(turnStartParams?["threadId"]?.stringValue, "quick-chat")
+        XCTAssertNil(service.thread(for: "quick-chat")?.gitWorkingDirectory)
+    }
+
     private func makeService(defaults: UserDefaults? = nil) -> CodexService {
         let resolvedDefaults: UserDefaults
         if let defaults {

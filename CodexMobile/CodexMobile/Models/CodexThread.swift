@@ -242,6 +242,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
 extension CodexThread {
     // --- UI helpers -----------------------------------------------------------
     static let defaultDisplayTitle = "New Thread"
+    static let noProjectDisplayName = "No Project"
     private static let noProjectGroupKey = "__no_project__"
 
     // Old rollouts may still persist "Conversation", so treat both labels as the same placeholder.
@@ -418,7 +419,7 @@ extension CodexThread {
     // Distinguishes Codex-managed worktrees from the main repo in compact sidebar UIs.
     static func projectDisplayLabel(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
-            return "Cloud"
+            return noProjectDisplayName
         }
 
         let baseLabel = projectBaseDisplayName(for: normalizedProjectPath)
@@ -431,7 +432,7 @@ extension CodexThread {
 
     static func projectIconSystemName(for normalizedProjectPath: String?) -> String {
         guard let normalizedProjectPath else {
-            return "cloud"
+            return "bubble.left.and.bubble.right"
         }
 
         return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "folder" : "arrow.triangle.branch"

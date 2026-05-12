@@ -10,6 +10,7 @@ import UIKit
 struct TurnComposerSecondaryBar: View {
     let isInputFocused: Bool
     let isEmptyThread: Bool
+    let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
 
     let selectedAccessMode: CodexAccessMode
@@ -43,7 +44,12 @@ struct TurnComposerSecondaryBar: View {
     private let branchLabelColor = Color(.secondaryLabel)
     private var branchTextFont: Font { AppFont.subheadline() }
     private var branchChevronFont: Font { AppFont.system(size: 9, weight: .regular) }
-    private var runtimeLabelTitle: String { isWorktreeProject ? "Worktree" : "Local" }
+    private var runtimeLabelTitle: String {
+        if !hasWorkingDirectory {
+            return "Quick Chat"
+        }
+        return isWorktreeProject ? "Worktree" : "Local"
+    }
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -154,7 +160,10 @@ struct TurnComposerSecondaryBar: View {
             }
         } label: {
             HStack(spacing: 6) {
-                if isWorktreeProject {
+                if !hasWorkingDirectory {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(branchTextFont)
+                } else if isWorktreeProject {
                     CodexWorktreeIcon(pointSize: 12, weight: .regular)
                 } else {
                     Image(systemName: "laptopcomputer")

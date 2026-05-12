@@ -26,7 +26,7 @@ enum WorktreeFlowCoordinator {
     ]
 
     // Input: optional Local checkout path chosen by the user.
-    // Output: a brand-new chat in Local or Cloud.
+    // Output: a brand-new chat in Local or project-less Quick Chat mode.
     // Side effects: issues only `thread/start`.
     // Rollback: none.
     // Errors: runtime readiness and `thread/start` failures.

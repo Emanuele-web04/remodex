@@ -110,6 +110,16 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertNil(thread.gitWorkingDirectory)
     }
 
+    func testProjectlessThreadUsesNoProjectPresentation() {
+        let thread = CodexThread(id: "thread-1", cwd: nil)
+
+        XCTAssertEqual(thread.projectDisplayName, "No Project")
+        XCTAssertEqual(CodexThread.projectDisplayLabel(for: nil), "No Project")
+        XCTAssertEqual(CodexThread.projectIconSystemName(for: nil), "bubble.left.and.bubble.right")
+        XCTAssertNil(thread.normalizedProjectPath)
+        XCTAssertNil(thread.gitWorkingDirectory)
+    }
+
     func testPseudoProjectBucketDoesNotBecomeGitWorkingDirectory() {
         let thread = CodexThread(id: "thread-1", cwd: "_default")
 

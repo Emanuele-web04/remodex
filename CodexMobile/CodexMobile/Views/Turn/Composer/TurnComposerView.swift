@@ -23,6 +23,7 @@ struct TurnComposerView: View {
     let activeTurnID: String?
     let isThreadRunning: Bool
     let isEmptyThread: Bool
+    let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
 
     let orderedModelOptions: [CodexModelOption]
@@ -222,6 +223,7 @@ struct TurnComposerView: View {
             TurnComposerSecondaryBar(
                 isInputFocused: isInputFocused.wrappedValue,
                 isEmptyThread: isEmptyThread,
+                hasWorkingDirectory: hasWorkingDirectory,
                 isWorktreeProject: isWorktreeProject,
                 selectedAccessMode: selectedAccessMode,
                 contextWindowUsage: contextWindowUsage,
@@ -702,6 +704,7 @@ private struct ComposerPreviewContent: View {
             activeTurnID: nil,
             isThreadRunning: isThreadRunning,
             isEmptyThread: true,
+            hasWorkingDirectory: true,
             isWorktreeProject: false,
             orderedModelOptions: modelOptions,
             selectedModelID: "gpt-5.5",
