@@ -74,6 +74,9 @@ const RELAY_TURNS_LIST_TARGET_BUDGET_MS = 5_500;
 const RELAY_TURNS_LIST_BUDGET_RESERVE_MS = 1_000;
 const RELAY_TURNS_LIST_MAX_INITIAL_LIMIT = 5;
 const RELAY_TURNS_LIST_SAFE_RETRY_LIMIT = 5;
+const MODELS_WITHOUT_REASONING_SUMMARY = new Set([
+  "gpt-5.3-codex-spark",
+]);
 const RELAY_TURNS_LIST_RESULT_KEYS = ["data", "items", "turns"];
 const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "nextCursor",
@@ -576,9 +579,10 @@ function startBridge({
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
+    const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
-    rememberThreadFromMessage("phone", rawMessage);
-    codex.send(rawMessage);
+    rememberThreadFromMessage("phone", codexRequest);
+    codex.send(codexRequest);
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
@@ -1407,6 +1411,41 @@ function shutdown(codex, getSocket, beforeExit = () => {}) {
   codex.shutdown();
 
   setTimeout(() => process.exit(0), 100);
+}
+
+// Forces app-server summary generation off for models whose Responses API calls
+// reject reasoning.summary, while leaving the phone-facing runtime choice intact.
+function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || parsed.method !== "turn/start") {
+    return rawMessage;
+  }
+
+  const params = parsed.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : null;
+  if (!params || params.summary === "none") {
+    return rawMessage;
+  }
+
+  const model = readTurnStartModel(params);
+  if (!MODELS_WITHOUT_REASONING_SUMMARY.has(model)) {
+    return rawMessage;
+  }
+
+  return JSON.stringify({
+    ...parsed,
+    params: {
+      ...params,
+      summary: "none",
+    },
+  });
+}
+
+function readTurnStartModel(params) {
+  return normalizeNonEmptyString(params?.model).toLowerCase()
+    || normalizeNonEmptyString(params?.collaborationMode?.settings?.model).toLowerCase()
+    || normalizeNonEmptyString(params?.collaboration_mode?.settings?.model).toLowerCase();
 }
 
 function extractBridgeMessageContext(rawMessage) {
@@ -2811,6 +2850,7 @@ function persistBridgePreferences(
 module.exports = {
   buildHeartbeatBridgeStatus,
   createMacOSBridgeWakeAssertion,
+  disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   normalizeRelayBoundJsonRpcMessage,

@@ -16,12 +16,14 @@ const ACTION_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
   "item/fileRead/requestApproval",
+  "item/permissions/requestApproval",
   "item/tool/requestUserInput",
 ]);
 const REPLY_METHOD_BY_ACTION_METHOD = new Map([
   ["item/commandExecution/requestApproval", "thread-follower-command-approval-decision"],
   ["item/fileChange/requestApproval", "thread-follower-file-approval-decision"],
   ["item/fileRead/requestApproval", "thread-follower-file-approval-decision"],
+  ["item/permissions/requestApproval", "thread-follower-file-approval-decision"],
   ["item/tool/requestUserInput", "thread-follower-submit-user-input"],
 ]);
 const METHOD_VERSION_BY_NAME = new Map([
@@ -483,7 +485,7 @@ function desktopFollowerPayloadForResponse(route, responseMessage) {
     };
   }
 
-  const decision = readString(responseMessage?.result?.decision);
+  const decision = desktopApprovalDecisionForResponse(route.method, responseMessage?.result);
   if (!APPROVAL_DECISIONS.has(decision)) {
     return null;
   }
@@ -496,6 +498,47 @@ function desktopFollowerPayloadForResponse(route, responseMessage) {
       decision,
     },
   };
+}
+
+function desktopApprovalDecisionForResponse(method, result) {
+  const explicitDecision = readString(result?.decision);
+  if (explicitDecision) {
+    return explicitDecision;
+  }
+
+  if (method !== "item/permissions/requestApproval") {
+    return "";
+  }
+
+  // Permission approvals use a grant payload on app-server, while Desktop IPC
+  // currently exposes only decision-style follower replies.
+  return hasGrantedPermission(result?.permissions) ? "accept" : "decline";
+}
+
+function hasGrantedPermission(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  if (Object.keys(value).length === 0) {
+    return false;
+  }
+
+  return Object.values(value).some((entry) => {
+    if (entry == null) {
+      return false;
+    }
+    if (typeof entry === "boolean") {
+      return entry;
+    }
+    if (Array.isArray(entry)) {
+      return entry.length > 0;
+    }
+    if (typeof entry === "object") {
+      return Object.keys(entry).length > 0;
+    }
+    return true;
+  });
 }
 
 function projectPendingDesktopActions(threadId, conversationState) {

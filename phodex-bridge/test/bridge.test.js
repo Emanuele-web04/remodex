@@ -12,6 +12,7 @@ const path = require("node:path");
 const {
   buildHeartbeatBridgeStatus,
   createMacOSBridgeWakeAssertion,
+  disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   normalizeRelayBoundJsonRpcMessage,
@@ -156,6 +157,61 @@ test("normalizeRelayBoundJsonRpcMessage keeps server-origin approval requests", 
   });
 
   assert.equal(normalizeRelayBoundJsonRpcMessage(raw), raw);
+});
+
+test("disableUnsupportedReasoningSummaryForTurnStart disables summaries for Codex Spark", () => {
+  const raw = JSON.stringify({
+    id: "req-turn-start",
+    method: "turn/start",
+    params: {
+      threadId: "thread-1",
+      model: "gpt-5.3-codex-spark",
+      effort: "medium",
+      input: [{ type: "text", text: "Ship it" }],
+    },
+  });
+
+  const normalized = JSON.parse(disableUnsupportedReasoningSummaryForTurnStart(raw));
+
+  assert.equal(normalized.params.model, "gpt-5.3-codex-spark");
+  assert.equal(normalized.params.summary, "none");
+});
+
+test("disableUnsupportedReasoningSummaryForTurnStart detects plan-mode Codex Spark model", () => {
+  const raw = JSON.stringify({
+    id: "req-turn-start-plan",
+    method: "turn/start",
+    params: {
+      threadId: "thread-1",
+      input: [{ type: "text", text: "Plan it" }],
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          model: "gpt-5.3-codex-spark",
+          reasoning_effort: "medium",
+        },
+      },
+    },
+  });
+
+  const normalized = JSON.parse(disableUnsupportedReasoningSummaryForTurnStart(raw));
+
+  assert.equal(normalized.params.summary, "none");
+  assert.equal(normalized.params.collaborationMode.settings.model, "gpt-5.3-codex-spark");
+});
+
+test("disableUnsupportedReasoningSummaryForTurnStart leaves other models untouched", () => {
+  const raw = JSON.stringify({
+    id: "req-turn-start-gpt55",
+    method: "turn/start",
+    params: {
+      threadId: "thread-1",
+      model: "gpt-5.5",
+      input: [{ type: "text", text: "Ship it" }],
+    },
+  });
+
+  assert.equal(disableUnsupportedReasoningSummaryForTurnStart(raw), raw);
 });
 
 test("hasRelayConnectionGoneStale returns false for fresh or missing activity timestamps", () => {

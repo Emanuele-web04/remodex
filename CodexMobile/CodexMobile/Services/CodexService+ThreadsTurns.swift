@@ -25,6 +25,31 @@ extension CodexService {
         .object(["decision": .string(decision)])
     }
 
+    // New permission prompts use a grant payload, unlike command/file approval decisions.
+    func permissionApprovalResult(for request: CodexApprovalRequest, grantsRequestedPermissions: Bool) -> JSONValue {
+        let requestedPermissions = request.params?.objectValue?["permissions"] ?? .object([:])
+        return .object([
+            "permissions": grantsRequestedPermissions ? requestedPermissions : .object([:]),
+            "scope": .string("turn"),
+        ])
+    }
+
+    func approvalResponseResult(
+        for request: CodexApprovalRequest,
+        decision: String,
+        forSession: Bool = false
+    ) -> JSONValue {
+        let normalizedMethod = request.method.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalizedMethod == "item/permissions/requestApproval" {
+            return permissionApprovalResult(for: request, grantsRequestedPermissions: decision == "accept")
+        }
+
+        let isCommandApproval = normalizedMethod == "item/commandExecution/requestApproval"
+            || normalizedMethod == "item/command_execution/request_approval"
+        let resolvedDecision = (decision == "accept" && forSession && isCommandApproval) ? "acceptForSession" : decision
+        return approvalDecisionResult(resolvedDecision)
+    }
+
     // Returns the next pending approval for a specific thread, falling back to thread-less requests.
     func pendingApproval(for threadId: String? = nil) -> CodexApprovalRequest? {
         guard let normalizedThreadID = normalizedApprovalThreadIdentifier(threadId) else {
@@ -514,12 +539,10 @@ extension CodexService {
             throw CodexServiceError.noPendingApproval
         }
 
-        let normalizedMethod = request.method.trimmingCharacters(in: .whitespacesAndNewlines)
-        let isCommandApproval = normalizedMethod == "item/commandExecution/requestApproval"
-            || normalizedMethod == "item/command_execution/request_approval"
-        let decision = (forSession && isCommandApproval) ? "acceptForSession" : "accept"
-
-        try await sendResponse(id: request.requestID, result: approvalDecisionResult(decision))
+        try await sendResponse(
+            id: request.requestID,
+            result: approvalResponseResult(for: request, decision: "accept", forSession: forSession)
+        )
         removePendingApproval(requestID: request.requestID)
     }
 
@@ -539,7 +562,10 @@ extension CodexService {
             throw CodexServiceError.noPendingApproval
         }
 
-        try await sendResponse(id: request.requestID, result: approvalDecisionResult("decline"))
+        try await sendResponse(
+            id: request.requestID,
+            result: approvalResponseResult(for: request, decision: "decline")
+        )
         removePendingApproval(requestID: request.requestID)
     }
 
