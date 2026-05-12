@@ -43,6 +43,9 @@ let geminiModels = [];
         collaborationMode: "default",
         approvalPolicy: "on-request",
         completedAssistantText: "",
+        activeThinkingId: null,
+        activeToolId: null,
+        activeToolName: null,
         isGenerating: false,
         promptQueue: [],
       });
@@ -596,20 +599,24 @@ let geminiModels = [];
         break;
       case "thinking_part":
         if (update.text) {
+          const thinkingItemId = state.activeThinkingId || update.id || `think-${Date.now()}`;
+          state.activeThinkingId = thinkingItemId;
           emitCodexEvent("item/reasoning/textDelta", {
             threadId: threadId,
             turnId: state.activeTurnId,
+            itemId: thinkingItemId,
             delta: update.text,
           });
         }
         break;
       case "thinking_complete":
-        if (state.activeThinkingId) {
+        if (state.activeThinkingId || update.id) {
+          const thinkingItemId = state.activeThinkingId || update.id;
           emitCodexEvent("item/completed", {
             threadId: threadId,
             turnId: state.activeTurnId,
             item: {
-              id: state.activeThinkingId,
+              id: thinkingItemId,
               type: "reasoning",
               role: "assistant",
               status: "completed"
@@ -624,13 +631,15 @@ let geminiModels = [];
         if (update.arguments) {
           resolvedCommand = update.arguments.CommandLine || update.arguments.command || update.arguments.cmd || update.arguments.query || rawCommandName;
         }
+        const toolItemId = update.id || state.activeToolId || `tool-${Date.now()}`;
+        state.activeToolId = toolItemId;
         state.activeToolName = resolvedCommand;
         
         emitCodexEvent("item/started", {
           threadId: threadId,
           turnId: state.activeTurnId,
           item: {
-            id: update.id || `tool-${Date.now()}`,
+            id: toolItemId,
             type: "commandExecution",
             command: state.activeToolName,
           }
@@ -638,9 +647,9 @@ let geminiModels = [];
         emitCodexEvent("item/commandExecution/outputDelta", {
           threadId: threadId,
           turnId: state.activeTurnId,
-          itemId: update.id,
+          itemId: toolItemId,
           item: {
-            id: update.id || `tool-${Date.now()}`,
+            id: toolItemId,
             type: "commandExecution",
             command: state.activeToolName,
           },
@@ -648,12 +657,14 @@ let geminiModels = [];
         });
         break;
       case "tool_result":
+        const completedToolItemId = update.id || state.activeToolId || `tool-${Date.now()}`;
+        state.activeToolId = completedToolItemId;
         emitCodexEvent("item/commandExecution/outputDelta", {
           threadId: threadId,
           turnId: state.activeTurnId,
-          itemId: update.id,
+          itemId: completedToolItemId,
           item: {
-            id: update.id || `tool-${Date.now()}`,
+            id: completedToolItemId,
             type: "commandExecution",
             command: state.activeToolName || "tool",
           },
