@@ -4,6 +4,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const readline = require("readline");
+const Module = require("module");
 const { execFile, spawn } = require("child_process");
 // FILE: remodex.js
 // Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and macOS service control.
@@ -493,6 +494,8 @@ function loadLocalRelayServer() {
 }
 
 function loadCodexRelayServer() {
+  addNodeModuleLookupPath(path.resolve(__dirname, "..", "node_modules"));
+
   const candidatePaths = [
     path.resolve(__dirname, "..", "..", "relay", "server.js"),
     path.resolve(process.cwd(), "relay", "server.js"),
@@ -505,6 +508,23 @@ function loadCodexRelayServer() {
   }
 
   return null;
+}
+
+function addNodeModuleLookupPath(nodeModulesPath) {
+  if (!fs.existsSync(nodeModulesPath)) {
+    return;
+  }
+
+  const currentNodePath = process.env.NODE_PATH || "";
+  const paths = currentNodePath
+    ? currentNodePath.split(path.delimiter).filter(Boolean)
+    : [];
+  if (paths.includes(nodeModulesPath)) {
+    return;
+  }
+
+  process.env.NODE_PATH = [...paths, nodeModulesPath].join(path.delimiter);
+  Module._initPaths();
 }
 
 async function runGeminiPreflight({
