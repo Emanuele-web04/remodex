@@ -69,6 +69,46 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
   const threadHistory = new Map(); // Store threadId -> { turns: [], updatedAt, ... }
   const geminiSessionByThread = new Map(); // Store threadId -> { sessionId, cwd }
 
+  function normalizeThreadRecord(threadId, rawRecord = {}) {
+    const now = new Date().toISOString();
+    const normalized = {
+      title: typeof rawRecord.title === "string" && rawRecord.title.trim()
+        ? rawRecord.title
+        : "Gemini Session",
+      turns: Array.isArray(rawRecord.turns) ? rawRecord.turns : [],
+      createdAt: rawRecord.createdAt || now,
+      updatedAt: rawRecord.updatedAt || rawRecord.createdAt || now,
+      cwd: normalizeCwd(rawRecord.cwd),
+      model: typeof rawRecord.model === "string" && rawRecord.model.trim()
+        ? rawRecord.model.trim()
+        : null,
+      modelProvider: "gemini",
+      backendType: "gemini",
+      totalInputTokens: Number(rawRecord.totalInputTokens) || 0,
+      totalOutputTokens: Number(rawRecord.totalOutputTokens) || 0,
+    };
+    if (!normalized.model && geminiCurrentModelId) {
+      normalized.model = geminiCurrentModelId;
+    }
+    return normalized;
+  }
+
+  function buildThreadDescriptor(threadId, rawRecord = {}) {
+    const record = normalizeThreadRecord(threadId, rawRecord);
+    return {
+      id: threadId,
+      threadId,
+      title: record.title,
+      updatedAt: record.updatedAt,
+      createdAt: record.createdAt,
+      syncState: "live",
+      cwd: record.cwd,
+      model: record.model || "gemini",
+      modelProvider: "gemini",
+      backendType: "gemini",
+    };
+  }
+
   // Load persisted sessions
   function loadPersistedState() {
     try {
@@ -76,12 +116,13 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         const data = JSON.parse(fs.readFileSync(stateFile, "utf8"));
         if (data.threads) {
           for (const [tid, tdata] of Object.entries(data.threads)) {
-            threadHistory.set(tid, tdata);
+            const normalizedRecord = normalizeThreadRecord(tid, tdata);
+            threadHistory.set(tid, normalizedRecord);
             // Re-hydrate token counts from history if available
-            if (tdata.totalInputTokens) {
+            if (normalizedRecord.totalInputTokens) {
               const state = getThreadState(tid);
-              state.totalInputTokens = tdata.totalInputTokens;
-              state.totalOutputTokens = tdata.totalOutputTokens || 0;
+              state.totalInputTokens = normalizedRecord.totalInputTokens;
+              state.totalOutputTokens = normalizedRecord.totalOutputTokens || 0;
             }
           }
         }
@@ -106,9 +147,14 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         }
       }
 
+      const persistedThreads = {};
+      for (const [tid, record] of threadHistory.entries()) {
+        persistedThreads[tid] = normalizeThreadRecord(tid, record);
+      }
+
       const data = {
         activeThreadId,
-        threads: Object.fromEntries(threadHistory),
+        threads: persistedThreads,
       };
       fs.writeFileSync(stateFile, JSON.stringify(data, null, 2));
     } catch (e) {
@@ -132,14 +178,13 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
 
   function ensureThreadHistory(threadId, cwd = process.cwd()) {
     if (!threadHistory.has(threadId)) {
-      const now = new Date().toISOString();
-      threadHistory.set(threadId, {
-        title: "Gemini Session",
-        turns: [],
-        createdAt: now,
-        updatedAt: now,
-        cwd,
-      });
+      threadHistory.set(threadId, normalizeThreadRecord(threadId, { cwd }));
+    } else {
+      const updatedRecord = normalizeThreadRecord(threadId, threadHistory.get(threadId));
+      if (cwd) {
+        updatedRecord.cwd = normalizeCwd(cwd);
+      }
+      threadHistory.set(threadId, updatedRecord);
     }
     return threadHistory.get(threadId);
   }
@@ -482,6 +527,17 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
       geminiCurrentModelId = geminiModels[0].id;
     }
 
+    if (threadId) {
+      const threadData = ensureThreadHistory(threadId, geminiSessionCwd);
+      if (!threadData.model && geminiCurrentModelId) {
+        threadData.model = geminiCurrentModelId;
+      }
+      threadData.modelProvider = "gemini";
+      threadData.backendType = "gemini";
+      threadData.updatedAt = new Date().toISOString();
+      savePersistedState();
+    }
+
     log(`Gemini session ready (${geminiSessionCwd})`, "debug");
     log(`Models: ${geminiModels.map(m => m.id).join(", ")}`, "debug");
     sessionReady = true;
@@ -811,26 +867,15 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
           const threads = [];
           // Add persisted threads
           for (const [tid, tdata] of threadHistory) {
-            threads.push({
-              id: tid,
-              title: tdata.title || "Gemini Session",
-              updatedAt: tdata.updatedAt || new Date().toISOString(),
-              createdAt: tdata.createdAt || new Date().toISOString(),
-              syncState: "live",
-              cwd: tdata.cwd || threadCwd(tid),
-              model: tdata.model || geminiCurrentModelId || "gemini",
-            });
+            threads.push(buildThreadDescriptor(tid, tdata));
           }
           // If no threads exist, show at least one
           if (threads.length === 0 && activeThreadId) {
-            threads.push({
-              id: activeThreadId,
+            threads.push(buildThreadDescriptor(activeThreadId, {
               title: "Gemini CLI",
-              updatedAt: new Date().toISOString(),
-              syncState: "live",
               cwd: threadCwd(activeThreadId),
               model: geminiCurrentModelId || "gemini",
-            });
+            }));
           }
           emitCodexResponse(requestId, { threads });
         }
@@ -841,12 +886,11 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         const threadData = threadHistory.get(readThreadId);
         if (requestId != null) {
           emitCodexResponse(requestId, {
-            thread: {
-              id: readThreadId,
-              title: threadData?.title || "Gemini CLI",
-              cwd: threadData?.cwd || threadCwd(readThreadId),
-              model: geminiCurrentModelId,
-            },
+            thread: buildThreadDescriptor(readThreadId, threadData || {
+              title: "Gemini CLI",
+              cwd: threadCwd(readThreadId),
+              model: geminiCurrentModelId || "gemini",
+            }),
             turns: normalizeThreadTurns(threadData?.turns || [], readThreadId),
           });
         }
@@ -870,13 +914,18 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
         if (requestId != null) {
           const resumeThreadId = parsed.params?.threadId || activeThreadId;
           if (resumeThreadId) activeThreadId = resumeThreadId;
+          const activeThreadRecord = activeThreadId
+            ? ensureThreadHistory(activeThreadId, threadCwd(activeThreadId))
+            : null;
           emitCodexResponse(requestId, {
             threadId: activeThreadId,
-            thread: {
-              id: activeThreadId,
-              title: threadHistory.get(activeThreadId)?.title || "Gemini CLI",
-              cwd: threadCwd(activeThreadId),
-            },
+            thread: activeThreadId
+              ? buildThreadDescriptor(activeThreadId, activeThreadRecord || {
+                title: "Gemini CLI",
+                cwd: threadCwd(activeThreadId),
+                model: geminiCurrentModelId || "gemini",
+              })
+              : null,
           });
         }
         return;
@@ -985,26 +1034,24 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     }
 
     const now = new Date().toISOString();
-    const newThread = {
-      id: activeThreadId,
-      threadId: activeThreadId,
+    const normalizedTargetModel = targetModel || geminiCurrentModelId || "gemini";
+    const newThread = buildThreadDescriptor(activeThreadId, {
       title: "Gemini Session",
       updatedAt: now,
       createdAt: now,
-      syncState: "live",
       cwd: requestedCwd,
-      model: targetModel,
-    };
+      model: normalizedTargetModel,
+    });
 
     // Persist the thread
-    threadHistory.set(activeThreadId, {
+    threadHistory.set(activeThreadId, normalizeThreadRecord(activeThreadId, {
       title: "Gemini Session",
       turns: [],
       createdAt: now,
       updatedAt: now,
       cwd: requestedCwd,
-      model: targetModel,
-    });
+      model: normalizedTargetModel,
+    }));
     savePersistedState();
 
     // Reset token counters for new thread
@@ -1053,6 +1100,13 @@ function createGeminiProtocolAdapter({ transport, logPrefix = "[remodex-gemini]"
     if (explicitCwd || !threadData.cwd) {
       threadData.cwd = requestedCwd;
     }
+    if (modelId) {
+      threadData.model = modelId;
+    } else if (!threadData.model && geminiCurrentModelId) {
+      threadData.model = geminiCurrentModelId;
+    }
+    threadData.modelProvider = "gemini";
+    threadData.backendType = "gemini";
     
     const state = getThreadState(threadId);
     state.activeTurnId = `turn-${randomBytes(8).toString("hex")}`;

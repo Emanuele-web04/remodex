@@ -234,3 +234,197 @@ test("Gemini adapter opens a Gemini session in the turn cwd selected by iOS", as
   assert.ok(promptRequest, "expected turn prompt to use the cwd-scoped Gemini session");
   assert.ok(responseById(outbound, "turn-start-documents"));
 });
+
+test("Gemini adapter restores persisted threads with Gemini metadata after adapter restart", async (t) => {
+  const previousHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-gemini-adapter-"));
+  process.env.HOME = tempHome;
+  t.after(() => {
+    process.env.HOME = previousHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const first = createFakeGeminiTransport();
+  const firstAdapter = createGeminiProtocolAdapter({
+    transport: first.transport,
+    logPrefix: "[test-gemini]",
+  });
+  const firstOutbound = [];
+  firstAdapter.onMessage((rawMessage) => firstOutbound.push(JSON.parse(rawMessage)));
+
+  first.emit({
+    jsonrpc: "2.0",
+    id: "gemini-init-1",
+    result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Gemini CLI", version: "test" },
+    },
+  });
+  first.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1000",
+    result: {
+      sessionId: "root-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+
+  firstAdapter.send(JSON.stringify({
+    id: "thread-start-reconnect",
+    method: "thread/start",
+    params: { cwd: "/Users/developer/remodex" },
+  }));
+  const threadId = responseById(firstOutbound, "thread-start-reconnect").result.threadId;
+
+  firstAdapter.send(JSON.stringify({
+    id: "turn-start-reconnect",
+    method: "turn/start",
+    params: {
+      threadId,
+      prompt: "Восстанови меня после reconnect",
+      cwd: "/Users/developer/remodex",
+      model: "gemini-2.5-pro",
+    },
+  }));
+
+  const sessionRequest = first.sent.find((message) =>
+    message.method === "session/new"
+    && message.params?.cwd === "/Users/developer/remodex"
+  );
+  assert.ok(sessionRequest, "expected a cwd-scoped Gemini session request");
+
+  first.emit({
+    jsonrpc: "2.0",
+    id: sessionRequest.id,
+    result: {
+      sessionId: "reconnect-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  first.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_start",
+      },
+    },
+  });
+  first.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_part",
+        text: "Я вернулся после reconnect.",
+      },
+    },
+  });
+  first.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_complete",
+      },
+    },
+  });
+  first.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1002",
+    result: { stopReason: "end_turn" },
+  });
+
+  const second = createFakeGeminiTransport();
+  const secondAdapter = createGeminiProtocolAdapter({
+    transport: second.transport,
+    logPrefix: "[test-gemini]",
+  });
+  const secondOutbound = [];
+  secondAdapter.onMessage((rawMessage) => secondOutbound.push(JSON.parse(rawMessage)));
+
+  second.emit({
+    jsonrpc: "2.0",
+    id: "gemini-init-1",
+    result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Gemini CLI", version: "test" },
+    },
+  });
+  second.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1000",
+    result: {
+      sessionId: "second-root-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+
+  secondAdapter.send(JSON.stringify({
+    id: "thread-list-reconnect",
+    method: "thread/list",
+    params: {},
+  }));
+  secondAdapter.send(JSON.stringify({
+    id: "thread-read-reconnect",
+    method: "thread/read",
+    params: { threadId },
+  }));
+  secondAdapter.send(JSON.stringify({
+    id: "thread-resume-reconnect",
+    method: "thread/resume",
+    params: { threadId },
+  }));
+
+  const listResponse = responseById(secondOutbound, "thread-list-reconnect");
+  const readResponse = responseById(secondOutbound, "thread-read-reconnect");
+  const resumeResponse = responseById(secondOutbound, "thread-resume-reconnect");
+
+  assert.ok(listResponse, "expected thread/list response after adapter restart");
+  assert.ok(readResponse, "expected thread/read response after adapter restart");
+  assert.ok(resumeResponse, "expected thread/resume response after adapter restart");
+
+  assert.equal(listResponse.result.threads.length, 1);
+  assert.equal(listResponse.result.threads[0].id, threadId);
+  assert.equal(listResponse.result.threads[0].model, "gemini-2.5-pro");
+  assert.equal(listResponse.result.threads[0].modelProvider, "gemini");
+  assert.equal(listResponse.result.threads[0].backendType, "gemini");
+
+  assert.equal(readResponse.result.thread.id, threadId);
+  assert.equal(readResponse.result.thread.model, "gemini-2.5-pro");
+  assert.equal(readResponse.result.thread.modelProvider, "gemini");
+  assert.equal(readResponse.result.thread.backendType, "gemini");
+  assert.equal(readResponse.result.turns.length, 1);
+  assert.deepEqual(
+    readResponse.result.turns[0].items.map((item) => item.text),
+    ["Восстанови меня после reconnect", "Я вернулся после reconnect."]
+  );
+
+  assert.equal(resumeResponse.result.threadId, threadId);
+  assert.equal(resumeResponse.result.thread.model, "gemini-2.5-pro");
+  assert.equal(resumeResponse.result.thread.modelProvider, "gemini");
+  assert.equal(resumeResponse.result.thread.backendType, "gemini");
+});

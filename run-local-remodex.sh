@@ -20,6 +20,7 @@ RELAY_URL="${RELAY_URL:-}"
 RELAY_BRIDGE_HOST=""
 RELAY_PID=""
 BRIDGE_PID=""
+BRIDGE_BACKEND_LABEL=""
 
 log() {
   echo "[run-local-remodex] $*"
@@ -361,7 +362,30 @@ print_summary() {
   Relay hostname  : ${RELAY_HOSTNAME}
   Bridge host     : ${RELAY_BRIDGE_HOST}
   Relay URL       : ${RELAY_URL}
+  AI backend      : ${BRIDGE_BACKEND_LABEL}
 EOF
+}
+
+resolve_bridge_backend_label() {
+  BRIDGE_BACKEND_LABEL="$(node <<'NODE'
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+try {
+  const configPath = path.join(os.homedir(), ".remodex", "config.json");
+  if (fs.existsSync(configPath)) {
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    if (parsed?.backend === "gemini") {
+      console.log("Gemini CLI");
+      process.exit(0);
+    }
+  }
+} catch {}
+
+console.log("Codex");
+NODE
+)"
 }
 
 start_bridge() {
@@ -397,6 +421,7 @@ trap cleanup EXIT INT TERM
 parse_args "$@"
 RELAY_HOSTNAME="$(default_hostname)"
 RELAY_BRIDGE_HOST="$(healthcheck_host)"
+resolve_bridge_backend_label
 
 ensure_prerequisites
 ensure_package_dependencies "${BRIDGE_DIR}"
