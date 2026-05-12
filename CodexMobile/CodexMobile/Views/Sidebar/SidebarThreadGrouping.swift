@@ -142,7 +142,7 @@ enum SidebarThreadGrouping {
         let sortDate = representativeThread?.updatedAt ?? representativeThread?.createdAt ?? .distantPast
         return SidebarThreadGroup(
             id: "project:\(projectKey)",
-            label: representativeThread?.projectDisplayName ?? "Cloud",
+            label: representativeThread?.projectDisplayName ?? CodexThread.noProjectDisplayName,
             kind: .project,
             sortDate: sortDate,
             projectPath: representativeThread?.normalizedProjectPath,

@@ -1,5 +1,5 @@
 // FILE: SidebarNewChatProjectPickerSheet.swift
-// Purpose: Minimal "Start new chat" sheet that lets the user pick a project, worktree, or cloud chat.
+// Purpose: Minimal "Start new chat" sheet that lets the user pick a project, worktree, or Quick Chat.
 // Layer: View
 // Exports: SidebarNewChatProjectPickerSheet
 // Depends on: SidebarProjectChoice, AppFont, CodexWorktreeIcon
@@ -94,11 +94,11 @@ struct SidebarNewChatProjectPickerSheet: View {
                     } label: {
                         projectRow(
                             icon: AnyView(
-                                Image(systemName: "cloud")
+                                Image(systemName: "bubble.left.and.bubble.right")
                                     .font(AppFont.body(weight: .medium))
                                     .foregroundStyle(.secondary)
                             ),
-                            title: "Cloud",
+                            title: "Quick Chat",
                             subtitle: "Start a chat without a working directory."
                         )
                     }
