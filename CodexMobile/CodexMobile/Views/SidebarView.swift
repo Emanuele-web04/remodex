@@ -17,6 +17,7 @@ struct SidebarView: View {
     var isVisible: Bool = true
 
     let onClose: () -> Void
+    let onOpenTerminal: () -> Void
     let onNewChatCreationStateChange: (Bool) -> Void
     let onOpenThread: (CodexThread) -> Void
 
@@ -121,6 +122,7 @@ struct SidebarView: View {
             }
 
             HStack(spacing: 10) {
+                SidebarFloatingTerminalButton(colorScheme: colorScheme, action: openTerminal)
                 SidebarFloatingSettingsButton(colorScheme: colorScheme, action: openSettings)
                 Spacer(minLength: 0)
                 if let trustedPairPresentation = codex.trustedPairPresentation {
@@ -359,6 +361,13 @@ struct SidebarView: View {
         searchText = ""
         isSearchActive = false
         showSettings = true
+        onClose()
+    }
+
+    private func openTerminal() {
+        searchText = ""
+        isSearchActive = false
+        onOpenTerminal()
         onClose()
     }
 
