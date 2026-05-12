@@ -91,7 +91,7 @@ test("Gemini adapter returns paginated thread turns instead of an RPC error", as
     method: "turn/start",
     params: {
       threadId,
-      prompt: "Кто ты?",
+      prompt: "Who are you?",
     },
   }));
   const turnId = responseById(outbound, "turn-start-1").result.turnId;
@@ -111,7 +111,7 @@ test("Gemini adapter returns paginated thread turns instead of an RPC error", as
     params: {
       update: {
         sessionUpdate: "message_part",
-        text: "Я Gemini CLI.",
+        text: "I am Gemini CLI.",
       },
     },
   });
@@ -149,8 +149,8 @@ test("Gemini adapter returns paginated thread turns instead of an RPC error", as
     response.result.data[0].items.map((item) => item.type),
     ["user_message", "agent_message"]
   );
-  assert.equal(response.result.data[0].items[0].text, "Кто ты?");
-  assert.equal(response.result.data[0].items[1].text, "Я Gemini CLI.");
+  assert.equal(response.result.data[0].items[0].text, "Who are you?");
+  assert.equal(response.result.data[0].items[1].text, "I am Gemini CLI.");
 });
 
 test("Gemini adapter opens a Gemini session in the turn cwd selected by iOS", async (t) => {
@@ -200,7 +200,7 @@ test("Gemini adapter opens a Gemini session in the turn cwd selected by iOS", as
     params: {
       threadId: "gemini-documents-thread",
       cwd: "/Users/developer/Documents",
-      input: [{ type: "text", text: "Где ты?" }],
+      input: [{ type: "text", text: "Where are you?" }],
     },
   }));
 
@@ -288,7 +288,7 @@ test("Gemini adapter restores persisted threads with Gemini metadata after adapt
     method: "turn/start",
     params: {
       threadId,
-      prompt: "Восстанови меня после reconnect",
+      prompt: "Restore me after reconnect",
       cwd: "/Users/developer/remodex",
       model: "gemini-2.5-pro",
     },
@@ -332,7 +332,7 @@ test("Gemini adapter restores persisted threads with Gemini metadata after adapt
     params: {
       update: {
         sessionUpdate: "message_part",
-        text: "Я вернулся после reconnect.",
+        text: "I returned after reconnect.",
       },
     },
   });
@@ -420,7 +420,7 @@ test("Gemini adapter restores persisted threads with Gemini metadata after adapt
   assert.equal(readResponse.result.turns.length, 1);
   assert.deepEqual(
     readResponse.result.turns[0].items.map((item) => item.text),
-    ["Восстанови меня после reconnect", "Я вернулся после reconnect."]
+    ["Restore me after reconnect", "I returned after reconnect."]
   );
 
   assert.equal(resumeResponse.result.threadId, threadId);
