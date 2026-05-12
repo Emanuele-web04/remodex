@@ -222,6 +222,42 @@ test("trusted session resolve returns the current live session for a trusted iph
   });
 });
 
+test("trusted session resolve also works when the relay HTTP API is mounted under /relay", async () => {
+  const phoneIdentity = makePhoneIdentity();
+
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/live-session-prefixed`, {
+      headers: {
+        "x-role": "mac",
+        "x-mac-device-id": "mac-prefixed",
+        "x-mac-identity-public-key": "mac-public-key-prefixed",
+        "x-trusted-phone-device-id": phoneIdentity.phoneDeviceId,
+        "x-trusted-phone-public-key": phoneIdentity.phoneIdentityPublicKey,
+      },
+    });
+    await onceOpen(mac);
+
+    const body = makeTrustedResolveBody({
+      macDeviceId: "mac-prefixed",
+      phoneIdentity,
+      nonce: "nonce-prefixed",
+      timestamp: Date.now(),
+    });
+    const response = await fetch(`http://127.0.0.1:${port}/relay/v1/trusted/session/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).sessionId, "live-session-prefixed");
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+  });
+});
+
 test("trusted session resolve routes each trusted mobile device to its own live mac channel", async () => {
   const phone = makePhoneIdentity();
   const android = makePhoneIdentity();
@@ -313,6 +349,36 @@ test("pairing code resolve returns bootstrap metadata for a live mac session", a
       macIdentityPublicKey: "mac-public-key-pairing-1",
       expiresAt,
     });
+
+    const macClosed = onceClosed(mac);
+    mac.close();
+    await macClosed;
+  });
+});
+
+test("pairing code resolve also works when the relay HTTP API is mounted under /relay", async () => {
+  await withServer(async ({ port }) => {
+    const expiresAt = Date.now() + 60_000;
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/pairing-live-prefixed`, {
+      headers: {
+        "x-role": "mac",
+        "x-mac-device-id": "mac-pairing-prefixed",
+        "x-mac-identity-public-key": "mac-public-key-pairing-prefixed",
+        "x-pairing-code": "PR23CD34EF",
+        "x-pairing-version": "2",
+        "x-pairing-expires-at": String(expiresAt),
+      },
+    });
+    await onceOpen(mac);
+
+    const response = await fetch(`http://127.0.0.1:${port}/relay/v1/pairing/code/resolve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "PR23CD34EF" }),
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).sessionId, "pairing-live-prefixed");
 
     const macClosed = onceClosed(mac);
     mac.close();

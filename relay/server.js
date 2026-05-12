@@ -147,11 +147,11 @@ async function handleHTTPRequest(req, res, {
     return handleJSONRoute(req, res, async (body) => pushSessionService.notifyCompletion(body));
   }
 
-  if (req.method === "POST" && pathname === "/v1/trusted/session/resolve") {
+  if (req.method === "POST" && isRelayHTTPAPIPath(pathname, "/v1/trusted/session/resolve")) {
     return handleJSONRoute(req, res, async (body) => resolveTrustedMacSession(body));
   }
 
-  if (req.method === "POST" && pathname === "/v1/pairing/code/resolve") {
+  if (req.method === "POST" && isRelayHTTPAPIPath(pathname, "/v1/pairing/code/resolve")) {
     return handleJSONRoute(req, res, async (body) => resolvePairingCode(body));
   }
 
@@ -227,6 +227,11 @@ function writeRateLimitResponse(res) {
     error: "Too many requests",
     code: "rate_limited",
   });
+}
+
+function isRelayHTTPAPIPath(pathname, routePath) {
+  // Supports relays mounted at the domain root or under /relay by a local proxy.
+  return pathname === routePath || pathname === `/relay${routePath}`;
 }
 
 function createDisabledPushSessionService() {
