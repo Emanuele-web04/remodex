@@ -261,8 +261,25 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
                     continuation.resume(returning: allowed)
                 }
             }
+        } else {
+            switch audioSession.recordPermission {
+            case .granted:
+                return true
+            case .denied:
+                return false
+            case .undetermined:
+                break
+            @unknown default:
+                return false
+            }
+
+            return await withCheckedContinuation { continuation in
+                audioSession.requestRecordPermission { allowed in
+                    continuation.resume(returning: allowed)
+                }
+            }
         }
-#endif
+#else
         switch audioSession.recordPermission {
         case .granted:
             return true
@@ -279,6 +296,7 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
                 continuation.resume(returning: allowed)
             }
         }
+#endif
     }
 
     // ─── Audio session ───────────────────────────────────────────

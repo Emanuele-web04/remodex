@@ -79,6 +79,12 @@ enum AppEnvironment {
 }
 
 private extension AppEnvironment {
+    static let feedbackTimestampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     static func resolvedString(forInfoPlistKey key: String) -> String? {
         guard let rawValue = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
             return nil
@@ -114,7 +120,7 @@ private extension AppEnvironment {
             sanitizedFeedbackError(errorMessage),
             "",
             "Context:",
-            "- Time: \(ISO8601DateFormatter().string(from: Date()))"
+            "- Time: \(feedbackTimestampFormatter.string(from: Date()))"
         ]
 
         if let threadId = redactedThreadId(threadId) {

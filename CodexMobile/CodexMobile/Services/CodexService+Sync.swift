@@ -799,9 +799,13 @@ extension CodexService {
 
     func debugSyncLog(_ message: String) {
 #if DEBUG
+        guard Self.isSyncDebugLoggingEnabled else { return }
         print("[CodexSync] \(message)")
 #endif
     }
+
+    // Keep high-volume sync traces opt-in so normal Debug runs stay readable.
+    static var isSyncDebugLoggingEnabled: Bool { false }
 
     // Treats thread as active while a real turn id exists or while protected fallback
     // is keeping the run recoverable before the server publishes that turn id.

@@ -65,6 +65,15 @@ private struct CachedSubscriptionState: Codable, Equatable {
     let managementURLString: String?
 }
 
+private final class CustomerInfoUpdatesTaskStore {
+    var task: Task<Void, Never>?
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+    }
+}
+
 @MainActor
 @Observable
 final class SubscriptionService {
@@ -73,8 +82,7 @@ final class SubscriptionService {
     private static let freeSendLimit = 5
 
     private let defaults: UserDefaults
-    // Keep the task handle nonisolated so `deinit` can cancel it under Swift 6 isolation rules.
-    nonisolated(unsafe) private var customerInfoUpdatesTask: Task<Void, Never>?
+    @ObservationIgnored private let customerInfoUpdatesTaskStore = CustomerInfoUpdatesTaskStore()
     private var isBootstrapping = false
     private var hasCachedOptimisticAccess = false
 
@@ -99,7 +107,7 @@ final class SubscriptionService {
     }
 
     deinit {
-        customerInfoUpdatesTask?.cancel()
+        customerInfoUpdatesTaskStore.cancel()
     }
 
     var remainingFreeSendAttempts: Int {
@@ -271,17 +279,17 @@ final class SubscriptionService {
 
 private extension SubscriptionService {
     func startCustomerInfoObserverIfConfigured() {
-        guard customerInfoUpdatesTask == nil, Purchases.isConfigured else {
+        guard customerInfoUpdatesTaskStore.task == nil, Purchases.isConfigured else {
             return
         }
 
-        customerInfoUpdatesTask = Task { [weak self] in
+        customerInfoUpdatesTaskStore.task = Task { [weak self] in
             for await info in Purchases.shared.customerInfoStream {
                 guard let self else {
                     break
                 }
 
-                await self.handleCustomerInfoStreamUpdate(info)
+                self.handleCustomerInfoStreamUpdate(info)
             }
         }
     }

@@ -7,7 +7,7 @@
 import CryptoKit
 import Foundation
 
-struct CodexMessagePersistence {
+nonisolated struct CodexMessagePersistence {
     // v6 encrypts the on-device message cache while keeping backward-compatible legacy fallbacks.
     private let fileName = "codex-message-history-v6.bin"
     private let legacyFileNames = [

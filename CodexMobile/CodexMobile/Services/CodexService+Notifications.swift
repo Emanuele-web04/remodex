@@ -14,11 +14,13 @@ private enum CodexNotificationSource {
 }
 
 protocol CodexRemoteNotificationRegistering: AnyObject {
+    @MainActor
     func registerForRemoteNotifications()
 }
 
 final class CodexApplicationRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
     // Requests the APNs device token once alert permission is no longer denied.
+    @MainActor
     func registerForRemoteNotifications() {
 #if targetEnvironment(simulator)
         return
@@ -385,7 +387,9 @@ private extension CodexService {
                 return
             }
 
-            self?.handleRemoteNotificationDeviceToken(tokenData)
+            Task { @MainActor [weak self] in
+                self?.handleRemoteNotificationDeviceToken(tokenData)
+            }
         }
 
         let didFailObserver = NotificationCenter.default.addObserver(
@@ -397,7 +401,9 @@ private extension CodexService {
                 return
             }
 
-            self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+            Task { @MainActor [weak self] in
+                self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+            }
         }
 
         notificationObserverTokens = [didRegisterObserver, didFailObserver]

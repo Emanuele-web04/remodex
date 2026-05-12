@@ -79,4 +79,21 @@ final class TurnConnectionRecoverySnapshotBuilderTests: XCTestCase {
         XCTAssertEqual(snapshot?.trailingStyle, .action("Wake Screen"))
         XCTAssertEqual(snapshot?.summary, "Connection was interrupted. Tap Reconnect to try again.")
     }
+
+    func testWakeActionCanShowWhenTrustedResolveMarkedPairForRepairButSavedSessionExists() {
+        let snapshot = TurnConnectionRecoverySnapshotBuilder.makeSnapshot(
+            hasReconnectCandidate: true,
+            isConnected: false,
+            secureConnectionState: .rePairRequired,
+            showsWakeSavedMacDisplayAction: true,
+            isWakingMacDisplayRecovery: false,
+            isConnecting: false,
+            shouldAutoReconnectOnForeground: false,
+            isRetryingConnectionRecovery: false,
+            lastErrorMessage: "Connection was interrupted. Tap Reconnect to try again."
+        )
+
+        XCTAssertEqual(snapshot?.status, .interrupted)
+        XCTAssertEqual(snapshot?.trailingStyle, .action("Wake Screen"))
+    }
 }

@@ -16,7 +16,7 @@ private struct CommandExecutionMessageContext {
 
 // Off-actor wire message classification and JSON-RPC decoding so transport callbacks
 // can parse before dispatching typed results to MainActor.
-enum WireMessagePreDecoder {
+nonisolated enum WireMessagePreDecoder {
     enum Result: Sendable {
         case message(RPCMessage)
         case decodeFailed

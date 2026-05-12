@@ -93,6 +93,53 @@ final class DesktopHandoffServiceTests: XCTestCase {
         XCTAssertEqual(capturedMethods, ["desktop/wakeDisplay"])
     }
 
+    func testWakeDisplayFallsBackToSavedSessionWhenTrustedResolveReportsRePairRequired() async throws {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let relayURL = "ws://macbook-pro-di-emanuele.local:8080/ws"
+        let macPublicKey = Data(repeating: 21, count: 32).base64EncodedString()
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: macPublicKey,
+            lastPairedAt: Date(),
+            relayURL: relayURL
+        )
+        service.lastTrustedMacDeviceId = macDeviceID
+        service.relayUrl = relayURL
+        service.relaySessionId = "session-123"
+        service.relayMacDeviceId = macDeviceID
+        service.relayMacIdentityPublicKey = macPublicKey
+        service.secureConnectionState = .rePairRequired
+        service.lastErrorMessage = "This iPhone is no longer trusted by the paired computer."
+        service.trustedSessionResolverOverride = {
+            throw CodexTrustedSessionResolveError.rePairRequired("Resolve says this phone is not trusted.")
+        }
+
+        var capturedURL: String?
+        service.requestTransportOverride = { _, _ in
+            RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["success": .bool(true)]),
+                includeJSONRPC: false
+            )
+        }
+        let handoff = DesktopHandoffService(
+            codex: service,
+            savedPairConnector: { reconnectURL in
+                capturedURL = reconnectURL
+            }
+        )
+
+        try await handoff.wakeDisplay()
+
+        XCTAssertEqual(
+            capturedURL,
+            "ws://macbook-pro-di-emanuele.local:8080/ws/session-123"
+        )
+        XCTAssertEqual(service.secureConnectionState, .trustedMac)
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
     func testWakeDisplayRequiresSavedPairWhenDisconnected() async {
         let service = makeService()
         let handoff = DesktopHandoffService(codex: service)

@@ -7,17 +7,11 @@
 import Foundation
 import UIKit
 
-private enum RunningThreadHistoryCatchupPolicy {
-    // Running-thread reopen only needs the latest transcript tail to catch up the UI.
-    static let recentMergeWindow = 160
-    static let cancellationCheckInterval = 32
-}
-
 extension CodexService {
     nonisolated static func shouldPreferRecentHistoryWindow(
         existingCount: Int,
         historyCount: Int,
-        windowSize: Int = RunningThreadHistoryCatchupPolicy.recentMergeWindow
+        windowSize: Int = 160
     ) -> Bool {
         let normalizedWindowSize = max(1, windowSize)
         guard existingCount > normalizedWindowSize,
@@ -45,7 +39,7 @@ extension CodexService {
                     history,
                     activeThreadIDs: activeThreadIDs,
                     runningThreadIDs: runningThreadIDs,
-                    windowSize: RunningThreadHistoryCatchupPolicy.recentMergeWindow
+                    windowSize: 160
                 )
             }
 
@@ -536,7 +530,7 @@ extension CodexService {
 
         for message in history {
             processedHistoryMessages &+= 1
-            if processedHistoryMessages.isMultiple(of: RunningThreadHistoryCatchupPolicy.cancellationCheckInterval),
+            if processedHistoryMessages.isMultiple(of: 32),
                Task.isCancelled {
                 throw CancellationError()
             }

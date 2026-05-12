@@ -306,6 +306,11 @@ extension CodexService {
             return
         }
 
+        restoreTrustedPairPresentationState()
+    }
+
+    // Rebuilds the saved-pair UI state from persisted trust without touching sockets or keys.
+    func restoreTrustedPairPresentationState() {
         if let relayMacDeviceId,
            let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
             secureConnectionState = .trustedMac

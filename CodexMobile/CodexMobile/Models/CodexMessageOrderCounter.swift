@@ -10,7 +10,7 @@ import os
 /// Provides a globally unique, monotonically increasing order index for CodexMessage.
 /// This ensures messages are always displayed in the order they were created/received,
 /// regardless of wall-clock timestamp drift between device and server.
-enum CodexMessageOrderCounter {
+nonisolated enum CodexMessageOrderCounter {
     private nonisolated(unsafe) static var counter: Int = 0
     private static let lock = NSLock()
 
