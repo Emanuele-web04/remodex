@@ -40,6 +40,10 @@ struct TerminalOptionsMenu: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Color(hexString: statusTone.text))
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .adaptiveGlass(.regular, in: Capsule())
+            .contentShape(Capsule())
         }
         .accessibilityLabel("Terminal options")
     }

@@ -20,33 +20,37 @@ struct RemodexTerminalTheme: Equatable {
         colorScheme == .light ? light : dark
     }
 
+    // Ghostty ships many bundled themes from iTerm2 color schemes; the screenshots match the
+    // softer "pastel on near-black" family much more than the stock/vivid ANSI palette.
+    // These values are based on Catppuccin Frappe's official Ghostty ANSI colors, with the
+    // darker neutral background from the reference screenshots.
     static let light = RemodexTerminalTheme(
-        background: "#f2f2f7",
-        foreground: "#6C6C71",
-        mutedForeground: "#8E8E95",
-        border: "#eeeeef",
-        cursorForeground: "#009fff",
-        cursorBackground: "#f2f2f7",
+        background: "#eff1f5",
+        foreground: "#4c4f69",
+        mutedForeground: "#8c8fa1",
+        border: "#ccd0da",
+        cursorForeground: "#dc8a78",
+        cursorBackground: "#eff1f5",
         palette: [
-            "#1f1f21", "#ff2e3f", "#0dbe4e", "#ffca00",
-            "#009fff", "#c635e4", "#08c0ef", "#c6c6c8",
-            "#1f1f21", "#ff2e3f", "#0dbe4e", "#ffca00",
-            "#009fff", "#c635e4", "#08c0ef", "#c6c6c8",
+            "#5c5f77", "#d20f39", "#40a02b", "#df8e1d",
+            "#1e66f5", "#ea76cb", "#179299", "#acb0be",
+            "#6c6f85", "#d20f39", "#40a02b", "#df8e1d",
+            "#1e66f5", "#ea76cb", "#179299", "#bcc0cc",
         ]
     )
 
     static let dark = RemodexTerminalTheme(
-        background: "#0a0a0a",
-        foreground: "#adadb1",
-        mutedForeground: "#8e8e95",
-        border: "#2e2e30",
-        cursorForeground: "#009fff",
-        cursorBackground: "#0a0a0a",
+        background: "#101113",
+        foreground: "#d7d7dc",
+        mutedForeground: "#96979f",
+        border: "#2d2e33",
+        cursorForeground: "#4dd78a",
+        cursorBackground: "#101113",
         palette: [
-            "#141415", "#ff2e3f", "#0dbe4e", "#ffca00",
-            "#009fff", "#c635e4", "#08c0ef", "#c6c6c8",
-            "#141415", "#ff2e3f", "#0dbe4e", "#ffca00",
-            "#009fff", "#c635e4", "#08c0ef", "#c6c6c8",
+            "#535766", "#e78284", "#a6d189", "#e5c890",
+            "#8caaee", "#f4b8e4", "#81c8be", "#b7bfd6",
+            "#626880", "#e78284", "#a6d189", "#e5c890",
+            "#8caaee", "#f4b8e4", "#81c8be", "#d8dee9",
         ]
     )
 

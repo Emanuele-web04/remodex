@@ -12,9 +12,47 @@ let remodexTerminalMinFontSize = 6.0
 let remodexTerminalMaxFontSize = 14.0
 let remodexTerminalAccessoryHeight: CGFloat = 52
 
-enum TerminalPendingModifier: Equatable {
+enum TerminalPendingModifier: CaseIterable, Equatable, Hashable {
+    case cmd
+    case shift
+    case alt
     case ctrl
-    case meta
+
+    var selectorLabel: String {
+        switch self {
+        case .cmd: return "cmd ^"
+        case .shift: return "shift ^"
+        case .alt: return "alt ^"
+        case .ctrl: return "ctrl ^"
+        }
+    }
+
+    var menuTitle: String {
+        switch self {
+        case .cmd: return "cmd"
+        case .shift: return "shift"
+        case .alt: return "alt"
+        case .ctrl: return "ctrl"
+        }
+    }
+
+    var menuSymbolName: String {
+        switch self {
+        case .cmd: return "command"
+        case .shift: return "shift"
+        case .alt: return "option"
+        case .ctrl: return "control"
+        }
+    }
+
+    var csiModifierParameter: Int {
+        switch self {
+        case .shift: return 2
+        case .alt: return 3
+        case .ctrl: return 5
+        case .cmd: return 9
+        }
+    }
 }
 
 enum TerminalHostPlatform {
@@ -80,6 +118,14 @@ struct TerminalToolbarAction: Identifiable {
     var isModifier: Bool {
         modifier != nil
     }
+}
+
+// A horizontally-grouped run of keys rendered inside a single glass capsule.
+// Clusters keep semantically-related keys (modifiers, symbols, arrows) visually together
+// so the bar reads like the iOS system keyboard pill row from the reference design.
+struct TerminalToolbarCluster: Identifiable {
+    let id: String
+    let actions: [TerminalToolbarAction]
 }
 
 extension Color {

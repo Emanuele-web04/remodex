@@ -22,6 +22,8 @@ struct TerminalScreen: View {
     @State private var actionErrorMessage: String?
     @State private var didApplyPreferredWorkingDirectory = false
     @State private var pendingModifier: TerminalPendingModifier?
+    @State private var selectedModifier: TerminalPendingModifier = .ctrl
+    @Environment(\.dismiss) private var dismissRoute
     @AppStorage("codex.terminal.fontSize") private var terminalFontSize = remodexTerminalDefaultFontSize
 
     let preferredWorkingDirectory: String?
@@ -139,33 +141,34 @@ struct TerminalScreen: View {
         }
     }
 
-    private var terminalToolbarActions: [TerminalToolbarAction] {
-        let modifierActions: [TerminalToolbarAction]
-        switch hostPlatform {
-        case .mac:
-            modifierActions = [
-                TerminalToolbarAction(kind: .modifier(.meta), key: "cmd", label: "cmd"),
-                TerminalToolbarAction(kind: .modifier(.ctrl), key: "ctrl", label: "ctrl"),
-            ]
-        case .linux, .windows, .unknown:
-            modifierActions = [
-                TerminalToolbarAction(kind: .modifier(.ctrl), key: "ctrl", label: "ctrl"),
-                TerminalToolbarAction(kind: .modifier(.meta), key: "alt", label: "alt"),
-            ]
-        }
-
-        return [
+    private var modifierClusterActions: [TerminalToolbarAction] {
+        [
             TerminalToolbarAction(kind: .send("\u{1B}"), key: "esc", label: "esc"),
-        ] + modifierActions + [
+            TerminalToolbarAction(
+                kind: .modifier(selectedModifier),
+                key: "modifier-selector",
+                label: selectedModifier.selectorLabel
+            ),
             TerminalToolbarAction(kind: .send("\t"), key: "tab", label: "tab"),
-            TerminalToolbarAction(kind: .send("\u{1B}[A"), key: "up", label: "↑"),
-            TerminalToolbarAction(kind: .send("\u{1B}[B"), key: "down", label: "↓"),
-            TerminalToolbarAction(kind: .send("\u{1B}[D"), key: "left", label: "←"),
-            TerminalToolbarAction(kind: .send("\u{1B}[C"), key: "right", label: "→"),
+        ]
+    }
+
+    private var symbolClusterActions: [TerminalToolbarAction] {
+        [
             TerminalToolbarAction(kind: .send("~"), key: "tilde", label: "~"),
             TerminalToolbarAction(kind: .send("|"), key: "pipe", label: "|"),
             TerminalToolbarAction(kind: .send("/"), key: "slash", label: "/"),
-            TerminalToolbarAction(kind: .send("-"), key: "dash", label: "-"),
+        ]
+    }
+
+    private var terminalToolbarClusters: [TerminalToolbarCluster] {
+        [
+            TerminalToolbarCluster(id: "modifiers", actions: modifierClusterActions),
+            TerminalToolbarCluster(id: "symbols", actions: symbolClusterActions),
+            TerminalToolbarCluster(
+                id: "extras",
+                actions: [TerminalToolbarAction(kind: .send("-"), key: "dash", label: "-")]
+            ),
         ]
     }
 
@@ -195,10 +198,17 @@ struct TerminalScreen: View {
             terminalRouteBody
         }
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color(hexString: theme.background), for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
+        .navigationBarBackButtonHidden(true)
+        // Use the system bar (translucent over the black terminal background) instead
+        // of an opaque tinted bar — the glass back button and status pill float on top.
+        .toolbarBackground(.hidden, for: .navigationBar)
         .toolbarColorScheme(colorScheme, for: .navigationBar)
         .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                TerminalGlassBackButton(theme: theme) {
+                    dismissRoute()
+                }
+            }
             ToolbarItem(placement: .principal) {
                 TerminalRouteTitle(
                     topLine: navigationTopLine,
@@ -231,11 +241,14 @@ struct TerminalScreen: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if hasConnectionConfiguration {
                 TerminalRouteAccessoryBar(
-                    actions: terminalToolbarActions,
+                    clusters: terminalToolbarClusters,
                     pendingModifier: pendingModifier,
                     theme: theme,
                     isEnabled: activeSnapshot.status == .running,
-                    onAction: handleToolbarActionPress
+                    onAction: handleToolbarActionPress,
+                    onSelectModifier: selectModifier,
+                    onDismissKeyboard: dismissSystemKeyboard,
+                    onDirectionalInput: sendDirectionalInput
                 )
             }
         }
@@ -473,12 +486,15 @@ struct TerminalScreen: View {
 
         let outputText: String
         switch pendingModifier {
+        case .cmd, .alt:
+            pendingModifier = nil
+            outputText = "\u{1B}\(text)"
+        case .shift:
+            pendingModifier = nil
+            outputText = text
         case .ctrl:
             pendingModifier = nil
             outputText = Self.applyCtrlModifier(text)
-        case .meta:
-            pendingModifier = nil
-            outputText = "\u{1B}\(text)"
         case nil:
             outputText = text
         }
@@ -493,6 +509,36 @@ struct TerminalScreen: View {
         case .send(let data):
             handleTerminalTextInput(data)
         }
+    }
+
+    private func selectModifier(_ modifier: TerminalPendingModifier) {
+        selectedModifier = modifier
+        pendingModifier = modifier
+    }
+
+    // Project-wide pattern (see ContentView.swift:985): nil-target resignFirstResponder
+    // walks the responder chain so we don't need a reference to the offscreen UITextField
+    // that GhosttyTerminalView uses as its first responder.
+    private func dismissSystemKeyboard() {
+        UIApplication.shared.sendAction(
+            #selector(UIResponder.resignFirstResponder),
+            to: nil,
+            from: nil,
+            for: nil
+        )
+    }
+
+    private func sendDirectionalInput(_ text: String) {
+        guard !text.isEmpty else { return }
+        let outputText: String
+        if let modifier = pendingModifier,
+           let modifiedArrow = Self.modifiedArrowSequence(text, modifier: modifier) {
+            pendingModifier = nil
+            outputText = modifiedArrow
+        } else {
+            outputText = text
+        }
+        writeInput(Data(outputText.utf8))
     }
 
     private func writeInput(_ data: Data) {
@@ -582,7 +628,13 @@ struct TerminalScreen: View {
         case "^": return "\u{1E}"
         case "_": return "\u{1F}"
         case "?": return "\u{7F}"
-        default: return input
+            default: return input
         }
+    }
+
+    private static func modifiedArrowSequence(_ input: String, modifier: TerminalPendingModifier) -> String? {
+        guard input.hasPrefix("\u{1B}[") else { return nil }
+        guard let final = input.last, ["A", "B", "C", "D"].contains(final) else { return nil }
+        return "\u{1B}[1;\(modifier.csiModifierParameter)\(final)"
     }
 }
