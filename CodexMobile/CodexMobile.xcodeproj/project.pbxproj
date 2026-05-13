@@ -28,6 +28,14 @@
 		90120FC72C9B8D0F5F03F14D /* CodexMobileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */; };
 		9D7C9A8B7E6D5C4B3A291817 /* TurnViewModelQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */; };
 		A2B3C4D5E6F708192A3B4C6 /* CodexServiceThreadListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B3C4D5E6F708192A3B4C7 /* CodexServiceThreadListTests.swift */; };
+		A4B0C1D2E3F4051627384A02 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A01 /* GhosttyKit.xcframework */; };
+		A4B0C1D2E3F4051627384A04 /* IOSurface.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A03 /* IOSurface.framework */; };
+		A4B0C1D2E3F4051627384A06 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A05 /* Metal.framework */; };
+		A4B0C1D2E3F4051627384A08 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A07 /* MetalKit.framework */; };
+		A4B0C1D2E3F4051627384A0A /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A09 /* QuartzCore.framework */; };
+		A4B0C1D2E3F4051627384A0C /* libc++.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0B /* libc++.tbd */; };
+		A4B0C1D2E3F4051627384A0E /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0D /* libz.tbd */; };
+		A4B0C1D2E3F4051627384A10 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0F /* UIKit.framework */; };
 		A9F1B2C3D4E5F60718293A40 /* TurnSkillAutocompleteTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */; };
 		A9F1B2C3D4E5F60718293A42 /* CodexSkillsListDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */; };
 		A9F1B2C3D4E5F60718293A44 /* CodexTurnInputPayloadSkillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A45 /* CodexTurnInputPayloadSkillTests.swift */; };
@@ -39,6 +47,7 @@
 		B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */; };
 		C04E214B2F71D34100AA3193 /* RevenueCat in Frameworks */ = {isa = PBXBuildFile; productRef = C04E214A2F71D34100AA3193 /* RevenueCat */; };
 		C04E214D2F71D4DB00AA3193 /* StoreKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C04E214C2F71D4DB00AA3193 /* StoreKit.framework */; };
+		C078C1A22F79000100BEEF01 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = C078C1A12F79000100BEEF01 /* Citadel */; };
 		C0DED3362F5E39DC0021A8E8 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = C0DED3352F5E39DC0021A8E8 /* Textual */; };
 		C0F0D1FF2F7210A700A17B41 /* MarkdownView in Frameworks */ = {isa = PBXBuildFile; productRef = C0F0D1FE2F7210A700A17B41 /* MarkdownView */; };
 		D0C0FFEE0000000000000001 /* TextualMarkdownRenderingRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C0FFEE0000000000000002 /* TextualMarkdownRenderingRegressionTests.swift */; };
@@ -89,6 +98,14 @@
 		9A37794F4B32C1952A3770E0 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnViewModelQueueTests.swift; sourceTree = "<group>"; };
 		A2B3C4D5E6F708192A3B4C7 /* CodexServiceThreadListTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceThreadListTests.swift; sourceTree = "<group>"; };
+		A4B0C1D2E3F4051627384A01 /* GhosttyKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = GhosttyKit.xcframework; path = CodexMobile/Terminal/Vendor/GhosttyKit.xcframework; sourceTree = SOURCE_ROOT; };
+		A4B0C1D2E3F4051627384A03 /* IOSurface.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOSurface.framework; path = System/Library/Frameworks/IOSurface.framework; sourceTree = SDKROOT; };
+		A4B0C1D2E3F4051627384A05 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		A4B0C1D2E3F4051627384A07 /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
+		A4B0C1D2E3F4051627384A09 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
+		A4B0C1D2E3F4051627384A0B /* libc++.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libc++.tbd"; path = "usr/lib/libc++.tbd"; sourceTree = SDKROOT; };
+		A4B0C1D2E3F4051627384A0D /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
+		A4B0C1D2E3F4051627384A0F /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		A932BE773A84EFEA525DF684 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = CodexMobile/Assets.xcassets; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnSkillAutocompleteTokenTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexSkillsListDecodeTests.swift; sourceTree = "<group>"; };
@@ -126,7 +143,16 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A4B0C1D2E3F4051627384A02 /* GhosttyKit.xcframework in Frameworks */,
+				A4B0C1D2E3F4051627384A04 /* IOSurface.framework in Frameworks */,
+				A4B0C1D2E3F4051627384A06 /* Metal.framework in Frameworks */,
+				A4B0C1D2E3F4051627384A08 /* MetalKit.framework in Frameworks */,
+				A4B0C1D2E3F4051627384A0A /* QuartzCore.framework in Frameworks */,
+				A4B0C1D2E3F4051627384A10 /* UIKit.framework in Frameworks */,
+				A4B0C1D2E3F4051627384A0C /* libc++.tbd in Frameworks */,
+				A4B0C1D2E3F4051627384A0E /* libz.tbd in Frameworks */,
 				C04E214D2F71D4DB00AA3193 /* StoreKit.framework in Frameworks */,
+				C078C1A22F79000100BEEF01 /* Citadel in Frameworks */,
 				C04E214B2F71D34100AA3193 /* RevenueCat in Frameworks */,
 				C0DED3362F5E39DC0021A8E8 /* Textual in Frameworks */,
 				C0F0D1FF2F7210A700A17B41 /* MarkdownView in Frameworks */,
@@ -250,6 +276,14 @@
 			isa = PBXGroup;
 			children = (
 				9A37794F4B32C1952A3770E0 /* Foundation.framework */,
+				A4B0C1D2E3F4051627384A01 /* GhosttyKit.xcframework */,
+				A4B0C1D2E3F4051627384A03 /* IOSurface.framework */,
+				A4B0C1D2E3F4051627384A05 /* Metal.framework */,
+				A4B0C1D2E3F4051627384A07 /* MetalKit.framework */,
+				A4B0C1D2E3F4051627384A09 /* QuartzCore.framework */,
+				A4B0C1D2E3F4051627384A0F /* UIKit.framework */,
+				A4B0C1D2E3F4051627384A0B /* libc++.tbd */,
+				A4B0C1D2E3F4051627384A0D /* libz.tbd */,
 			);
 			name = iOS;
 			sourceTree = "<group>";
@@ -364,6 +398,7 @@
 			name = CodexMobile;
 			packageProductDependencies = (
 				C04E214A2F71D34100AA3193 /* RevenueCat */,
+				C078C1A12F79000100BEEF01 /* Citadel */,
 				C0DED3352F5E39DC0021A8E8 /* Textual */,
 				C0F0D1FE2F7210A700A17B41 /* MarkdownView */,
 			);
@@ -399,6 +434,7 @@
 				C0DED3342F5E39DC0021A8E8 /* XCRemoteSwiftPackageReference "textual" */,
 				C04E21492F71D34100AA3193 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */,
 				C0F0D1FD2F7210A700A17B41 /* XCRemoteSwiftPackageReference "MarkdownView" */,
+				C078C1A02F79000100BEEF01 /* XCRemoteSwiftPackageReference "Citadel" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = C09A76AF2F4B8D7B003B3F3A /* Products */;
@@ -943,6 +979,14 @@
 				minimumVersion = 5.66.0;
 			};
 		};
+		C078C1A02F79000100BEEF01 /* XCRemoteSwiftPackageReference "Citadel" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/orlandos-nl/Citadel.git";
+			requirement = {
+				branch = main;
+				kind = branch;
+			};
+		};
 		C0DED3342F5E39DC0021A8E8 /* XCRemoteSwiftPackageReference "textual" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/devnoname120/textual.git";
@@ -966,6 +1010,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = C04E21492F71D34100AA3193 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */;
 			productName = RevenueCat;
+		};
+		C078C1A12F79000100BEEF01 /* Citadel */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C078C1A02F79000100BEEF01 /* XCRemoteSwiftPackageReference "Citadel" */;
+			productName = Citadel;
 		};
 		C0DED3352F5E39DC0021A8E8 /* Textual */ = {
 			isa = XCSwiftPackageProductDependency;

@@ -33,6 +33,7 @@ struct TurnToolbarContent: ToolbarContent {
     var onTapMacHandoff: (() -> Void)?
     var onTapWorktreeHandoff: (() -> Void)?
     var onTapNewChat: (() -> Void)?
+    var onTapTerminal: (() -> Void)?
     var onTapRepoDiff: (() -> Void)?
     let onGitAction: (TurnGitActionKind) -> Void
 
@@ -47,6 +48,7 @@ struct TurnToolbarContent: ToolbarContent {
             && !isCreatingGitWorktree
             && !isThreadActionLoading
         let canTapNewChat = onTapNewChat != nil && !isThreadActionLoading
+        let canTapTerminal = onTapTerminal != nil
 
         ToolbarItem(placement: .principal) {
             VStack(alignment: .leading, spacing: 1) {
@@ -110,6 +112,17 @@ struct TurnToolbarContent: ToolbarContent {
                         }
                     }
                     .disabled(!canTapNewChat)
+
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onTapTerminal?()
+                    } label: {
+                        HStack(spacing: 10) {
+                            ResizableThreadActionSymbol(systemName: "terminal", pointSize: 13)
+                            Text("Open Terminal Here")
+                        }
+                    }
+                    .disabled(!canTapTerminal)
                 } label: {
                     TurnMacHandoffToolbarLabel(isLoading: isThreadActionLoading)
                 }

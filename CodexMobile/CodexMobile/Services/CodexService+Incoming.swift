@@ -296,6 +296,9 @@ extension CodexService {
         case "git/stackedAction/progress":
             handleGitStackedActionProgress(paramsObject)
 
+        case "terminal/event":
+            handleTerminalEvent(paramsObject)
+
         default:
             if method.hasPrefix("codex/event/"),
                handleLegacyCodexNamedEvent(method: method, paramsObject: paramsObject) {

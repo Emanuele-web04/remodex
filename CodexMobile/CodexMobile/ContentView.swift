@@ -21,6 +21,10 @@ private enum RootSheetRoute: Identifiable, Equatable {
     }
 }
 
+private struct TerminalNavigationRoute: Hashable {
+    let preferredWorkingDirectory: String?
+}
+
 struct ContentView: View {
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
@@ -355,6 +359,9 @@ struct ContentView: View {
                         showsInlineCloseButton: shouldUseFullWidthSidebar,
                         isVisible: sidebarVisible,
                         onClose: { closeSidebar() },
+                        onOpenTerminal: {
+                            openTerminal(preferredWorkingDirectory: nil)
+                        },
                         onNewChatCreationStateChange: { isCreating in
                             setNewChatOpeningState(isCreating)
                         },
@@ -411,6 +418,10 @@ struct ContentView: View {
                             .adaptiveNavigationBar()
                     }
                 }
+                .navigationDestination(for: TerminalNavigationRoute.self) { route in
+                    TerminalScreen(preferredWorkingDirectory: route.preferredWorkingDirectory)
+                        .adaptiveNavigationBar()
+                }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -427,7 +438,10 @@ struct ContentView: View {
         } else if let thread = selectedThread {
             TurnView(
                 thread: thread,
-                isWakingMacDisplayRecovery: isWakingSavedMacDisplay
+                isWakingMacDisplayRecovery: isWakingSavedMacDisplay,
+                onOpenTerminal: { workingDirectory in
+                    openTerminal(preferredWorkingDirectory: workingDirectory)
+                }
             )
                 .id(thread.id)
                 .environment(\.reconnectAction, {
@@ -768,6 +782,10 @@ struct ContentView: View {
 
             codex.requestImmediateActiveThreadSync(threadId: thread.id)
         }
+    }
+
+    private func openTerminal(preferredWorkingDirectory: String?) {
+        navigationPath.append(TerminalNavigationRoute(preferredWorkingDirectory: preferredWorkingDirectory))
     }
 
     // Prevents a close-swipe release from also activating whichever sidebar row was under the finger.

@@ -1,7 +1,7 @@
 // FILE: SidebarFloatingSettingsButton.swift
-// Purpose: Floating shortcut used to open sidebar settings.
+// Purpose: Floating shortcuts used to open sidebar settings and terminal tools.
 // Layer: View Component
-// Exports: SidebarFloatingSettingsButton, SidebarComputerConnectionStatusView
+// Exports: SidebarFloatingSettingsButton, SidebarFloatingTerminalButton, SidebarComputerConnectionStatusView
 
 import SwiftUI
 
@@ -23,6 +23,27 @@ struct SidebarFloatingSettingsButton: View {
         .buttonStyle(.plain)
         .contentShape(Circle())
         .accessibilityLabel("Settings")
+    }
+}
+
+struct SidebarFloatingTerminalButton: View {
+    let colorScheme: ColorScheme
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: {
+            HapticFeedback.shared.triggerImpactFeedback()
+            action()
+        }) {
+            Image(systemName: "terminal.fill")
+                .font(AppFont.system(size: 17, weight: .semibold))
+                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+                .frame(width: 44, height: 44)
+                .adaptiveGlass(.regular, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .contentShape(Circle())
+        .accessibilityLabel("Terminal")
     }
 }
 
