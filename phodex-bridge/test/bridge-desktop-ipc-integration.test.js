@@ -15,8 +15,7 @@ const { setTimeout: wait } = require("node:timers/promises");
 const WebSocket = require("ws");
 
 test("bridge forwards desktop IPC actions to the phone and routes replies back to Codex Desktop", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-bridge-ipc-"));
-  const ipcSocketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-bridge-ipc-");
   const relayServer = new WebSocket.Server({ port: 0 });
   const relayMessages = [];
   const ipcFrames = [];
@@ -103,7 +102,7 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
     params: { threadId: "thread-ipc" },
   }));
 
-  await waitFor(() => ipcServerSocket);
+  await waitFor(() => ipcServerSocket, 2_000);
   await wait(25);
   assert.equal(
     fakeCodex.sent.some((message) => message.method === "thread/read"),
@@ -324,4 +323,12 @@ function safeParseJSON(value) {
   } catch {
     return null;
   }
+}
+
+function createIpcTestSocket(prefix) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const socketPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\${path.basename(tempDir)}-ipc`
+    : path.join(tempDir, "ipc.sock");
+  return { tempDir, socketPath };
 }

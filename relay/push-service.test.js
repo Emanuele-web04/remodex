@@ -185,7 +185,9 @@ test("push service reloads registrations from persisted state after a restart", 
 
   assert.equal(firstSent.length, 0);
   assert.equal(secondSent.length, 1);
-  assert.equal(fs.statSync(stateFilePath).mode & 0o777, 0o600);
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(stateFilePath).mode & 0o777, 0o600);
+  }
 });
 
 test("push service defaults to a durable state file in the remodex home dir", () => {
@@ -193,7 +195,7 @@ test("push service defaults to a durable state file in the remodex home dir", ()
     CODEX_HOME: "/tmp/codex-home",
   });
 
-  assert.equal(resolved, "/tmp/codex-home/remodex/push-state.json");
+  assert.equal(resolved, path.join("/tmp/codex-home", "remodex", "push-state.json"));
 });
 
 test("push service keeps working when state persistence fails", async () => {

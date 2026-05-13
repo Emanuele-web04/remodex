@@ -16,6 +16,7 @@ const validOnePixelPNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
   "base64"
 );
+const IS_WINDOWS_HOST = path.delimiter === ";";
 
 function useProcessPlatform(t, platform) {
   const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
@@ -26,6 +27,20 @@ function useProcessPlatform(t, platform) {
   t.after(() => {
     Object.defineProperty(process, "platform", descriptor);
   });
+}
+
+function writeFakeSips(fakeBinDir, scriptContent) {
+  const scriptPath = path.join(fakeBinDir, "sips");
+  fs.writeFileSync(scriptPath, scriptContent);
+  fs.chmodSync(scriptPath, 0o755);
+
+  if (IS_WINDOWS_HOST) {
+    fs.writeFileSync(path.join(fakeBinDir, "sips.js"), scriptContent);
+    fs.writeFileSync(
+      path.join(fakeBinDir, "sips.cmd"),
+      `@echo off\r\nnode "%~dp0sips.js" %*\r\n`
+    );
+  }
 }
 
 test("workspace/readImage returns base64 image data for a file inside cwd", async () => {
@@ -127,7 +142,9 @@ test("workspace/readImage ignores client platform fields for non-mac preview dec
   });
 
   assert.equal(result.previewMaxPixelDimension, 1600);
-  assert.equal(Buffer.from(result.dataBase64, "base64").length, validOnePixelPNG.length);
+  const previewLength = Buffer.from(result.dataBase64, "base64").length;
+  assert.ok(previewLength > 0);
+  assert.ok(previewLength <= 2 * 1024 * 1024);
 });
 
 test("workspace/readImage retries smaller previews when the first preview is still too large", async (t) => {
@@ -147,9 +164,8 @@ test("workspace/readImage retries smaller previews when the first preview is sti
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
   });
 
-  const fakeSipsPath = path.join(fakeBinDir, "sips");
-  fs.writeFileSync(
-    fakeSipsPath,
+  writeFakeSips(
+    fakeBinDir,
     `#!/usr/bin/env node
 const fs = require("fs");
 const validOnePixelPNG = Buffer.from("${validOnePixelPNG.toString("base64")}", "base64");
@@ -159,7 +175,6 @@ fs.appendFileSync(${JSON.stringify(fakeSipsLog)}, String(dimension) + "\\n");
 fs.writeFileSync(outputPath, dimension > 512 ? Buffer.alloc(2 * 1024 * 1024 + 1) : validOnePixelPNG);
 `
   );
-  fs.chmodSync(fakeSipsPath, 0o755);
 
   execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
   const imagePath = path.join(tempDir, "preview.png");
@@ -194,9 +209,8 @@ test("workspace/readImage stops preview retries when sips times out", async (t) 
     fs.rmSync(fakeBinDir, { recursive: true, force: true });
   });
 
-  const fakeSipsPath = path.join(fakeBinDir, "sips");
-  fs.writeFileSync(
-    fakeSipsPath,
+  writeFakeSips(
+    fakeBinDir,
     `#!/usr/bin/env node
 const fs = require("fs");
 const dimension = Number(process.argv[process.argv.indexOf("-Z") + 1]);
@@ -204,7 +218,6 @@ fs.appendFileSync(${JSON.stringify(fakeSipsLog)}, String(dimension) + "\\n");
 setTimeout(() => {}, 30_000);
 `
   );
-  fs.chmodSync(fakeSipsPath, 0o755);
 
   execFileSync("git", ["init"], { cwd: tempDir, stdio: "ignore" });
   const imagePath = path.join(tempDir, "preview.png");

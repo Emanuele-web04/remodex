@@ -13,6 +13,7 @@ function createCodexTransport({
   endpoint = "",
   env = process.env,
   appPath = "",
+  platform = process.platform,
   spawnImpl = spawn,
   WebSocketImpl = WebSocket,
 } = {}) {
@@ -20,11 +21,11 @@ function createCodexTransport({
     return createWebSocketTransport({ endpoint, WebSocketImpl });
   }
 
-  return createSpawnTransport({ env, appPath, spawnImpl });
+  return createSpawnTransport({ env, appPath, platform, spawnImpl });
 }
 
-function createSpawnTransport({ env, appPath, spawnImpl = spawn }) {
-  const launchPlans = createCodexLaunchPlans({ env, appPath });
+function createSpawnTransport({ env, appPath, platform, spawnImpl = spawn }) {
+  const launchPlans = createCodexLaunchPlans({ env, appPath, platform });
   let launchIndex = -1;
   let activeLaunch = null;
   let codex = null;

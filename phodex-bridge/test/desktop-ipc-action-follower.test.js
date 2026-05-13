@@ -339,8 +339,7 @@ test("seeds conversation state from thread/read responses for IPC recovery", () 
 });
 
 test("desktop IPC follower projects first add patch-only action updates without a baseline read", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-recovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-recovery-");
   let baselineReads = 0;
   let serverSocket = null;
 
@@ -420,8 +419,7 @@ test("desktop IPC follower projects first add patch-only action updates without 
 });
 
 test("desktop IPC follower uses baseline recovery for patch-only updates that need existing state", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-replace-recovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-replace-recovery-");
   let baselineReads = 0;
   let serverSocket = null;
 
@@ -503,8 +501,7 @@ test("desktop IPC follower uses baseline recovery for patch-only updates that ne
 });
 
 test("desktop IPC follower does not issue baseline reads just because a chat opens", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-lazy-recovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-lazy-recovery-");
   let baselineReads = 0;
   let serverSocket = null;
 
@@ -552,8 +549,7 @@ test("desktop IPC follower does not issue baseline reads just because a chat ope
 });
 
 test("desktop IPC follower waits for a usable snapshot when a first patch needs missing state", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-wait-snapshot-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-wait-snapshot-");
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -644,8 +640,7 @@ test("desktop IPC follower waits for a usable snapshot when a first patch needs 
 });
 
 test("desktop IPC follower does not block add patch-only actions on a failing baseline reader", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-recovery-fallback-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-recovery-fallback-");
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -729,8 +724,7 @@ test("desktop IPC follower does not block add patch-only actions on a failing ba
 });
 
 test("desktop IPC follower answers client discovery requests as a passive client", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-discovery-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-discovery-");
   const serverFrames = [];
   let serverSocket = null;
 
@@ -793,8 +787,7 @@ test("desktop IPC follower answers client discovery requests as a passive client
 });
 
 test("desktop IPC follower forwards pending actions and routes iOS replies back to the Mac", async (t) => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-ipc-follower-"));
-  const socketPath = path.join(tempDir, "ipc.sock");
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-");
   const serverFrames = [];
   let serverSocket = null;
 
@@ -928,4 +921,12 @@ async function waitFor(predicate, timeoutMs = 500) {
     }
     await wait(5);
   }
+}
+
+function createIpcTestSocket(prefix) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const socketPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\${path.basename(tempDir)}-ipc`
+    : path.join(tempDir, "ipc.sock");
+  return { tempDir, socketPath };
 }

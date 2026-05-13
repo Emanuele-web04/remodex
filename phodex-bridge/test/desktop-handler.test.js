@@ -6,6 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const path = require("node:path");
 
 const { handleDesktopRequest } = require("../src/desktop-handler");
 
@@ -269,12 +270,12 @@ test("desktop/continueOnDesktop bounces Codex via deep links on Windows", async 
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(executorCalls.length, 2);
-  assert.equal(executorCalls[0][0], "C:\\Windows/System32/rundll32.exe");
+  assert.equal(executorCalls[0][0], path.join("C:\\Windows", "System32", "rundll32.exe"));
   assert.deepEqual(executorCalls[0][1], [
     "url.dll,FileProtocolHandler",
     "codex://settings",
   ]);
-  assert.equal(executorCalls[1][0], "C:\\Windows/System32/rundll32.exe");
+  assert.equal(executorCalls[1][0], path.join("C:\\Windows", "System32", "rundll32.exe"));
   assert.deepEqual(executorCalls[1][1], [
     "url.dll,FileProtocolHandler",
     "codex://threads/thread-win-123",

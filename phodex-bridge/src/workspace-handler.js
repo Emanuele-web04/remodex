@@ -239,7 +239,7 @@ function isBroadWorkspaceRoot(candidatePath) {
 }
 
 async function readPreviewImageData(imagePath, maxPixelDimension, originalByteLength) {
-  if (!usesSipsImagePreview()) {
+  if (!usesNativeImagePreview()) {
     if (originalByteLength <= MAX_IMAGE_PREVIEW_READ_BYTES) {
       return fs.promises.readFile(imagePath);
     }
@@ -262,7 +262,7 @@ async function readPreviewImageData(imagePath, maxPixelDimension, originalByteLe
     }
 
     try {
-      const previewData = await downsampleImageWithSips(
+      const previewData = await downsampleImageNative(
         imagePath,
         candidateDimension,
         Math.min(IMAGE_PREVIEW_TOOL_TIMEOUT_MS, remainingTimeoutMs)
@@ -318,18 +318,118 @@ function previewPixelDimensionCandidates(maxPixelDimension) {
   return Array.from(new Set(dimensions)).sort((a, b) => b - a);
 }
 
-function usesSipsImagePreview() {
+function usesNativeImagePreview() {
   const normalizedPlatform = String(process.platform || "").trim().toLowerCase();
-  return normalizedPlatform === "darwin" || normalizedPlatform === "macos" || normalizedPlatform === "mac";
+  return normalizedPlatform === "darwin"
+    || normalizedPlatform === "macos"
+    || normalizedPlatform === "mac"
+    || normalizedPlatform === "win32"
+    || normalizedPlatform === "windows";
+}
+
+async function downsampleImageNative(imagePath, maxPixelDimension, timeoutMs = IMAGE_PREVIEW_TOOL_TIMEOUT_MS) {
+  return usesWindowsImagePreview()
+    ? downsampleImageWithPowerShell(imagePath, maxPixelDimension, timeoutMs)
+    : downsampleImageWithSips(imagePath, maxPixelDimension, timeoutMs);
+}
+
+function usesWindowsImagePreview() {
+  const normalizedPlatform = String(process.platform || "").trim().toLowerCase();
+  return normalizedPlatform === "win32" || normalizedPlatform === "windows";
 }
 
 async function downsampleImageWithSips(imagePath, maxPixelDimension, timeoutMs = IMAGE_PREVIEW_TOOL_TIMEOUT_MS) {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "remodex-image-preview-"));
   const outputPath = path.join(tempDir, `preview${path.extname(imagePath) || ".png"}`);
+  const command = resolveHostCommand("sips");
   try {
-    await execFileAsync("sips", ["-Z", String(maxPixelDimension), imagePath, "--out", outputPath], {
+    await execFileAsync(command.file, [
+      ...command.args,
+      "-Z",
+      String(maxPixelDimension),
+      imagePath,
+      "--out",
+      outputPath,
+    ], {
       timeout: Math.max(1, Math.floor(timeoutMs)),
       maxBuffer: 1024 * 1024,
+    });
+    return await fs.promises.readFile(outputPath);
+  } finally {
+    await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function resolveHostCommand(commandName) {
+  if (path.delimiter !== ";") {
+    return { file: commandName, args: [] };
+  }
+
+  const pathEntries = String(process.env.PATH || "")
+    .split(path.delimiter)
+    .filter(Boolean);
+  for (const entry of pathEntries) {
+    const jsShim = path.join(entry, `${commandName}.js`);
+    if (fs.existsSync(jsShim)) {
+      return { file: process.execPath, args: [jsShim] };
+    }
+  }
+  return { file: commandName, args: [] };
+}
+
+async function downsampleImageWithPowerShell(imagePath, maxPixelDimension, timeoutMs = IMAGE_PREVIEW_TOOL_TIMEOUT_MS) {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "remodex-image-preview-"));
+  const outputPath = path.join(tempDir, `preview${path.extname(imagePath) || ".png"}`);
+  const scriptPath = path.join(tempDir, "resize-preview.ps1");
+  const script = `
+param(
+  [Parameter(Mandatory=$true)][string]$InputPath,
+  [Parameter(Mandatory=$true)][string]$OutputPath,
+  [Parameter(Mandatory=$true)][int]$MaxDimension
+)
+Add-Type -AssemblyName System.Drawing
+$image = [System.Drawing.Image]::FromFile($InputPath)
+try {
+  $longest = [Math]::Max($image.Width, $image.Height)
+  if ($longest -le 0) { throw "Invalid image dimensions." }
+  $scale = [Math]::Min(1.0, [double]$MaxDimension / [double]$longest)
+  $targetWidth = [Math]::Max(1, [int][Math]::Round($image.Width * $scale))
+  $targetHeight = [Math]::Max(1, [int][Math]::Round($image.Height * $scale))
+  $bitmap = New-Object System.Drawing.Bitmap $targetWidth, $targetHeight
+  try {
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+      $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+      $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+      $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+      $graphics.DrawImage($image, 0, 0, $targetWidth, $targetHeight)
+    } finally {
+      $graphics.Dispose()
+    }
+    $bitmap.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+  } finally {
+    if ($bitmap) { $bitmap.Dispose() }
+  }
+} finally {
+  $image.Dispose()
+}
+`;
+  try {
+    await fs.promises.writeFile(scriptPath, script, "utf8");
+    await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      scriptPath,
+      imagePath,
+      outputPath,
+      String(maxPixelDimension),
+    ], {
+      timeout: Math.max(1, Math.floor(timeoutMs)),
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
     });
     return await fs.promises.readFile(outputPath);
   } finally {

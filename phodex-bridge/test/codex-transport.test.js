@@ -137,6 +137,7 @@ test("spawn transport retries with the bundled Codex binary after an ENOENT laun
     const transport = createCodexTransport({
       env: { PATH: "/usr/bin:/bin" },
       appPath,
+      platform: "darwin",
       spawnImpl,
     });
     transport.onStarted((info) => {
@@ -168,6 +169,7 @@ test("spawn transport explains Codex API-key environment failures without asking
   const children = [];
   const transport = createCodexTransport({
     env: { PATH: "/usr/bin:/bin" },
+    platform: "darwin",
     spawnImpl() {
       const child = createFakeChild();
       children.push(child);

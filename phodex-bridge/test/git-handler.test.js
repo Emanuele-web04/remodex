@@ -28,6 +28,7 @@ function git(cwd, ...args) {
 function makeTempRepo() {
   const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-"));
   git(repoDir, "init", "-b", "main");
+  git(repoDir, "config", "core.autocrlf", "false");
   git(repoDir, "config", "user.name", "Remodex Tests");
   git(repoDir, "config", "user.email", "tests@example.com");
   fs.writeFileSync(path.join(repoDir, "README.md"), "# Test\n");
