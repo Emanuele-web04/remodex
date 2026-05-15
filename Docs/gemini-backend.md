@@ -180,6 +180,21 @@ Current behavior includes:
 
 This is important for reconnect, thread listing, thread reading, and session continuity.
 
+## Reconnect and Active-Turn Recovery
+
+Gemini reconnect behavior needs special care because the iPhone UI is consuming Remodex-style thread, turn, reasoning, and tool events that are adapted from Gemini ACP.
+
+The intended behavior is:
+
+- a background or network interruption should not lose the active Gemini thread
+- reconnect should restore the currently running turn when Gemini is still active
+- the Stop affordance should remain available after reconnect when a turn is still running
+- if the client has no cached active turn ID, it should recover active state from thread data before sending an interrupt
+- late turn-less activity events should not create duplicate or misleading timeline rows
+- reasoning deltas should continue to merge into the correct existing item instead of spawning fake extra thinking rows
+
+In practice, this area still requires live validation on the iPhone client. It should be treated as a core compatibility requirement for Gemini, not as a cosmetic UI detail.
+
 ## Prompt Handling
 
 The adapter accepts prompt payloads from the mobile client and translates them into Gemini ACP prompt items.
@@ -265,6 +280,7 @@ The following issues are still considered open:
 - command names may still fail to render correctly in the iPhone UI
 - reasoning and command activity events still need live runtime validation beyond code inspection
 - prompt queue behavior is present in code but should not yet be described as proven stable
+- reconnect and active-turn recovery need explicit testing in Gemini sessions, especially after backgrounding the app while Gemini is still generating
 - Gemini commit flow still needs stronger handling for unborn `HEAD` / no-initial-commit repositories
 - foreground lifecycle cleanup still needs explicit validation:
   - relay port release on shutdown
@@ -288,11 +304,12 @@ Then:
 3. send a normal chat message
 4. verify thread creation
 5. verify thread restore after reconnect
-6. verify working-directory-sensitive behavior in a known repository
-7. verify multimodal input if needed
-8. test git draft flows carefully
-9. explicitly test Stop behavior
-10. explicitly test command activity rendering
+6. background the iPhone app while Gemini is still generating, then return and verify the active turn is restored
+7. verify Stop remains visible and can interrupt after reconnect
+8. verify working-directory-sensitive behavior in a known repository
+9. verify multimodal input if needed
+10. test git draft flows carefully
+11. explicitly test command activity rendering
 
 ## Implementation Pointers
 
