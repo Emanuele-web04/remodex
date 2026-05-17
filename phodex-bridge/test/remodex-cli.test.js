@@ -13,7 +13,7 @@ const path = require("path");
 const { EventEmitter } = require("events");
 const { Readable, Writable } = require("stream");
 const { version } = require("../package.json");
-const { main } = require("../bin/remodex");
+const { main, verifyGeminiCliReady } = require("../bin/remodex");
 
 test("remodex --version prints the package version", () => {
   const cliPath = path.join(__dirname, "..", "bin", "remodex.js");
@@ -396,6 +396,99 @@ test("remodex up starts the Gemini local relay when Gemini is selected", async (
   ]);
   assert.match(logs.join("\n"), /AI backend: Gemini CLI\. Run `remodex up --switch` to change\./);
   assert.match(logs.join("\n"), /gemini relay listening on 0\.0\.0\.0:54322/);
+});
+
+test("verifyGeminiCliReady falls back to spawned help output when execFile help is empty", async () => {
+  function fakeExecFile(_command, _args, _options, callback) {
+    callback(null, "", "");
+  }
+
+  function fakeSpawn(command, args) {
+    if (args[0] === "--help") {
+      const child = new EventEmitter();
+      child.killed = false;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {
+        child.killed = true;
+      };
+      queueMicrotask(() => {
+        child.stdout.emit("data", "Usage: gemini --acp\n");
+        child.emit("close", 0, null);
+      });
+      return child;
+    }
+
+    if (args[0] === "--acp") {
+      const child = new EventEmitter();
+      child.killed = false;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {
+        child.killed = true;
+      };
+      queueMicrotask(() => {
+        child.stdout.emit("data", "ACP ready\n");
+      });
+      return child;
+    }
+
+    throw new Error(`unexpected args: ${args.join(" ")}`);
+  }
+
+  await assert.doesNotReject(() => verifyGeminiCliReady({
+    execFileImpl: fakeExecFile,
+    spawnImpl: fakeSpawn,
+    timeoutMs: 1_500,
+  }));
+});
+
+test("verifyGeminiCliReady falls back to spawned help output when execFile help times out", async () => {
+  function fakeExecFile(_command, _args, _options, callback) {
+    const error = new Error("exec timeout");
+    error.killed = true;
+    error.signal = "SIGTERM";
+    callback(error, "", "");
+  }
+
+  function fakeSpawn(command, args) {
+    if (args[0] === "--help") {
+      const child = new EventEmitter();
+      child.killed = false;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {
+        child.killed = true;
+      };
+      queueMicrotask(() => {
+        child.stdout.emit("data", "Usage: gemini --acp\n");
+        child.emit("close", 0, null);
+      });
+      return child;
+    }
+
+    if (args[0] === "--acp") {
+      const child = new EventEmitter();
+      child.killed = false;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {
+        child.killed = true;
+      };
+      queueMicrotask(() => {
+        child.stdout.emit("data", "ACP ready\n");
+      });
+      return child;
+    }
+
+    throw new Error(`unexpected args: ${args.join(" ")}`);
+  }
+
+  await assert.doesNotReject(() => verifyGeminiCliReady({
+    execFileImpl: fakeExecFile,
+    spawnImpl: fakeSpawn,
+    timeoutMs: 1_500,
+  }));
 });
 
 test("remodex status --json exposes daemon metadata for companion apps", async () => {

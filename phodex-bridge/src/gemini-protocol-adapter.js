@@ -44,11 +44,12 @@ let geminiModels = [];
         approvalPolicy: "on-request",
         completedAssistantText: "",
         activeThinkingId: null,
-        activeToolId: null,
-        activeToolName: null,
-        isGenerating: false,
-        promptQueue: [],
-      });
+          activeToolId: null,
+          activeToolName: null,
+          isGenerating: false,
+          activeGeminiPromptRequestId: null,
+          promptQueue: [],
+        });
     }
     return threadStates.get(threadId);
   }
@@ -70,10 +71,11 @@ let geminiModels = [];
   // Session persistence
   const stateDir = path.join(os.homedir(), ".remodex");
   const stateFile = path.join(stateDir, "gemini-sessions.json");
-  const pendingGeminiRequests = new Map();
-  const pendingPermissions = new Map(); // Store stepId -> { geminiRequestId, threadId }
-  const threadHistory = new Map(); // Store threadId -> { turns: [], updatedAt, ... }
-  const geminiSessionByThread = new Map(); // Store threadId -> { sessionId, cwd }
+    const pendingGeminiRequests = new Map();
+    const pendingPermissions = new Map(); // Store stepId -> { geminiRequestId, threadId }
+    const threadHistory = new Map(); // Store threadId -> { turns: [], updatedAt, ... }
+    const geminiSessionByThread = new Map(); // Store threadId -> { sessionId, cwd }
+    const ignoredGeminiPromptResponseIds = new Set();
 
   function normalizeThreadRecord(threadId, rawRecord = {}) {
     const now = new Date().toISOString();
@@ -112,6 +114,17 @@ let geminiModels = [];
       model: record.model || "gemini",
       modelProvider: "gemini",
       backendType: "gemini",
+    };
+  }
+
+  function buildThreadReadPayload(threadId, rawRecord = {}, { includeTurns = true } = {}) {
+    const thread = buildThreadDescriptor(threadId, rawRecord);
+    if (!includeTurns) {
+      return thread;
+    }
+    return {
+      ...thread,
+      turns: buildThreadTurns(threadId),
     };
   }
 
@@ -195,16 +208,15 @@ let geminiModels = [];
     return threadHistory.get(threadId);
   }
 
-  function buildThreadTurnsPage(threadId, {
-    limit = 20,
-    cursor = null,
-    sortDirection = "desc",
-  } = {}) {
-    const threadData = threadHistory.get(threadId);
-    const allTurns = normalizeThreadTurns(threadData?.turns || [], threadId);
-    const orderedTurns = String(sortDirection).toLowerCase() === "asc"
-      ? allTurns
-      : [...allTurns].reverse();
+    function buildThreadTurnsPage(threadId, {
+      limit = 20,
+      cursor = null,
+      sortDirection = "desc",
+    } = {}) {
+      const allTurns = buildThreadTurns(threadId);
+      const orderedTurns = String(sortDirection).toLowerCase() === "asc"
+        ? allTurns
+        : [...allTurns].reverse();
     const offset = Math.max(0, Number.parseInt(String(cursor || "0"), 10) || 0);
     const pageLimit = Math.max(1, Math.min(Number(limit) || 20, 100));
     const data = orderedTurns.slice(offset, offset + pageLimit);
@@ -213,8 +225,55 @@ let geminiModels = [];
     return {
       data,
       nextCursor: nextOffset < orderedTurns.length ? String(nextOffset) : null,
-    };
-  }
+      };
+    }
+
+    function buildThreadTurns(threadId) {
+      const threadData = threadHistory.get(threadId);
+      return withActiveTurnSnapshot(normalizeThreadTurns(threadData?.turns || [], threadId), threadId);
+    }
+
+    function withActiveTurnSnapshot(turns, threadId) {
+      const state = getThreadState(threadId);
+      if (!state.isGenerating || !state.activeTurnId) {
+        return turns;
+      }
+
+      const now = new Date().toISOString();
+      const activeTurnIndex = turns.findIndex((turn) => turn.id === state.activeTurnId);
+      const activeTurn = activeTurnIndex >= 0
+        ? {
+          ...turns[activeTurnIndex],
+          status: "in_progress",
+          updatedAt: now,
+          items: [...(turns[activeTurnIndex].items || [])],
+        }
+        : {
+          id: state.activeTurnId,
+          threadId,
+          status: "in_progress",
+          createdAt: now,
+          updatedAt: now,
+          items: [],
+        };
+
+      const assistantText = state.completedAssistantText || state.accumulatedText || "";
+      if (assistantText && !activeTurn.items.some((item) => item.role === "assistant")) {
+        activeTurn.items.push({
+          id: state.activeMessageId || `${state.activeTurnId}-assistant-active`,
+          type: "agent_message",
+          role: "assistant",
+          text: assistantText,
+          content: [{ type: "output_text", text: assistantText }],
+          createdAt: now,
+        });
+      }
+
+      if (activeTurnIndex >= 0) {
+        return turns.map((turn, index) => index === activeTurnIndex ? activeTurn : turn);
+      }
+      return [...turns, activeTurn];
+    }
 
   function normalizeThreadTurns(rawTurns, threadId) {
     const groupedTurns = [];
@@ -377,10 +436,14 @@ let geminiModels = [];
       return;
     }
 
-    // 5. Handle session/prompt response (prompt completed)
-    if (parsed.id != null && parsed.result) {
-      // Find which thread this prompt belonged to
-      const promptInfo = pendingGeminiRequests.get(parsed.id);
+      // 5. Handle session/prompt response (prompt completed)
+      if (parsed.id != null && parsed.result) {
+        if (ignoredGeminiPromptResponseIds.delete(parsed.id)) {
+          log(`[Gemini Inbound] Ignoring late session/prompt response ${parsed.id} after stream turn_complete`);
+          return;
+        }
+        // Find which thread this prompt belonged to
+        const promptInfo = pendingGeminiRequests.get(parsed.id);
       
       // Cleanup the pending request now that we've used it
       if (pendingGeminiRequests.has(parsed.id)) {
@@ -752,7 +815,7 @@ let geminiModels = [];
     });
   }
 
-  function handleMessageComplete(update, threadId) {
+    function handleMessageComplete(update, threadId) {
     const state = getThreadState(threadId);
     const finalText = update.text || update.content || state.accumulatedText || "";
     state.completedAssistantText = finalText;
@@ -767,66 +830,87 @@ let geminiModels = [];
       },
     });
     state.activeMessageId = null;
-    state.accumulatedText = "";
-  }
+      state.accumulatedText = "";
+    }
 
-  function handleTurnComplete(update, threadId) {
-    const state = getThreadState(threadId);
+    function emitThreadStatusChanged(threadId, status, turnId = null) {
+      emitCodexEvent("thread/status/changed", {
+        threadId,
+        turnId,
+        status,
+      });
+    }
 
-    // Persist assistant response before clearing state —
-    // this fires from session/update "turn_complete" which arrives
-    // BEFORE the prompt RPC response, so we must capture the text here.
-    const finalText = state.completedAssistantText || state.accumulatedText || "";
-    const threadData = threadHistory.get(threadId);
-    if (threadData && finalText && state.activeTurnId) {
-      threadData.turns.push({
-        id: state.activeTurnId,
-        role: "assistant",
-        text: finalText,
-        timestamp: new Date().toISOString(),
+    function drainPromptQueue(threadId) {
+      const state = getThreadState(threadId);
+      if (state.isGenerating || !state.promptQueue || state.promptQueue.length === 0) {
+        return;
+      }
+      const nextPrompt = state.promptQueue.shift();
+      void handleTurnStart(nextPrompt);
+    }
+
+    function handleTurnComplete(update, threadId) {
+      const state = getThreadState(threadId);
+      const completedTurnId = state.activeTurnId;
+      const completedPromptRequestId = state.activeGeminiPromptRequestId;
+
+      // Persist assistant response before clearing state —
+      // this fires from session/update "turn_complete" which arrives
+      // BEFORE the prompt RPC response, so we must capture the text here.
+      const finalText = state.completedAssistantText || state.accumulatedText || "";
+      const threadData = threadHistory.get(threadId);
+      if (threadData && finalText && completedTurnId) {
+        threadData.turns.push({
+          id: completedTurnId,
+          role: "assistant",
+          text: finalText,
+          timestamp: new Date().toISOString(),
       });
       threadData.updatedAt = new Date().toISOString();
     }
 
-    emitCodexEvent("turn/completed", {
-      threadId: threadId,
-      turnId: state.activeTurnId,
-      turn: {
-        id: state.activeTurnId,
+      emitCodexEvent("turn/completed", {
         threadId: threadId,
-        status: "completed",
-      },
-    });
-    state.activeTurnId = null;
-    state.activeMessageId = null;
-    state.accumulatedText = "";
-    state.completedAssistantText = "";
-    state.pendingTurnRequestId = null;
-    savePersistedState();
-  }
-
-  function handleGeminiPromptResponse(parsed, threadId) {
-    const state = getThreadState(threadId);
-    // The prompt RPC completed — emit message_complete + turn_complete
-    if (parsed.result && parsed.result.stopReason === "end_turn") {
-      // Save assistant response in thread history (fallback — turn_complete may have saved already)
-      const finalText = state.completedAssistantText || state.accumulatedText || "";
-      const threadData = threadHistory.get(threadId);
-      const alreadySaved = !state.activeTurnId; // turn_complete already cleared it
-      if (threadData && finalText && !alreadySaved) {
-        threadData.turns.push({
-          id: state.activeTurnId,
-          role: "assistant",
-          text: finalText,
-          timestamp: new Date().toISOString(),
-        });
-        threadData.updatedAt = new Date().toISOString();
-        savePersistedState();
+        turnId: completedTurnId,
+        turn: {
+          id: completedTurnId,
+          threadId: threadId,
+          status: "completed",
+        },
+      });
+      emitThreadStatusChanged(threadId, "completed", completedTurnId);
+      if (completedPromptRequestId && pendingGeminiRequests.has(completedPromptRequestId)) {
+        const waiter = pendingGeminiRequests.get(completedPromptRequestId);
+        pendingGeminiRequests.delete(completedPromptRequestId);
+        if (waiter?.timeout) clearTimeout(waiter.timeout);
+        ignoredGeminiPromptResponseIds.add(completedPromptRequestId);
+        waiter?.resolve?.({ stopReason: "end_turn" });
       }
-
-      if (state.activeMessageId) {
-        handleMessageComplete({}, threadId);
+      state.activeTurnId = null;
+      state.activeMessageId = null;
+      state.accumulatedText = "";
+      state.completedAssistantText = "";
+      state.pendingTurnRequestId = null;
+      state.activeGeminiPromptRequestId = null;
+      state.activeThinkingId = null;
+      state.activeToolId = null;
+      state.activeToolName = null;
+      state.isGenerating = false;
+      if (threadId === currentPromptThreadId) {
+        currentPromptThreadId = null;
       }
+      savePersistedState();
+      drainPromptQueue(threadId);
+    }
+
+    function handleGeminiPromptResponse(parsed, threadId) {
+      const state = getThreadState(threadId);
+      // The prompt RPC completed — emit message_complete + turn_complete
+      if (parsed.result && parsed.result.stopReason === "end_turn") {
+        if (state.activeMessageId) {
+          handleMessageComplete({}, threadId);
+        }
       if (state.activeTurnId) {
         handleTurnComplete({}, threadId);
       }
@@ -976,13 +1060,15 @@ let geminiModels = [];
         const readThreadId = parsed.params?.threadId || activeThreadId || "gemini-default-session";
         const threadData = threadHistory.get(readThreadId);
         if (requestId != null) {
+          const includeTurnsParam = parsed.params?.includeTurns ?? parsed.params?.include_turns;
+          const includeTurns = includeTurnsParam == null ? true : includeTurnsParam !== false;
           emitCodexResponse(requestId, {
-            thread: buildThreadDescriptor(readThreadId, threadData || {
+            thread: buildThreadReadPayload(readThreadId, threadData || {
               title: "Gemini CLI",
               cwd: threadCwd(readThreadId),
               model: geminiCurrentModelId || "gemini",
-            }),
-            turns: normalizeThreadTurns(threadData?.turns || [], readThreadId),
+            }, { includeTurns }),
+            turns: buildThreadTurns(readThreadId),
           });
         }
         return;
@@ -1004,6 +1090,8 @@ let geminiModels = [];
       case "thread/resume":
         if (requestId != null) {
           const resumeThreadId = parsed.params?.threadId || activeThreadId;
+          const excludeTurnsParam = parsed.params?.excludeTurns ?? parsed.params?.exclude_turns;
+          const includeTurns = excludeTurnsParam !== true;
           if (resumeThreadId) activeThreadId = resumeThreadId;
           const activeThreadRecord = activeThreadId
             ? ensureThreadHistory(activeThreadId, threadCwd(activeThreadId))
@@ -1011,11 +1099,11 @@ let geminiModels = [];
           emitCodexResponse(requestId, {
             threadId: activeThreadId,
             thread: activeThreadId
-              ? buildThreadDescriptor(activeThreadId, activeThreadRecord || {
+              ? buildThreadReadPayload(activeThreadId, activeThreadRecord || {
                 title: "Gemini CLI",
                 cwd: threadCwd(activeThreadId),
                 model: geminiCurrentModelId || "gemini",
-              })
+              }, { includeTurns })
               : null,
           });
         }
@@ -1228,15 +1316,16 @@ let geminiModels = [];
     currentPromptThreadId = threadId;
 
     // Emit turn/started to phone
-    emitCodexEvent("turn/started", {
-      threadId: threadId,
-      turnId: state.activeTurnId,
-      turn: {
+      emitCodexEvent("turn/started", {
+        threadId: threadId,
+        turnId: state.activeTurnId,
+        turn: {
         id: state.activeTurnId,
         threadId: threadId,
-        status: "in_progress",
-      },
-    });
+          status: "in_progress",
+        },
+      });
+      emitThreadStatusChanged(threadId, "running", state.activeTurnId);
 
     // Respond to the turn/start request
     if (requestId != null) {
@@ -1319,15 +1408,24 @@ let geminiModels = [];
       }
     }
 
-    if (promptItems.length === 0) {
-      log("warn: empty prompt in turn/start");
-      emitCodexEvent("turn/completed", {
-        threadId: threadId,
-        turnId: state.activeTurnId,
-        turn: { id: state.activeTurnId, threadId: threadId, status: "completed" },
-      });
-      return;
-    }
+      if (promptItems.length === 0) {
+        log("warn: empty prompt in turn/start");
+        emitCodexEvent("turn/completed", {
+          threadId: threadId,
+          turnId: state.activeTurnId,
+          turn: { id: state.activeTurnId, threadId: threadId, status: "completed" },
+        });
+        emitThreadStatusChanged(threadId, "completed", state.activeTurnId);
+        state.activeTurnId = null;
+        state.pendingTurnRequestId = null;
+        state.activeGeminiPromptRequestId = null;
+        state.isGenerating = false;
+        if (threadId === currentPromptThreadId) {
+          currentPromptThreadId = null;
+        }
+        drainPromptQueue(threadId);
+        return;
+      }
 
     // Persist the user message in thread history
     const userText = promptItems.filter(p => p.type === "text").map(p => p.text).join("\\n");
@@ -1356,24 +1454,30 @@ let geminiModels = [];
       promptSessionId = promptSessionId || await createGeminiSessionForThread(threadId, requestedCwd);
     } catch (error) {
       log(`error: failed to create Gemini session for ${requestedCwd}: ${error.message || error}`);
-      emitCodexEvent("turn/completed", {
-        threadId: threadId,
-        turnId: state.activeTurnId,
-        turn: { id: state.activeTurnId, threadId: threadId, status: "failed" },
-      });
-      state.isGenerating = false;
-      state.activeTurnId = null;
-      if (state.promptQueue && state.promptQueue.length > 0) {
-        const nextPrompt = state.promptQueue.shift();
-        handleTurnStart(nextPrompt);
+        emitCodexEvent("turn/completed", {
+          threadId: threadId,
+          turnId: state.activeTurnId,
+          turn: { id: state.activeTurnId, threadId: threadId, status: "failed" },
+        });
+        emitThreadStatusChanged(threadId, "system_error", state.activeTurnId);
+        state.isGenerating = false;
+        state.activeTurnId = null;
+        state.pendingTurnRequestId = null;
+        state.activeGeminiPromptRequestId = null;
+        if (threadId === currentPromptThreadId) {
+          currentPromptThreadId = null;
+        }
+        if (state.promptQueue && state.promptQueue.length > 0) {
+          drainPromptQueue(threadId);
+        }
+        return;
       }
-      return;
-    }
 
-    const geminiReqId = nextGeminiRequestId();
-    sendGeminiRequest(geminiReqId, "session/prompt", {
-      sessionId: promptSessionId,
-      prompt: promptItems,
+      const geminiReqId = nextGeminiRequestId();
+      state.activeGeminiPromptRequestId = geminiReqId;
+      sendGeminiRequest(geminiReqId, "session/prompt", {
+        sessionId: promptSessionId,
+        prompt: promptItems,
     }, threadId);
   }
 
@@ -1386,29 +1490,40 @@ let geminiModels = [];
 
     if (geminiSessionId) {
       const cancelId = nextGeminiRequestId();
-      sendGeminiRequest(cancelId, "cancel", {
+      void sendGeminiRequest(cancelId, "cancel", {
         sessionId: geminiSessionId,
-      }, threadId);
+      }, threadId).catch((error) => {
+        log(`warn: Gemini cancel request failed: ${error.message || error}`);
+      });
     }
 
     // Notify phone that turn is cancelled (echo)
-    emitCodexEvent("turn/completed", {
-      threadId: threadId,
-      turnId: state.activeTurnId,
-      turn: {
+      emitCodexEvent("turn/completed", {
+        threadId: threadId,
+        turnId: state.activeTurnId,
+        turn: {
         id: state.activeTurnId,
         threadId: threadId,
-        status: "cancelled",
-      },
-    });
+          status: "cancelled",
+        },
+      });
+      emitThreadStatusChanged(threadId, "stopped", state.activeTurnId);
+      if (state.activeGeminiPromptRequestId && pendingGeminiRequests.has(state.activeGeminiPromptRequestId)) {
+        const waiter = pendingGeminiRequests.get(state.activeGeminiPromptRequestId);
+        pendingGeminiRequests.delete(state.activeGeminiPromptRequestId);
+        if (waiter?.timeout) clearTimeout(waiter.timeout);
+        ignoredGeminiPromptResponseIds.add(state.activeGeminiPromptRequestId);
+        waiter?.resolve?.({ stopReason: "cancelled" });
+      }
 
     if (requestId != null) {
       emitCodexResponse(requestId, { success: true });
     }
 
-    state.activeTurnId = null;
-    state.pendingTurnRequestId = null;
-    state.isGenerating = false;
+      state.activeTurnId = null;
+      state.pendingTurnRequestId = null;
+      state.activeGeminiPromptRequestId = null;
+      state.isGenerating = false;
     
     if (threadId === currentPromptThreadId) {
       currentPromptThreadId = null;
@@ -1606,39 +1721,47 @@ let geminiModels = [];
     transport.send(msg);
   }
 
-  function sendGeminiRequest(id, method, params, threadId = null) {
-    const msg = JSON.stringify({
-      jsonrpc: "2.0",
+    function sendGeminiRequest(id, method, params, threadId = null) {
+      const msg = JSON.stringify({
+        jsonrpc: "2.0",
       id,
       method,
       params,
-    });
-    log(`[Gemini Outbound] ${msg.slice(0, 500)}${msg.length > 500 ? "..." : ""}`);
+      });
+      log(`[Gemini Outbound] ${msg.slice(0, 500)}${msg.length > 500 ? "..." : ""}`);
+      const timeoutMs = geminiRequestTimeoutMs(method);
 
-    pendingGeminiRequests.set(id, {
-      id,
-      method,
-      params,
-      threadId: threadId || activeThreadId,
-      resolve: null,
-      reject: null,
-      timeout: setTimeout(() => {
-        if (pendingGeminiRequests.has(id)) {
-          log(`warn: Gemini request ${id} (${method}) timed out`);
-          pendingGeminiRequests.delete(id);
-        }
-      }, 30000),
-    });
-    pendingGeminiRequests.get(id)?.timeout?.unref?.();
+      pendingGeminiRequests.set(id, {
+        id,
+        method,
+        params,
+        threadId: threadId || activeThreadId,
+        resolve: null,
+        reject: null,
+        timeout: timeoutMs == null ? null : setTimeout(() => {
+          if (pendingGeminiRequests.has(id)) {
+            log(`warn: Gemini request ${id} (${method}) timed out`);
+            pendingGeminiRequests.delete(id);
+          }
+        }, timeoutMs),
+      });
+      pendingGeminiRequests.get(id)?.timeout?.unref?.();
 
     transport.send(msg);
 
     return new Promise((resolve, reject) => {
       const waiter = pendingGeminiRequests.get(id);
       waiter.resolve = resolve;
-      waiter.reject = reject;
-    });
-  }
+        waiter.reject = reject;
+      });
+    }
+
+    function geminiRequestTimeoutMs(method) {
+      if (method === "session/prompt") {
+        return null;
+      }
+      return 30000;
+    }
 
   function nextGeminiRequestId() {
     return `gemini-adapter-${geminiRequestCounter++}`;

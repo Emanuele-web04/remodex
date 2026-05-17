@@ -235,6 +235,361 @@ test("Gemini adapter opens a Gemini session in the turn cwd selected by iOS", as
   assert.ok(responseById(outbound, "turn-start-documents"));
 });
 
+test("Gemini adapter exposes an in-progress turn while a prompt is still running", async (t) => {
+  const previousHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-gemini-adapter-"));
+  process.env.HOME = tempHome;
+  t.after(() => {
+    process.env.HOME = previousHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const fake = createFakeGeminiTransport();
+  const adapter = createGeminiProtocolAdapter({
+    transport: fake.transport,
+    logPrefix: "[test-gemini]",
+  });
+  const outbound = [];
+  adapter.onMessage((rawMessage) => outbound.push(JSON.parse(rawMessage)));
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-init-1",
+    result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Gemini CLI", version: "test" },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1000",
+    result: {
+      sessionId: "root-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+
+  adapter.send(JSON.stringify({
+    id: "thread-start-running",
+    method: "thread/start",
+    params: { cwd: "/Users/developer/remodex" },
+  }));
+  const threadId = responseById(outbound, "thread-start-running").result.threadId;
+
+  adapter.send(JSON.stringify({
+    id: "turn-start-running",
+    method: "turn/start",
+    params: {
+      threadId,
+      prompt: "Monitor logs for 10 minutes",
+    },
+  }));
+  const turnId = responseById(outbound, "turn-start-running").result.turnId;
+
+  const runningStatus = outbound.find((message) =>
+    message.method === "thread/status/changed"
+    && message.params?.threadId === threadId
+    && message.params?.status === "running"
+  );
+  assert.ok(runningStatus, "expected a running thread status while Gemini prompt is active");
+
+  adapter.send(JSON.stringify({
+    id: "thread-read-running",
+    method: "thread/read",
+    params: { threadId },
+  }));
+
+  const readResponse = responseById(outbound, "thread-read-running");
+  assert.ok(readResponse, "expected thread/read response");
+  assert.equal(readResponse.result.turns.length, 1);
+  assert.equal(readResponse.result.turns[0].id, turnId);
+  assert.equal(readResponse.result.turns[0].status, "in_progress");
+  assert.equal(readResponse.result.turns[0].items[0].text, "Monitor logs for 10 minutes");
+  assert.equal(readResponse.result.thread.turns[0].status, "in_progress");
+  assert.equal(readResponse.result.thread.turns[0].items[0].text, "Monitor logs for 10 minutes");
+});
+
+test("Gemini stream turn_complete ends a long prompt lifecycle and drains queued prompts", async (t) => {
+  const previousHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-gemini-adapter-"));
+  process.env.HOME = tempHome;
+  t.after(() => {
+    process.env.HOME = previousHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const fake = createFakeGeminiTransport();
+  const adapter = createGeminiProtocolAdapter({
+    transport: fake.transport,
+    logPrefix: "[test-gemini]",
+  });
+  const outbound = [];
+  adapter.onMessage((rawMessage) => outbound.push(JSON.parse(rawMessage)));
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-init-1",
+    result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Gemini CLI", version: "test" },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1000",
+    result: {
+      sessionId: "root-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+
+  adapter.send(JSON.stringify({
+    id: "thread-start-queue",
+    method: "thread/start",
+    params: { cwd: "/Users/developer/remodex" },
+  }));
+  const threadId = responseById(outbound, "thread-start-queue").result.threadId;
+
+  adapter.send(JSON.stringify({
+    id: "turn-start-first",
+    method: "turn/start",
+    params: {
+      threadId,
+      prompt: "First long prompt",
+    },
+  }));
+  const sessionRequest = fake.sent.find((message) =>
+    message.method === "session/new"
+    && message.params?.cwd === "/Users/developer/remodex"
+  );
+  assert.ok(sessionRequest, "expected a cwd-scoped Gemini session request");
+  fake.emit({
+    jsonrpc: "2.0",
+    id: sessionRequest.id,
+    result: {
+      sessionId: "queue-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const firstPromptRequest = fake.sent.find((message) => message.method === "session/prompt");
+  assert.ok(firstPromptRequest, "expected first Gemini prompt request");
+
+  adapter.send(JSON.stringify({
+    id: "turn-start-second",
+    method: "turn/start",
+    params: {
+      threadId,
+      prompt: "Second queued prompt",
+    },
+  }));
+  assert.equal(
+    fake.sent.filter((message) => message.method === "session/prompt").length,
+    1,
+    "second prompt should wait while the first prompt is still active"
+  );
+
+  fake.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_start",
+      },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "message_part",
+        text: "Finished monitoring.",
+      },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      update: {
+        sessionUpdate: "turn_complete",
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(responseById(outbound, "turn-start-second"), "expected queued turn/start to receive a response");
+  assert.equal(
+    fake.sent.filter((message) => message.method === "session/prompt").length,
+    2,
+    "queued prompt should start after stream turn_complete"
+  );
+
+  const completedStatus = outbound.find((message) =>
+    message.method === "thread/status/changed"
+    && message.params?.threadId === threadId
+    && message.params?.status === "completed"
+  );
+  assert.ok(completedStatus, "expected completed thread status after stream turn_complete");
+
+  const completedCountBeforeLateResponse = outbound.filter((message) =>
+    message.method === "turn/completed"
+  ).length;
+  fake.emit({
+    jsonrpc: "2.0",
+    id: firstPromptRequest.id,
+    result: { stopReason: "end_turn" },
+  });
+  assert.equal(
+    outbound.filter((message) => message.method === "turn/completed").length,
+    completedCountBeforeLateResponse,
+    "late prompt RPC response should not complete the next active turn"
+  );
+});
+
+test("Gemini turn/cancel stays local when Gemini RPC cancel is unsupported", async (t) => {
+  const previousHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-gemini-adapter-"));
+  process.env.HOME = tempHome;
+  t.after(() => {
+    process.env.HOME = previousHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  const fake = createFakeGeminiTransport();
+  const adapter = createGeminiProtocolAdapter({
+    transport: fake.transport,
+    logPrefix: "[test-gemini]",
+  });
+  const outbound = [];
+  adapter.onMessage((rawMessage) => outbound.push(JSON.parse(rawMessage)));
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-init-1",
+    result: {
+      protocolVersion: 1,
+      agentInfo: { name: "Gemini CLI", version: "test" },
+    },
+  });
+  fake.emit({
+    jsonrpc: "2.0",
+    id: "gemini-adapter-1000",
+    result: {
+      sessionId: "root-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+
+  adapter.send(JSON.stringify({
+    id: "thread-start-cancel",
+    method: "thread/start",
+    params: { cwd: "/Users/developer/remodex" },
+  }));
+  const threadId = responseById(outbound, "thread-start-cancel").result.threadId;
+
+  adapter.send(JSON.stringify({
+    id: "turn-start-cancel",
+    method: "turn/start",
+    params: {
+      threadId,
+      prompt: "Long running monitor",
+    },
+  }));
+  const turnId = responseById(outbound, "turn-start-cancel").result.turnId;
+  const sessionRequest = fake.sent.find((message) =>
+    message.method === "session/new"
+    && message.params?.cwd === "/Users/developer/remodex"
+  );
+  assert.ok(sessionRequest, "expected Gemini session bootstrap before cancel");
+  fake.emit({
+    jsonrpc: "2.0",
+    id: sessionRequest.id,
+    result: {
+      sessionId: "cancel-session",
+      models: {
+        currentModelId: "gemini-2.5-pro",
+        availableModels: ["gemini-2.5-pro"],
+      },
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default", name: "Default" }],
+      },
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const cancelRequest = fake.sent.find((message) => message.method === "session/prompt");
+  assert.ok(cancelRequest, "expected active Gemini prompt before cancel");
+
+  adapter.send(JSON.stringify({
+    id: "turn-cancel-1",
+    method: "turn/cancel",
+    params: { threadId },
+  }));
+
+  const geminiCancelRequest = fake.sent.find((message) => message.method === "cancel");
+  assert.ok(geminiCancelRequest, "expected Gemini cancel RPC attempt");
+
+  fake.emit({
+    jsonrpc: "2.0",
+    id: geminiCancelRequest.id,
+    error: {
+      code: -32601,
+      message: "\"Method not found\": cancel",
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const cancelResponse = responseById(outbound, "turn-cancel-1");
+  assert.deepEqual(cancelResponse?.result, { success: true });
+
+  const completedEvent = outbound.find((message) =>
+    message.method === "turn/completed"
+    && message.params?.threadId === threadId
+    && message.params?.turn?.status === "cancelled"
+  );
+  assert.ok(completedEvent, "expected local cancelled completion event");
+  assert.equal(completedEvent.params?.turnId, turnId);
+
+  const stoppedStatus = outbound.find((message) =>
+    message.method === "thread/status/changed"
+    && message.params?.threadId === threadId
+    && message.params?.status === "stopped"
+  );
+  assert.ok(stoppedStatus, "expected stopped thread status after local cancel");
+});
+
 test("Gemini adapter restores persisted threads with Gemini metadata after adapter restart", async (t) => {
   const previousHome = process.env.HOME;
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-gemini-adapter-"));
@@ -427,4 +782,8 @@ test("Gemini adapter restores persisted threads with Gemini metadata after adapt
   assert.equal(resumeResponse.result.thread.model, "gemini-2.5-pro");
   assert.equal(resumeResponse.result.thread.modelProvider, "gemini");
   assert.equal(resumeResponse.result.thread.backendType, "gemini");
+  assert.deepEqual(
+    resumeResponse.result.thread.turns[0].items.map((item) => item.text),
+    ["Restore me after reconnect", "I returned after reconnect."]
+  );
 });

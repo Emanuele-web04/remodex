@@ -552,15 +552,36 @@ async function verifyGeminiCliReady({
   command = "gemini",
   execFileImpl = execFile,
   spawnImpl = spawn,
-  timeoutMs = 1_500,
+  timeoutMs = 5_000,
 } = {}) {
-  const helpOutput = await execFileText(execFileImpl, command, ["--help"], { timeoutMs })
+  let helpOutput = "";
+  let execFileHelpError = null;
+
+  await execFileText(execFileImpl, command, ["--help"], { timeoutMs })
+    .then((output) => {
+      helpOutput = output;
+    })
     .catch((error) => {
       if (error?.code === "ENOENT") {
         throw new Error("Gemini CLI was not found in PATH. Install Gemini CLI or make `gemini` available in your terminal PATH.");
       }
-      throw new Error(`Could not run \`${command} --help\`: ${error.message || error}`);
+      execFileHelpError = error;
     });
+
+  // Some Gemini CLI wrappers relaunch through a child process and do not emit
+  // help text through execFile pipes, even though a direct spawned process does.
+  if (execFileHelpError || (!helpOutput.includes("--acp") && !helpOutput.includes("--experimental-acp"))) {
+    helpOutput = await spawnText(command, ["--help"], {
+      spawnImpl,
+      timeoutMs,
+    }).catch((error) => {
+      if (error?.code === "ENOENT") {
+        throw new Error("Gemini CLI was not found in PATH. Install Gemini CLI or make `gemini` available in your terminal PATH.");
+      }
+      const execFileMessage = execFileHelpError ? ` execFile error: ${execFileHelpError.message || execFileHelpError}` : "";
+      throw new Error(`Could not run \`${command} --help\`:${execFileMessage} spawn error: ${error.message || error}`);
+    });
+  }
 
   if (!helpOutput.includes("--acp") && !helpOutput.includes("--experimental-acp")) {
     throw new Error("Gemini CLI is installed, but this version does not advertise `--acp`. Update Gemini CLI before using the Gemini bridge.");
@@ -585,6 +606,62 @@ function execFileText(execFileImpl, command, args, { timeoutMs }) {
         return;
       }
       resolve(`${stdout || ""}\n${stderr || ""}`);
+    });
+  });
+}
+
+function spawnText(command, args, {
+  spawnImpl = spawn,
+  timeoutMs = 1_500,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    const child = spawnImpl(command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env },
+    });
+
+    const finish = (error = null, output = "") => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (child && !child.killed) {
+        child.kill("SIGTERM");
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve(output);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      finish(new Error(`\`${command} ${args.join(" ")}\` timed out.`));
+    }, timeoutMs);
+
+    child.stdout?.on("data", (chunk) => {
+      stdoutBuffer += String(chunk || "");
+    });
+
+    child.stderr?.on("data", (chunk) => {
+      stderrBuffer += String(chunk || "");
+    });
+
+    child.on("error", (error) => {
+      finish(error);
+    });
+
+    child.on("close", (code, signal) => {
+      if (code && code !== 0) {
+        const details = stderrBuffer.trim() ? ` ${stderrBuffer.trim()}` : "";
+        finish(new Error(`\`${command} ${args.join(" ")}\` exited with code ${code} (signal ${signal || "none"}).${details}`));
+        return;
+      }
+      finish(null, `${stdoutBuffer}\n${stderrBuffer}`);
     });
   });
 }
