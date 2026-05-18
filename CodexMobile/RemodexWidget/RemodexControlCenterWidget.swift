@@ -9,20 +9,19 @@ import AppIntents
 import SwiftUI
 import WidgetKit
 
+private let remodexProjectsURL = URL(string: "phodex://open/projects")!
+
 @available(iOS 18.0, *)
 struct RemodexLaunchControl: ControlWidget {
-    static let kind = "com.emanueledipietro.Remodex.RemodexWidget.LaunchControl.v9"
+    static let kind = "com.emanueledipietro.Remodex.RemodexWidget.ProjectsControl.v10"
 
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: Self.kind) {
-            ControlWidgetButton(action: RemodexLaunchIntent()) {
-                // Control Center only accepts symbol images. This custom SF
-                // Symbol uses the unmodified SF Symbols template from
-                // SwiftDraw; manual scaling can make iOS render it as blank.
-                Label("Remodex", image: "remodex_symbol_medium")
+            ControlWidgetButton(action: OpenURLIntent(remodexProjectsURL)) {
+                Label("Remodex Projects", image: "remodex_control_symbol")
             }
         }
-        .displayName("Remodex")
-        .description("Launch Remodex from Control Center.")
+        .displayName("Remodex Projects")
+        .description("Open the Remodex project list from the lock screen.")
     }
 }

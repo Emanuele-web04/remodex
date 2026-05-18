@@ -146,6 +146,9 @@ struct ContentView: View {
                 syncSelectedThread(with: threads)
                 scheduleSidebarPrewarmIfNeeded()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .remodexOpenProjects)) { _ in
+                presentProjectListFromExternalOpen()
+            }
             .onChange(of: scenePhase) { _, phase in
                 debugSidebarLog("scenePhase changed phase=\(String(describing: phase))")
                 codex.setForegroundState(phase != .background)
@@ -1041,6 +1044,24 @@ struct ContentView: View {
             closeSidebar()
         }
         isShowingSettingsCover = true
+    }
+
+    private func presentProjectListFromExternalOpen() {
+        isOpeningNewChatFromSidebar = false
+        isSearchActive = false
+        selectedThread = nil
+        codex.activeThreadId = nil
+
+        if shouldPresentSidebarAsNavigation {
+            navigationPath.removeAll()
+            requestSidebarFreshSyncIfNeeded()
+            return
+        }
+
+        requestSidebarFreshSyncIfNeeded()
+        if !isSidebarOpen {
+            setSidebar(open: true)
+        }
     }
 
     // Prevents a close-swipe release from also activating whichever sidebar row was under the finger.

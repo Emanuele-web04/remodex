@@ -6,6 +6,10 @@
 import RevenueCat
 import SwiftUI
 
+extension Notification.Name {
+    static let remodexOpenProjects = Notification.Name("remodex.openProjects")
+}
+
 @MainActor
 @main
 struct CodexMobileApp: App {
@@ -38,7 +42,11 @@ struct CodexMobileApp: App {
                 }
                 .onOpenURL { url in
                     Task { @MainActor in
-                        guard CodexService.legacyGPTLoginCallbackEnabled else {
+                        if handleAppOpenURL(url) {
+                            return
+                        }
+                        guard CodexService.legacyGPTLoginCallbackEnabled,
+                              codexService.isExpectedGPTLoginCallbackURL(url) else {
                             return
                         }
                         await codexService.handleGPTLoginCallbackURL(url)
@@ -56,6 +64,22 @@ struct CodexMobileApp: App {
                     TurnCacheManager.resetAll()
                 }
         }
+    }
+
+    private func handleAppOpenURL(_ url: URL) -> Bool {
+        guard url.scheme?.caseInsensitiveCompare("phodex") == .orderedSame else {
+            return false
+        }
+
+        let host = url.host?.lowercased()
+        let path = url.path.lowercased()
+        guard host == "open",
+              path.isEmpty || path == "/" || path == "/projects" else {
+            return false
+        }
+
+        NotificationCenter.default.post(name: .remodexOpenProjects, object: nil)
+        return true
     }
 
     // Configures RevenueCat once at launch using the client-safe public SDK key.
