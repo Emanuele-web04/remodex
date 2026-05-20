@@ -1,11 +1,11 @@
 // FILE: SidebarConnectionStatusBadge.swift
 // Purpose: Compact capsule pill that surfaces the live relay connection phase
-//          underneath the connect/reconnect panel's recovery chips. Hides
-//          itself when the relay is fully `.connected` so the happy-path
-//          empty state never has a stale status indicator hanging around.
+//          in the sidebar's chip row under search. Hides itself when the relay
+//          is fully `.connected` so the happy path never has a stale status
+//          indicator hanging around.
 // Layer: View Component
 // Exports: SidebarConnectionStatusBadge
-// Depends on: SwiftUI, CodexConnectionPhase, AppFont
+// Depends on: SwiftUI, CodexConnectionPhase, AppFont, AdaptiveGlassModifier
 
 import SwiftUI
 
@@ -57,8 +57,12 @@ struct SidebarConnectionStatusBadge: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(Capsule().fill(Color(.systemBackground)))
-        .overlay(Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 1))
+        .adaptiveGlass(
+            .regular,
+            isInteractive: false,
+            fallbackMaterial: .ultraThinMaterial,
+            in: Capsule(style: .continuous)
+        )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("Connection status: \(statusLabel)"))
     }

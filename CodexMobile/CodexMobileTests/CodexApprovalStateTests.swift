@@ -147,6 +147,29 @@ final class CodexApprovalStateTests: XCTestCase {
         XCTAssertEqual(service.pendingApproval(for: "thread-a")?.id, service.idKey(from: approvalRequestID))
     }
 
+    func testDesktopMirroredApprovalQueuesEvenWhenFullAccessIsSelected() {
+        let service = makeService()
+        service.setSelectedAccessMode(.fullAccess)
+        let requestID: JSONValue = .string("approval-1")
+
+        service.handleIncomingRPCMessage(
+            RPCMessage(
+                id: requestID,
+                method: "item/commandExecution/requestApproval",
+                params: .object([
+                    "threadId": .string("thread-a"),
+                    "turnId": .string("turn-a"),
+                    "command": .string("git status"),
+                    "remodexActionSource": .string("desktop-ipc-action-follower"),
+                ]),
+                includeJSONRPC: false
+            )
+        )
+
+        XCTAssertEqual(service.pendingApprovals.count, 1)
+        XCTAssertEqual(service.pendingApproval(for: "thread-a")?.id, service.idKey(from: requestID))
+    }
+
     func testFailedApproveKeepsApprovalQueued() async {
         let service = makeService()
         let requestID: JSONValue = .string("approval-1")

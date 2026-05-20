@@ -122,6 +122,65 @@ async function startMacOSBridgeService({
   };
 }
 
+// Restarts the installed LaunchAgent without rewriting relay config, useful during local bridge development.
+async function restartMacOSBridgeService({
+  env = process.env,
+  platform = process.platform,
+  fsImpl = fs,
+  execFileSyncImpl = execFileSync,
+  osImpl = os,
+  waitForPairing = false,
+  pairingTimeoutMs = DEFAULT_PAIRING_WAIT_TIMEOUT_MS,
+  pairingPollIntervalMs = DEFAULT_PAIRING_WAIT_INTERVAL_MS,
+  ...startOptions
+} = {}) {
+  assertDarwinPlatform(platform);
+  const plistPath = resolveLaunchAgentPlistPath({ env, osImpl });
+  if (!fsImpl.existsSync(plistPath)) {
+    return startMacOSBridgeService({
+      env,
+      platform,
+      fsImpl,
+      execFileSyncImpl,
+      osImpl,
+      waitForPairing,
+      pairingTimeoutMs,
+      pairingPollIntervalMs,
+      ...startOptions,
+    });
+  }
+
+  const startedAt = Date.now();
+  if (waitForPairing) {
+    clearPairingSession({ env, fsImpl });
+  }
+
+  kickstartLaunchAgent({
+    env,
+    execFileSyncImpl,
+    plistPath,
+  });
+
+  if (waitForPairing) {
+    const pairingSession = await waitForFreshPairingSession({
+      env,
+      fsImpl,
+      startedAt,
+      timeoutMs: pairingTimeoutMs,
+      intervalMs: pairingPollIntervalMs,
+    });
+    return {
+      plistPath,
+      pairingSession,
+    };
+  }
+
+  return {
+    plistPath,
+    pairingSession: null,
+  };
+}
+
 function stopMacOSBridgeService({
   env = process.env,
   platform = process.platform,
@@ -373,6 +432,31 @@ function restartLaunchAgent({
   ], { stdio: ["ignore", "ignore", "pipe"] });
 }
 
+function kickstartLaunchAgent({
+  env = process.env,
+  execFileSyncImpl = execFileSync,
+  plistPath,
+} = {}) {
+  try {
+    execFileSyncImpl("launchctl", [
+      "kickstart",
+      "-k",
+      launchAgentLabelDomain(env),
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+  } catch {
+    execFileSyncImpl("launchctl", [
+      "bootstrap",
+      launchAgentDomain(env),
+      plistPath,
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+    execFileSyncImpl("launchctl", [
+      "kickstart",
+      "-k",
+      launchAgentLabelDomain(env),
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+  }
+}
+
 function bootoutLaunchAgent({
   env = process.env,
   execFileSyncImpl = execFileSync,
@@ -537,6 +621,7 @@ module.exports = {
   printMacOSBridgeServiceStatus,
   resetMacOSBridgePairing,
   resolveLaunchAgentPlistPath,
+  restartMacOSBridgeService,
   runMacOSBridgeService,
   startMacOSBridgeService,
   stopMacOSBridgeService,

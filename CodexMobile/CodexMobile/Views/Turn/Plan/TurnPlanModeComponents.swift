@@ -238,6 +238,7 @@ struct ProposedPlanResultCard: View {
 
     @State private var isImplementing = false
     @State private var hasStartedImplementation = false
+    @State private var isPlanExpanded = false
 
     private var canRenderImplementationAction: Bool {
         canImplement && !isStreaming && !proposedPlan.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -247,37 +248,66 @@ struct ProposedPlanResultCard: View {
         isImplementing || hasStartedImplementation
     }
 
+    private var visiblePlanBody: String {
+        isPlanExpanded ? proposedPlan.body : collapsedPlanBody
+    }
+
+    private var collapsedPlanBody: String {
+        let lines = proposedPlan.body.components(separatedBy: .newlines)
+        let collapsed = lines
+            .prefix(5)
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return collapsed.isEmpty ? proposedPlan.body : collapsed
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Proposed plan")
-                .font(AppFont.subheadline(weight: .semibold))
-                .foregroundStyle(.primary)
+            HStack(alignment: .center, spacing: 8) {
+                Text("Proposed plan")
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
 
-            MarkdownTextView(text: proposedPlan.body, profile: .assistantProse)
-                .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
 
-            if canRenderImplementationAction {
                 Button {
-                    implementPlan()
-                } label: {
-                    HStack(spacing: 8) {
-                        if isImplementationLocked {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            RemodexIcon.image(systemName: "arrow.right.circle.fill")
-                                .font(AppFont.system(size: 14, weight: .semibold))
-                        }
-                        Text(isImplementationLocked ? "Starting implementation…" : "Implement plan")
-                            .font(AppFont.subheadline(weight: .semibold))
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.86)) {
+                        isPlanExpanded.toggle()
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 12)
-                    .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(isPlanExpanded ? "Collapse" : "Expand")
+                            .font(AppFont.footnote(weight: .semibold))
+                        RemodexIcon.image(systemName: isPlanExpanded ? "chevron.up" : "chevron.down")
+                            .font(AppFont.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .adaptiveGlass(.regular, in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .disabled(isImplementationLocked)
+                .accessibilityLabel(isPlanExpanded ? "Collapse plan" : "Expand plan")
+            }
+
+            MarkdownTextView(text: visiblePlanBody, profile: .assistantProse)
+                .id(isPlanExpanded)
+                .fixedSize(horizontal: false, vertical: true)
+                .animation(.spring(response: 0.3, dampingFraction: 0.86), value: isPlanExpanded)
+
+            HStack(spacing: 10) {
+                if canRenderImplementationAction {
+                    PlanResultActionButton(
+                        title: isImplementationLocked ? "Starting..." : "Implement",
+                        systemName: "arrow.right.circle.fill",
+                        isPrimary: true,
+                        isLoading: isImplementationLocked
+                    ) {
+                        implementPlan()
+                    }
+                    .disabled(isImplementationLocked)
+                }
             }
         }
         .padding(14)
@@ -311,6 +341,47 @@ struct ProposedPlanResultCard: View {
                 codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }
+    }
+}
+
+private struct PlanResultActionButton: View {
+    let title: String
+    let systemName: String
+    let isPrimary: Bool
+    let isLoading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            guard !isLoading else { return }
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            action()
+        } label: {
+            HStack(spacing: 6) {
+                Group {
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        RemodexIcon.image(systemName: systemName)
+                            .font(AppFont.system(size: 13, weight: .semibold))
+                    }
+                }
+                .frame(width: 16, height: 16)
+
+                Text(title)
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            .foregroundStyle(isPrimary ? Color(.plan) : Color.primary)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 11)
+            .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
     }
 }
 
@@ -1003,4 +1074,28 @@ private struct ParsedQuestionBlock {
 #Preview("Plan Sheet") {
     PlanExecutionSheet(message: PlanAccessoryPreviewFixtures.activeMessage)
         .environment(CodexService())
+}
+
+#Preview("Proposed Plan Result") {
+    ProposedPlanResultCard(
+        threadId: "thread-preview-proposed-plan",
+        proposedPlan: CodexProposedPlan(
+            body: """
+            # RevenueCat Dashboard Improvement Plan
+
+            ## Summary
+            Improve the app in three passes: first make it safer with tests and API hardening, then improve dashboard accuracy and UX, then refactor the large dashboard component.
+
+            ## Key Changes
+            - Add a test setup using vitest for pure logic and route-level behavior.
+            - Cover lib/tax-calculator.ts, lib/ranges.ts, lib/chart-normalizer.ts, /api/fx, and /api/revenuecat.
+            - Keep typecheck as a required verification step.
+            """
+        ),
+        isStreaming: false,
+        canImplement: true
+    )
+    .padding(16)
+    .background(Color(.systemBackground))
+    .environment(CodexService())
 }

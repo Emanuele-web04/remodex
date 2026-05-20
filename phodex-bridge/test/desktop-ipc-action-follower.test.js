@@ -50,6 +50,7 @@ test("projects desktop pending user input as an app-server request shape", () =>
       threadId: "thread-1",
       turnId: "turn-1",
       itemId: "item-1",
+      remodexActionSource: "desktop-ipc-action-follower",
       questions: [{
         id: "q1",
         header: "Mode",
@@ -134,6 +135,7 @@ test("projects command, file, and permission approvals while ignoring completed 
   assert.equal(actions[1].params.grantRoot, "/repo");
   assert.equal(actions[2].params.path, "/repo/secrets.txt");
   assert.equal(actions[3].params.reason, "Need plugin network access");
+  assert.equal(actions[3].params.remodexActionSource, "desktop-ipc-action-follower");
 });
 
 test("builds desktop follower reply payloads from iOS responses", () => {

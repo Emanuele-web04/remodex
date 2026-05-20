@@ -1191,6 +1191,7 @@ extension CodexService {
 
                 if let runningTurnID = snapshot.interruptibleTurnID {
                     markThreadAsRunning(normalizedThreadID)
+                    noteDesktopMirroredRunningActivity(for: normalizedThreadID)
                     setProtectedRunningFallback(false, for: normalizedThreadID)
                     setActiveTurnID(runningTurnID, for: normalizedThreadID)
                     threadIdByTurnID[runningTurnID] = normalizedThreadID
@@ -1200,8 +1201,22 @@ extension CodexService {
 
                 if snapshot.hasInterruptibleTurnWithoutID {
                     markThreadAsRunning(normalizedThreadID)
+                    noteDesktopMirroredRunningActivity(for: normalizedThreadID)
                     setProtectedRunningFallback(true, for: normalizedThreadID)
                 } else {
+                    if isDesktopMirroredRunning(normalizedThreadID),
+                       threadHasActiveOrRunningTurn(normalizedThreadID),
+                       shouldPreserveDesktopMirroredRunningAfterStaleSnapshot(for: normalizedThreadID) {
+                        markThreadAsRunning(normalizedThreadID)
+                        if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                            setProtectedRunningFallback(false, for: normalizedThreadID)
+                            threadIdByTurnID[existingTurnID] = normalizedThreadID
+                            activeTurnId = existingTurnID
+                        } else {
+                            setProtectedRunningFallback(true, for: normalizedThreadID)
+                        }
+                        return true
+                    }
                     clearRunningState(for: normalizedThreadID)
                 }
 

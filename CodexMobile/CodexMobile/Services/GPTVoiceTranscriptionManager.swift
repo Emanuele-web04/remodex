@@ -61,28 +61,51 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
     private static let maxAudioLevels = 240
 
     private var engine: AVAudioEngine?
-    private let collector = AudioBufferCollector()
+    private let collector = AudioSampleCollector()
     private var captureSampleRate: Double = 0
     private var isRecording = false
+    private var isStarting = false
+    private var recordingSessionID = 0
     private var durationTimer: Timer?
+    private var audioSessionObservers: [NSObjectProtocol] = []
 
     /// Rolling window of normalized (0…1) amplitude samples for waveform visualization.
     @Published var audioLevels: [CGFloat] = []
     /// Elapsed seconds since recording started.
     @Published var recordingDuration: TimeInterval = 0
+    /// Incremented when iOS invalidates the capture path so views can reset their local mic state.
+    @Published var captureInvalidationID = 0
+
+    init() {
+        installAudioSessionObservers()
+    }
+
+    deinit {
+        for observer in audioSessionObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
 
     // ─── Recording lifecycle ─────────────────────────────────────
 
     @MainActor
     func startRecording() async throws {
         codexLogVoiceRecording("start requested")
-        guard !isRecording else {
+        guard !isRecording, !isStarting else {
             throw GPTVoiceTranscriptionError.alreadyRecording
         }
 
+        recordingSessionID += 1
+        let sessionID = recordingSessionID
+        isStarting = true
+
         let isPermissionGranted = await requestMicrophonePermission()
         codexLogVoiceRecording("microphone permission: \(isPermissionGranted ? "granted" : "denied")")
+        guard isStarting, recordingSessionID == sessionID else {
+            throw GPTVoiceTranscriptionError.notRecording
+        }
         guard isPermissionGranted else {
+            isStarting = false
             throw GPTVoiceTranscriptionError.microphonePermissionDenied
         }
 
@@ -105,24 +128,20 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
             )
 
             captureSampleRate = format.sampleRate
-            collector.reset()
+            collector.beginSession(sessionID)
 
-            // Collect raw buffers on the tap thread and compute audio levels for the waveform.
+            resetMeteringState()
+
+            // Copy tap samples immediately; AVAudioEngine owns the callback buffer lifetime.
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { [collector, weak self] buffer, _ in
-                collector.append(buffer)
+                guard let samples = collector.append(buffer, sessionID: sessionID) else { return }
 
                 // Compute RMS power for waveform visualization.
-                guard let channelData = buffer.floatChannelData?[0] else { return }
-                let frameCount = Int(buffer.frameLength)
-                guard frameCount > 0 else { return }
-
                 var sumOfSquares: Float = 0
-                let ptr = channelData
-                for i in 0..<frameCount {
-                    let sample = ptr[i]
+                for sample in samples {
                     sumOfSquares += sample * sample
                 }
-                let rms = sqrt(sumOfSquares / Float(frameCount))
+                let rms = sqrt(sumOfSquares / Float(samples.count))
                 let dB = 20 * log10(max(rms, 1e-6))
                 let normalized = CGFloat(max(0, min(1, (dB + 50) / 50)))
 
@@ -136,18 +155,29 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
             }
 
             self.engine = engine
-            isRecording = true
 
             engine.prepare()
+            guard isStarting, recordingSessionID == sessionID else {
+                teardownEngine()
+                throw GPTVoiceTranscriptionError.notRecording
+            }
             try engine.start()
+            guard isStarting, recordingSessionID == sessionID else {
+                teardownEngine()
+                throw GPTVoiceTranscriptionError.notRecording
+            }
+            isStarting = false
+            isRecording = true
             startDurationTimer()
             codexLogVoiceRecording("recording active")
         } catch let error as GPTVoiceTranscriptionError {
             teardownEngine()
+            collector.reset()
             codexLogVoiceRecording("start failed: \(error.localizedDescription)")
             throw error
         } catch {
             teardownEngine()
+            collector.reset()
             codexLogVoiceRecording("engine start threw: \(error.localizedDescription)")
             throw GPTVoiceTranscriptionError.unableToPrepareAudioEngine
         }
@@ -157,21 +187,13 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
     @MainActor
     func stopRecording() throws -> GPTVoiceRecordingClip? {
         guard isRecording else { return nil }
+        let sessionID = recordingSessionID
         isRecording = false
 
         stopDurationTimer()
         teardownEngine()
 
-        let buffers = collector.drain()
-        guard !buffers.isEmpty else { return nil }
-
-        // Flatten all captured float samples from the first channel.
-        var allSamples = [Float]()
-        for buf in buffers {
-            guard let data = buf.floatChannelData?[0] else { continue }
-            allSamples.append(contentsOf: UnsafeBufferPointer(start: data, count: Int(buf.frameLength)))
-        }
-
+        let allSamples = collector.drain(sessionID: sessionID)
         guard !allSamples.isEmpty else { return nil }
 
         let resampled = Self.resample(allSamples, from: captureSampleRate, to: Self.targetSampleRate)
@@ -204,13 +226,15 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
 
     @MainActor
     func cancelRecording() {
-        let wasRecording = isRecording
+        let wasActive = isRecording || isStarting || engine != nil
+        recordingSessionID += 1
+        isStarting = false
         isRecording = false
 
         stopDurationTimer()
         resetMeteringState()
 
-        if wasRecording || engine != nil {
+        if wasActive {
             teardownEngine()
         }
         collector.reset()
@@ -309,7 +333,7 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
                 mode: .default,
                 options: [.defaultToSpeaker, .allowBluetoothHFP]
             )
-            try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
+            try audioSession.setActive(true)
 
             let inputs = audioSession.currentRoute.inputs.map { "\($0.portType.rawValue):\($0.portName)" }
             codexLogVoiceRecording("active input route: \(inputs.isEmpty ? "none" : inputs.joined(separator: ", "))")
@@ -327,10 +351,110 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         }
     }
 
-    // ─── Engine teardown ─────────────────────────────────────────
+    // ─── Audio interruptions ────────────────────────────────────────
+
+    private func installAudioSessionObservers() {
+        let center = NotificationCenter.default
+        audioSessionObservers = [
+            center.addObserver(
+                forName: AVAudioSession.interruptionNotification,
+                object: audioSession,
+                queue: nil
+            ) { [weak self] notification in
+                let typeRawValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+                Task { @MainActor [weak self] in
+                    self?.handleAudioSessionInterruption(typeRawValue: typeRawValue)
+                }
+            },
+            center.addObserver(
+                forName: AVAudioSession.routeChangeNotification,
+                object: audioSession,
+                queue: nil
+            ) { [weak self] notification in
+                let reasonRawValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt
+                Task { @MainActor [weak self] in
+                    self?.handleAudioRouteChange(reasonRawValue: reasonRawValue)
+                }
+            },
+            center.addObserver(
+                forName: AVAudioSession.mediaServicesWereLostNotification,
+                object: audioSession,
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.invalidateActiveCapture(reason: "audio media services were lost")
+                }
+            },
+            center.addObserver(
+                forName: AVAudioSession.mediaServicesWereResetNotification,
+                object: audioSession,
+                queue: nil
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.invalidateActiveCapture(reason: "audio media services were reset")
+                }
+            }
+        ]
+    }
 
     @MainActor
+    private func handleAudioSessionInterruption(typeRawValue: UInt?) {
+        guard let typeRawValue,
+              AVAudioSession.InterruptionType(rawValue: typeRawValue) == .began else {
+            return
+        }
+
+        invalidateActiveCapture(reason: "audio session interruption began")
+    }
+
+    @MainActor
+    private func handleAudioRouteChange(reasonRawValue: UInt?) {
+        guard isRecording || isStarting || engine != nil else {
+            return
+        }
+
+        guard let reasonRawValue,
+              let reason = AVAudioSession.RouteChangeReason(rawValue: reasonRawValue) else {
+            cancelCaptureIfInputDisappeared(reason: "audio route changed: unknown")
+            return
+        }
+
+        switch reason {
+        case .oldDeviceUnavailable, .noSuitableRouteForCategory, .routeConfigurationChange:
+            cancelCaptureIfInputDisappeared(reason: "audio route changed: \(String(describing: reason))")
+        default:
+            codexLogVoiceRecording("ignored audio route change: \(String(describing: reason))")
+        }
+    }
+
+    @MainActor
+    private func cancelCaptureIfInputDisappeared(reason: String) {
+        guard audioSession.currentRoute.inputs.isEmpty else {
+            codexLogVoiceRecording("\(reason); microphone input still available")
+            return
+        }
+
+        invalidateActiveCapture(reason: reason)
+    }
+
+    @MainActor
+    private func invalidateActiveCapture(reason: String) {
+        guard isRecording || isStarting || engine != nil else {
+            return
+        }
+
+        codexLogVoiceRecording("\(reason); cancelling active capture")
+        cancelRecording()
+        captureInvalidationID += 1
+    }
+
+    // ─── Engine teardown ─────────────────────────────────────────
+
+    // Clears AVAudioEngine state after normal stops and failed starts so the next mic tap can retry.
+    @MainActor
     private func teardownEngine() {
+        isStarting = false
+        isRecording = false
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
             if engine.isRunning { engine.stop() }
@@ -412,6 +536,13 @@ extension GPTVoiceTranscriptionManager {
             return try await transcribeOverride(wavData, token)
         }
 
+        let normalizedToken = token
+            .replacingOccurrences(of: #"(?i)^bearer\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedToken.isEmpty else {
+            throw GPTVoiceTranscriptionError.authExpired
+        }
+
         let boundary = "Remodex-\(UUID().uuidString)"
 
         var body = Data()
@@ -423,7 +554,7 @@ extension GPTVoiceTranscriptionManager {
 
         var request = URLRequest(url: chatGPTTranscriptionURL)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(normalizedToken)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
 
@@ -467,37 +598,124 @@ extension GPTVoiceTranscriptionManager {
     }
 }
 
-private extension Data {
-    mutating func appendUTF8(_ string: String) {
-        if let data = string.data(using: .utf8) {
-            append(data)
-        }
-    }
-}
+// ─── Thread-safe sample collector ────────────────────────────────
 
-// ─── Thread-safe buffer collector ────────────────────────────────
-
-private final class AudioBufferCollector: @unchecked Sendable {
+private final class AudioSampleCollector: @unchecked Sendable {
     private let lock = NSLock()
-    private var buffers: [AVAudioPCMBuffer] = []
+    private var activeSessionID: Int?
+    private var sampleChunks: [[Float]] = []
 
-    func append(_ buffer: AVAudioPCMBuffer) {
+    func beginSession(_ sessionID: Int) {
         lock.lock()
-        buffers.append(buffer)
+        activeSessionID = sessionID
+        sampleChunks = []
         lock.unlock()
     }
 
-    func drain() -> [AVAudioPCMBuffer] {
+    func append(_ buffer: AVAudioPCMBuffer, sessionID: Int) -> [Float]? {
+        guard let samples = Self.copyMonoFloatSamples(from: buffer), !samples.isEmpty else { return nil }
         lock.lock()
-        let result = buffers
-        buffers = []
+        guard activeSessionID == sessionID else {
+            lock.unlock()
+            return nil
+        }
+        sampleChunks.append(samples)
         lock.unlock()
-        return result
+        return samples
+    }
+
+    // Copies a tap buffer into mono Float32 samples, averaging channels when the input is stereo.
+    private static func copyMonoFloatSamples(from buffer: AVAudioPCMBuffer) -> [Float]? {
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard frameCount > 0, channelCount > 0 else { return nil }
+
+        if let channelData = buffer.floatChannelData {
+            var samples = [Float](repeating: 0, count: frameCount)
+            if buffer.format.isInterleaved {
+                let interleaved = channelData[0]
+                for frameIndex in 0..<frameCount {
+                    let baseIndex = frameIndex * channelCount
+                    for channelIndex in 0..<channelCount {
+                        samples[frameIndex] += interleaved[baseIndex + channelIndex]
+                    }
+                }
+            } else {
+                for channelIndex in 0..<channelCount {
+                    let channel = channelData[channelIndex]
+                    for frameIndex in 0..<frameCount {
+                        samples[frameIndex] += channel[frameIndex]
+                    }
+                }
+            }
+            if channelCount > 1 {
+                let divisor = Float(channelCount)
+                for index in samples.indices {
+                    samples[index] /= divisor
+                }
+            }
+            return samples
+        }
+
+        return convertPCMBufferToMonoFloat(buffer)
+    }
+
+    // Fallback for hardware routes that deliver integer PCM instead of Float32.
+    private static func convertPCMBufferToMonoFloat(_ buffer: AVAudioPCMBuffer) -> [Float]? {
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: buffer.format.sampleRate,
+            channels: 1,
+            interleaved: false
+        ),
+              let converter = AVAudioConverter(from: buffer.format, to: format) else {
+            return nil
+        }
+
+        let capacity = max(1, AVAudioFrameCount(Double(buffer.frameLength) * format.sampleRate / buffer.format.sampleRate) + 1)
+        guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+            return nil
+        }
+
+        var didFeedInput = false
+        var conversionError: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { _, status in
+            if didFeedInput {
+                status.pointee = .noDataNow
+                return nil
+            }
+            didFeedInput = true
+            status.pointee = .haveData
+            return buffer
+        }
+
+        converter.convert(to: convertedBuffer, error: &conversionError, withInputFrom: inputBlock)
+        guard conversionError == nil,
+              let channelData = convertedBuffer.floatChannelData?[0],
+              convertedBuffer.frameLength > 0 else {
+            return nil
+        }
+
+        return Array(UnsafeBufferPointer(start: channelData, count: Int(convertedBuffer.frameLength)))
+    }
+
+    func drain(sessionID: Int) -> [Float] {
+        lock.lock()
+        guard activeSessionID == sessionID else {
+            lock.unlock()
+            return []
+        }
+        let chunks = sampleChunks
+        sampleChunks = []
+        activeSessionID = nil
+        lock.unlock()
+        return chunks.flatMap { $0 }
     }
 
     func reset() {
         lock.lock()
-        buffers = []
+        activeSessionID = nil
+        sampleChunks = []
         lock.unlock()
     }
 }
@@ -505,6 +723,12 @@ private final class AudioBufferCollector: @unchecked Sendable {
 // ─── Data helpers ────────────────────────────────────────────────
 
 private extension Data {
+    mutating func appendUTF8(_ string: String) {
+        if let data = string.data(using: .utf8) {
+            append(data)
+        }
+    }
+
     mutating func appendLE<T: FixedWidthInteger>(_ value: T) {
         var le = value.littleEndian
         Swift.withUnsafeBytes(of: &le) { append(contentsOf: $0) }

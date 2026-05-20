@@ -4,9 +4,38 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const {
+  parseSessionJsonlMetadata,
   parseSessionJsonlTurns,
   readThreadTurnsListPageFromSessionJsonl,
 } = require("../src/session-jsonl-history");
+
+test("parseSessionJsonlMetadata reads desktop thread cwd", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-05T23:31:11.000Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-jsonl-meta",
+        cwd: "/Users/test/Project",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-05T23:31:12.000Z",
+      type: "response_item",
+      payload: {
+        id: "assistant-final",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "done" }],
+      },
+    }),
+  ].join("\n");
+
+  assert.deepEqual(parseSessionJsonlMetadata(content), {
+    threadId: "thread-jsonl-meta",
+    cwd: "/Users/test/Project",
+  });
+});
 
 test("readThreadTurnsListPageFromSessionJsonl builds a recent turns page from rollout JSONL", () => {
   const filePath = "/tmp/session.jsonl";
@@ -83,6 +112,41 @@ test("readThreadTurnsListPageFromSessionJsonl builds a recent turns page from ro
       ["message", "assistant", "fixed"],
     ]
   );
+});
+
+test("parseSessionJsonlTurns attaches pre-task user messages to following task", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-05T23:31:11.000Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-jsonl-prelude",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-05T23:31:12.000Z",
+      type: "event_msg",
+      payload: {
+        type: "user_message",
+        message: "from mac",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-05T23:31:13.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-jsonl-prelude",
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-jsonl-prelude" });
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].id, "turn-jsonl-prelude");
+  assert.equal(turns[0].items[0].type, "user_message");
+  assert.equal(turns[0].items[0].text, "from mac");
 });
 
 test("readThreadTurnsListPageFromSessionJsonl caps fallback pages to five turns", () => {
@@ -177,6 +241,160 @@ test("readThreadTurnsListPageFromSessionJsonl skips cursor requests", () => {
   });
 
   assert.equal(page, null);
+});
+
+test("parseSessionJsonlTurns restores desktop custom apply_patch as fileChange", () => {
+  const patch = [
+    "*** Begin Patch",
+    "*** Update File: Sources/App.swift",
+    "@@",
+    "-let title = \"Old\"",
+    "+let title = \"New\"",
+    "*** End Patch",
+    "",
+  ].join("\n");
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:52.418Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-patch",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:53.000Z",
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        status: "completed",
+        name: "apply_patch",
+        call_id: "call-patch",
+        input: patch,
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-patch" });
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].items.length, 1);
+  assert.equal(turns[0].items[0].type, "fileChange");
+  assert.equal(turns[0].items[0].id, "call-patch");
+  assert.deepEqual(turns[0].items[0].changes.map((change) => ({
+    path: change.path,
+    kind: change.kind,
+    additions: change.additions,
+    deletions: change.deletions,
+  })), [{
+    path: "Sources/App.swift",
+    kind: "update",
+    additions: 1,
+    deletions: 1,
+  }]);
+});
+
+test("parseSessionJsonlTurns restores update_plan calls as progress plan items", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:52.418Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-plan",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-15T07:53:53.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "update_plan",
+        call_id: "call-plan",
+        arguments: JSON.stringify({
+          explanation: "Break the work into safe slices.",
+          plan: [
+            { step: "Inspect plan rendering", status: "completed" },
+            { step: "Keep it visible", status: "in_progress" },
+          ],
+        }),
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-plan" });
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].items.length, 1);
+  assert.equal(turns[0].items[0].type, "plan");
+  assert.equal(turns[0].items[0].id, "call-plan");
+  assert.equal(turns[0].items[0].explanation, "Break the work into safe slices.");
+  assert.deepEqual(turns[0].items[0].plan, [
+    { step: "Inspect plan rendering", status: "completed" },
+    { step: "Keep it visible", status: "in_progress" },
+  ]);
+});
+
+test("parseSessionJsonlTurns restores completed desktop Plan items without duplicating proposed_plan messages", () => {
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-05-20T14:37:30.000Z",
+      type: "session_meta",
+      payload: {
+        id: "thread-completed-plan",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-20T14:37:31.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: "turn-completed-plan",
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-20T14:37:40.000Z",
+      type: "event_msg",
+      payload: {
+        type: "item_completed",
+        turn_id: "turn-completed-plan",
+        item: {
+          type: "Plan",
+          id: "turn-completed-plan-plan",
+          text: "# Improve Dashboard\n\n- Tighten validation",
+        },
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-20T14:37:40.010Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{
+          type: "output_text",
+          text: "<proposed_plan>\n# Improve Dashboard\n\n- Tighten validation\n</proposed_plan>",
+        }],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-05-20T14:37:41.000Z",
+      type: "event_msg",
+      payload: {
+        type: "task_complete",
+        turn_id: "turn-completed-plan",
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-completed-plan" });
+
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].status, "completed");
+  assert.equal(turns[0].items.length, 1);
+  assert.equal(turns[0].items[0].type, "plan");
+  assert.equal(turns[0].items[0].id, "turn-completed-plan-plan");
+  assert.equal(turns[0].items[0].text, "# Improve Dashboard\n\n- Tighten validation");
 });
 
 test("parseSessionJsonlTurns hides subagent orchestration transcript internals", () => {

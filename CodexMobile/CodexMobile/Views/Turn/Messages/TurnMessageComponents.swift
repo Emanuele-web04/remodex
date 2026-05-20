@@ -401,9 +401,12 @@ struct MessageRow: View, Equatable {
                         if let assistantBlockAccessoryState, hasTurnEndActions {
                             assistantTurnEndActions(accessoryState: assistantBlockAccessoryState)
                         }
-                        if let assistantBlockAccessoryState {
+                        if let assistantBlockAccessoryState,
+                           shouldRenderSystemCopyAccessory(assistantBlockAccessoryState) {
                             CopyBlockButton(
-                                text: assistantBlockAccessoryState.copyText,
+                                text: assistantBlockAccessoryState.allowsCopy
+                                    ? assistantBlockAccessoryState.copyText
+                                    : nil,
                                 isRunning: assistantBlockAccessoryState.showsRunningIndicator
                             )
                         }
@@ -642,9 +645,11 @@ struct MessageRow: View, Equatable {
                 assistantTurnEndActions(accessoryState: assistantBlockAccessoryState)
             }
 
-            if !suppressNativeProposedPlanShell, let assistantBlockAccessoryState {
+            if !suppressNativeProposedPlanShell,
+               let assistantBlockAccessoryState,
+               shouldRenderAssistantCopyAccessory(assistantBlockAccessoryState) {
                 CopyBlockButton(
-                    text: assistantCopyText,
+                    text: assistantBlockAccessoryState.allowsCopy ? assistantCopyText : nil,
                     isRunning: assistantBlockAccessoryState.showsRunningIndicator
                 )
             }
@@ -656,9 +661,21 @@ struct MessageRow: View, Equatable {
     }
 
     private var hasTurnEndActions: Bool {
-        AssistantTurnEndActionVisibility.shouldShow(
-            accessoryState: assistantBlockAccessoryState
-        )
+        // Tail Revert / Commit & Push controls are paused for now.
+        // return AssistantTurnEndActionVisibility.shouldShow(
+        //     accessoryState: assistantBlockAccessoryState
+        // )
+        return false
+    }
+
+    private func shouldRenderSystemCopyAccessory(_ state: AssistantBlockAccessoryState) -> Bool {
+        state.showsRunningIndicator || (state.allowsCopy && state.copyText != nil)
+    }
+
+    // Assistant rows get their copy payload from the row text, so the accessory state
+    // carries the copy permission separately from the potentially large text value.
+    private func shouldRenderAssistantCopyAccessory(_ state: AssistantBlockAccessoryState) -> Bool {
+        state.showsRunningIndicator || state.allowsCopy
     }
 
     private func expandVisibleText() {

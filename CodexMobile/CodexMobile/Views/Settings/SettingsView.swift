@@ -350,6 +350,9 @@ private struct SettingsGPTAccountCard: View {
 private struct SettingsBridgeVersionCard: View {
     @Environment(CodexService.self) private var codex
     @Environment(\.scenePhase) private var scenePhase
+    @State private var isUpdatingBridge = false
+    @State private var bridgeUpdateMessage: String?
+    @State private var bridgeUpdateFailed = false
 
     var body: some View {
         SettingsCard(title: "Bridge Version") {
@@ -375,6 +378,21 @@ private struct SettingsBridgeVersionCard: View {
                 Text(guidance)
                     .font(AppFont.caption())
                     .foregroundStyle(guidanceColor)
+            }
+
+            if codex.supportsBridgePackageUpdate {
+                SettingsButton(bridgeUpdateButtonTitle, isLoading: isUpdatingBridge) {
+                    Task {
+                        await updateBridgeFromSettings()
+                    }
+                }
+                .disabled(!codex.isConnected || isUpdatingBridge)
+            }
+
+            if let bridgeUpdateMessage {
+                Text(bridgeUpdateMessage)
+                    .font(AppFont.caption())
+                    .foregroundStyle(bridgeUpdateFailed ? .orange : .secondary)
             }
         }
         .task {
@@ -446,6 +464,16 @@ private struct SettingsBridgeVersionCard: View {
         return .orange
     }
 
+    private var bridgeUpdateButtonTitle: String {
+        if let installedVersion,
+           let latestVersion,
+           installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending {
+            return "Update Bridge on Computer"
+        }
+
+        return "Reinstall Bridge on Computer"
+    }
+
     private var installedValueStyle: Color {
         guard let installedVersion,
               let latestVersion,
@@ -462,6 +490,34 @@ private struct SettingsBridgeVersionCard: View {
 
     private var latestVersion: String? {
         normalizedVersion(codex.latestBridgePackageVersion)
+    }
+
+    private func updateBridgeFromSettings() async {
+        guard codex.isConnected else {
+            bridgeUpdateFailed = true
+            bridgeUpdateMessage = "Connect to your paired computer first."
+            return
+        }
+
+        guard !isUpdatingBridge else {
+            return
+        }
+
+        isUpdatingBridge = true
+        bridgeUpdateMessage = nil
+        bridgeUpdateFailed = false
+
+        do {
+            let handoffService = DesktopHandoffService(codex: codex)
+            try await handoffService.updateBridgePackageAndRestart()
+            bridgeUpdateFailed = false
+            bridgeUpdateMessage = "Bridge updated. Reconnecting after restart..."
+        } catch {
+            bridgeUpdateFailed = true
+            bridgeUpdateMessage = error.localizedDescription
+        }
+
+        isUpdatingBridge = false
     }
 
     private func normalizedVersion(_ value: String?) -> String? {

@@ -11,6 +11,7 @@ const path = require("path");
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
+const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
 const ACTION_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -688,6 +689,7 @@ function projectPendingDesktopAction(threadId, request) {
     method,
     params: {
       ...params,
+      remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
       threadId: readString(params.threadId) || readString(params.thread_id) || threadId,
     },
   };

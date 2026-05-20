@@ -2,11 +2,32 @@
 // Purpose: Loads, caches, and presents workspace image/text previews from assistant links.
 // Layer: Turn UI preview service
 // Exports: AssistantWorkspaceImagePreviewScreen, WorkspaceLinkedFilePreviewScreen, WorkspaceImagePreviewCache
-// Depends on: Foundation, ImageIO, SwiftUI, UIKit, CodexService workspace preview APIs
+// Depends on: Foundation, ImageIO, Runestone, SwiftUI, UIKit, CodexService workspace preview APIs
 
 import Foundation
 import ImageIO
+import Runestone
 import SwiftUI
+import TreeSitterBashRunestone
+import TreeSitterCPPRunestone
+import TreeSitterCRunestone
+import TreeSitterCSSRunestone
+import TreeSitterCSharpRunestone
+import TreeSitterGoRunestone
+import TreeSitterHTMLRunestone
+import TreeSitterJavaRunestone
+import TreeSitterJavaScriptRunestone
+import TreeSitterJSONRunestone
+import TreeSitterMarkdownRunestone
+import TreeSitterPythonRunestone
+import TreeSitterRubyRunestone
+import TreeSitterRustRunestone
+import TreeSitterSQLRunestone
+import TreeSitterSwiftRunestone
+import TreeSitterTOMLRunestone
+import TreeSitterTSXRunestone
+import TreeSitterTypeScriptRunestone
+import TreeSitterYAMLRunestone
 import UIKit
 
 struct AssistantWorkspaceImagePreviewRequest: Identifiable {
@@ -32,9 +53,10 @@ fileprivate enum WorkspaceLinkedFilePreviewKind {
 
 enum WorkspaceFileLinkResolver {
     private static let textFileExtensions: Set<String> = [
-        "c", "cc", "cpp", "css", "go", "h", "html", "java", "js", "json", "jsx",
-        "kt", "m", "md", "mm", "py", "rb", "rs", "sh", "swift", "toml", "ts",
-        "tsx", "txt", "xml", "yaml", "yml"
+        "bash", "c", "cc", "cjs", "cpp", "cs", "css", "go", "h", "html", "java",
+        "js", "json", "jsx", "kt", "m", "md", "mjs", "mm", "py", "rb", "rs",
+        "scss", "sh", "sql", "swift", "toml", "ts", "tsx", "txt", "xml", "yaml",
+        "yml", "zsh"
     ]
     private static let imageFileExtensions: Set<String> = [
         "gif", "heic", "heif", "jpeg", "jpg", "png", "webp"
@@ -496,7 +518,9 @@ private struct WorkspaceTextFileViewerScreen: View {
     let onDismiss: () -> Void
     let onReload: () -> Void
 
+    @Environment(\.colorScheme) private var colorScheme
     @State private var isShowingCopiedConfirmation = false
+    @State private var copyResetTask: Task<Void, Never>?
 
     private var content: String {
         file.content ?? ""
@@ -504,24 +528,33 @@ private struct WorkspaceTextFileViewerScreen: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView([.vertical, .horizontal]) {
-                VStack(alignment: .leading, spacing: 12) {
-                    fileMetadataHeader
-                    Text(content)
-                        .font(AppFont.mono(.caption))
-                        .foregroundStyle(.primary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .padding(16)
+            VStack(alignment: .leading, spacing: 0) {
+                WorkspaceTextFilePreviewHeader(file: file)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10)
+                    .padding(.bottom, 12)
+
+                Divider()
+                    .overlay(Color.primary.opacity(0.06))
+
+                WorkspaceRunestoneCodeFileView(
+                    content: content,
+                    fileName: file.fileName,
+                    colorScheme: colorScheme
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .ignoresSafeArea(edges: .bottom)
             }
-            .background(Color(.systemBackground))
-            .navigationTitle(file.fileName.isEmpty ? "File" : file.fileName)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(Color(WorkspaceRunestoneTheme.backgroundUIColor(for: colorScheme)))
             .navigationBarTitleDisplayMode(.inline)
             .adaptiveNavigationBar()
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { onDismiss() }
+                }
+                ToolbarItem(placement: .principal) {
+                    WorkspaceTextFilePreviewToolbarTitle(file: file)
                 }
                 ToolbarItemGroup(placement: .confirmationAction) {
                     Button {
@@ -532,41 +565,477 @@ private struct WorkspaceTextFileViewerScreen: View {
                     .accessibilityLabel("Reload file")
 
                     Button {
-                        UIPasteboard.general.string = content
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isShowingCopiedConfirmation = true
-                        }
+                        copyFileContents()
                     } label: {
                         RemodexIcon.image(systemName: isShowingCopiedConfirmation ? "checkmark" : "doc.on.doc")
                     }
                     .accessibilityLabel("Copy file contents")
                 }
             }
+            .onDisappear { copyResetTask?.cancel() }
         }
     }
 
-    private var fileMetadataHeader: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(file.path)
-                .font(AppFont.mono(.caption))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+    private func copyFileContents() {
+        UIPasteboard.general.string = content
+        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isShowingCopiedConfirmation = true
+        }
+        copyResetTask?.cancel()
+        copyResetTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isShowingCopiedConfirmation = false
+            }
+        }
+    }
+}
+
+// Renders an inline icon + filename + folder breadcrumb so the nav bar
+// keeps the file in context without truncating the basename mid-word.
+private struct WorkspaceTextFilePreviewToolbarTitle: View {
+    let file: WorkspaceTextFileReadResult
+
+    var body: some View {
+        VStack(spacing: 1) {
+            Text(displayName)
+                .font(AppFont.subheadline(weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
                 .truncationMode(.middle)
-            Text(metadataSummary)
-                .font(AppFont.caption())
-                .foregroundStyle(.tertiary)
+            if let parent = parentDirectoryName {
+                Text(parent)
+                    .font(AppFont.caption2())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+        .frame(maxWidth: 220)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var displayName: String {
+        file.fileName.isEmpty ? "File" : file.fileName
+    }
+
+    private var parentDirectoryName: String? {
+        let parent = (file.path as NSString).deletingLastPathComponent
+        let lastComponent = (parent as NSString).lastPathComponent
+        guard !lastComponent.isEmpty, lastComponent != "/" else { return nil }
+        return lastComponent
+    }
+}
+
+// Header card under the nav bar: file-type icon, name, breadcrumb path, and metadata chips.
+private struct WorkspaceTextFilePreviewHeader: View {
+    let file: WorkspaceTextFileReadResult
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            WorkspaceFileTypeIcon(fileName: displayName)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(displayName)
+                        .font(AppFont.headline(weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+
+                    if let languageBadgeTitle {
+                        Text(languageBadgeTitle)
+                            .font(AppFont.caption2(weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.primary.opacity(0.06))
+                            )
+                    }
+                }
+
+                Text(displayPath)
+                    .font(AppFont.mono(.caption))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                metadataChips
+                    .padding(.top, 2)
+            }
+
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.bottom, 4)
     }
 
-    private var metadataSummary: String {
-        var parts = [ByteCountFormatter.string(fromByteCount: Int64(file.byteLength), countStyle: .file)]
-        if let lineCount = file.lineCount {
-            parts.append("\(lineCount) line\(lineCount == 1 ? "" : "s")")
+    private var displayName: String {
+        file.fileName.isEmpty ? "File" : file.fileName
+    }
+
+    // Collapses the device home directory to `~` so long absolute paths stay readable.
+    private var displayPath: String {
+        let path = file.path
+        let home = NSHomeDirectory()
+        if !home.isEmpty, path.hasPrefix(home + "/") {
+            return "~" + path.dropFirst(home.count)
         }
-        parts.append(file.encoding.uppercased())
-        return parts.joined(separator: " | ")
+        if path == home { return "~" }
+        return path
+    }
+
+    private var languageBadgeTitle: String? {
+        let languageID = WorkspaceRunestoneLanguageResolver.languageID(for: displayName)
+        guard languageID != "plain" else { return nil }
+        switch languageID {
+        case "cpp": return "C++"
+        case "csharp": return "C#"
+        case "javascript": return "JavaScript"
+        case "typescript": return "TypeScript"
+        case "jsx": return "JSX"
+        case "tsx": return "TSX"
+        case "html": return "HTML"
+        case "css": return "CSS"
+        case "json": return "JSON"
+        case "sql": return "SQL"
+        case "yaml": return "YAML"
+        case "toml": return "TOML"
+        default: return languageID.capitalized
+        }
+    }
+
+    @ViewBuilder
+    private var metadataChips: some View {
+        HStack(spacing: 6) {
+            metadataChip(text: ByteCountFormatter.string(fromByteCount: Int64(file.byteLength), countStyle: .file))
+            if let lineCount = file.lineCount {
+                metadataChip(text: "\(lineCount) line\(lineCount == 1 ? "" : "s")")
+            }
+            metadataChip(text: file.encoding.uppercased())
+        }
+    }
+
+    private func metadataChip(text: String) -> some View {
+        Text(text)
+            .font(AppFont.caption2(weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+            )
+    }
+}
+
+// Small rounded badge with a language-aware glyph that sits next to the file name.
+private struct WorkspaceFileTypeIcon: View {
+    let fileName: String
+
+    var body: some View {
+        let style = WorkspaceFileTypeStyle.style(for: fileName)
+        ZStack {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(style.tint.opacity(0.14))
+            RemodexIcon.image(systemName: style.symbolName)
+                .font(AppFont.system(size: 17, weight: .semibold))
+                .foregroundStyle(style.tint)
+        }
+        .frame(width: 38, height: 38)
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(style.tint.opacity(0.18), lineWidth: 0.5)
+        )
+        .accessibilityHidden(true)
+    }
+}
+
+private enum WorkspaceFileTypeStyle {
+    struct Style {
+        let symbolName: String
+        let tint: Color
+    }
+
+    static func style(for fileName: String) -> Style {
+        let languageID = WorkspaceRunestoneLanguageResolver.languageID(for: fileName)
+        switch languageID {
+        case "swift": return Style(symbolName: "swift", tint: .orange)
+        case "javascript": return Style(symbolName: "curlybraces", tint: .yellow)
+        case "jsx": return Style(symbolName: "curlybraces", tint: .cyan)
+        case "typescript": return Style(symbolName: "curlybraces", tint: .blue)
+        case "tsx": return Style(symbolName: "curlybraces", tint: .indigo)
+        case "python": return Style(symbolName: "chevron.left.forwardslash.chevron.right", tint: .blue)
+        case "ruby": return Style(symbolName: "diamond.fill", tint: .red)
+        case "rust": return Style(symbolName: "gearshape.fill", tint: .orange)
+        case "go": return Style(symbolName: "g.circle.fill", tint: .cyan)
+        case "c": return Style(symbolName: "c.circle.fill", tint: .indigo)
+        case "cpp": return Style(symbolName: "c.circle.fill", tint: .purple)
+        case "csharp": return Style(symbolName: "c.circle.fill", tint: .green)
+        case "java": return Style(symbolName: "cup.and.saucer.fill", tint: .brown)
+        case "html": return Style(symbolName: "chevron.left.forwardslash.chevron.right", tint: .orange)
+        case "css": return Style(symbolName: "paintbrush.pointed.fill", tint: .blue)
+        case "json": return Style(symbolName: "curlybraces.square.fill", tint: .green)
+        case "markdown": return Style(symbolName: "text.book.closed.fill", tint: .indigo)
+        case "yaml", "toml": return Style(symbolName: "list.bullet.indent", tint: .gray)
+        case "sql": return Style(symbolName: "cylinder.split.1x2.fill", tint: .teal)
+        case "bash": return Style(symbolName: "terminal.fill", tint: .green)
+        default: return Style(symbolName: "doc.text.fill", tint: .accentColor)
+        }
+    }
+}
+
+// Hosts Runestone's native code viewer so workspace files get line numbers, selection, and syntax colors.
+private struct WorkspaceRunestoneCodeFileView: UIViewRepresentable {
+    let content: String
+    let fileName: String
+    let colorScheme: ColorScheme
+
+    private static let highlightedTextMaxUTF8Bytes = 512 * 1024
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context _: Context) -> TextView {
+        let textView = TextView(frame: .zero)
+        configure(textView)
+        return textView
+    }
+
+    func updateUIView(_ uiView: TextView, context: Context) {
+        configure(uiView)
+
+        let renderedContent = displayContent
+        // Large files remain scrollable/selectable while avoiding Tree-sitter work on the main thread.
+        let shouldSyntaxHighlight = renderedContent.utf8.count <= Self.highlightedTextMaxUTF8Bytes
+        let languageID = shouldSyntaxHighlight
+            ? WorkspaceRunestoneLanguageResolver.languageID(for: fileName)
+            : "plain"
+        let signature = Coordinator.Signature(
+            content: renderedContent,
+            languageID: languageID,
+            isDark: colorScheme == .dark
+        )
+
+        guard context.coordinator.signature != signature else {
+            return
+        }
+
+        context.coordinator.signature = signature
+        let theme = WorkspaceRunestoneTheme(colorScheme: colorScheme)
+        let language = shouldSyntaxHighlight ? WorkspaceRunestoneLanguageResolver.language(for: fileName) : nil
+        if let language {
+            uiView.setState(TextViewState(text: renderedContent, theme: theme, language: language))
+        } else {
+            uiView.setState(TextViewState(text: renderedContent, theme: theme))
+        }
+    }
+
+    private func configure(_ textView: TextView) {
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.showLineNumbers = true
+        textView.lineSelectionDisplayType = .line
+        textView.isLineWrappingEnabled = false
+        textView.lineHeightMultiplier = 1.22
+        textView.textContainerInset = UIEdgeInsets(top: 14, left: 10, bottom: 14, right: 18)
+        textView.backgroundColor = WorkspaceRunestoneTheme.backgroundUIColor(for: colorScheme)
+        textView.selectionBarColor = .systemBlue
+        textView.selectionHighlightColor = UIColor.systemBlue.withAlphaComponent(0.18)
+        textView.autocorrectionType = .no
+        textView.autocapitalizationType = .none
+        textView.smartDashesType = .no
+        textView.smartQuotesType = .no
+        textView.smartInsertDeleteType = .no
+        textView.spellCheckingType = .no
+        textView.alwaysBounceVertical = true
+        textView.alwaysBounceHorizontal = true
+        textView.keyboardDismissMode = .interactive
+        textView.layer.cornerRadius = 0
+        textView.layer.borderWidth = 0
+        // Keep Runestone's scroll layer from painting behind the fixed file header.
+        textView.clipsToBounds = true
+        if #available(iOS 16.0, *) {
+            textView.isFindInteractionEnabled = true
+        }
+    }
+
+    private var displayContent: String {
+        content.isEmpty ? " " : content
+    }
+
+    final class Coordinator {
+        var signature: Signature?
+
+        struct Signature: Equatable {
+            let content: String
+            let languageID: String
+            let isDark: Bool
+        }
+    }
+}
+
+private enum WorkspaceRunestoneLanguageResolver {
+    static func language(for fileName: String) -> TreeSitterLanguage? {
+        switch languageID(for: fileName) {
+        case "bash": return .bash
+        case "c": return .c
+        case "cpp": return .cpp
+        case "csharp": return .cSharp
+        case "css": return .css
+        case "go": return .go
+        case "html": return .html
+        case "java": return .java
+        case "javascript": return .javaScript
+        case "jsx": return .jsx
+        case "json": return .json
+        case "markdown": return .markdown
+        case "python": return .python
+        case "ruby": return .ruby
+        case "rust": return .rust
+        case "sql": return .sql
+        case "swift": return .swift
+        case "toml": return .toml
+        case "tsx": return .tsx
+        case "typescript": return .typeScript
+        case "yaml": return .yaml
+        default: return nil
+        }
+    }
+
+    static func languageID(for fileName: String) -> String {
+        let lowercasedName = fileName.lowercased()
+        let fileExtension = (lowercasedName as NSString).pathExtension
+        let basename = (lowercasedName as NSString).lastPathComponent
+
+        if basename == "dockerfile" {
+            return "bash"
+        }
+
+        switch fileExtension {
+        case "bash", "sh", "zsh": return "bash"
+        case "c", "h", "m": return "c"
+        case "cc", "cpp", "cxx", "hh", "hpp", "hxx", "mm": return "cpp"
+        case "cs": return "csharp"
+        case "css", "scss": return "css"
+        case "go": return "go"
+        case "html", "htm": return "html"
+        case "java", "kt": return "java"
+        case "js", "mjs", "cjs": return "javascript"
+        case "jsx": return "jsx"
+        case "json": return "json"
+        case "md", "markdown": return "markdown"
+        case "py": return "python"
+        case "rb": return "ruby"
+        case "rs": return "rust"
+        case "sql": return "sql"
+        case "swift": return "swift"
+        case "toml": return "toml"
+        case "tsx": return "tsx"
+        case "ts": return "typescript"
+        case "yaml", "yml": return "yaml"
+        default: return "plain"
+        }
+    }
+}
+
+private final class WorkspaceRunestoneTheme: Runestone.Theme {
+    private let isDark: Bool
+
+    init(colorScheme: ColorScheme) {
+        isDark = colorScheme == .dark
+    }
+
+    var font: UIFont {
+        AppFont.monoUIFont(size: 13, textStyle: .caption1)
+    }
+
+    var textColor: UIColor {
+        isDark ? UIColor(red: 0.88, green: 0.91, blue: 0.95, alpha: 1) : .label
+    }
+
+    var gutterBackgroundColor: UIColor {
+        Self.backgroundUIColor(isDark: isDark)
+    }
+
+    var gutterHairlineColor: UIColor {
+        UIColor.separator.withAlphaComponent(isDark ? 0.22 : 0.32)
+    }
+
+    var lineNumberColor: UIColor {
+        UIColor.secondaryLabel.withAlphaComponent(isDark ? 0.70 : 0.82)
+    }
+
+    var lineNumberFont: UIFont {
+        AppFont.monoUIFont(size: 12, textStyle: .caption2)
+    }
+
+    var selectedLineBackgroundColor: UIColor {
+        UIColor.systemBlue.withAlphaComponent(isDark ? 0.16 : 0.10)
+    }
+
+    var selectedLinesLineNumberColor: UIColor {
+        .systemBlue
+    }
+
+    var selectedLinesGutterBackgroundColor: UIColor {
+        UIColor.systemBlue.withAlphaComponent(isDark ? 0.14 : 0.08)
+    }
+
+    var invisibleCharactersColor: UIColor {
+        UIColor.tertiaryLabel
+    }
+
+    var pageGuideHairlineColor: UIColor {
+        UIColor.separator.withAlphaComponent(0.35)
+    }
+
+    var pageGuideBackgroundColor: UIColor {
+        .clear
+    }
+
+    var markedTextBackgroundColor: UIColor {
+        UIColor.systemYellow.withAlphaComponent(0.25)
+    }
+
+    func textColor(for highlightName: String) -> UIColor? {
+        let name = highlightName.lowercased()
+        if name.contains("comment") { return isDark ? uiColor(0.45, 0.54, 0.63) : uiColor(0.45, 0.49, 0.55) }
+        if name.contains("keyword") || name.contains("operator") { return isDark ? uiColor(0.94, 0.56, 0.76) : uiColor(0.73, 0.18, 0.45) }
+        if name.contains("string") { return isDark ? uiColor(0.76, 0.84, 0.55) : uiColor(0.17, 0.55, 0.32) }
+        if name.contains("number") || name.contains("constant") { return isDark ? uiColor(0.95, 0.67, 0.46) : uiColor(0.72, 0.38, 0.12) }
+        if name.contains("function") || name.contains("method") { return isDark ? uiColor(0.50, 0.74, 1.00) : uiColor(0.00, 0.37, 0.74) }
+        if name.contains("type") || name.contains("constructor") { return isDark ? uiColor(0.56, 0.86, 0.78) : uiColor(0.08, 0.52, 0.50) }
+        if name.contains("property") || name.contains("field") { return isDark ? uiColor(0.84, 0.70, 1.00) : uiColor(0.43, 0.25, 0.74) }
+        if name.contains("variable.builtin") { return isDark ? uiColor(1.00, 0.74, 0.47) : uiColor(0.70, 0.33, 0.08) }
+        if name.contains("punctuation") { return UIColor.secondaryLabel }
+        return nil
+    }
+
+    func fontTraits(for highlightName: String) -> FontTraits {
+        let name = highlightName.lowercased()
+        if name.contains("keyword") || name.contains("type") {
+            return .bold
+        }
+        return []
+    }
+
+    static func backgroundUIColor(for colorScheme: ColorScheme) -> UIColor {
+        backgroundUIColor(isDark: colorScheme == .dark)
+    }
+
+    private static func backgroundUIColor(isDark: Bool) -> UIColor {
+        isDark
+            ? UIColor(red: 0.071, green: 0.078, blue: 0.090, alpha: 1)
+            : UIColor(red: 0.961, green: 0.965, blue: 0.973, alpha: 1)
+    }
+
+    private func uiColor(_ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) -> UIColor {
+        UIColor(red: red, green: green, blue: blue, alpha: 1)
     }
 }
 

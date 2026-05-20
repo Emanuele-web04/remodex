@@ -169,6 +169,46 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testAgentDeltaRestoresActiveTurnIDAfterStaleRunningClear() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string("item-agent"),
+                "delta": .string("hello"),
+            ])
+        )
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertFalse(service.protectedRunningFallbackThreadIDs.contains(threadID))
+    }
+
+    func testDesktopMirrorActivityHeartbeatRestoresRunningAfterStaleClear() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/activity",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexRolloutLiveMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.desktopMirroredRunningThreadIDs.contains(threadID))
+    }
+
     func testTurnStartedAcceptsTopLevelIDAsTurnID() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -1771,6 +1811,49 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertFalse(planMessages[0].isStreaming)
         XCTAssertEqual(planMessages[0].planState?.steps.map(\.status), [.completed, .completed, .completed])
         XCTAssertFalse(planMessages[0].shouldDisplayPinnedPlanAccessory)
+    }
+
+    func testLateDesktopMirroredActivityDoesNotReviveCompletedTurn() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+
+        service.handleNotification(
+            method: "turn/activity",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "plan": .array([
+                    .object([
+                        "step": .string("Late replay"),
+                        "status": .string("in_progress"),
+                    ]),
+                ]),
+            ])
+        )
+
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertFalse(service.desktopMirroredRunningThreadIDs.contains(threadID))
+        XCTAssertNil(service.activeTurnIdByThread[threadID])
     }
 
     func testLegacyAgentDeltaParsesTopLevelTurnIdAndMessageId() {

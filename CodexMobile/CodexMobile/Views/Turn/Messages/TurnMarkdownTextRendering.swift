@@ -55,6 +55,7 @@ struct MarkdownTextView: View {
     var enablesSelection: Bool = false
     var constrainsToAvailableWidth: Bool = false
     var usesCaches: Bool = true
+    var usesScrollableCodeBlocks: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(UserBubbleColor.storageKey)
@@ -71,9 +72,9 @@ struct MarkdownTextView: View {
             : UncachedMarkdownParser.shared
         // Keep prose on the app font, but let RemodexTextKit own markdown/code layout to avoid block sizing regressions.
         // RemodexTextKit intentionally keeps the `.textual` namespace for its SwiftUI modifiers.
-        // Force code-block overflow to wrap instead of scroll so horizontal ScrollViews
+        // Default code-block overflow to wrap so horizontal ScrollViews
         // inside the timeline do not compete with the sidebar swipe gesture or let
-        // the chat feel like a pannable canvas.
+        // the chat feel like a pannable canvas. Modal detail views can opt into scroll.
         let baseView = StructuredText(transformed, parser: parser)
             .font(AppFont.body())
             .textual.codeBlockStyle(
@@ -93,7 +94,7 @@ struct MarkdownTextView: View {
             )
             .textual.inlineStyle(markdownInlineStyle)
             .textual.structuredTextStyle(.default)
-            .textual.overflowMode(.wrap)
+            .textual.overflowMode(usesScrollableCodeBlocks ? .scroll : .wrap)
 
         let renderedContent = Group {
             if enablesSelection {
@@ -222,7 +223,9 @@ struct StreamingAssistantMarkdownTextView: View {
             return
         }
 
-        if !animated || !nextText.hasPrefix(displayedText) {
+        if !animated
+            || !nextText.hasPrefix(displayedText)
+            || StreamingMarkdownRevealPolicy.shouldSnap(displayedText: displayedText, targetText: nextText) {
             cancelReveal()
             guard displayedText != nextText else { return }
             displayedText = nextText
@@ -254,16 +257,15 @@ struct StreamingAssistantMarkdownTextView: View {
         }
     }
 
-    // Ticks displayedText forward at ~30fps, advancing more characters when the
+    // Ticks displayedText forward at a modest cadence, advancing more characters when the
     // backlog is large so bursts catch up quickly while trickle streams drip smoothly.
     private func runReveal() async {
-        let frameInterval: UInt64 = 33_000_000
-
         while !Task.isCancelled {
             let target = targetText
             let current = displayedText
 
-            if !target.hasPrefix(current) {
+            if !target.hasPrefix(current)
+                || StreamingMarkdownRevealPolicy.shouldSnap(displayedText: current, targetText: target) {
                 if displayedText != target {
                     displayedText = target
                     displayedSegments = StreamingMarkdownBlockSplitter.split(target)
@@ -276,7 +278,7 @@ struct StreamingAssistantMarkdownTextView: View {
             if displayedCount >= targetCount { return }
 
             let remaining = targetCount - displayedCount
-            let advance = max(2, min(remaining / 3, 80))
+            let advance = StreamingMarkdownRevealPolicy.advanceSize(forRemainingCharacters: remaining)
             let take = min(remaining, advance)
             let endIndex = target.index(target.startIndex, offsetBy: displayedCount + take)
             let advanced = String(target[..<endIndex])
@@ -284,8 +286,32 @@ struct StreamingAssistantMarkdownTextView: View {
             displayedSegments = StreamingMarkdownBlockSplitter.split(advanced)
 
             if advanced.count >= targetCount { return }
-            try? await Task.sleep(nanoseconds: frameInterval)
+            try? await Task.sleep(nanoseconds: StreamingMarkdownRevealPolicy.frameIntervalNanoseconds)
         }
+    }
+}
+
+private enum StreamingMarkdownRevealPolicy {
+    // MessageRow already coalesces assistant text, so this view only needs a light reveal.
+    // Avoid long catch-up tails that repeatedly reparse Markdown and look like line rewrites.
+    static let frameIntervalNanoseconds: UInt64 = 50_000_000
+    private static let snapBacklogCharacterCount = 900
+    private static let minimumAdvanceCharacterCount = 12
+    private static let maximumAdvanceCharacterCount = 240
+
+    static func shouldSnap(displayedText: String, targetText: String) -> Bool {
+        guard targetText.hasPrefix(displayedText) else {
+            return true
+        }
+
+        return targetText.count - displayedText.count >= snapBacklogCharacterCount
+    }
+
+    static func advanceSize(forRemainingCharacters remaining: Int) -> Int {
+        max(
+            minimumAdvanceCharacterCount,
+            min(remaining / 2, maximumAdvanceCharacterCount)
+        )
     }
 }
 
@@ -533,6 +559,9 @@ enum MarkdownTextFormatter {
             }
 
             let token = nsLine.substring(with: tokenRange)
+            guard isStandaloneInlineCodeFileReference(token) else {
+                continue
+            }
             guard let parsed = parseFileReference(token) else {
                 continue
             }
@@ -542,6 +571,15 @@ enum MarkdownTextFormatter {
         }
 
         return String(mutableLine)
+    }
+
+    private static func isStandaloneInlineCodeFileReference(_ token: String) -> Bool {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed == token else {
+            return false
+        }
+
+        return trimmed.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
     }
 
     private static func markdownLinkRanges(in line: String) -> [NSRange] {

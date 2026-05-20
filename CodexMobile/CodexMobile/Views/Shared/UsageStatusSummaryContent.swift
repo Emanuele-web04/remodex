@@ -49,10 +49,6 @@ struct UsageStatusSummaryContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if let refreshControl {
-                refreshButton(refreshControl)
-            }
-
             if showsContextWindowSection && contextPlacement == .top {
                 contextSection
             }
@@ -89,6 +85,10 @@ struct UsageStatusSummaryContent: View {
                     if isLoadingRateLimits {
                         ProgressView()
                             .controlSize(.small)
+                    }
+
+                    if let refreshControl {
+                        refreshButton(refreshControl)
                     }
                 }
             }
@@ -141,20 +141,19 @@ struct UsageStatusSummaryContent: View {
 
     private func refreshButton(_ refreshControl: UsageStatusRefreshControl) -> some View {
         Button(action: refreshControl.action) {
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 if refreshControl.isRefreshing {
                     ProgressView()
                         .controlSize(.small)
                 } else {
                     RemodexIcon.image(systemName: "arrow.clockwise")
-                        .font(AppFont.system(size: 12, weight: .semibold))
+                        .font(AppFont.system(size: 11, weight: .medium))
                 }
 
                 Text(refreshControl.isRefreshing ? "Refreshing..." : refreshControl.title)
-                    .font(AppFont.subheadline(weight: .semibold))
+                    .font(AppFont.subheadline())
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .foregroundStyle(.primary)
+            .foregroundStyle(.secondary)
         }
         .buttonStyle(.plain)
         .disabled(refreshControl.isRefreshing)

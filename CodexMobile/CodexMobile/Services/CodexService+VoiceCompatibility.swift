@@ -11,6 +11,7 @@ enum CodexVoiceFailureReason: Equatable {
     case bridgeSessionUnsupported
     case macLoginRequired
     case macReauthenticationRequired
+    case providerAuthenticationRejected(String)
     case voiceSyncInProgress
     case chatGPTRequired
     case microphonePermissionRequired
@@ -20,19 +21,19 @@ enum CodexVoiceFailureReason: Equatable {
 }
 
 extension CodexService {
-    // Learns that this bridge predates the bridge-owned voice RPCs so future mic taps can short-circuit immediately.
-    func consumeUnsupportedVoiceBridgeAuth(_ error: Error) -> Bool {
-        guard shouldTreatAsUnsupportedVoiceBridgeAuth(error) else {
+    // Learns that this bridge predates the voice RPCs so future mic taps can short-circuit immediately.
+    func consumeUnsupportedVoiceBridgeMethod(_ error: Error) -> Bool {
+        guard shouldTreatAsUnsupportedVoiceBridgeMethod(error) else {
             return false
         }
 
-        supportsBridgeVoiceAuth = false
+        supportsBridgeVoiceTranscription = false
         return true
     }
 
     // Normalizes voice failures from the recorder, bridge RPC, and transcription API into UI-friendly buckets.
     func classifyVoiceFailure(_ error: Error) -> CodexVoiceFailureReason {
-        if !supportsBridgeVoiceAuth || shouldTreatAsUnsupportedVoiceBridgeAuth(error) {
+        if !supportsBridgeVoiceTranscription || shouldTreatAsUnsupportedVoiceBridgeMethod(error) {
             return .bridgeSessionUnsupported
         }
 
@@ -60,7 +61,7 @@ extension CodexService {
         }
     }
 
-    func shouldTreatAsUnsupportedVoiceBridgeAuth(_ error: Error) -> Bool {
+    func shouldTreatAsUnsupportedVoiceBridgeMethod(_ error: Error) -> Bool {
         guard let serviceError = error as? CodexServiceError,
               case .rpcError(let rpcError) = serviceError else {
             return false
@@ -77,12 +78,12 @@ extension CodexService {
             || message.contains("does not support")
             || message.contains("unknown variant")
             || message.contains("expected one of")
-        let mentionsBridgeVoiceMethod = message.contains("voice/resolveauth")
-            || message.contains("voice resolveauth")
-            || message.contains("voice/resolveauth`")
-            || message.contains("voice/transcribe")
+        let mentionsBridgeVoiceMethod = message.contains("voice/transcribe")
             || message.contains("voice transcribe")
             || message.contains("voice/transcribe`")
+            || message.contains("voice/resolveauth")
+            || message.contains("voice resolveauth")
+            || message.contains("voice/resolveauth`")
 
         guard rpcError.code == -32600 || rpcError.code == -32602 || rpcError.code == -32000 else {
             return mentionsUnsupportedRequest && mentionsBridgeVoiceMethod
@@ -115,6 +116,8 @@ extension CodexService {
         switch bridgeErrorCode {
         case "auth_unavailable":
             return .reconnectRequired
+        case "auth_rejected":
+            return .providerAuthenticationRejected(rpcError.message)
         case "token_missing", "not_authenticated":
             return classifyMissingVoiceTokenState()
         case "not_chatgpt":
@@ -158,6 +161,8 @@ extension CodexService {
         switch reason {
         case .macLoginRequired, .macReauthenticationRequired, .voiceSyncInProgress:
             return resolveAuthSensitiveVoiceRecoveryReason()
+        case .providerAuthenticationRejected:
+            return reason
         default:
             return reason
         }
@@ -170,7 +175,7 @@ extension CodexService {
         }
 
         let normalized = trimmed.lowercased()
-        if (normalized.contains("voice/resolveauth") || normalized.contains("voice/transcribe"))
+        if (normalized.contains("voice/transcribe") || normalized.contains("voice/resolveauth"))
             && normalized.contains("unknown variant") {
             return .bridgeSessionUnsupported
         }
@@ -194,7 +199,7 @@ extension CodexService {
         if normalized.contains("chatgpt login has expired")
             || normalized.contains("fresh sign-in")
             || normalized.contains("sign in again") {
-            return .macReauthenticationRequired
+            return .providerAuthenticationRejected(trimmed)
         }
         if normalized.contains("waiting for voice sync") {
             return .voiceSyncInProgress

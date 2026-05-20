@@ -51,8 +51,6 @@ struct ComposerBottomBar: View {
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
-    private var metaSymbolFont: Font { AppFont.system(size: 11, weight: .regular) }
-    private let metaVerticalPadding: CGFloat = 6
     private let composerIconSide: CGFloat = 22
     private let rootlessAccessControlSize: CGFloat = 32
     private let rootlessAccessControlIconSize: CGFloat = 20
@@ -88,11 +86,6 @@ struct ComposerBottomBar: View {
                 rootlessAccessMenuLabel
             } else {
                 runtimeMenuControl
-            }
-            if isPlanModeArmed {
-                Divider()
-                    .frame(height: 16)
-                planModeIndicator
             }
             Spacer(minLength: 0)
 
@@ -288,7 +281,7 @@ struct ComposerBottomBar: View {
                     onSetPlanModeArmed(newValue)
                 }
             )) {
-                RemodexIcon.menuLabel("Plan mode", systemName: "checklist")
+                RemodexIcon.menuLabel("Plan mode", systemName: "remodex.plan-mode")
             }
 
             if runtimeState.supportsFastMode {
@@ -329,20 +322,6 @@ struct ComposerBottomBar: View {
         .tint(metaLabelColor)
         .disabled(isComposerInteractionLocked)
         .accessibilityLabel("Composer options")
-    }
-
-    private var planModeIndicator: some View {
-        HStack(spacing: 5) {
-            RemodexIcon.image(systemName: "checklist")
-                .font(metaSymbolFont)
-            Text("Plan")
-                .font(metaTextFont)
-                .fontWeight(.regular)
-                .lineLimit(1)
-        }
-        .padding(.vertical, metaVerticalPadding)
-        .padding(.horizontal, 4)
-        .foregroundStyle(Color(.plan))
     }
 
     // Toggling Fast Mode from the plus menu mirrors the runtime speed menu without adding another visible pill.

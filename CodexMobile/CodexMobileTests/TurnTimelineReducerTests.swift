@@ -3396,7 +3396,84 @@ final class TurnTimelineReducerTests: XCTestCase {
             stoppedTurnIDs: []
         )
 
-        XCTAssertEqual(blockInfo[0]?.copyText, "Completed response")
+        XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
+    }
+
+    func testAssistantBlockInfoHidesCopyWhileStopControlIsVisible() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Previous response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Keep going",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2"
+            ),
+            makeMessage(
+                id: "assistant-2",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Partial response",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-2",
+                isStreaming: true
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: "turn-2",
+            isThreadRunning: true,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0]?.copyText)
+        XCTAssertNil(blockInfo[2]?.copyText)
+        XCTAssertEqual(blockInfo[2]?.allowsCopy, false)
+        XCTAssertEqual(blockInfo[2]?.showsRunningIndicator, true)
+
+        let globalIndicatorState = blockInfo[2]?.replacingRunningIndicator(false)
+        XCTAssertEqual(globalIndicatorState?.allowsCopy, false)
+        XCTAssertEqual(globalIndicatorState?.showsRunningIndicator, false)
+    }
+
+    func testAssistantBlockInfoHidesCopyWhileRunIsStarting() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Last settled response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            isCopySuppressedByRunState: true,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertEqual(blockInfo, [nil])
     }
 
     func testRunningAccessoryRehomesFromSkippedThinkingPlaceholder() {

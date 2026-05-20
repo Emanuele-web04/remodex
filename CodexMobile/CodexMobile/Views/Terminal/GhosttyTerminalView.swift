@@ -559,13 +559,13 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         window != nil && !isRendererSuspended
     }
 
-    // Keeps Ghostty away from IOSurface drawing/input focus while UIKit is
-    // backgrounding the scene; SSH output can still accumulate in the buffer.
+    // Tears down Ghostty's IOSurface client before UIKit backgrounds the scene;
+    // SSH output keeps accumulating in the Swift snapshot and replays on resume.
     private func suspendRendererForAppBackground() {
         guard !isRendererSuspended else { return }
         isRendererSuspended = true
         inputField.resignFirstResponder()
-        updateSurfaceRuntimeVisibility()
+        tearDownSurfaceForAppBackground()
     }
 
     private func resumeRendererForActiveApp() {
@@ -579,6 +579,14 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
         resizeSurface()
         applyRemoteBuffer(initialBuffer)
         requestKeyboardFocus()
+    }
+
+    private func tearDownSurfaceForAppBackground() {
+        guard surface != nil || app != nil else { return }
+        destroySurface()
+        lastAppliedBuffer = Data()
+        lastViewportSize = .zero
+        lastContentScale = 0
     }
 
     private func updateSurfaceRuntimeVisibility() {

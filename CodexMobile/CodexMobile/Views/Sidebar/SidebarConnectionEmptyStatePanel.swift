@@ -2,14 +2,12 @@
 // Purpose: Centered connect/reconnect/scan-QR card shown in the sidebar when
 //          the relay session is offline and there are no cached chats.
 //          Focuses on the remembered host identity + primary reconnect CTA,
-//          with a small `SidebarConnectionStatusBadge` pinned underneath the
-//          recovery chips as a live status footer. The Forget Pair affordance
-//          and the long status message live in a separate footer view pinned
-//          above the sidebar's bottom action bar.
+//          while the status chip and footer stay owned by the surrounding
+//          sidebar layout.
 // Layer: View Component
 // Exports: SidebarConnectionEmptyStatePanel
 // Depends on: SwiftUI, CodexConnectionPhase, CodexTrustedPairPresentation,
-//             SidebarConnectionStatusBadge, AppFont
+//             AppFont
 
 import SwiftUI
 
@@ -43,12 +41,6 @@ struct SidebarConnectionEmptyStatePanel: View {
                     wakeDisplayButton
                 }
             }
-
-            // Live status footer: sits directly under the recovery chips so
-            // the user always sees the current relay phase without it
-            // crowding the hero identity. Auto-hides when fully connected,
-            // and the surrounding VStack spacing collapses with it.
-            SidebarConnectionStatusBadge(connectionPhase: connectionPhase)
         }
         .frame(maxWidth: 300)
         .padding(.horizontal, 24)

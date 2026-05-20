@@ -53,8 +53,8 @@ enum TurnVoiceButtonPresentationBuilder {
             systemImageName: "mic",
             foregroundColor: Color(.secondaryLabel),
             backgroundColor: .clear,
-            accessibilityLabel: "Start voice transcription",
-            isDisabled: !isConnected,
+            accessibilityLabel: isConnected ? "Start voice transcription" : "Reconnect for voice transcription",
+            isDisabled: false,
             showsProgress: false,
             hasCircleBackground: false
         )
@@ -85,14 +85,32 @@ enum TurnVoiceRecoveryPresentationBuilder {
                 action: .reconnect
             )
         case .macLoginRequired:
-            return setupHelpPresentation(
-                summary: "Sign in to ChatGPT on your computer to use voice mode.",
-                detail: "Open ChatGPT on the paired computer, sign in there, then come back here and try again."
+            return macLoginPresentation(
+                summary: "Set up OpenAI auth on your computer to use voice mode.",
+                detail: "Sign in to ChatGPT or configure an OpenAI API key on the paired computer, then try again."
             )
         case .macReauthenticationRequired:
-            return setupHelpPresentation(
-                summary: "ChatGPT voice needs a fresh sign-in on your computer.",
-                detail: "Open ChatGPT on the paired computer, sign in again there, then retry voice mode here."
+            return macLoginPresentation(
+                summary: "Voice mode needs fresh OpenAI auth on your computer.",
+                detail: "Sign in to ChatGPT again or update the OpenAI API key on the paired computer, then retry voice mode here."
+            )
+        case .providerAuthenticationRejected(let message):
+            let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isAPIKeyRejection = trimmedMessage.lowercased().contains("api key")
+            if isAPIKeyRejection {
+                return setupHelpPresentation(
+                    summary: trimmedMessage.isEmpty
+                        ? "Voice transcription auth was rejected."
+                        : trimmedMessage,
+                    detail: "Update the OpenAI API key on the paired computer, then retry voice mode here."
+                )
+            }
+
+            return macLoginPresentation(
+                summary: trimmedMessage.isEmpty
+                    ? "Voice transcription auth was rejected."
+                    : trimmedMessage,
+                detail: "Refresh ChatGPT login on the paired computer, then retry voice mode here."
             )
         case .voiceSyncInProgress:
             return VoiceRecoveryPresentation(
@@ -106,8 +124,8 @@ enum TurnVoiceRecoveryPresentationBuilder {
             )
         case .chatGPTRequired:
             return setupHelpPresentation(
-                summary: "Voice mode needs a ChatGPT session on your computer.",
-                detail: "API-key-only auth is not enough here. Sign in to ChatGPT on the paired computer, then try again."
+                summary: "Voice mode needs the updated bridge auth path.",
+                detail: "Restart or update Remodex on the paired computer. Current voice mode can use ChatGPT or an OpenAI API key without sending the token to your phone."
             )
         case .microphonePermissionRequired:
             return VoiceRecoveryPresentation(
@@ -164,6 +182,21 @@ enum TurnVoiceRecoveryPresentationBuilder {
                 trailingStyle: .action("How To Fix")
             ),
             action: .showSetupHelp
+        )
+    }
+
+    private static func macLoginPresentation(
+        summary: String,
+        detail: String
+    ) -> VoiceRecoveryPresentation {
+        VoiceRecoveryPresentation(
+            snapshot: snapshot(
+                summary: summary,
+                detail: detail,
+                status: .actionRequired,
+                trailingStyle: .action("Open Login")
+            ),
+            action: .openMacLogin
         )
     }
 

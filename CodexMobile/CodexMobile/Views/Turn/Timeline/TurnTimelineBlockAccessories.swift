@@ -18,6 +18,7 @@ extension TurnTimelineView {
         for messages: [CodexMessage],
         activeTurnID: String?,
         isThreadRunning: Bool,
+        isCopySuppressedByRunState: Bool? = nil,
         latestTurnTerminalState: CodexTurnTerminalState?,
         stoppedTurnIDs: Set<String>,
         revertStatesByMessageID: [String: AssistantRevertPresentation] = [:]
@@ -61,8 +62,7 @@ extension TurnTimelineView {
             let isLatestBlock = latestBlockEnd == blockEnd
             let copyAllowed = shouldShowCopyButton(
                 blockTurnID: blockTurnID,
-                activeTurnID: activeTurnID,
-                isThreadRunning: isThreadRunning,
+                isCopySuppressedByRunState: isCopySuppressedByRunState ?? isThreadRunning,
                 isLatestBlock: isLatestBlock,
                 latestTurnTerminalState: latestTurnTerminalState,
                 stoppedTurnIDs: stoppedTurnIDs
@@ -91,6 +91,7 @@ extension TurnTimelineView {
                 result[blockEnd] = AssistantBlockAccessoryState(
                     copyText: copyText,
                     showsRunningIndicator: showsRunningIndicator,
+                    allowsCopy: copyAllowed,
                     blockDiffText: blockDiffText,
                     blockDiffEntries: blockDiffEntries,
                     blockRevertPresentation: blockRevert?.presentation,
@@ -300,11 +301,10 @@ extension TurnTimelineView {
         return trimmed?.isEmpty == false ? trimmed : nil
     }
 
-    // Keeps Copy aligned with real run completion instead of per-message streaming heuristics.
+    // Mirrors the composer Stop visibility so Copy never appears while the run is still active.
     private static func shouldShowCopyButton(
         blockTurnID: String?,
-        activeTurnID: String?,
-        isThreadRunning: Bool,
+        isCopySuppressedByRunState: Bool,
         isLatestBlock: Bool,
         latestTurnTerminalState: CodexTurnTerminalState?,
         stoppedTurnIDs: Set<String>
@@ -317,15 +317,7 @@ extension TurnTimelineView {
             return false
         }
 
-        guard isThreadRunning else {
-            return true
-        }
-
-        if let blockTurnID, let activeTurnID {
-            return blockTurnID != activeTurnID
-        }
-
-        return !isLatestBlock
+        return !isCopySuppressedByRunState
     }
 
     // Keeps the terminal loader attached to the block that still belongs to the active run.

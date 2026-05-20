@@ -2,11 +2,9 @@
 // Purpose: Shared diff sheet UI and repo-patch presentation helpers for turn-level change inspection.
 // Layer: View Component
 // Exports: TurnDiffSheet, TurnDiffPresentation, TurnDiffPresentationBuilder
-// Depends on: SwiftUI, UIKit, MarkdownView, TurnMessageCaches, TurnFileChangeSummaryParser
+// Depends on: SwiftUI, MarkdownTextView, TurnMessageCaches, TurnFileChangeSummaryParser
 
-import MarkdownView
 import SwiftUI
-import UIKit
 
 struct TurnDiffPresentation: Identifiable, Equatable {
     let id: String
@@ -346,43 +344,29 @@ private struct TurnDiffFileCard: View {
     }
 }
 
-private struct MarkdownUnifiedDiffBlockView: UIViewRepresentable {
+private struct MarkdownUnifiedDiffBlockView: View {
     let diffCode: String
 
-    func makeUIView(context _: Context) -> MarkdownView.MarkdownTextView {
-        let view = MarkdownView.MarkdownTextView()
-        view.backgroundColor = .clear
-        view.isOpaque = false
-        view.theme = Self.theme
-        return view
-    }
-
-    func updateUIView(_ uiView: MarkdownView.MarkdownTextView, context _: Context) {
-        let theme = Self.theme
-        let content = MarkdownView.MarkdownTextView.PreprocessedContent(
-            markdown: renderableDiff,
-            theme: theme
+    var body: some View {
+        MarkdownTextView(
+            text: renderableDiff,
+            profile: .assistantProse,
+            enablesSelection: true,
+            constrainsToAvailableWidth: true,
+            usesCaches: false,
+            usesScrollableCodeBlocks: true
         )
-        uiView.theme = theme
-        uiView.setMarkdownManually(content)
-    }
-
-    func sizeThatFits(
-        _ proposal: ProposedViewSize,
-        uiView: MarkdownView.MarkdownTextView,
-        context _: Context
-    ) -> CGSize? {
-        guard let width = proposal.width, width > 0 else {
-            return uiView.intrinsicContentSize
-        }
-        let measuredSize = uiView.boundingSize(for: width)
-        return CGSize(width: width, height: measuredSize.height)
+        .padding(.vertical, 8)
     }
 
     private var renderableDiff: String {
         let body = Self.renderableBody(from: diffCode)
         let fence = Self.markdownFence(for: body)
         return "\(fence)diff\n\(body)\n\(fence)"
+    }
+
+    private var renderableBody: String {
+        Self.renderableBody(from: diffCode)
     }
 
     static func canRender(diffCode: String) -> Bool {
@@ -423,20 +407,6 @@ private struct MarkdownUnifiedDiffBlockView: UIViewRepresentable {
         return String(repeating: "`", count: max(3, longestFence + 1))
     }
 
-    private static var theme: MarkdownTheme {
-        var theme = MarkdownTheme.default
-        theme.showsBlockHeaders = false
-        theme.fonts.code = AppFont.monoUIFont(size: 13, textStyle: .callout)
-        theme.colors.body = .label
-        theme.colors.code = .label
-        theme.colors.codeBackground = .clear
-        theme.diff.backgroundColor = .clear
-        theme.diff.borderWidth = 0
-        theme.diff.lineNumberStyle = .single
-        theme.diff.showsChangeMarkers = false
-        theme.diff.scrollBehavior = .horizontalOnly
-        return theme
-    }
 }
 
 private extension TurnDiffLineKind {

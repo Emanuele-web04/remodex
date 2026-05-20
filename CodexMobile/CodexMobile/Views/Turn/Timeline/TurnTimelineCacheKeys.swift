@@ -32,6 +32,7 @@ enum TurnTimelineCacheKeyBuilder {
     static func blockInfoInputKey(
         messages: [CodexMessage],
         isThreadRunning: Bool,
+        isSendInFlight: Bool = false,
         activeTurnID: String?,
         latestTurnTerminalState: CodexTurnTerminalState?,
         completedTurnIDs: Set<String>,
@@ -41,6 +42,7 @@ enum TurnTimelineCacheKeyBuilder {
         var hasher = Hasher()
         hasher.combine(messages.count)
         hasher.combine(isThreadRunning)
+        hasher.combine(isSendInFlight)
         hasher.combine(activeTurnID)
         hasher.combine(latestTurnTerminalState)
         hasher.combine(completedTurnIDs)

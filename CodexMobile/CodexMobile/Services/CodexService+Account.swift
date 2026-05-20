@@ -126,6 +126,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
         case keepAwake
         case hostBrowserLogin
         case terminal
+        case bridgeUpdate
     }
 
     var desktopHandoff: Bool = false
@@ -133,19 +134,22 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
     var keepAwake: Bool = false
     var hostBrowserLogin: Bool = false
     var terminal: Bool = false
+    var bridgeUpdate: Bool = false
 
     init(
         desktopHandoff: Bool = false,
         displayWake: Bool = false,
         keepAwake: Bool = false,
         hostBrowserLogin: Bool = false,
-        terminal: Bool = false
+        terminal: Bool = false,
+        bridgeUpdate: Bool = false
     ) {
         self.desktopHandoff = desktopHandoff
         self.displayWake = displayWake
         self.keepAwake = keepAwake
         self.hostBrowserLogin = hostBrowserLogin
         self.terminal = terminal
+        self.bridgeUpdate = bridgeUpdate
     }
 
     init(from decoder: Decoder) throws {
@@ -155,6 +159,7 @@ struct CodexBridgeHostCapabilities: Codable, Equatable, Sendable {
         keepAwake = try container.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? false
         hostBrowserLogin = try container.decodeIfPresent(Bool.self, forKey: .hostBrowserLogin) ?? false
         terminal = try container.decodeIfPresent(Bool.self, forKey: .terminal) ?? false
+        bridgeUpdate = try container.decodeIfPresent(Bool.self, forKey: .bridgeUpdate) ?? false
     }
 
     static let legacyMacOS = CodexBridgeHostCapabilities(
@@ -362,7 +367,7 @@ extension CodexService {
         gptAccountErrorMessage = nil
     }
 
-    // Keeps the account card honest when voice auth proves the bridge token is no longer usable.
+    // Keeps the account card honest when voice auth proves the bridge auth is no longer usable.
     func markGPTVoiceReauthenticationRequired() {
         stopGPTLoginSync()
         clearGPTLoginState()
@@ -374,7 +379,7 @@ extension CodexService {
                 retaining: gptAccountSnapshot
             )
         )
-        gptAccountErrorMessage = "ChatGPT voice needs a fresh sign-in on your paired computer."
+        gptAccountErrorMessage = "Voice mode needs fresh OpenAI auth on your paired computer."
     }
 
     // Stores an incoming deep-link callback and completes the pending login when the bridge is reachable.
@@ -1207,7 +1212,8 @@ extension CodexService {
             displayWake: firstBoolValue(in: capabilitiesObject, keys: ["displayWake", "display_wake"]) ?? false,
             keepAwake: firstBoolValue(in: capabilitiesObject, keys: ["keepAwake", "keep_awake"]) ?? false,
             hostBrowserLogin: firstBoolValue(in: capabilitiesObject, keys: ["hostBrowserLogin", "host_browser_login"]) ?? false,
-            terminal: firstBoolValue(in: capabilitiesObject, keys: ["terminal", "sshTerminal", "ssh_terminal"]) ?? false
+            terminal: firstBoolValue(in: capabilitiesObject, keys: ["terminal", "sshTerminal", "ssh_terminal"]) ?? false,
+            bridgeUpdate: firstBoolValue(in: capabilitiesObject, keys: ["bridgeUpdate", "bridge_update"]) ?? false
         )
     }
 

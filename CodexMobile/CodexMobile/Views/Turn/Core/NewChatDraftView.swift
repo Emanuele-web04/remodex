@@ -8,6 +8,7 @@
 
 import PhotosUI
 import SwiftUI
+import UIKit
 
 struct NewChatDraftRoute: Hashable {
     let id: String
@@ -37,6 +38,9 @@ enum NewChatDraftLeadingControl {
 struct NewChatDraftView: View {
     @Environment(CodexService.self) private var codex
     @Environment(SubscriptionService.self) private var subscriptions
+    @Environment(\.openURL) private var openURL
+    @Environment(\.reconnectAction) private var reconnectAction
+    @Environment(\.scenePhase) private var scenePhase
 
     let route: NewChatDraftRoute
     var leadingControl: NewChatDraftLeadingControl = .back
@@ -56,6 +60,16 @@ struct NewChatDraftView: View {
     @State private var isShowingMacHandoffConfirm = false
     @State private var macHandoffErrorMessage: String?
     @State private var isDeferringSendForFocusDismissal = false
+    @State private var isVoiceRecording = false
+    @State private var isVoicePreflighting = false
+    @State private var voicePreflightGeneration = 0
+    @State private var voiceOperationGeneration = 0
+    @State private var voiceTranscriptionTask: Task<Void, Never>?
+    @State private var isVoiceTranscribing = false
+    @State private var hasTriggeredVoiceAutoStop = false
+    @State private var voiceRecoveryReason: CodexVoiceFailureReason?
+    @State private var isShowingVoiceSetupSheet = false
+    @StateObject private var voiceTranscriptionManager = GPTVoiceTranscriptionManager()
 
     // UI-only check for layout experiments: true when opened from the general
     // sidebar Chat affordance, false when opened from a folder section button.
@@ -119,9 +133,23 @@ struct NewChatDraftView: View {
         .onChange(of: projectChoices) { _, _ in
             initializeProjectSelectionIfNeeded()
         }
-        .onChange(of: codex.isConnected) { _, isConnected in
-            guard isConnected else { return }
+        .onChange(of: codex.isConnected) { wasConnected, isConnected in
+            if !isConnected {
+                return
+            }
+
+            if voiceRecoveryReason == .reconnectRequired {
+                clearVoiceRecovery()
+            }
+            guard !wasConnected, isConnected else { return }
             refreshDraftGitStateIfNeeded()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase != .active else { return }
+            cancelVoiceTranscriptionIfNeeded()
+            cancelVoiceRecordingIfNeeded()
+            invalidatePendingVoicePreflight()
+            viewModel.saveLocalDraft(codex: codex, threadID: route.id, persistToDisk: true)
         }
         .onChange(of: selectedProjectPath) { _, _ in
             // Defer the observable-model mutation out of the .onChange action
@@ -185,6 +213,30 @@ struct NewChatDraftView: View {
                 viewModel.enqueuePhotoPickerItems(newItems, codex: codex, threadID: route.id)
                 viewModel.photoPickerItems = []
             }
+        }
+        .onReceive(voiceTranscriptionManager.$recordingDuration) { duration in
+            guard isVoiceRecording,
+                  !isVoiceTranscribing,
+                  !hasTriggeredVoiceAutoStop,
+                  duration >= voiceAutoStopThreshold else {
+                return
+            }
+
+            hasTriggeredVoiceAutoStop = true
+            beginVoiceStopTranscription()
+        }
+        .onReceive(voiceTranscriptionManager.$captureInvalidationID) { invalidationID in
+            guard invalidationID > 0 else { return }
+            handleVoiceCaptureInvalidation()
+        }
+        .onDisappear {
+            cancelVoiceTranscriptionIfNeeded()
+            cancelVoiceRecordingIfNeeded()
+            invalidatePendingVoicePreflight()
+            clearVoiceRecovery()
+        }
+        .sheet(isPresented: $isShowingVoiceSetupSheet) {
+            GPTVoiceSetupSheet()
         }
     }
 
@@ -470,71 +522,79 @@ struct NewChatDraftView: View {
     }
 
     private var composer: some View {
-        TurnComposerHostView(
-            viewModel: viewModel,
-            codex: codex,
-            thread: draftThread,
-            activeTurnID: nil,
-            isThreadRunning: false,
-            isEmptyThread: true,
-            isWorktreeProject: false,
-            canForkLocally: false,
-            isInputFocused: $isInputFocused,
-            orderedModelOptions: orderedModelOptions,
-            selectedModelTitle: selectedModelTitle,
-            reasoningDisplayOptions: reasoningDisplayOptions,
-            showsGitControls: hasSelectedProject && viewModel.isGitRepositoryInitialized,
-            isGitBranchSelectorEnabled: isDraftGitActionEnabled && viewModel.isGitRepositoryInitialized,
-            onSelectGitBranch: { branch in
-                guard hasSelectedProject else { return }
-                viewModel.requestSwitchGitBranch(
-                    to: branch,
-                    codex: codex,
-                    workingDirectory: selectedProjectPath,
-                    threadID: route.id,
-                    activeTurnID: nil
-                )
-            },
-            onCreateGitBranch: { branchName in
-                guard hasSelectedProject else { return }
-                viewModel.requestCreateGitBranch(
-                    named: branchName,
-                    codex: codex,
-                    workingDirectory: selectedProjectPath,
-                    threadID: route.id,
-                    activeTurnID: nil
-                )
-            },
-            onRefreshGitBranches: {
-                guard hasSelectedProject, viewModel.isGitRepositoryInitialized else { return }
-                viewModel.refreshGitBranchTargets(
-                    codex: codex,
-                    workingDirectory: selectedProjectPath,
-                    threadID: route.id
-                )
-            },
-            onStartCodeReviewThread: { target in
-                viewModel.applyPendingComposerAction(.codeReview(target: target.codexPendingTarget))
-            },
-            onStartForkThreadLocally: {},
-            onOpenForkWorktree: {},
-            onOpenWorktreeHandoff: {},
-            onOpenFeedbackMail: {},
-            onShowStatus: {},
-            voiceButtonPresentation: TurnVoiceButtonPresentationBuilder.presentation(
-                isTranscribing: false,
-                isPreflighting: false,
-                isRecording: false,
-                isConnected: codex.isConnected
-            ),
-            isVoiceRecording: false,
-            voiceAudioLevels: [],
-            voiceRecordingDuration: 0,
-            onTapVoice: {},
-            onCancelVoiceRecording: {},
-            onSend: sendDraft,
-            showsSecondaryBar: true
-        )
+        VStack(spacing: 8) {
+            if let voiceRecoveryPresentation {
+                ConnectionRecoveryCard(snapshot: voiceRecoveryPresentation.snapshot) {
+                    handleVoiceRecoveryAction(voiceRecoveryPresentation.action)
+                }
+                .padding(.horizontal, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            TurnComposerHostView(
+                viewModel: viewModel,
+                codex: codex,
+                thread: draftThread,
+                activeTurnID: nil,
+                isThreadRunning: false,
+                isEmptyThread: true,
+                isWorktreeProject: false,
+                canForkLocally: false,
+                isInputFocused: $isInputFocused,
+                orderedModelOptions: orderedModelOptions,
+                selectedModelTitle: selectedModelTitle,
+                reasoningDisplayOptions: reasoningDisplayOptions,
+                showsGitControls: hasSelectedProject && viewModel.isGitRepositoryInitialized,
+                isGitBranchSelectorEnabled: isDraftGitActionEnabled && viewModel.isGitRepositoryInitialized,
+                onSelectGitBranch: { branch in
+                    guard hasSelectedProject else { return }
+                    viewModel.requestSwitchGitBranch(
+                        to: branch,
+                        codex: codex,
+                        workingDirectory: selectedProjectPath,
+                        threadID: route.id,
+                        activeTurnID: nil
+                    )
+                },
+                onCreateGitBranch: { branchName in
+                    guard hasSelectedProject else { return }
+                    viewModel.requestCreateGitBranch(
+                        named: branchName,
+                        codex: codex,
+                        workingDirectory: selectedProjectPath,
+                        threadID: route.id,
+                        activeTurnID: nil
+                    )
+                },
+                onRefreshGitBranches: {
+                    guard hasSelectedProject, viewModel.isGitRepositoryInitialized else { return }
+                    viewModel.refreshGitBranchTargets(
+                        codex: codex,
+                        workingDirectory: selectedProjectPath,
+                        threadID: route.id
+                    )
+                },
+                onStartCodeReviewThread: { target in
+                    viewModel.applyPendingComposerAction(.codeReview(target: target.codexPendingTarget))
+                },
+                onStartForkThreadLocally: {},
+                onOpenForkWorktree: {},
+                onOpenWorktreeHandoff: {},
+                onOpenFeedbackMail: {},
+                onShowStatus: {},
+                voiceButtonPresentation: voiceButtonPresentation,
+                isVoiceInputActive: isVoiceInputActive,
+                isVoiceRecording: isVoiceRecording,
+                voiceAudioLevels: voiceTranscriptionManager.audioLevels,
+                voiceRecordingDuration: voiceTranscriptionManager.recordingDuration,
+                onTapVoice: handleVoiceButtonTap,
+                onCancelVoiceRecording: cancelVoiceRecordingIfNeeded,
+                onSend: sendDraft,
+                showsSecondaryBar: true
+            )
+        }
+        .animation(.easeInOut(duration: 0.18), value: voiceRecoveryPresentation?.snapshot.summary)
+        .animation(.easeInOut(duration: 0.18), value: isVoiceRecording)
     }
 
     private var draftThread: CodexThread {
@@ -568,6 +628,29 @@ struct NewChatDraftView: View {
         }
 
         return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.selectedModelId)
+    }
+
+    // Mirrors the regular TurnView mic state so empty drafts can record before a runtime thread exists.
+    private var voiceButtonPresentation: TurnComposerVoiceButtonPresentation {
+        TurnVoiceButtonPresentationBuilder.presentation(
+            isTranscribing: isVoiceTranscribing,
+            isPreflighting: isVoicePreflighting,
+            isRecording: isVoiceRecording,
+            isConnected: codex.isConnected
+        )
+    }
+
+    private var isVoiceInputActive: Bool {
+        isVoiceRecording || isVoicePreflighting || isVoiceTranscribing
+    }
+
+    private var voiceRecoveryPresentation: VoiceRecoveryPresentation? {
+        guard let voiceRecoveryReason,
+              let resolvedReason = codex.resolveVoiceRecoveryReason(voiceRecoveryReason) else {
+            return nil
+        }
+
+        return TurnVoiceRecoveryPresentationBuilder.presentation(for: resolvedReason)
     }
 
     private var isPhotoPickerPresentedBinding: Binding<Bool> {
@@ -621,6 +704,7 @@ struct NewChatDraftView: View {
     }
 
     private func sendDraft() {
+        guard !isVoiceInputActive else { return }
         guard !isDeferringSendForFocusDismissal else { return }
         isDeferringSendForFocusDismissal = true
         isInputFocused = false
@@ -639,6 +723,230 @@ struct NewChatDraftView: View {
             )
             isDeferringSendForFocusDismissal = false
         }
+    }
+
+    // Switches the draft composer between ready, recording, and transcription states.
+    private func handleVoiceButtonTap() {
+        if isVoiceTranscribing {
+            return
+        }
+
+        if isVoiceRecording {
+            beginVoiceStopTranscription()
+            return
+        }
+
+        Task { @MainActor in
+            await startVoiceRecordingIfReady()
+        }
+    }
+
+    // Starts a single draft stop/upload operation so double taps and auto-stop cannot race each other.
+    private func beginVoiceStopTranscription() {
+        guard isVoiceRecording, !isVoiceTranscribing else {
+            return
+        }
+
+        hasTriggeredVoiceAutoStop = false
+        isVoiceTranscribing = true
+        voiceOperationGeneration += 1
+        let operationGeneration = voiceOperationGeneration
+        voiceTranscriptionTask?.cancel()
+        voiceTranscriptionTask = Task { @MainActor in
+            await stopVoiceTranscription(operationGeneration: operationGeneration)
+        }
+    }
+
+    // Stops the draft recorder, transcribes through the bridge, and inserts text into the unsent draft.
+    private func stopVoiceTranscription(operationGeneration: Int) async {
+        defer {
+            if isVoiceOperationCurrent(operationGeneration) {
+                isVoiceTranscribing = false
+                voiceTranscriptionTask = nil
+            }
+        }
+
+        do {
+            guard let clip = try voiceTranscriptionManager.stopRecording() else {
+                if isVoiceOperationCurrent(operationGeneration) {
+                    isVoiceRecording = false
+                    voiceTranscriptionManager.resetMeteringState()
+                    presentVoiceRecovery(for: .recorderUnavailable)
+                }
+                return
+            }
+
+            defer {
+                try? FileManager.default.removeItem(at: clip.url)
+            }
+
+            isVoiceRecording = false
+            voiceTranscriptionManager.resetMeteringState()
+            let transcript = try await codex.transcribeVoiceAudioFile(
+                at: clip.url,
+                durationSeconds: clip.durationSeconds
+            )
+            guard isVoiceOperationCurrent(operationGeneration), !Task.isCancelled else {
+                return
+            }
+            clearVoiceRecovery()
+            viewModel.appendVoiceTranscript(transcript)
+            viewModel.saveLocalDraft(codex: codex, threadID: route.id, persistToDisk: true)
+            isInputFocused = false
+        } catch {
+            guard isVoiceOperationCurrent(operationGeneration), !Task.isCancelled else {
+                return
+            }
+            isVoiceRecording = false
+            voiceTranscriptionManager.resetMeteringState()
+            presentVoiceRecovery(for: error)
+        }
+    }
+
+    // Starts microphone capture before the first thread is created; auth resolves only after stop.
+    @MainActor
+    private func startVoiceRecordingIfReady() async {
+        guard !isVoicePreflighting else {
+            return
+        }
+
+        guard codex.supportsBridgeVoiceTranscription else {
+            presentVoiceRecovery(for: .bridgeSessionUnsupported)
+            return
+        }
+
+        guard codex.isConnected else {
+            presentVoiceRecovery(for: .reconnectRequired)
+            return
+        }
+
+        clearVoiceRecovery()
+        codex.lastErrorMessage = nil
+        hasTriggeredVoiceAutoStop = false
+        isInputFocused = false
+        let preflightGeneration = voicePreflightGeneration + 1
+        voicePreflightGeneration = preflightGeneration
+        isVoicePreflighting = true
+        defer {
+            if isVoicePreflightCurrent(preflightGeneration) {
+                isVoicePreflighting = false
+            }
+        }
+
+        do {
+            guard isVoicePreflightCurrent(preflightGeneration) else {
+                return
+            }
+            try await voiceTranscriptionManager.startRecording()
+            guard isVoicePreflightCurrent(preflightGeneration) else {
+                voiceTranscriptionManager.cancelRecording()
+                return
+            }
+            isVoiceRecording = true
+            isInputFocused = false
+        } catch {
+            guard isVoicePreflightCurrent(preflightGeneration) else {
+                return
+            }
+            presentVoiceRecovery(for: error)
+        }
+    }
+
+    private func cancelVoiceRecordingIfNeeded() {
+        guard isVoiceRecording || isVoicePreflighting else {
+            return
+        }
+
+        voiceTranscriptionManager.cancelRecording()
+        isVoiceRecording = false
+        isVoicePreflighting = false
+        hasTriggeredVoiceAutoStop = false
+    }
+
+    // Resets the draft composer when the system invalidates the active microphone capture.
+    private func handleVoiceCaptureInvalidation() {
+        guard isVoiceRecording || isVoicePreflighting else {
+            return
+        }
+
+        cancelVoiceTranscriptionIfNeeded()
+        invalidatePendingVoicePreflight()
+        isVoiceRecording = false
+        isVoicePreflighting = false
+        hasTriggeredVoiceAutoStop = false
+        presentVoiceRecovery(for: .recorderUnavailable)
+    }
+
+    private var voiceAutoStopThreshold: TimeInterval {
+        max(0, CodexVoiceTranscriptionPreflight.maxDurationSeconds - 0.25)
+    }
+
+    private func clearVoiceRecovery() {
+        voiceRecoveryReason = nil
+    }
+
+    private func presentVoiceRecovery(for error: Error) {
+        presentVoiceRecovery(for: codex.classifyVoiceFailure(error))
+    }
+
+    private func presentVoiceRecovery(for reason: CodexVoiceFailureReason) {
+        voiceRecoveryReason = reason
+        codex.lastErrorMessage = nil
+    }
+
+    private func handleVoiceRecoveryAction(_ action: VoiceRecoveryAction) {
+        switch action {
+        case .reconnect:
+            reconnectAction?()
+        case .openMacLogin:
+            startVoiceLoginOnMac()
+        case .showSetupHelp:
+            isShowingVoiceSetupSheet = true
+        case .openSystemSettings:
+            guard let settingsURL = URL(string: UIApplication.openSettingsURLString) else {
+                return
+            }
+            openURL(settingsURL)
+        case .none:
+            break
+        }
+    }
+
+    // Opens the Codex ChatGPT login flow on the paired Mac while the draft composer stays in place.
+    private func startVoiceLoginOnMac() {
+        Task { @MainActor in
+            do {
+                try await codex.startOrResumeGPTLoginOnMac()
+                presentVoiceRecovery(for: .voiceSyncInProgress)
+            } catch {
+                presentVoiceRecovery(for: error)
+            }
+        }
+    }
+
+    private func cancelVoiceTranscriptionIfNeeded() {
+        guard isVoiceTranscribing || voiceTranscriptionTask != nil else {
+            return
+        }
+
+        voiceOperationGeneration += 1
+        voiceTranscriptionTask?.cancel()
+        voiceTranscriptionTask = nil
+        isVoiceTranscribing = false
+    }
+
+    private func invalidatePendingVoicePreflight() {
+        voicePreflightGeneration += 1
+        isVoicePreflighting = false
+        voiceTranscriptionManager.cancelRecording()
+    }
+
+    private func isVoicePreflightCurrent(_ generation: Int) -> Bool {
+        generation == voicePreflightGeneration
+    }
+
+    private func isVoiceOperationCurrent(_ generation: Int) -> Bool {
+        generation == voiceOperationGeneration
     }
 
     @ViewBuilder

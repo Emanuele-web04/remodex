@@ -456,3 +456,54 @@ test("desktop/preferences/update rejects invalid bridge preference payloads", as
 
   assert.equal(responses[0].error?.data?.errorCode, "invalid_bridge_preferences");
 });
+
+test("desktop/bridge/updateAndRestart forwards bridge package updates", async () => {
+  const responses = [];
+  let didUpdate = false;
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-7",
+    method: "desktop/bridge/updateAndRestart",
+    params: {},
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    async updateBridgePackageAndRestart() {
+      didUpdate = true;
+      return {
+        success: true,
+        restartScheduled: true,
+      };
+    },
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(didUpdate, true);
+  assert.deepEqual(responses, [{
+    id: "request-7",
+    result: {
+      success: true,
+      restartScheduled: true,
+    },
+  }]);
+});
+
+test("desktop/bridge/updateAndRestart reports unsupported bridges", async () => {
+  const responses = [];
+
+  handleDesktopRequest(JSON.stringify({
+    id: "request-8",
+    method: "desktop/bridge/updateAndRestart",
+    params: {},
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(responses[0].error?.data?.errorCode, "unsupported_bridge_update");
+});

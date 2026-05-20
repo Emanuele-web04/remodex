@@ -49,15 +49,15 @@ struct RemodexLockScreenWidgetView: View {
     }
 
     private var circularBody: some View {
-        ZStack {
-            AccessoryWidgetBackground()
-            Image("remodex-outline")
-                .resizable()
-                .renderingMode(.template)
-                .scaledToFit()
-                .padding(8)
-        }
-        .widgetAccentable()
+        // Keep the circular accessory as a bare glyph; the Lock Screen slot
+        // already supplies the surrounding widget chrome.
+        Image("remodex-outline")
+            .resizable()
+            .renderingMode(.template)
+            .scaledToFit()
+            .padding(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .widgetAccentable()
     }
 
     private var rectangularBody: some View {

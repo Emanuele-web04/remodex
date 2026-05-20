@@ -26,7 +26,8 @@ function composeAccountStatus({
   const tokenReady = Boolean(authToken);
   const requiresOpenaiAuth = Boolean(accountRead?.requiresOpenaiAuth || authStatus?.requiresOpenaiAuth);
   const hasPriorLoginContext = hasAccountLogin || Boolean(authMethod);
-  const needsReauth = !loginInFlight && requiresOpenaiAuth && hasPriorLoginContext;
+  const hasUsableChatGPTToken = tokenReady && isChatGPTAuthMethod(authMethod);
+  const needsReauth = !loginInFlight && requiresOpenaiAuth && hasPriorLoginContext && !hasUsableChatGPTToken;
   const isAuthenticated = !needsReauth && (tokenReady || hasAccountLogin);
   const status = isAuthenticated
     ? "authenticated"
@@ -51,6 +52,10 @@ function composeAccountStatus({
     hostPlatform: normalizeHostPlatform(hostPlatform),
     hostCapabilities: deriveHostCapabilities(hostPlatform),
   };
+}
+
+function isChatGPTAuthMethod(authMethod) {
+  return authMethod === "chatgpt" || authMethod === "chatgptAuthTokens";
 }
 
 // Removes any token-bearing fields before the bridge sends auth state to the phone.
@@ -165,6 +170,7 @@ function deriveHostCapabilities(platform) {
     displayWake: isMacOS,
     keepAwake: isMacOS,
     hostBrowserLogin: isMacOS,
+    bridgeUpdate: isMacOS,
   };
 }
 

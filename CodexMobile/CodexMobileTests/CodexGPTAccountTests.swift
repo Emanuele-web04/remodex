@@ -610,6 +610,17 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
+    func testVoiceTranscriptionPreflightRejectsEmptyDuration() {
+        let preflight = CodexVoiceTranscriptionPreflight(
+            byteCount: 2_048,
+            durationSeconds: 0
+        )
+
+        XCTAssertThrowsError(try preflight.validate()) { error in
+            XCTAssertEqual(error.localizedDescription, "Voice clips must include recorded audio.")
+        }
+    }
+
     func testVoiceTranscriptionReportsDisconnectedInsteadOfLoginWhenBridgeIsOffline() async {
         let service = makeService()
         service.isConnected = false
@@ -636,13 +647,12 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
-    func testVoiceTranscriptionUsesBridgeResolvedTokenForDirectUpload() async throws {
+    func testVoiceTranscriptionUsesBridgeOwnedTranscribeRequest() async throws {
         let service = makeService()
         service.isConnected = true
         let clipURL = try makeTemporaryVoiceClipURL()
         defer { try? FileManager.default.removeItem(at: clipURL) }
         let expectedAudio = makeTestWavData()
-        let expectedToken = "chatgpt-token-123"
 
         var observedMethod: String?
         var observedParams: JSONValue?
@@ -652,36 +662,168 @@ final class CodexGPTAccountTests: XCTestCase {
             return RPCMessage(
                 id: .string(UUID().uuidString),
                 result: .object([
-                    "token": .string(expectedToken),
+                    "text": .string("transcribed on bridge"),
                 ]),
                 includeJSONRPC: false
             )
         }
-        GPTVoiceTranscriptionManager.transcribeOverride = { wavData, token in
-            XCTAssertEqual(wavData, expectedAudio)
-            XCTAssertEqual(token, expectedToken)
-            return "transcribed on phone"
-        }
-        defer { GPTVoiceTranscriptionManager.transcribeOverride = nil }
 
         let transcript = try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1.25)
 
-        XCTAssertEqual(transcript, "transcribed on phone")
-        XCTAssertEqual(observedMethod, "voice/resolveAuth")
-        XCTAssertNil(observedParams)
+        XCTAssertEqual(transcript, "transcribed on bridge")
+        XCTAssertEqual(observedMethod, "voice/transcribe")
+        let params = observedParams?.objectValue
+        XCTAssertEqual(params?["mimeType"]?.stringValue, "audio/wav")
+        XCTAssertEqual(params?["sampleRateHz"]?.intValue, 24_000)
+        XCTAssertEqual(params?["durationMs"]?.intValue, 1_250)
+        XCTAssertEqual(Data(base64Encoded: params?["audioBase64"]?.stringValue ?? "") ?? Data(), expectedAudio)
     }
 
-    func testUnsupportedVoiceBridgeAuthMarksBridgeSessionAsUnsupported() {
+    func testVoiceTranscriptionFallsBackToPhoneUploadWhenBridgeProviderRejectsAuth() async throws {
+        let service = makeService()
+        service.isConnected = true
+        let clipURL = try makeTemporaryVoiceClipURL()
+        defer {
+            try? FileManager.default.removeItem(at: clipURL)
+            GPTVoiceTranscriptionManager.transcribeOverride = nil
+        }
+
+        var observedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            observedMethods.append(method)
+            if method == "voice/transcribe" {
+                throw CodexServiceError.rpcError(
+                    RPCError(
+                        code: -32000,
+                        message: "Your ChatGPT login has expired. Sign in again.",
+                        data: .object([
+                            "errorCode": .string("auth_rejected"),
+                        ])
+                    )
+                )
+            }
+
+            XCTAssertEqual(method, "voice/resolveAuth")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "token": .string("Bearer fresh-chatgpt-token"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        GPTVoiceTranscriptionManager.transcribeOverride = { data, token in
+            XCTAssertFalse(data.isEmpty)
+            XCTAssertEqual(token, "fresh-chatgpt-token")
+            return "legacy path works"
+        }
+
+        let transcript = try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1)
+
+        XCTAssertEqual(transcript, "legacy path works")
+        XCTAssertEqual(observedMethods, ["voice/transcribe", "voice/resolveAuth"])
+    }
+
+    func testVoiceTranscriptionAuthRejectionMarksAccountAsExpired() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
+            status: .authenticated,
+            authMethod: .chatgpt,
+            email: "voice@example.com",
+            displayName: nil,
+            planType: "plus",
+            loginInFlight: false,
+            needsReauth: false,
+            expiresAt: nil,
+            tokenReady: true,
+            updatedAt: .now
+        )
+        let clipURL = try makeTemporaryVoiceClipURL()
+        defer { try? FileManager.default.removeItem(at: clipURL) }
+
+        service.requestTransportOverride = { _, _ in
+            throw CodexServiceError.rpcError(
+                RPCError(
+                    code: -32000,
+                    message: "Your ChatGPT login has expired. Sign in again.",
+                    data: .object([
+                        "errorCode": .string("auth_rejected"),
+                    ])
+                )
+            )
+        }
+
+        await XCTAssertThrowsErrorAsync({
+            try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1)
+        }) { error in
+            XCTAssertEqual(service.classifyVoiceFailure(error), .providerAuthenticationRejected("Your ChatGPT login has expired. Sign in again."))
+        }
+        XCTAssertEqual(service.gptAccountSnapshot.status, .expired)
+        XCTAssertTrue(service.gptAccountSnapshot.needsReauth)
+    }
+
+    func testVoiceTranscriptionAcceptsChunkedWAVBeforeBridgeUpload() async throws {
+        let service = makeService()
+        service.isConnected = true
+        let expectedAudio = makeTestWavData(includeJunkChunk: true)
+        let clipURL = try makeTemporaryVoiceClipURL(wavData: expectedAudio)
+        defer { try? FileManager.default.removeItem(at: clipURL) }
+
+        var observedParams: JSONValue?
+        service.requestTransportOverride = { method, params in
+            XCTAssertEqual(method, "voice/transcribe")
+            observedParams = params
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "text": .string("chunked wav works"),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let transcript = try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 0.25)
+
+        XCTAssertEqual(transcript, "chunked wav works")
+        XCTAssertEqual(Data(base64Encoded: observedParams?.objectValue?["audioBase64"]?.stringValue ?? "") ?? Data(), expectedAudio)
+    }
+
+    func testVoiceTranscriptionRejectsInvalidWAVBeforeCallingBridge() async throws {
+        let service = makeService()
+        service.isConnected = true
+        let clipURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("wav")
+        try Data("not a wav".utf8).write(to: clipURL)
+        defer { try? FileManager.default.removeItem(at: clipURL) }
+
+        var didCallBridge = false
+        service.requestTransportOverride = { _, _ in
+            didCallBridge = true
+            throw CodexServiceError.disconnected
+        }
+
+        await XCTAssertThrowsErrorAsync({
+            try await service.transcribeVoiceAudioFile(at: clipURL, durationSeconds: 1)
+        }) { error in
+            XCTAssertEqual(error.localizedDescription, "The recorded audio is not a valid WAV file.")
+        }
+        XCTAssertFalse(didCallBridge)
+    }
+
+    func testUnsupportedVoiceBridgeTranscribeMarksBridgeSessionAsUnsupported() {
         let service = makeService()
         let error = CodexServiceError.rpcError(
             RPCError(
                 code: -32600,
-                message: "Invalid request: unknown variant `voice/resolveAuth`, expected one of `initialize`, `thread/start`"
+                message: "Invalid request: unknown variant `voice/transcribe`, expected one of `initialize`, `thread/start`"
             )
         )
 
-        XCTAssertTrue(service.consumeUnsupportedVoiceBridgeAuth(error))
-        XCTAssertFalse(service.supportsBridgeVoiceAuth)
+        XCTAssertTrue(service.consumeUnsupportedVoiceBridgeMethod(error))
+        XCTAssertFalse(service.supportsBridgeVoiceTranscription)
         XCTAssertEqual(service.classifyVoiceFailure(error), .bridgeSessionUnsupported)
     }
 
@@ -703,6 +845,40 @@ final class CodexGPTAccountTests: XCTestCase {
         XCTAssertNil(service.resolveVoiceRecoveryReason(.voiceSyncInProgress))
         XCTAssertNil(service.resolveVoiceRecoveryReason(.macLoginRequired))
         XCTAssertNil(service.resolveVoiceRecoveryReason(.macReauthenticationRequired))
+        XCTAssertEqual(
+            service.resolveVoiceRecoveryReason(.providerAuthenticationRejected("Your ChatGPT login has expired.")),
+            .providerAuthenticationRejected("Your ChatGPT login has expired.")
+        )
+    }
+
+    func testVoiceProviderAuthRejectionIsNotHiddenByHealthyCachedAccountSnapshot() {
+        let service = makeService()
+        service.gptAccountSnapshot = CodexGPTAccountSnapshot(
+            status: .authenticated,
+            authMethod: .chatgpt,
+            email: "voice@example.com",
+            displayName: nil,
+            planType: "plus",
+            loginInFlight: false,
+            needsReauth: false,
+            expiresAt: nil,
+            tokenReady: true,
+            updatedAt: .now
+        )
+
+        let error = CodexServiceError.rpcError(
+            RPCError(
+                code: -32000,
+                message: "Your ChatGPT login has expired. Sign in again.",
+                data: .object([
+                    "errorCode": .string("auth_rejected"),
+                ])
+            )
+        )
+
+        let reason = service.classifyVoiceFailure(error)
+        XCTAssertEqual(reason, .providerAuthenticationRejected("Your ChatGPT login has expired. Sign in again."))
+        XCTAssertEqual(service.resolveVoiceRecoveryReason(reason), reason)
     }
 
     func testVoiceMissingTokenWhileAuthenticatedIsClassifiedAsSyncing() {
@@ -834,35 +1010,43 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
-    private func makeTemporaryVoiceClipURL() throws -> URL {
+    private func makeTemporaryVoiceClipURL(wavData: Data? = nil) throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension("wav")
-        try makeTestWavData().write(to: url)
+        try (wavData ?? makeTestWavData()).write(to: url)
         return url
     }
 
-    private func makeTestWavData() -> Data {
+    private func makeTestWavData(includeJunkChunk: Bool = false) -> Data {
         let sampleRate = 24_000
         let sampleCount = sampleRate / 4
         let pcmData = Data(repeating: 0, count: sampleCount * 2)
         let dataSize = UInt32(pcmData.count)
 
+        var chunks = Data()
+        if includeJunkChunk {
+            chunks.append(contentsOf: "JUNK".utf8)
+            chunks.appendLE(UInt32(4))
+            chunks.append(contentsOf: [1, 2, 3, 4])
+        }
+        chunks.append(contentsOf: "fmt ".utf8)
+        chunks.appendLE(UInt32(16))
+        chunks.appendLE(UInt16(1))
+        chunks.appendLE(UInt16(1))
+        chunks.appendLE(UInt32(sampleRate))
+        chunks.appendLE(UInt32(sampleRate * 2))
+        chunks.appendLE(UInt16(2))
+        chunks.appendLE(UInt16(16))
+        chunks.append(contentsOf: "data".utf8)
+        chunks.appendLE(dataSize)
+        chunks.append(pcmData)
+
         var wav = Data()
         wav.append(contentsOf: "RIFF".utf8)
-        wav.appendLE(UInt32(36 + dataSize))
+        wav.appendLE(UInt32(4 + chunks.count))
         wav.append(contentsOf: "WAVE".utf8)
-        wav.append(contentsOf: "fmt ".utf8)
-        wav.appendLE(UInt32(16))
-        wav.appendLE(UInt16(1))
-        wav.appendLE(UInt16(1))
-        wav.appendLE(UInt32(sampleRate))
-        wav.appendLE(UInt32(sampleRate * 2))
-        wav.appendLE(UInt16(2))
-        wav.appendLE(UInt16(16))
-        wav.append(contentsOf: "data".utf8)
-        wav.appendLE(dataSize)
-        wav.append(pcmData)
+        wav.append(chunks)
         return wav
     }
 

@@ -9,14 +9,34 @@ import SwiftUI
 struct AssistantBlockAccessoryState: Equatable {
     let copyText: String?
     let showsRunningIndicator: Bool
+    let allowsCopy: Bool
     let blockDiffText: String?
     let blockDiffEntries: [TurnFileChangeSummaryEntry]?
     let blockRevertPresentation: AssistantRevertPresentation?
     let blockRevertMessage: CodexMessage?
 
+    init(
+        copyText: String?,
+        showsRunningIndicator: Bool,
+        allowsCopy: Bool = false,
+        blockDiffText: String?,
+        blockDiffEntries: [TurnFileChangeSummaryEntry]?,
+        blockRevertPresentation: AssistantRevertPresentation?,
+        blockRevertMessage: CodexMessage?
+    ) {
+        self.copyText = copyText
+        self.showsRunningIndicator = showsRunningIndicator
+        self.allowsCopy = allowsCopy
+        self.blockDiffText = blockDiffText
+        self.blockDiffEntries = blockDiffEntries
+        self.blockRevertPresentation = blockRevertPresentation
+        self.blockRevertMessage = blockRevertMessage
+    }
+
     static func == (lhs: AssistantBlockAccessoryState, rhs: AssistantBlockAccessoryState) -> Bool {
         lhs.copyText == rhs.copyText
             && lhs.showsRunningIndicator == rhs.showsRunningIndicator
+            && lhs.allowsCopy == rhs.allowsCopy
             && lhs.blockDiffText == rhs.blockDiffText
             && lhs.blockDiffEntries == rhs.blockDiffEntries
             && lhs.blockRevertPresentation == rhs.blockRevertPresentation
@@ -27,6 +47,7 @@ struct AssistantBlockAccessoryState: Equatable {
         AssistantBlockAccessoryState(
             copyText: copyText,
             showsRunningIndicator: showsRunningIndicator,
+            allowsCopy: allowsCopy,
             blockDiffText: blockDiffText,
             blockDiffEntries: blockDiffEntries,
             blockRevertPresentation: blockRevertPresentation,
@@ -38,6 +59,7 @@ struct AssistantBlockAccessoryState: Equatable {
         AssistantBlockAccessoryState(
             copyText: copyText,
             showsRunningIndicator: showsRunningIndicator,
+            allowsCopy: allowsCopy,
             blockDiffText: blockDiffText,
             blockDiffEntries: blockDiffEntries,
             blockRevertPresentation: blockRevertPresentation,
@@ -49,6 +71,7 @@ struct AssistantBlockAccessoryState: Equatable {
         AssistantBlockAccessoryState(
             copyText: copyText ?? state.copyText,
             showsRunningIndicator: showsRunningIndicator || state.showsRunningIndicator,
+            allowsCopy: allowsCopy || state.allowsCopy,
             blockDiffText: blockDiffText ?? state.blockDiffText,
             blockDiffEntries: blockDiffEntries ?? state.blockDiffEntries,
             blockRevertPresentation: blockRevertPresentation ?? state.blockRevertPresentation,
@@ -320,7 +343,7 @@ struct TurnTimelineRowsSection: View {
     let isLoadingEarlierMessages: Bool
     let earlierMessagesErrorMessage: String?
     let renderItems: [TurnTimelineRenderItem]
-    let showsPendingAssistantIndicator: Bool
+    let showsGlobalRunningIndicator: Bool
     let isRetryAvailable: Bool
     let cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState]
     let planSessionSource: CodexPlanSessionSource?
@@ -382,7 +405,7 @@ struct TurnTimelineRowsSection: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
-                        showsGlobalRunningIndicator: shouldShowPendingAssistantIndicator,
+                        showsGlobalRunningIndicator: shouldUseGlobalRunningIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
@@ -400,7 +423,7 @@ struct TurnTimelineRowsSection: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
-                        showsGlobalRunningIndicator: shouldShowPendingAssistantIndicator,
+                        showsGlobalRunningIndicator: shouldUseGlobalRunningIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
@@ -418,25 +441,19 @@ struct TurnTimelineRowsSection: View {
                         planMatchingFingerprint: planMatchingFingerprint,
                         newestStreamingMessageID: newestStreamingMessageID,
                         autoScrollMode: autoScrollMode,
-                        showsGlobalRunningIndicator: shouldShowPendingAssistantIndicator,
+                        showsGlobalRunningIndicator: shouldUseGlobalRunningIndicator,
                         onRetryUserMessage: onRetryUserMessage,
                         onTapAssistantRevert: onTapAssistantRevert,
                         onTapSubagent: onTapSubagent
                     )
                 }
             }
-
-            if shouldShowPendingAssistantIndicator {
-                PendingAssistantIndicatorRow()
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var shouldShowPendingAssistantIndicator: Bool {
-        TurnTimelinePendingAssistantState.shouldShowIndicator(
-            isRunStartingOrRunning: showsPendingAssistantIndicator
-        )
+    private var shouldUseGlobalRunningIndicator: Bool {
+        showsGlobalRunningIndicator
     }
 
     private var earlierMessagesButtonTitle: String {
@@ -444,17 +461,5 @@ struct TurnTimelineRowsSection: View {
             return "Loading earlier messages..."
         }
         return earlierMessagesErrorMessage ?? "Load earlier messages"
-    }
-}
-
-private struct PendingAssistantIndicatorRow: View {
-    var body: some View {
-        HStack {
-            TerminalRunningIndicator()
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 4)
-        .padding(.top, 6)
     }
 }

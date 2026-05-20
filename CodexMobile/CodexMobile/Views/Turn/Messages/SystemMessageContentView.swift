@@ -38,7 +38,11 @@ struct SystemMessageContentView: View {
         case .userInputPrompt:
             userInputPromptSystemView
         case .chat:
-            defaultSystemView(text: text)
+            if isContextCompactionNotice(text) {
+                contextCompactionNoticeView(text: text)
+            } else {
+                defaultSystemView(text: text)
+            }
         }
     }
 
@@ -195,6 +199,44 @@ struct SystemMessageContentView: View {
             .contextMenu {
                 selectableTextActions(text: actionText, usesMarkdownSelection: false)
             }
+    }
+
+    private func contextCompactionNoticeView(text: String) -> some View {
+        HStack(spacing: 14) {
+            contextCompactionDivider
+
+            HStack(spacing: 8) {
+                RemodexIcon.image(systemName: "doc.text")
+                    .font(AppFont.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(AppFont.title3(weight: .regular))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+
+            contextCompactionDivider
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .contextMenu {
+            selectableTextActions(text: actionText, usesMarkdownSelection: false)
+        }
+    }
+
+    private var contextCompactionDivider: some View {
+        Rectangle()
+            .fill(Color(.separator).opacity(0.42))
+            .frame(height: 1)
+            .frame(maxWidth: .infinity)
+    }
+
+    // Keeps the synthetic compaction marker visually separate from adjacent transcript text.
+    private func isContextCompactionNotice(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines) == "Context compacted"
     }
 
     @ViewBuilder

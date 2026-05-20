@@ -15,6 +15,7 @@ const {
   mergeBridgeStatusForDaemon,
   printMacOSBridgePairingQr,
   resetMacOSBridgePairing,
+  restartMacOSBridgeService,
   resolveLaunchAgentPlistPath,
   runMacOSBridgeService,
   startMacOSBridgeService,
@@ -215,6 +216,82 @@ test("startMacOSBridgeService kickstarts the launch agent after bootstrap", () =
   });
 });
 
+test("restartMacOSBridgeService kickstarts an existing LaunchAgent without relay config", async () => {
+  await withTempDaemonEnv(async ({ rootDir }) => {
+    const calls = [];
+    const env = {
+      ...process.env,
+      HOME: rootDir,
+      REMODEX_DEVICE_STATE_DIR: rootDir,
+      UID: String(TEST_UID),
+    };
+    const plistPath = path.join(rootDir, "Library", "LaunchAgents", "com.remodex.bridge.plist");
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fs.writeFileSync(plistPath, "<plist />", "utf8");
+
+    const result = await restartMacOSBridgeService({
+      env,
+      platform: "darwin",
+      execFileSyncImpl(command, args) {
+        calls.push([command, args]);
+      },
+    });
+
+    assert.equal(result.plistPath, plistPath);
+    assert.equal(result.pairingSession, null);
+    assert.deepEqual(calls, [
+      ["launchctl", ["kickstart", "-k", `gui/${TEST_UID}/com.remodex.bridge`]],
+    ]);
+  });
+});
+
+test("restartMacOSBridgeService can wait for the daemon to publish a fresh pairing QR", async () => {
+  await withTempDaemonEnv(async ({ rootDir }) => {
+    const calls = [];
+    const env = {
+      ...process.env,
+      HOME: rootDir,
+      REMODEX_DEVICE_STATE_DIR: rootDir,
+      UID: String(TEST_UID),
+    };
+    const plistPath = path.join(rootDir, "Library", "LaunchAgents", "com.remodex.bridge.plist");
+    fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+    fs.writeFileSync(plistPath, "<plist />", "utf8");
+    writePairingSession({
+      createdAt: "2000-01-01T00:00:00.000Z",
+      pairingPayload: { sessionId: "stale-session" },
+    }, { env });
+
+    const result = await restartMacOSBridgeService({
+      env,
+      platform: "darwin",
+      pairingTimeoutMs: 200,
+      pairingPollIntervalMs: 5,
+      waitForPairing: true,
+      execFileSyncImpl(command, args) {
+        calls.push([command, args]);
+        writePairingSession({
+          pairingPayload: {
+            v: 2,
+            relay: "ws://127.0.0.1:9000/relay",
+            sessionId: "fresh-session",
+            macDeviceId: "mac-1",
+            macIdentityPublicKey: "mac-pub",
+            expiresAt: Date.now() + 60_000,
+          },
+          pairingCode: "PAIRME",
+        }, { env });
+      },
+    });
+
+    assert.equal(result.plistPath, plistPath);
+    assert.equal(result.pairingSession?.pairingPayload?.sessionId, "fresh-session");
+    assert.deepEqual(calls, [
+      ["launchctl", ["kickstart", "-k", `gui/${TEST_UID}/com.remodex.bridge`]],
+    ]);
+  });
+});
+
 test("printMacOSBridgePairingQr renders the daemon pairing session", () => {
   withTempDaemonEnv(() => {
     writePairingSession({
@@ -395,9 +472,7 @@ function withTempDaemonEnv(run) {
   process.env.REMODEX_DEVICE_STATE_DIR = rootDir;
   process.env.HOME = rootDir;
 
-  try {
-    return run({ rootDir });
-  } finally {
+  const cleanup = () => {
     if (previousDir === undefined) {
       delete process.env.REMODEX_DEVICE_STATE_DIR;
     } else {
@@ -409,5 +484,17 @@ function withTempDaemonEnv(run) {
       process.env.HOME = previousHome;
     }
     fs.rmSync(rootDir, { recursive: true, force: true });
+  };
+
+  try {
+    const result = run({ rootDir });
+    if (result && typeof result.then === "function") {
+      return result.finally(cleanup);
+    }
+    cleanup();
+    return result;
+  } catch (error) {
+    cleanup();
+    throw error;
   }
 }

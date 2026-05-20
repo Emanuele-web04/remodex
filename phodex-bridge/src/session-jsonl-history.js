@@ -2,6 +2,7 @@
 // Purpose: Reconstructs a small thread/turns/list page from local Codex session JSONL files.
 
 const fs = require("fs");
+const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 
 function readThreadTurnsListPageFromSessionJsonl(filePath, {
   threadId = "",
@@ -31,12 +32,53 @@ function readThreadTurnsListPageFromSessionJsonl(filePath, {
   };
 }
 
+// Extracts thread-level context that app-server history can omit for desktop-origin runs.
+function parseSessionJsonlMetadata(content) {
+  let threadId = "";
+  let cwd = "";
+
+  const lines = String(content || "").split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+
+    if (entry?.type !== "session_meta") {
+      continue;
+    }
+
+    const payload = objectValue(entry.payload);
+    threadId ||= normalizeString(payload?.id)
+      || normalizeString(payload?.thread_id)
+      || normalizeString(payload?.threadId);
+    cwd ||= normalizeString(payload?.cwd)
+      || normalizeString(payload?.current_working_directory)
+      || normalizeString(payload?.working_directory);
+
+    if (threadId && cwd) {
+      break;
+    }
+  }
+
+  return { threadId, cwd };
+}
+
 function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   const turns = [];
   const turnsById = new Map();
   let activeTurnId = "";
   let sessionThreadId = normalizeString(threadId);
+  let sessionCwd = "";
   const skippedCallIds = new Set();
+  const pendingUserMessages = [];
 
   const lines = String(content || "").split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {
@@ -57,6 +99,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       sessionThreadId ||= normalizeString(payload?.id)
         || normalizeString(payload?.thread_id)
         || normalizeString(payload?.threadId);
+      sessionCwd ||= normalizeString(payload?.cwd);
       continue;
     }
 
@@ -68,7 +111,8 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           || normalizeString(payload?.turnId)
           || activeTurnId
           || `turn-line-${index + 1}`;
-        ensureTurn(turns, turnsById, activeTurnId, sessionThreadId, entry.timestamp);
+        const turn = ensureTurn(turns, turnsById, activeTurnId, sessionThreadId, entry.timestamp);
+        flushPendingUserMessagesToTurn(turn, pendingUserMessages);
         continue;
       }
 
@@ -81,14 +125,48 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
           entry.timestamp
         );
         turn.status = "completed";
+        activeTurnId = "";
         continue;
       }
 
-      if (eventType === "user_message") {
+      if (eventType === "item_completed") {
+        const completedItem = objectValue(payload?.item);
+        if (!completedItem) {
+          continue;
+        }
+
         const turn = ensureTurn(
           turns,
           turnsById,
           normalizeString(payload?.turn_id) || normalizeString(payload?.turnId) || activeTurnId || `turn-line-${index + 1}`,
+          sessionThreadId,
+          entry.timestamp
+        );
+        const item = normalizeResponseItemForHistory(completedItem, index + 1, {
+          cwd: sessionCwd,
+        });
+        if (item) {
+          turn.items.push(item);
+        }
+        continue;
+      }
+
+      if (eventType === "user_message") {
+        const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
+        if (!explicitTurnId && !activeTurnId) {
+          pendingUserMessages.push({
+            id: normalizeString(payload?.id) || `user-message-line-${index + 1}`,
+            type: "user_message",
+            role: "user",
+            text: normalizeString(payload?.message) || normalizeString(payload?.text),
+          });
+          continue;
+        }
+
+        const turn = ensureTurn(
+          turns,
+          turnsById,
+          explicitTurnId || activeTurnId || `turn-line-${index + 1}`,
           sessionThreadId,
           entry.timestamp
         );
@@ -121,14 +199,47 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         sessionThreadId,
         entry.timestamp
       );
-      const item = normalizeResponseItemForHistory(payload, index + 1);
+      const item = normalizeResponseItemForHistory(payload, index + 1, {
+        cwd: sessionCwd,
+      });
       if (item) {
+        if (shouldSkipDuplicateProposedPlanMessage(turn, item)) {
+          continue;
+        }
         turn.items.push(item);
       }
     }
   }
 
   return turns.filter((turn) => turn.items.length > 0);
+}
+
+function shouldSkipDuplicateProposedPlanMessage(turn, item) {
+  if (!turn || !item || normalizeHistoryToken(item.type) !== "message") {
+    return false;
+  }
+
+  const role = normalizeString(item.role).toLowerCase();
+  if (role && role !== "assistant") {
+    return false;
+  }
+
+  if (!responseItemMessageText(item).includes("<proposed_plan>")) {
+    return false;
+  }
+
+  return turn.items.some((candidate) => (
+    normalizeHistoryToken(candidate?.type) === "plan"
+      && candidate?.remodexJsonlProgressPlan !== true
+  ));
+}
+
+function flushPendingUserMessagesToTurn(turn, pendingUserMessages) {
+  if (!turn || pendingUserMessages.length === 0) {
+    return;
+  }
+
+  turn.items.push(...pendingUserMessages.splice(0));
 }
 
 function ensureTurn(turns, turnsById, turnId, threadId, timestamp) {
@@ -151,10 +262,20 @@ function ensureTurn(turns, turnsById, turnId, threadId, timestamp) {
   return turn;
 }
 
-function normalizeResponseItemForHistory(payload, lineNumber) {
+function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "" } = {}) {
   const type = normalizeHistoryItemType(payload.type);
   if (!type) {
     return null;
+  }
+
+  const progressPlanItem = normalizeProgressPlanItemForHistory(payload);
+  if (progressPlanItem) {
+    return progressPlanItem;
+  }
+
+  const applyPatchItem = normalizeApplyPatchItemForHistory(payload, lineNumber, { cwd });
+  if (applyPatchItem) {
+    return applyPatchItem;
   }
 
   const item = {
@@ -173,6 +294,95 @@ function normalizeResponseItemForHistory(payload, lineNumber) {
   return item;
 }
 
+function normalizeApplyPatchItemForHistory(payload, lineNumber, { cwd = "" } = {}) {
+  const type = normalizeHistoryItemType(payload.type);
+  if (normalizeString(payload.name) !== "apply_patch" || normalizeHistoryToken(type) !== "customtoolcall") {
+    return null;
+  }
+
+  const callId = normalizeString(payload.call_id)
+    || normalizeString(payload.callId)
+    || normalizeString(payload.id);
+  const item = buildApplyPatchFileChangeItem({
+    callId,
+    patch: normalizeString(payload.input),
+    status: normalizeString(payload.status) || "completed",
+    idFallback: callId || `apply-patch-line-${lineNumber}`,
+    cwd,
+  });
+  return item ? { ...payload, ...item } : null;
+}
+
+function normalizeProgressPlanItemForHistory(payload) {
+  const type = normalizeHistoryItemType(payload.type);
+  if (!isInternalProgressPlanCall(payload) || normalizeHistoryToken(type) !== "toolcall") {
+    return null;
+  }
+
+  const argumentsObject = parseToolArguments(payload.arguments);
+  const explanation = normalizeString(argumentsObject.explanation);
+  const plan = normalizeHistoryPlanSteps(argumentsObject.plan);
+  if (!explanation && plan.length === 0) {
+    return null;
+  }
+
+  return {
+    id: normalizeString(payload.call_id)
+      || normalizeString(payload.callId)
+      || normalizeString(payload.id)
+      || undefined,
+    type: "plan",
+    text: explanation || "Planning...",
+    explanation: explanation || undefined,
+    plan,
+    remodexJsonlProgressPlan: true,
+  };
+}
+
+function normalizeHistoryPlanSteps(rawPlan) {
+  if (!Array.isArray(rawPlan)) {
+    return [];
+  }
+
+  return rawPlan.flatMap((rawStep) => {
+    const stepObject = objectValue(rawStep);
+    const step = normalizeString(stepObject?.step);
+    const status = normalizeHistoryPlanStatus(stepObject?.status);
+    return step && status ? [{ step, status }] : [];
+  });
+}
+
+function normalizeHistoryPlanStatus(rawStatus) {
+  const normalized = normalizeString(rawStatus);
+  switch (normalized) {
+    case "pending":
+    case "in_progress":
+    case "inProgress":
+    case "completed":
+      return normalized;
+    default:
+      return "";
+  }
+}
+
+function parseToolArguments(rawArguments) {
+  const parsed = typeof rawArguments === "string"
+    ? safeParseJSON(normalizeString(rawArguments))
+    : rawArguments;
+  return objectValue(parsed) || {};
+}
+
+function safeParseJSON(rawValue) {
+  if (!rawValue) {
+    return null;
+  }
+  try {
+    return JSON.parse(rawValue);
+  } catch {
+    return null;
+  }
+}
+
 // Filters desktop transcript internals that are stored as response items but are not chat history.
 function shouldSkipResponseItemForHistory(payload, skippedCallIds) {
   const type = normalizeHistoryItemType(payload.type);
@@ -187,6 +397,13 @@ function shouldSkipResponseItemForHistory(payload, skippedCallIds) {
       skippedCallIds.add(callId);
     }
     return true;
+  }
+
+  if (type === "tool_call" && isInternalProgressPlanCall(payload)) {
+    if (callId) {
+      skippedCallIds.add(callId);
+    }
+    return false;
   }
 
   if (type !== "message") {
@@ -214,6 +431,10 @@ function isSubagentOrchestrationCall(payload) {
     || name === "close_agent";
 }
 
+function isInternalProgressPlanCall(payload) {
+  return normalizeString(payload.name).toLowerCase() === "update_plan";
+}
+
 function isSubagentNotificationMessage(payload) {
   const text = responseItemMessageText(payload).trimStart();
   return text.startsWith("<subagent_notification>");
@@ -235,7 +456,7 @@ function responseItemMessageText(payload) {
 }
 
 function normalizeHistoryItemType(rawType) {
-  const normalized = normalizeString(rawType).toLowerCase().replace(/[\s_-]+/g, "");
+  const normalized = normalizeHistoryToken(rawType);
   if (!normalized) {
     return "";
   }
@@ -245,7 +466,14 @@ function normalizeHistoryItemType(rawType) {
   if (normalized === "functioncalloutput") {
     return "tool_call_output";
   }
+  if (normalized === "plan") {
+    return "plan";
+  }
   return rawType;
+}
+
+function normalizeHistoryToken(rawType) {
+  return normalizeString(rawType).toLowerCase().replace(/[\s_-]+/g, "");
 }
 
 function objectValue(value) {
@@ -257,6 +485,7 @@ function normalizeString(value) {
 }
 
 module.exports = {
+  parseSessionJsonlMetadata,
   parseSessionJsonlTurns,
   readThreadTurnsListPageFromSessionJsonl,
 };

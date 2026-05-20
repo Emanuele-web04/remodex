@@ -6,6 +6,35 @@
 
 import SwiftUI
 
+// Groups derived timeline state so handlers can refresh caches with a single
+// @State assignment instead of several frame-adjacent mutations.
+private struct TurnTimelineRenderCacheState: Equatable {
+    var blockInfoByMessageID: [String: AssistantBlockAccessoryState] = [:]
+    var newestStreamingMessageID: String?
+    var renderItemsSignature: TurnTimelineRenderItemsCacheSignature?
+    var visibleRenderItems: [TurnTimelineRenderItem] = []
+    var blockInfoInputKey: Int?
+}
+
+// Keeps the pending status visually in the timeline while removing it from
+// the streaming message stack that changes height on every assistant delta.
+private struct StickyPendingAssistantIndicatorRow: View, Equatable {
+    let contentWidth: CGFloat
+    let viewportWidth: CGFloat
+    let horizontalPadding: CGFloat
+
+    var body: some View {
+        HStack {
+            TerminalRunningIndicator()
+            Spacer(minLength: 0)
+        }
+        .frame(width: contentWidth, alignment: .leading)
+        .padding(.horizontal, horizontalPadding)
+        .frame(width: viewportWidth, alignment: .leading)
+        .allowsHitTesting(false)
+    }
+}
+
 struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
@@ -57,16 +86,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     /// Heavy-chat staged warmup is temporarily disabled until geometry settles reliably.
     private static var initialWarmTailCount: Int { 0 }
     private static var scrollToLatestButtonLift: CGFloat { 44 + 8 }
+    private static var pendingAssistantIndicatorBottomLift: CGFloat { 8 }
     private static var scrollGeometryCoalescingDelayNanoseconds: UInt64 { 16_000_000 }
 
     @State private var visibleTailCount: Int = initialVisibleTailCount
     @State private var isScrolledToBottom = true
     @State private var viewportHeight: CGFloat = 0
-    @State private var cachedBlockInfoByMessageID: [String: AssistantBlockAccessoryState] = [:]
-    @State private var cachedNewestStreamingMessageID: String? = nil
-    @State private var cachedRenderItemsSignature: TurnTimelineRenderItemsCacheSignature?
-    @State private var cachedVisibleRenderItems: [TurnTimelineRenderItem] = []
-    @State private var blockInfoInputKey: Int = 0
+    @State private var renderCacheState = TurnTimelineRenderCacheState()
     @State private var scrollSessionThreadID: String?
     @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
     @State private var initialRecoverySnapPendingThreadID: String?
@@ -94,11 +120,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     // Never project inside `body`; stale cache is refreshed by lifecycle handlers.
     private var visibleRenderItems: [TurnTimelineRenderItem] {
-        cachedVisibleRenderItems
-    }
-
-    private var currentRenderItemsSignature: TurnTimelineRenderItemsCacheSignature {
-        renderItemsCacheSignature(for: visibleMessages)
+        renderCacheState.visibleRenderItems
     }
 
     private var hasEarlierMessages: Bool {
@@ -131,6 +153,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         !initialTurnsLoaded && !messages.isEmpty && !isThreadRunning
     }
 
+    private var isRunStartingOrRunning: Bool {
+        isThreadRunning || isSendInFlight
+    }
+
     private var isEarlierHistoryInteractionActive: Bool {
             isInitialEarlierPageLoading
             || isRemoteEarlierLoadPending
@@ -157,6 +183,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // prose does not read as edge-to-edge when Dynamic Type is bumped up.
     private var timelineHorizontalPadding: CGFloat {
         dynamicTypeSize.isAccessibilitySize ? 20 : 16
+    }
+
+    // Accessibility text can make the sticky overlay taller than the default row.
+    private var pendingAssistantIndicatorReservedHeight: CGFloat {
+        dynamicTypeSize.isAccessibilitySize ? 56 : 24
     }
 
     private var shouldStageHeavyThreadOpen: Bool {
@@ -209,6 +240,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             ScrollViewReader { proxy in
                 GeometryReader { viewport in
                     let contentWidth = timelineContentWidth(for: viewport.size.width)
+                    let showsStickyPendingAssistantIndicator = shouldShowStickyPendingAssistantIndicator
                     ScrollView(.vertical) {
                         TurnTimelineRowsSection(
                             shouldWarmRecentTailProgressively: shouldWarmRecentTailProgressively,
@@ -220,16 +252,16 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                                 || isRetryingEarlierHistoryLoad,
                             earlierMessagesErrorMessage: olderHistoryLoadErrorMessage,
                             renderItems: visibleRenderItems,
-                            showsPendingAssistantIndicator: isThreadRunning || isSendInFlight,
+                            showsGlobalRunningIndicator: showsStickyPendingAssistantIndicator,
                             isRetryAvailable: isRetryAvailable,
-                            cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                            cachedBlockInfoByMessageID: renderCacheState.blockInfoByMessageID,
                             planSessionSource: planSessionSource,
                             allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
                             completedTurnIDs: completedTurnIDs,
                             threadMessagesForPlanMatching: threadMessagesForPlanMatching,
                             currentWorkingDirectory: currentWorkingDirectory,
                             planMatchingFingerprint: planMatchingFingerprint,
-                            newestStreamingMessageID: cachedNewestStreamingMessageID,
+                            newestStreamingMessageID: renderCacheState.newestStreamingMessageID,
                             autoScrollMode: autoScrollMode,
                             onRetryUserMessage: onRetryUserMessage,
                             onTapAssistantRevert: onTapAssistantRevert,
@@ -244,7 +276,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                         .clipped()
                         .background(VerticalScrollAxisGuard())
                         .padding(.top, 12)
-                        .padding(.bottom, 12)
+                        .padding(.bottom, timelineRowsBottomPadding(
+                            showsStickyPendingAssistantIndicator: showsStickyPendingAssistantIndicator
+                        ))
 
                         // Keep bottom anchor outside the message stack so it is always
                         // reachable by scrollTo regardless of VStack layout timing.
@@ -258,6 +292,18 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     }
                     .accessibilityIdentifier("turn.timeline.scrollview")
                     .background(Color(.systemBackground))
+                    .overlay(alignment: .bottom) {
+                        if showsStickyPendingAssistantIndicator {
+                            StickyPendingAssistantIndicatorRow(
+                                contentWidth: contentWidth,
+                                viewportWidth: viewport.size.width,
+                                horizontalPadding: timelineHorizontalPadding
+                            )
+                            .equatable()
+                            .padding(.bottom, Self.pendingAssistantIndicatorBottomLift)
+                            .transition(.opacity)
+                        }
+                    }
                     .overlay {
                         if shouldShowFullTimelineLoader {
                             timelineLoadingOverlay
@@ -288,14 +334,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     .onAppear {
                         debugTimelineLog("onAppear threadID=\(threadID) messageCount=\(messages.count)")
                         beginScrollSessionIfNeeded()
-                        recomputeRenderItemsIfNeeded()
-                        recomputeBlockInfoIfNeeded()
+                        recomputeRenderItemsAndBlockInfoIfNeeded()
                         scheduleProgressiveTailRevealIfNeeded()
                         handleTimelineMutation(using: proxy)
-                    }
-                    .onChange(of: currentRenderItemsSignature) { _, _ in
-                        recomputeRenderItemsIfNeeded()
-                        recomputeBlockInfoIfNeeded()
                     }
                     .onDisappear {
                         debugTimelineLog("onDisappear threadID=\(threadID)")
@@ -313,56 +354,79 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     private func recomputeRenderItemsIfNeeded() {
-        let visible = visibleMessages
-        let signature = renderItemsCacheSignature(for: visible)
-        guard signature != cachedRenderItemsSignature else { return }
-
-        cachedVisibleRenderItems = TurnTimelineRenderProjection.project(
-            messages: Array(visible),
-            completedTurnIDs: completedTurnIDs
-        )
-        cachedRenderItemsSignature = signature
+        recomputeTimelineRenderCacheIfNeeded(rebuildBlockInfo: false)
     }
 
     private func recomputeBlockInfoIfNeeded() {
-        let visible = Array(visibleMessages)
-        let key = blockInfoInputKey(for: visible)
-        guard key != blockInfoInputKey else { return }
-        blockInfoInputKey = key
+        recomputeTimelineRenderCacheIfNeeded(rebuildRenderItems: false)
+    }
 
-        let cachedBlockInfo = Self.assistantBlockInfo(
-            for: visible,
-            activeTurnID: activeTurnID,
-            isThreadRunning: isThreadRunning,
-            latestTurnTerminalState: latestTurnTerminalState,
-            stoppedTurnIDs: stoppedTurnIDs,
-            revertStatesByMessageID: assistantRevertStatesByMessageID
-        )
+    private func recomputeRenderItemsAndBlockInfoIfNeeded() {
+        recomputeTimelineRenderCacheIfNeeded()
+    }
 
-        let initialBlockInfoByMessageID = [String: AssistantBlockAccessoryState](
-            uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
-                guard let blockText else { return nil }
-                return (message.id, blockText)
+    // Rebuilds derived row/accessory state and commits it as one SwiftUI state update.
+    private func recomputeTimelineRenderCacheIfNeeded(
+        rebuildRenderItems: Bool = true,
+        rebuildBlockInfo: Bool = true
+    ) {
+        let visibleSlice = visibleMessages
+        let visible = Array(visibleSlice)
+        var nextState = renderCacheState
+        var didChange = false
+
+        // Block-info placement depends on collapsed render items, so keep the
+        // projection fresh before deriving accessory state.
+        if rebuildRenderItems || rebuildBlockInfo {
+            let signature = renderItemsCacheSignature(for: visibleSlice)
+            if signature != nextState.renderItemsSignature {
+                nextState.visibleRenderItems = TurnTimelineRenderProjection.project(
+                    messages: visible,
+                    completedTurnIDs: completedTurnIDs
+                )
+                nextState.renderItemsSignature = signature
+                didChange = true
             }
-        )
-        let updated = Self.rehomeCollapsedFinalAccessoryStates(
-            initialBlockInfoByMessageID,
-            messages: visible,
-            completedTurnIDs: completedTurnIDs
-        )
-        let renderItems = cachedVisibleRenderItems
-        let visibleUpdated = Self.rehomeHiddenAccessoryStates(
-            updated,
-            messages: visible,
-            renderItems: renderItems
-        )
-        if visibleUpdated != cachedBlockInfoByMessageID {
-            cachedBlockInfoByMessageID = visibleUpdated
         }
 
-        let newestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
-        if newestStreamingMessageID != cachedNewestStreamingMessageID {
-            cachedNewestStreamingMessageID = newestStreamingMessageID
+        if rebuildBlockInfo {
+            let key = blockInfoInputKey(for: visible)
+            if nextState.blockInfoInputKey != key {
+                nextState.blockInfoInputKey = key
+
+                let cachedBlockInfo = Self.assistantBlockInfo(
+                    for: visible,
+                    activeTurnID: activeTurnID,
+                    isThreadRunning: isThreadRunning,
+                    isCopySuppressedByRunState: isRunStartingOrRunning,
+                    latestTurnTerminalState: latestTurnTerminalState,
+                    stoppedTurnIDs: stoppedTurnIDs,
+                    revertStatesByMessageID: assistantRevertStatesByMessageID
+                )
+
+                let initialBlockInfoByMessageID = [String: AssistantBlockAccessoryState](
+                    uniqueKeysWithValues: zip(visible, cachedBlockInfo).compactMap { message, blockText in
+                        guard let blockText else { return nil }
+                        return (message.id, blockText)
+                    }
+                )
+                let updated = Self.rehomeCollapsedFinalAccessoryStates(
+                    initialBlockInfoByMessageID,
+                    messages: visible,
+                    completedTurnIDs: completedTurnIDs
+                )
+                nextState.blockInfoByMessageID = Self.rehomeHiddenAccessoryStates(
+                    updated,
+                    messages: visible,
+                    renderItems: nextState.visibleRenderItems
+                )
+                nextState.newestStreamingMessageID = visible.last(where: { $0.isStreaming })?.id
+                didChange = true
+            }
+        }
+
+        if didChange {
+            renderCacheState = nextState
         }
     }
 
@@ -372,6 +436,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         TurnTimelineCacheKeyBuilder.blockInfoInputKey(
             messages: messages,
             isThreadRunning: isThreadRunning,
+            isSendInFlight: isSendInFlight,
             activeTurnID: activeTurnID,
             latestTurnTerminalState: latestTurnTerminalState,
             completedTurnIDs: completedTurnIDs,
@@ -430,6 +495,19 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
             messages: messages
         )
+    }
+
+    private var shouldShowStickyPendingAssistantIndicator: Bool {
+        TurnTimelinePendingAssistantState.shouldShowIndicator(
+            isRunStartingOrRunning: isRunStartingOrRunning
+        )
+            && (autoScrollMode == .followBottom
+                || autoScrollMode == .anchorAssistantResponse
+                || shouldShowPendingAssistantResponse)
+    }
+
+    private func timelineRowsBottomPadding(showsStickyPendingAssistantIndicator: Bool) -> CGFloat {
+        12 + (showsStickyPendingAssistantIndicator ? pendingAssistantIndicatorReservedHeight : 0)
     }
 
     // Scroll geometry resumes after the optimistic send gap and assistant anchor settle.
@@ -592,6 +670,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func timelineRenderChangeHandlers(using proxy: ScrollViewProxy) -> TurnTimelineRenderChangeHandlersModifier {
         TurnTimelineRenderChangeHandlersModifier(
             isThreadRunning: isThreadRunning,
+            isSendInFlight: isSendInFlight,
             threadID: threadID,
             activeTurnID: activeTurnID,
             latestTurnTerminalState: latestTurnTerminalState,
@@ -600,6 +679,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             visibleTailCount: visibleTailCount,
             shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
             onThreadRunningChange: handleThreadRunningChange,
+            onSendInFlightChange: handleSendInFlightChange,
             onThreadIDChange: { handleThreadIDChange(using: proxy) },
             onActiveTurnIDChange: { handleActiveTurnIDChange(using: proxy) },
             onTerminalStateChange: handleTerminalStateChange,
@@ -615,8 +695,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             "timelineChangeToken changed token=\(timelineChangeToken) "
                 + "messageCount=\(messages.count) visibleTail=\(visibleTailCount)"
         )
-        recomputeRenderItemsIfNeeded()
-        recomputeBlockInfoIfNeeded()
+        recomputeRenderItemsAndBlockInfoIfNeeded()
         scheduleProgressiveTailRevealIfNeeded()
         handleTimelineMutation(using: proxy)
     }
@@ -638,11 +717,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         recomputeBlockInfoIfNeeded()
     }
 
+    private func handleSendInFlightChange() {
+        debugTimelineLog("isSendInFlight changed value=\(isSendInFlight)")
+        recomputeBlockInfoIfNeeded()
+    }
+
     private func handleThreadIDChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("threadID changed to=\(threadID)")
         beginScrollSessionIfNeeded(force: true)
-        recomputeRenderItemsIfNeeded()
-        recomputeBlockInfoIfNeeded()
+        recomputeRenderItemsAndBlockInfoIfNeeded()
         scheduleProgressiveTailRevealIfNeeded()
         handleTimelineMutation(using: proxy)
     }
@@ -660,8 +743,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleCompletedTurnIDsChange() {
         debugTimelineLog("completedTurnIDs changed count=\(completedTurnIDs.count)")
-        recomputeRenderItemsIfNeeded()
-        recomputeBlockInfoIfNeeded()
+        recomputeRenderItemsAndBlockInfoIfNeeded()
     }
 
     private func handleStoppedTurnIDsChange() {
@@ -671,8 +753,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleVisibleTailCountChange() {
         debugTimelineLog("visibleTailCount changed value=\(visibleTailCount) totalMessages=\(messages.count)")
-        recomputeRenderItemsIfNeeded()
-        recomputeBlockInfoIfNeeded()
+        recomputeRenderItemsAndBlockInfoIfNeeded()
     }
 
     private func handleAssistantAnchorChange(_ newValue: Bool, using proxy: ScrollViewProxy) {
@@ -1180,6 +1261,7 @@ private struct TurnTimelineHistoryChangeHandlersModifier: ViewModifier {
 // Keeps render/turn-state observers in a second small modifier for faster SwiftUI type-checking.
 private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
     let isThreadRunning: Bool
+    let isSendInFlight: Bool
     let threadID: String
     let activeTurnID: String?
     let latestTurnTerminalState: CodexTurnTerminalState?
@@ -1189,6 +1271,7 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
     let shouldAnchorToAssistantResponse: Bool
 
     let onThreadRunningChange: () -> Void
+    let onSendInFlightChange: () -> Void
     let onThreadIDChange: () -> Void
     let onActiveTurnIDChange: () -> Void
     let onTerminalStateChange: () -> Void
@@ -1201,6 +1284,9 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
         content
             .onChange(of: isThreadRunning) { _, _ in
                 onThreadRunningChange()
+            }
+            .onChange(of: isSendInFlight) { _, _ in
+                onSendInFlightChange()
             }
             .onChange(of: threadID) { _, _ in
                 onThreadIDChange()

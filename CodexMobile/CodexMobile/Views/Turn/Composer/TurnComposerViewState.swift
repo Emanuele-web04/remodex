@@ -41,24 +41,29 @@ struct TurnComposerAccessoryState {
     let composerMentionedPlugins: [TurnComposerMentionedPlugin]
     let composerReviewSelection: TurnComposerReviewSelection?
     let isSubagentsSelectionArmed: Bool
+    let isPlanModeArmed: Bool
     let isVoiceRecording: Bool
     let voiceAudioLevels: [CGFloat]
     let voiceRecordingDuration: TimeInterval
+
+    var hasQueuedDrafts: Bool {
+        !queuedDrafts.isEmpty
+    }
 
     var showsComposerAttachments: Bool {
         !composerAttachments.isEmpty
     }
 
     var showsMentionedFiles: Bool {
-        !composerMentionedFiles.isEmpty
+        !showsVoiceRecordingCapsule && !hasQueuedDrafts && !composerMentionedFiles.isEmpty
     }
 
     var showsMentionedSkills: Bool {
-        !composerMentionedSkills.isEmpty
+        !showsVoiceRecordingCapsule && !hasQueuedDrafts && !composerMentionedSkills.isEmpty
     }
 
     var showsMentionedPlugins: Bool {
-        !composerMentionedPlugins.isEmpty
+        !showsVoiceRecordingCapsule && !hasQueuedDrafts && !composerMentionedPlugins.isEmpty
     }
 
     var reviewTarget: TurnComposerReviewTarget? {
@@ -66,11 +71,29 @@ struct TurnComposerAccessoryState {
     }
 
     var showsSubagentsSelection: Bool {
-        isSubagentsSelectionArmed
+        !showsVoiceRecordingCapsule && !hasQueuedDrafts && isSubagentsSelectionArmed
+    }
+
+    var showsPlanModeSelection: Bool {
+        !showsVoiceRecordingCapsule && !hasQueuedDrafts && isPlanModeArmed
+    }
+
+    var showsReviewSelection: Bool {
+        !showsVoiceRecordingCapsule && !hasQueuedDrafts && reviewTarget != nil
     }
 
     var showsVoiceRecordingCapsule: Bool {
         isVoiceRecording
+    }
+
+    var hasTopAccessoryContent: Bool {
+        showsComposerAttachments
+            || showsMentionedFiles
+            || showsMentionedSkills
+            || showsMentionedPlugins
+            || showsSubagentsSelection
+            || showsPlanModeSelection
+            || showsReviewSelection
     }
 
     // Tracks composer content that can make a follow-up send meaningful while a turn is running.
@@ -82,9 +105,10 @@ struct TurnComposerAccessoryState {
             || !composerMentionedPlugins.isEmpty
             || composerReviewSelection != nil
             || isSubagentsSelectionArmed
+            || isPlanModeArmed
     }
 
     var topInputPadding: CGFloat {
-        showsComposerAttachments || showsMentionedFiles || showsMentionedSkills || showsMentionedPlugins || showsSubagentsSelection || showsVoiceRecordingCapsule || reviewTarget != nil ? 6 : 10
+        hasTopAccessoryContent ? 6 : 10
     }
 }

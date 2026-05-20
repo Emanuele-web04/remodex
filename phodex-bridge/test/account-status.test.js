@@ -22,6 +22,7 @@ const macHostMetadata = {
     displayWake: true,
     keepAwake: true,
     hostBrowserLogin: true,
+    bridgeUpdate: true,
   },
 };
 
@@ -131,6 +132,42 @@ test("composeAccountStatus reports reauth when auth status explicitly requires C
     loginInFlight: false,
     needsReauth: true,
     tokenReady: false,
+    expiresAt: null,
+    requiresOpenaiAuth: true,
+    bridgeVersion: bridgePackageVersion,
+    bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
+  });
+});
+
+test("composeAccountStatus keeps voice-ready ChatGPT token authenticated despite requiresOpenaiAuth", () => {
+  const status = composeAccountStatus(withMacHost({
+    accountRead: {
+      account: {
+        type: "chatgpt",
+        email: "user@example.com",
+      },
+      requiresOpenaiAuth: true,
+    },
+    authStatus: {
+      authMethod: "chatgpt",
+      authToken: "chatgpt-token",
+      requiresOpenaiAuth: true,
+    },
+    bridgeVersionInfo: {
+      bridgeVersion: bridgePackageVersion,
+      bridgeLatestVersion: "9.9.9",
+    },
+  }));
+
+  assert.deepEqual(status, {
+    status: "authenticated",
+    authMethod: "chatgpt",
+    email: "user@example.com",
+    planType: null,
+    loginInFlight: false,
+    needsReauth: false,
+    tokenReady: true,
     expiresAt: null,
     requiresOpenaiAuth: true,
     bridgeVersion: bridgePackageVersion,

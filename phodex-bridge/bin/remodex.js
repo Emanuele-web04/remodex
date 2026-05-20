@@ -11,6 +11,7 @@ const {
   printMacOSBridgeServiceStatus,
   readBridgeConfig,
   resetMacOSBridgePairing,
+  restartMacOSBridgeService,
   runMacOSBridgeService,
   startBridge,
   startMacOSBridgeService,
@@ -27,6 +28,7 @@ const defaultDeps = {
   printMacOSBridgeServiceStatus,
   readBridgeConfig,
   resetMacOSBridgePairing,
+  restartMacOSBridgeService,
   runMacOSBridgeService,
   startBridge,
   startMacOSBridgeService,
@@ -106,10 +108,7 @@ async function main({
       consoleImpl,
       exitImpl,
     });
-    deps.readBridgeConfig();
-    const result = await deps.startMacOSBridgeService({
-      waitForPairing: false,
-    });
+    const result = await deps.startMacOSBridgeService();
     emitResult({
       payload: {
         ok: true,
@@ -130,10 +129,7 @@ async function main({
       consoleImpl,
       exitImpl,
     });
-    deps.readBridgeConfig();
-    const result = await deps.startMacOSBridgeService({
-      waitForPairing: false,
-    });
+    const result = await deps.restartMacOSBridgeService();
     emitResult({
       payload: {
         ok: true,
@@ -144,6 +140,22 @@ async function main({
       message: "[remodex] macOS bridge service restarted.",
       jsonOutput,
       consoleImpl,
+    });
+    return;
+  }
+
+  if (command === "qr" || command === "pair") {
+    assertMacOSCommand(command, {
+      platform,
+      consoleImpl,
+      exitImpl,
+    });
+    consoleImpl.log("[remodex] Refreshing bridge pairing QR...");
+    const result = await deps.startMacOSBridgeService({
+      waitForPairing: true,
+    });
+    deps.printMacOSBridgePairingQr({
+      pairingSession: result.pairingSession,
     });
     return;
   }
@@ -251,7 +263,7 @@ async function main({
 
   consoleImpl.error(`Unknown command: ${command}`);
   consoleImpl.error(
-    "Usage: remodex up | remodex run | remodex start | remodex restart | remodex stop | remodex status | "
+    "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex status | "
     + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
     + "append --json to start/restart/stop/status/reset-pairing/resume for machine-readable output"
   );

@@ -67,6 +67,11 @@ struct TurnMentionChipStyle: Equatable {
         tintColor: .teal
     )
 
+    static let planMode = TurnMentionChipStyle(
+        symbolName: "remodex.plan-mode",
+        tintColor: Color(.plan)
+    )
+
     static func slashCommand(_ command: TurnComposerSlashCommand) -> TurnMentionChipStyle {
         TurnMentionChipStyle(
             symbolName: command.symbolName,
@@ -100,6 +105,7 @@ struct TurnMentionChipRef: Identifiable, Equatable {
         case slashCommand(TurnComposerSlashCommand)
         case review(TurnComposerReviewTarget)
         case subagents
+        case planMode
         case action(TurnMentionChipStyle)
     }
 
@@ -128,6 +134,7 @@ struct TurnMentionChipRef: Identifiable, Equatable {
         case .slashCommand: return "slash"
         case .review: return "review"
         case .subagents: return "subagents"
+        case .planMode: return "plan"
         case .action: return "action"
         }
     }
@@ -146,6 +153,8 @@ struct TurnMentionChipRef: Identifiable, Equatable {
             return .review
         case .subagents:
             return .subagents
+        case .planMode:
+            return .planMode
         case .action(let style):
             return style
         }
@@ -165,6 +174,8 @@ struct TurnMentionChipRef: Identifiable, Equatable {
             return "Remove code review"
         case .subagents:
             return "Remove subagents"
+        case .planMode:
+            return "Disable Plan Mode"
         case .action:
             return "Remove action"
         }
@@ -220,6 +231,10 @@ struct TurnMentionChipRef: Identifiable, Equatable {
 
     static var subagents: TurnMentionChipRef {
         TurnMentionChipRef(kind: .subagents, label: "Subagents", identity: "subagents")
+    }
+
+    static var planMode: TurnMentionChipRef {
+        TurnMentionChipRef(kind: .planMode, label: "Plan", identity: "plan")
     }
 
     static func action(
@@ -479,6 +494,7 @@ struct TurnComposerMentionChipSections: View {
     let onRemoveMentionedPlugin: (String) -> Void
     let onRemoveComposerReviewSelection: () -> Void
     let onRemoveComposerSubagentsSelection: () -> Void
+    let onRemoveComposerPlanModeSelection: () -> Void
 
     var body: some View {
         Group {
@@ -521,7 +537,16 @@ struct TurnComposerMentionChipSections: View {
                 }
             }
 
-            if let reviewTarget = state.reviewTarget {
+            if state.showsPlanModeSelection {
+                TurnMentionChipRow.composer(
+                    chips: [.planMode],
+                    topPadding: TurnMentionChipTokens.composerAccessoryTopPadding
+                ) { _ in
+                    onRemoveComposerPlanModeSelection()
+                }
+            }
+
+            if state.showsReviewSelection, let reviewTarget = state.reviewTarget {
                 TurnMentionChipRow.composer(
                     chips: [.review(reviewTarget)],
                     topPadding: TurnMentionChipTokens.composerAccessoryTopPadding

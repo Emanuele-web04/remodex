@@ -257,6 +257,7 @@ extension CodexService {
 
                 case "plan":
                     let decodedPlanState = decodeHistoryPlanState(from: itemObject)
+                    let isJsonlProgressPlan = itemObject["remodexJsonlProgressPlan"]?.boolValue == true
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
@@ -267,7 +268,7 @@ extension CodexService {
                         itemId: itemID,
                         createdAt: timestamp,
                         planState: finalizedHistoryPlanState(decodedPlanState, turnCompleted: turnCompleted),
-                        planPresentation: itemID == nil
+                        planPresentation: isJsonlProgressPlan || itemID == nil
                             ? .progress
                             : (turnCompleted ? .resultReady : .resultClosed)
                     )

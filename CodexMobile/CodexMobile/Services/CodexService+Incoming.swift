@@ -8,6 +8,8 @@ import Foundation
 
 typealias IncomingParamsObject = [String: JSONValue]
 
+private let desktopIpcActionSource = "desktop-ipc-action-follower"
+
 private struct CommandExecutionMessageContext {
     let threadId: String
     let turnId: String?
@@ -137,7 +139,8 @@ extension CodexService {
                 params: params
             )
 
-            if selectedAccessMode == .fullAccess {
+            let isDesktopMirroredApproval = paramsObject?["remodexActionSource"]?.stringValue == desktopIpcActionSource
+            if selectedAccessMode == .fullAccess && !isDesktopMirroredApproval {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     do {
@@ -173,6 +176,7 @@ extension CodexService {
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
+        noteDesktopMirroredActivityIfNeeded(method: method, paramsObject: paramsObject)
 
         switch method {
         case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
@@ -314,6 +318,73 @@ extension CodexService {
                 return
             }
         }
+    }
+
+    private func noteDesktopMirroredActivityIfNeeded(
+        method: String,
+        paramsObject: IncomingParamsObject?
+    ) {
+        let isDesktopMirroredEvent = paramsObject?["remodexDesktopMirror"]?.boolValue == true
+            || paramsObject?["remodexRolloutLiveMirror"]?.boolValue == true
+        let isMirrorActivityMethod = method.hasPrefix("item/")
+            || method.hasPrefix("codex/event")
+            || method == "turn/activity"
+            || method == "turn/plan/updated"
+            || method == "turn/diff/updated"
+
+        guard (isDesktopMirroredEvent || isMirrorActivityMethod),
+              let threadId = resolveThreadID(from: paramsObject) else {
+            return
+        }
+
+        let mirroredTurnID = extractTurnID(from: paramsObject)
+        if shouldIgnoreTerminalDesktopMirroredActivity(
+            method: method,
+            threadId: threadId,
+            turnId: mirroredTurnID
+        ) {
+            return
+        }
+
+        if isDesktopMirroredEvent && method != "turn/completed" {
+            if !threadHasActiveOrRunningTurn(threadId) {
+                markThreadAsRunning(threadId)
+            }
+            markDesktopMirroredRunning(for: threadId)
+
+            if activeTurnID(for: threadId) == nil, let turnId = mirroredTurnID {
+                setActiveTurnID(turnId, for: threadId)
+                threadIdByTurnID[turnId] = threadId
+                activeTurnId = turnId
+                setProtectedRunningFallback(false, for: threadId)
+            } else if activeTurnID(for: threadId) == nil {
+                setProtectedRunningFallback(true, for: threadId)
+            }
+            return
+        }
+
+        if isMirrorActivityMethod {
+            noteDesktopMirroredRunningActivity(for: threadId)
+        }
+    }
+
+    // Replay can deliver rollout activity after completion; it should not revive Stop/busy UI.
+    private func shouldIgnoreTerminalDesktopMirroredActivity(
+        method: String,
+        threadId: String,
+        turnId: String?
+    ) -> Bool {
+        guard method != "turn/started", method != "turn/completed" else {
+            return false
+        }
+
+        if let turnId, turnTerminalState(for: turnId) != nil {
+            return true
+        }
+
+        return turnId == nil
+            && !threadHasActiveOrRunningTurn(threadId)
+            && latestTurnTerminalState(for: threadId) != nil
     }
 
     // Captures file-change notifications even when the server uses variant method names.
@@ -493,9 +564,15 @@ extension CodexService {
     private func handleTurnStarted(_ paramsObject: IncomingParamsObject?) {
         let threadId = resolveThreadID(from: paramsObject)
         let turnID = extractTurnIDForTurnLifecycleEvent(from: paramsObject)
+        let isDesktopMirroredTurn = paramsObject?["remodexDesktopMirror"]?.boolValue == true
+            || paramsObject?["remodexRolloutLiveMirror"]?.boolValue == true
 
         if let threadId {
             markThreadAsRunning(threadId)
+            if isDesktopMirroredTurn {
+                markDesktopMirroredRunning(for: threadId)
+                markMirroredRunningCatchupNeeded(for: threadId)
+            }
         }
 
         if let threadId, let turnID {
@@ -552,6 +629,7 @@ extension CodexService {
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             }
             requestImmediateSync(threadId: threadId)
+            requestThreadHistoryReconcile(threadId: threadId)
 
             guard let turnFailureMessage else {
                 return

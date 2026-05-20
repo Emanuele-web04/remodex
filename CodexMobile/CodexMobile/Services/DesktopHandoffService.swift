@@ -132,6 +132,29 @@ final class DesktopHandoffService {
         }
     }
 
+    func updateBridgePackageAndRestart() async throws {
+        do {
+            let response = try await codex.sendRequest(
+                method: "desktop/bridge/updateAndRestart",
+                params: .object([:])
+            )
+            guard let resultObject = response.result?.objectValue,
+                  resultObject["success"]?.boolValue == true else {
+                throw DesktopHandoffError.invalidResponse
+            }
+        } catch let error as CodexServiceError {
+            switch error {
+            case .disconnected:
+                throw DesktopHandoffError.disconnected
+            case .rpcError(let rpcError):
+                let errorCode = rpcError.data?.objectValue?["errorCode"]?.stringValue
+                throw DesktopHandoffError.bridgeError(code: errorCode, message: rpcError.message)
+            default:
+                throw DesktopHandoffError.bridgeError(code: nil, message: error.errorDescription)
+            }
+        }
+    }
+
     // Reuses the existing JSON-RPC bridge channel so display wake follows the same secure pairing path.
     private func sendWakeDisplayRequest(using service: CodexService) async throws {
         do {
@@ -209,6 +232,10 @@ private extension DesktopHandoffError {
             return fallback ?? "The computer bridge rejected this setting update."
         case "bridge_preferences_persist_failed":
             return fallback ?? "The computer bridge could not save this setting."
+        case "unsupported_bridge_update":
+            return fallback ?? "Update the Remodex bridge on your computer before updating it from iPhone."
+        case "bridge_update_failed":
+            return fallback ?? "The computer bridge could not update itself."
         default:
             return fallback ?? "Could not continue this chat on the desktop app."
         }

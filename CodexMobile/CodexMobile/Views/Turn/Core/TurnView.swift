@@ -47,6 +47,8 @@ struct TurnView: View {
     @State private var isVoiceRecording = false
     @State private var isVoicePreflighting = false
     @State private var voicePreflightGeneration = 0
+    @State private var voiceOperationGeneration = 0
+    @State private var voiceTranscriptionTask: Task<Void, Never>?
     @State private var isVoiceTranscribing = false
     @State private var hasTriggeredVoiceAutoStop = false
     @State private var voiceRecoveryReason: CodexVoiceFailureReason?
@@ -387,13 +389,12 @@ struct TurnView: View {
             },
             onConnectionChanged: { wasConnected, isConnected in
                 if !isConnected {
-                    cancelVoiceRecordingIfNeeded()
-                    invalidatePendingVoicePreflight()
-                    clearVoiceRecovery()
                     return
                 }
 
-                clearVoiceRecovery()
+                if voiceRecoveryReason == .reconnectRequired {
+                    clearVoiceRecovery()
+                }
                 guard !wasConnected, isConnected else { return }
                 // Defer the observable-model mutation out of the .onChange action
                 // to avoid AttributeGraph cycles when the parent re-renders.
@@ -414,6 +415,7 @@ struct TurnView: View {
                 DispatchQueue.main.async { [viewModel] in
                     viewModel.saveLocalDraft(codex: codex, threadID: thread.id, persistToDisk: true)
                 }
+                cancelVoiceTranscriptionIfNeeded()
                 cancelVoiceRecordingIfNeeded()
                 invalidatePendingVoicePreflight()
             },
@@ -423,6 +425,7 @@ struct TurnView: View {
         )
         .onDisappear {
             viewModel.saveLocalDraft(codex: codex, threadID: thread.id, persistToDisk: true)
+            cancelVoiceTranscriptionIfNeeded()
             cancelVoiceRecordingIfNeeded()
             invalidatePendingVoicePreflight()
             clearVoiceRecovery()
@@ -466,9 +469,11 @@ struct TurnView: View {
             }
 
             hasTriggeredVoiceAutoStop = true
-            Task { @MainActor in
-                await stopVoiceTranscription()
-            }
+            beginVoiceStopTranscription()
+        }
+        .onReceive(voiceTranscriptionManager.$captureInvalidationID) { invalidationID in
+            guard invalidationID > 0 else { return }
+            handleVoiceCaptureInvalidation()
         }
         .sheet(isPresented: $isShowingThreadPathSheet) {
             if let context = threadNavigationContext(for: resolvedThread) {
@@ -773,6 +778,7 @@ struct TurnView: View {
     }
 
     private func handleSend() {
+        guard !isVoiceInputActive else { return }
         viewModel.clearComposerAutocomplete()
         viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
         isInputFocused = false
@@ -1460,6 +1466,7 @@ struct TurnView: View {
                 },
                 onShowStatus: presentStatusSheet,
                 voiceButtonPresentation: voiceButtonPresentation,
+                isVoiceInputActive: isVoiceInputActive,
                 isVoiceRecording: isVoiceRecording,
                 voiceAudioLevels: voiceTranscriptionManager.audioLevels,
                 voiceRecordingDuration: voiceTranscriptionManager.recordingDuration,
@@ -1468,6 +1475,10 @@ struct TurnView: View {
                 onSend: handleSend
             )
         }
+    }
+
+    private var isVoiceInputActive: Bool {
+        isVoiceRecording || isVoicePreflighting || isVoiceTranscribing
     }
 
     // Mirrors the mic CTA state so the composer can swap between ready, record, and stop.
@@ -1487,9 +1498,7 @@ struct TurnView: View {
         }
 
         if isVoiceRecording {
-            Task { @MainActor in
-                await stopVoiceTranscription()
-            }
+            beginVoiceStopTranscription()
             return
         }
 
@@ -1498,16 +1507,38 @@ struct TurnView: View {
         }
     }
 
-    // Stops the recorder, transcribes through the bridge, and appends the final text into the draft.
-    private func stopVoiceTranscription() async {
+    // Starts a single stop/upload operation so double taps and auto-stop cannot race each other.
+    private func beginVoiceStopTranscription() {
+        guard isVoiceRecording, !isVoiceTranscribing else {
+            return
+        }
+
         hasTriggeredVoiceAutoStop = false
         isVoiceTranscribing = true
-        defer { isVoiceTranscribing = false }
+        voiceOperationGeneration += 1
+        let operationGeneration = voiceOperationGeneration
+        voiceTranscriptionTask?.cancel()
+        voiceTranscriptionTask = Task { @MainActor in
+            await stopVoiceTranscription(operationGeneration: operationGeneration)
+        }
+    }
+
+    // Stops the recorder, transcribes through the bridge, and appends the final text into the draft.
+    private func stopVoiceTranscription(operationGeneration: Int) async {
+        defer {
+            if isVoiceOperationCurrent(operationGeneration) {
+                isVoiceTranscribing = false
+                voiceTranscriptionTask = nil
+            }
+        }
 
         do {
             guard let clip = try voiceTranscriptionManager.stopRecording() else {
-                isVoiceRecording = false
-                voiceTranscriptionManager.resetMeteringState()
+                if isVoiceOperationCurrent(operationGeneration) {
+                    isVoiceRecording = false
+                    voiceTranscriptionManager.resetMeteringState()
+                    presentVoiceRecovery(for: .recorderUnavailable)
+                }
                 return
             }
 
@@ -1521,12 +1552,18 @@ struct TurnView: View {
                 at: clip.url,
                 durationSeconds: clip.durationSeconds
             )
+            guard isVoiceOperationCurrent(operationGeneration), !Task.isCancelled else {
+                return
+            }
             clearVoiceRecovery()
             viewModel.appendVoiceTranscript(transcript)
             viewModel.saveLocalDraft(codex: codex, threadID: thread.id, persistToDisk: true)
             // Keep voice flows keyboard-free; users can tap into the draft afterward if they want to edit.
             isInputFocused = false
         } catch {
+            guard isVoiceOperationCurrent(operationGeneration), !Task.isCancelled else {
+                return
+            }
             isVoiceRecording = false
             voiceTranscriptionManager.resetMeteringState()
             presentVoiceRecovery(for: error)
@@ -1540,7 +1577,7 @@ struct TurnView: View {
             return
         }
 
-        guard codex.supportsBridgeVoiceAuth else {
+        guard codex.supportsBridgeVoiceTranscription else {
             presentVoiceRecovery(for: .bridgeSessionUnsupported)
             return
         }
@@ -1566,30 +1603,48 @@ struct TurnView: View {
         }
 
         do {
-            guard isVoicePreflightCurrent(preflightGeneration), codex.isConnected else {
+            guard isVoicePreflightCurrent(preflightGeneration) else {
                 return
             }
             try await voiceTranscriptionManager.startRecording()
-            guard isVoicePreflightCurrent(preflightGeneration), codex.isConnected else {
+            guard isVoicePreflightCurrent(preflightGeneration) else {
                 voiceTranscriptionManager.cancelRecording()
                 return
             }
             isVoiceRecording = true
             isInputFocused = false
         } catch {
+            guard isVoicePreflightCurrent(preflightGeneration) else {
+                return
+            }
             presentVoiceRecovery(for: error)
         }
     }
 
     // Clears any partial microphone capture when the screen leaves the active voice flow.
     private func cancelVoiceRecordingIfNeeded() {
-        guard isVoiceRecording else {
+        guard isVoiceRecording || isVoicePreflighting else {
             return
         }
 
         voiceTranscriptionManager.cancelRecording()
         isVoiceRecording = false
+        isVoicePreflighting = false
         hasTriggeredVoiceAutoStop = false
+    }
+
+    // Resets UI state when iOS invalidates the mic route underneath an active recording.
+    private func handleVoiceCaptureInvalidation() {
+        guard isVoiceRecording || isVoicePreflighting else {
+            return
+        }
+
+        cancelVoiceTranscriptionIfNeeded()
+        invalidatePendingVoicePreflight()
+        isVoiceRecording = false
+        isVoicePreflighting = false
+        hasTriggeredVoiceAutoStop = false
+        presentVoiceRecovery(for: .recorderUnavailable)
     }
 
     // Trigger a hair before the hard validation limit so the saved WAV never misses by timer drift.
@@ -1615,6 +1670,8 @@ struct TurnView: View {
         switch action {
         case .reconnect:
             reconnectAction?()
+        case .openMacLogin:
+            startVoiceLoginOnMac()
         case .showSetupHelp:
             isShowingVoiceSetupSheet = true
         case .openSystemSettings:
@@ -1627,6 +1684,18 @@ struct TurnView: View {
         }
     }
 
+    // Opens the Codex ChatGPT login flow on the paired Mac, then lets account sync update voice readiness.
+    private func startVoiceLoginOnMac() {
+        Task { @MainActor in
+            do {
+                try await codex.startOrResumeGPTLoginOnMac()
+                presentVoiceRecovery(for: .voiceSyncInProgress)
+            } catch {
+                presentVoiceRecovery(for: error)
+            }
+        }
+    }
+
     private func handleConnectionRecoveryAction() {
         if shouldOfferWakeSavedMacDisplayAction {
             wakeMacDisplayAction?()
@@ -1636,14 +1705,31 @@ struct TurnView: View {
         reconnectAction?()
     }
 
+    // Cancels an upload/transcription task before lifecycle changes can append into a stale draft.
+    private func cancelVoiceTranscriptionIfNeeded() {
+        guard isVoiceTranscribing || voiceTranscriptionTask != nil else {
+            return
+        }
+
+        voiceOperationGeneration += 1
+        voiceTranscriptionTask?.cancel()
+        voiceTranscriptionTask = nil
+        isVoiceTranscribing = false
+    }
+
     // Invalidates any in-flight async mic startup so it cannot reopen the recorder after leaving the screen.
     private func invalidatePendingVoicePreflight() {
         voicePreflightGeneration += 1
         isVoicePreflighting = false
+        voiceTranscriptionManager.cancelRecording()
     }
 
     private func isVoicePreflightCurrent(_ generation: Int) -> Bool {
         generation == voicePreflightGeneration
+    }
+
+    private func isVoiceOperationCurrent(_ generation: Int) -> Bool {
+        generation == voiceOperationGeneration
     }
 
     private var forkLoadingNotice: some View {
@@ -1669,7 +1755,7 @@ struct TurnView: View {
     private func openThread(_ threadId: String) {
         codex.activeThreadId = threadId
         codex.markThreadAsViewed(threadId)
-        codex.requestImmediateActiveThreadSync(threadId: threadId)
+        codex.requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
     }
 
     // MARK: - Empty State

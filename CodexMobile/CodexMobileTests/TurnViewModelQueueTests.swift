@@ -722,6 +722,93 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(service.activeTurnId, "turn-latest")
     }
 
+    func testRefreshInFlightTurnStatePreservesDesktopMirroredRunOnlyOnceWhenSnapshotIsStale() async {
+        let service = makeService()
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string("thread-queue"),
+                "turnId": .string("turn-live"),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/read")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "turns": .array([]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let didRefresh = await service.refreshInFlightTurnState(threadId: "thread-queue")
+
+        XCTAssertTrue(didRefresh)
+        XCTAssertTrue(service.runningThreadIDs.contains("thread-queue"))
+        XCTAssertEqual(service.activeTurnIdByThread["thread-queue"], "turn-live")
+        XCTAssertEqual(service.activeTurnId, "turn-live")
+        XCTAssertTrue(service.desktopMirroredRunningThreadIDs.contains("thread-queue"))
+
+        let secondRefresh = await service.refreshInFlightTurnState(threadId: "thread-queue")
+
+        XCTAssertTrue(secondRefresh)
+        XCTAssertTrue(service.threadHasActiveOrRunningTurn("thread-queue"))
+        XCTAssertTrue(service.desktopMirroredRunningThreadIDs.contains("thread-queue"))
+
+        service.desktopMirroredRunningLastActivityAtByThread["thread-queue"] = Date(timeIntervalSinceNow: -30)
+
+        let thirdRefresh = await service.refreshInFlightTurnState(threadId: "thread-queue")
+        let fourthRefresh = await service.refreshInFlightTurnState(threadId: "thread-queue")
+
+        XCTAssertTrue(thirdRefresh)
+        XCTAssertTrue(fourthRefresh)
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn("thread-queue"))
+        XCTAssertFalse(service.desktopMirroredRunningThreadIDs.contains("thread-queue"))
+        XCTAssertNil(service.activeTurnIdByThread["thread-queue"])
+    }
+
+    func testVisibleTailPreservesRecentFileChangeArtifactsFromOmittedPreviousTurn() {
+        let service = makeService()
+        let fileChange = makeMessage(
+            id: "file-change",
+            role: .system,
+            kind: .fileChange,
+            text: "Status: completed",
+            turnId: "turn-edits",
+            orderIndex: 10
+        )
+        let plan = makeMessage(
+            id: "plan",
+            role: .system,
+            kind: .plan,
+            text: "Plan updated",
+            turnId: "turn-edits",
+            orderIndex: 11
+        )
+        let omittedPrefix = [fileChange, plan] + (12..<40).map { index in
+            makeMessage(id: "omitted-\(index)", text: "omitted \(index)", turnId: "turn-edits", orderIndex: index)
+        }
+        let visibleTail = (40..<120).map { index in
+            makeMessage(id: "visible-\(index)", text: "visible \(index)", turnId: "turn-next", orderIndex: index)
+        }
+
+        let result = service.visibleTailPreservingTurnArtifacts(
+            visibleTail: visibleTail,
+            omittedPrefix: ArraySlice(omittedPrefix)
+        )
+
+        XCTAssertEqual(result.prefix(2).map(\.id), ["file-change", "plan"])
+        XCTAssertEqual(result.count, visibleTail.count + 2)
+    }
+
     func testInterruptTurnDoesNotTargetCompletedLatestTurnWhenRunningTurnHasNoID() async {
         let service = makeService()
         service.isConnected = true
@@ -926,6 +1013,25 @@ final class TurnViewModelQueueTests: XCTestCase {
             skillMentions: [],
             collaborationMode: nil,
             createdAt: Date()
+        )
+    }
+
+    private func makeMessage(
+        id: String,
+        role: CodexMessageRole = .assistant,
+        kind: CodexMessageKind = .chat,
+        text: String,
+        turnId: String? = nil,
+        orderIndex: Int
+    ) -> CodexMessage {
+        CodexMessage(
+            id: id,
+            threadId: "thread-queue",
+            role: role,
+            kind: kind,
+            text: text,
+            turnId: turnId,
+            orderIndex: orderIndex
         )
     }
 

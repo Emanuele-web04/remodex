@@ -140,7 +140,7 @@ extension CodexService {
     }
 
     // Thread opening should refresh the visible chat, not refetch the full sidebar list.
-    func requestImmediateActiveThreadSync(threadId: String? = nil) {
+    func requestImmediateActiveThreadSync(threadId: String? = nil, forceHistoryRefresh: Bool = false) {
         guard canRunRealtimeSyncLoop else {
             return
         }
@@ -149,7 +149,25 @@ extension CodexService {
             guard let self else { return }
             if let threadId = threadId ?? self.activeThreadId {
                 await self.syncActiveThreadState(threadId: threadId)
+                if forceHistoryRefresh {
+                    await self.syncThreadHistory(threadId: threadId, force: true)
+                }
             }
+        }
+    }
+
+    // Re-reads canonical history after terminal/open events so missed bridge-live rows can be repaired.
+    func requestThreadHistoryReconcile(threadId: String, delayNanoseconds: UInt64 = 250_000_000) {
+        guard canRunRealtimeSyncLoop else {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            if delayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: delayNanoseconds)
+            }
+            guard let self, self.isConnected, self.isInitialized else { return }
+            await self.syncThreadHistory(threadId: threadId, force: true)
         }
     }
 
@@ -800,12 +818,14 @@ extension CodexService {
         activeTurnID(for: threadId) != nil
             || runningThreadIDs.contains(threadId)
             || protectedRunningFallbackThreadIDs.contains(threadId)
+            || desktopMirroredRunningThreadIDs.contains(threadId)
     }
 
     // Keeps short-lived background execution alive when a run is still in flight.
     var hasAnyRunningTurn: Bool {
         !runningThreadIDs.isEmpty
             || !protectedRunningFallbackThreadIDs.isEmpty
+            || !desktopMirroredRunningThreadIDs.isEmpty
             || !activeTurnIdByThread.isEmpty
     }
 

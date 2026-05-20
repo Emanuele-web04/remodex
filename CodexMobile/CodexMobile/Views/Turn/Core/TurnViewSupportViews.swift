@@ -30,6 +30,7 @@ struct NewChatOpeningOverlay: View {
 
 enum VoiceRecoveryAction: Equatable {
     case reconnect
+    case openMacLogin
     case showSetupHelp
     case openSystemSettings
     case none

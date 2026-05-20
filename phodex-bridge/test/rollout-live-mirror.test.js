@@ -68,8 +68,53 @@ test("desktop-origin active runs replay thinking and exec command activity on re
     ]
   );
   assert.equal(outbound[1].params.delta, "Thinking...");
+  assert.equal(outbound[0].params.remodexDesktopMirror, true);
   assert.equal(outbound[2].params.command, "git status");
   assert.equal(outbound[3].params.chunk, "On branch main");
+});
+
+test("desktop-origin active runs emit activity heartbeat while rollout is quiet", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-heartbeat",
+    originator: "Codex Desktop",
+    source: "vscode",
+    lines: [
+      taskStarted("turn-heartbeat"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 80,
+    activityHeartbeatMs: 15,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-heartbeat",
+    },
+  }));
+
+  await wait(45);
+
+  const heartbeat = outbound.find((message) => message.method === "turn/activity");
+  assert.ok(heartbeat);
+  assert.equal(heartbeat.params.threadId, "thread-heartbeat");
+  assert.equal(heartbeat.params.turnId, "turn-heartbeat");
+  assert.equal(heartbeat.params.remodexDesktopMirror, true);
+  assert.equal(outbound.at(-1).params.remodexRolloutLiveMirror, true);
 });
 
 test("desktop-origin bootstrap replays the pending user message and final assistant text", async (t) => {
@@ -112,18 +157,262 @@ test("desktop-origin bootstrap replays the pending user message and final assist
   assert.deepEqual(
     outbound.map((message) => message.method),
     [
-      "codex/event/user_message",
       "turn/started",
+      "codex/event/user_message",
       "item/reasoning/textDelta",
       "codex/event/agent_message",
     ]
   );
-  assert.equal(outbound[0].params.message, "Please review this diff");
+  assert.equal(outbound[0].params.remodexRolloutLiveMirror, true);
+  assert.equal(outbound[1].params.message, "Please review this diff");
+  assert.equal(outbound[1].params.turnId, "turn-chat");
   assert.equal(outbound[3].params.message, "Review complete");
   assert.equal(
     outbound[3].params.itemId,
     "rollout-agent-message:thread-chat:turn-chat:2026-03-15T19:47:40.000Z:73e01b91e228"
   );
+});
+
+test("desktop-origin live tail attaches pre-task user messages to the next turn", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-live-prelude",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 100,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-live-prelude",
+    },
+  }));
+
+  await wait(20);
+  appendRolloutLines(rolloutPath, [userMessage("Start from Mac")]);
+  await wait(20);
+  assert.equal(outbound.length, 0);
+
+  appendRolloutLines(rolloutPath, [taskStarted("turn-live-prelude")]);
+  await wait(30);
+
+  assert.deepEqual(
+    outbound.map((message) => message.method),
+    [
+      "turn/started",
+      "codex/event/user_message",
+      "item/reasoning/textDelta",
+    ]
+  );
+  assert.equal(outbound[1].params.message, "Start from Mac");
+  assert.equal(outbound[1].params.turnId, "turn-live-prelude");
+});
+
+test("desktop-origin update_plan calls mirror as structured activity plan updates", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-plan",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-plan"),
+      functionCall("call-plan", "update_plan", {
+        explanation: "Break the work into safe slices.",
+        plan: [
+          { step: "Inspect plan rendering", status: "completed" },
+          { step: "Keep it visible", status: "in_progress" },
+        ],
+      }),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-plan",
+    },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(
+    outbound.map((message) => message.method),
+    [
+      "turn/started",
+      "item/reasoning/textDelta",
+      "turn/plan/updated",
+    ]
+  );
+  assert.equal(outbound[1].params.turnId, "turn-plan");
+  assert.equal(outbound[2].params.turnId, "turn-plan");
+  assert.equal(outbound[2].params.explanation, "Break the work into safe slices.");
+  assert.deepEqual(outbound[2].params.plan, [
+    { step: "Inspect plan rendering", status: "completed" },
+    { step: "Keep it visible", status: "in_progress" },
+  ]);
+  assert.equal(outbound[2].params.remodexDesktopMirror, true);
+  assert.equal(
+    outbound.some((message) => message.params?.message === "Running update_plan"),
+    false
+  );
+});
+
+test("desktop-origin completed plan items mirror as final plan rows", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-plan-result",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-plan-result"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-plan-result",
+    },
+  }));
+
+  await wait(20);
+  appendRolloutLines(rolloutPath, [
+    planItemCompleted("turn-plan-result", "plan-result-1", "# Improve Dashboard\n\n- Tighten validation"),
+    taskComplete("turn-plan-result"),
+  ]);
+  await wait(30);
+
+  assert.deepEqual(
+    outbound.map((message) => message.method),
+    [
+      "turn/started",
+      "item/reasoning/textDelta",
+      "item/completed",
+      "turn/completed",
+    ]
+  );
+  assert.equal(outbound[2].params.threadId, "thread-plan-result");
+  assert.equal(outbound[2].params.turnId, "turn-plan-result");
+  assert.equal(outbound[2].params.item.type, "Plan");
+  assert.equal(outbound[2].params.item.id, "plan-result-1");
+  assert.equal(outbound[2].params.item.text, "# Improve Dashboard\n\n- Tighten validation");
+});
+
+test("desktop-origin task_started without turn_id still mirrors live file changes", async (t) => {
+  const patch = [
+    "*** Begin Patch",
+    "*** Update File: Sources/App.swift",
+    "@@",
+    "-let title = \"Old\"",
+    "+let title = \"New\"",
+    "*** End Patch",
+    "",
+  ].join("\n");
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-turnless-task",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-turnless-task",
+    },
+  }));
+
+  await wait(20);
+  appendRolloutLines(rolloutPath, [
+    taskStarted(),
+    customToolCall("call-turnless-patch", "apply_patch", patch),
+    patchApplyEnd("", "call-turnless-patch"),
+    taskComplete(""),
+  ]);
+  await wait(30);
+
+  assert.deepEqual(
+    outbound.map((message) => message.method),
+    [
+      "turn/started",
+      "item/reasoning/textDelta",
+      "codex/event/patch_apply_begin",
+      "codex/event/background_event",
+      "codex/event/patch_apply_end",
+      "codex/event/patch_apply_end",
+      "turn/completed",
+    ]
+  );
+  const mirroredTurnId = outbound[0].params.turnId;
+  assert.match(mirroredTurnId, /^rollout-turn:thread-turnless-task:/);
+  assert.equal(outbound[2].params.turnId, mirroredTurnId);
+  assert.equal(outbound[4].params.turnId, mirroredTurnId);
+  assert.equal(outbound[5].params.turnId, mirroredTurnId);
+  assert.equal(outbound[5].params.remodexTurnFileChangeSnapshot, true);
+  assert.equal(outbound[6].params.turnId, mirroredTurnId);
+  assert.equal(outbound[4].params.changes[0].path, "Sources/App.swift");
 });
 
 test("desktop-origin active runs mirror generated image previews", async (t) => {
@@ -416,6 +705,153 @@ test("desktop-origin idle watchers stream new rollout growth after the phone reo
   assert.equal(outbound[2].params.message, "Applying patch");
 });
 
+test("desktop-origin rollouts mirror custom apply_patch as file-change lifecycle", async (t) => {
+  const patch = [
+    "*** Begin Patch",
+    "*** Update File: Sources/App.swift",
+    "@@",
+    "-let title = \"Old\"",
+    "+let title = \"New\"",
+    "*** End Patch",
+    "",
+  ].join("\n");
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-patch",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-patch"),
+      customToolCall("call-patch", "apply_patch", patch),
+      patchApplyEnd("turn-patch", "call-patch"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-patch",
+    },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(
+    outbound.map((message) => message.method),
+    [
+      "turn/started",
+      "item/reasoning/textDelta",
+      "codex/event/patch_apply_begin",
+      "codex/event/background_event",
+      "codex/event/patch_apply_end",
+    ]
+  );
+  assert.equal(outbound[2].params.itemId, "call-patch");
+  assert.equal(outbound[2].params.status, "inProgress");
+  assert.equal(outbound[2].params.changes[0].path, "Sources/App.swift");
+  assert.equal(outbound[4].params.itemId, "call-patch");
+  assert.equal(outbound[4].params.changes[0].path, "Sources/App.swift");
+  assert.equal(outbound[4].params.changes[0].kind, "update");
+  assert.equal(outbound[4].params.changes[0].additions, 1);
+  assert.equal(outbound[4].params.changes[0].deletions, 1);
+  assert.match(outbound[4].params.changes[0].diff, /diff --git a\/Sources\/App.swift b\/Sources\/App.swift/);
+});
+
+test("desktop-origin rollouts emit turn-end file-change snapshot after final text", async (t) => {
+  const firstPatch = [
+    "*** Begin Patch",
+    "*** Update File: Sources/App.swift",
+    "@@",
+    "-let title = \"Old\"",
+    "+let title = \"New\"",
+    "*** End Patch",
+    "",
+  ].join("\n");
+  const secondPatch = [
+    "*** Begin Patch",
+    "*** Update File: Sources/Settings.swift",
+    "@@",
+    "-let enabled = false",
+    "+let enabled = true",
+    "*** End Patch",
+    "",
+  ].join("\n");
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-patch-snapshot",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-patch-snapshot"),
+      customToolCall("call-patch-1", "apply_patch", firstPatch),
+      patchApplyEnd("turn-patch-snapshot", "call-patch-1"),
+      customToolCall("call-patch-2", "apply_patch", secondPatch),
+      patchApplyEnd("turn-patch-snapshot", "call-patch-2"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-patch-snapshot",
+    },
+  }));
+  await wait(20);
+  appendRolloutLines(rolloutPath, [
+    agentMessage("Done editing.", "final_answer"),
+    taskComplete("turn-patch-snapshot"),
+  ]);
+  await wait(40);
+
+  const methods = outbound.map((message) => message.method);
+  const aggregateIndex = outbound.findIndex((message) => (
+    message.method === "codex/event/patch_apply_end"
+    && message.params.remodexTurnFileChangeSnapshot === true
+  ));
+  const completedIndex = methods.lastIndexOf("turn/completed");
+  const agentIndex = methods.lastIndexOf("codex/event/agent_message");
+
+  assert.ok(agentIndex >= 0);
+  assert.ok(aggregateIndex > agentIndex);
+  assert.ok(completedIndex > aggregateIndex);
+  assert.equal(outbound[aggregateIndex].params.itemId, "call-patch-2");
+  assert.equal(outbound[aggregateIndex].params.changes.length, 2);
+  assert.deepEqual(
+    outbound[aggregateIndex].params.changes.map((change) => change.path),
+    ["Sources/App.swift", "Sources/Settings.swift"]
+  );
+});
+
 test("desktop-origin detection stays narrow", () => {
   assert.equal(isDesktopRolloutOrigin({ originator: "Codex Desktop", source: "vscode" }), true);
   assert.equal(isDesktopRolloutOrigin({ originator: "codex_vscode", source: "vscode" }), true);
@@ -480,6 +916,22 @@ function agentMessage(message, phase = "final_answer") {
   });
 }
 
+function planItemCompleted(turnId, itemId, text) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:40.500Z",
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      turn_id: turnId,
+      item: {
+        type: "Plan",
+        id: itemId,
+        text,
+      },
+    },
+  });
+}
+
 function functionCall(callId, name, argumentsObject) {
   return JSON.stringify({
     timestamp: "2026-03-15T19:47:38.000Z",
@@ -501,6 +953,45 @@ function functionCallOutput(callId, output) {
       type: "function_call_output",
       call_id: callId,
       output,
+    },
+  });
+}
+
+function customToolCall(callId, name, input) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:38.500Z",
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call",
+      status: "completed",
+      call_id: callId,
+      name,
+      input,
+    },
+  });
+}
+
+function patchApplyEnd(turnId, callId) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:38.750Z",
+    type: "event_msg",
+    payload: {
+      type: "patch_apply_end",
+      turn_id: turnId,
+      call_id: callId,
+      status: "completed",
+      stdout: "Success. Updated the following files:\nM Sources/App.swift\n",
+    },
+  });
+}
+
+function taskComplete(turnId) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:41.000Z",
+    type: "event_msg",
+    payload: {
+      type: "task_complete",
+      turn_id: turnId,
     },
   });
 }

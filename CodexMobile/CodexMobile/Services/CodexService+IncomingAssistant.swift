@@ -42,6 +42,12 @@ extension CodexService {
         }
 
         markThreadAsRunning(context.threadId)
+        if activeTurnID(for: context.threadId) == nil {
+            setActiveTurnID(turnId, for: context.threadId)
+            threadIdByTurnID[turnId] = context.threadId
+            activeTurnId = turnId
+            setProtectedRunningFallback(false, for: context.threadId)
+        }
         clearMirroredRunningCatchupNeeded(for: context.threadId)
         appendAssistantDelta(
             threadId: context.threadId,

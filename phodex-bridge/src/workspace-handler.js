@@ -25,6 +25,7 @@ const MAX_IMAGE_READ_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_READ_BYTES = 2 * 1024 * 1024;
 const MAX_TEXT_FILE_READ_BYTES = 2 * 1024 * 1024;
 const BINARY_SNIFF_BYTES = 8 * 1024;
+const MAX_BASENAME_FALLBACK_MATCHES = 2;
 const MIN_IMAGE_PREVIEW_PIXEL_DIMENSION = 128;
 const MAX_IMAGE_PREVIEW_PIXEL_DIMENSION = 3_200;
 const IMAGE_PREVIEW_RETRY_SCALE = 0.75;
@@ -124,13 +125,8 @@ async function workspaceReadFile(params) {
   }
 
   const cwd = await resolveWorkspaceCwd(params);
-  const filePath = path.isAbsolute(requestedPath)
-    ? path.resolve(requestedPath)
-    : path.resolve(cwd, requestedPath);
-  const [realFilePath, realWorkspaceRoot] = await Promise.all([
-    realpathOrNull(filePath),
-    resolveReadableWorkspaceRoot(cwd),
-  ]);
+  const realWorkspaceRoot = await resolveReadableWorkspaceRoot(cwd);
+  const realFilePath = await resolveWorkspaceTextFilePath(cwd, requestedPath, realWorkspaceRoot);
   if (!realFilePath) {
     throw workspaceError("file_not_found", "The file no longer exists on this Mac.");
   }
@@ -333,6 +329,66 @@ async function resolveReadableWorkspaceRoot(cwd) {
 
 async function resolveImageWorkspaceRoot(cwd) {
   return resolveReadableWorkspaceRoot(cwd);
+}
+
+// Handles assistant links that only include a filename by finding one unique workspace match.
+async function resolveWorkspaceTextFilePath(cwd, requestedPath, realWorkspaceRoot) {
+  const filePath = path.isAbsolute(requestedPath)
+    ? path.resolve(requestedPath)
+    : path.resolve(cwd, requestedPath);
+  const realFilePath = await realpathOrNull(filePath);
+  if (realFilePath || path.isAbsolute(requestedPath) || !realWorkspaceRoot) {
+    return realFilePath;
+  }
+
+  if (!isBareFileName(requestedPath)) {
+    return null;
+  }
+
+  return resolveUniqueWorkspaceBasenameMatch(realWorkspaceRoot, requestedPath);
+}
+
+async function resolveUniqueWorkspaceBasenameMatch(realWorkspaceRoot, requestedFileName) {
+  const matches = await findWorkspaceBasenameMatches(realWorkspaceRoot, requestedFileName);
+  if (matches.length === 0) {
+    return null;
+  }
+  if (matches.length > 1) {
+    throw workspaceError(
+      "file_path_ambiguous",
+      `Multiple files named "${requestedFileName}" exist in this workspace. Use a path with folders.`
+    );
+  }
+  return matches[0];
+}
+
+async function findWorkspaceBasenameMatches(realWorkspaceRoot, requestedFileName) {
+  const matches = [];
+  const output = await git(realWorkspaceRoot, "ls-files", "-co", "--exclude-standard").catch(() => "");
+  const relativePaths = output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const relativePath of relativePaths) {
+    if (path.basename(relativePath) !== requestedFileName) {
+      continue;
+    }
+    const realCandidate = await realpathOrNull(path.resolve(realWorkspaceRoot, relativePath));
+    if (realCandidate && isPathInside(realCandidate, realWorkspaceRoot)) {
+      matches.push(realCandidate);
+      if (matches.length >= MAX_BASENAME_FALLBACK_MATCHES) {
+        break;
+      }
+    }
+  }
+  return matches;
+}
+
+function isBareFileName(candidatePath) {
+  return candidatePath === path.basename(candidatePath)
+    && candidatePath !== "."
+    && candidatePath !== "..";
 }
 
 function isBroadWorkspaceRoot(candidatePath) {

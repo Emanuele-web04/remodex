@@ -36,6 +36,31 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(buildCount, 2)
     }
 
+    func testMarkdownFormatterDoesNotLinkifyInlineShellCommands() {
+        let command = "`node --test phodex-bridge/test/bridge.test.js phodex-bridge/test/rollout-live-mirror.test.js phodex-bridge/test/secure-transport.test.js`"
+
+        let rendered = MarkdownTextFormatter.renderableText(
+            from: "Verificato: \(command) passa 77/77.",
+            profile: .assistantProse,
+            usesCache: false
+        )
+
+        XCTAssertEqual(rendered, "Verificato: \(command) passa 77/77.")
+    }
+
+    func testMarkdownFormatterStillLinkifiesSingleInlineCodeFileReference() {
+        let rendered = MarkdownTextFormatter.renderableText(
+            from: "Verificato: `phodex-bridge/test/secure-transport.test.js` passa.",
+            profile: .assistantProse,
+            usesCache: false
+        )
+
+        XCTAssertEqual(
+            rendered,
+            "Verificato: [secure-transport.test.js](phodex-bridge/test/secure-transport.test.js) passa."
+        )
+    }
+
     func testStableTextFingerprintChangesForUnsampledTextEdits() {
         let prefix = String(repeating: "a", count: 48)
         let suffix = String(repeating: "z", count: 48)

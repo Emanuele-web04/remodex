@@ -166,8 +166,8 @@ struct TurnConversationContainerView: View {
                     isShowingPinnedPlanSheet = true
                 }
                 .padding(.horizontal, 12)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                .padding(.top, 8)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
             if let composerRecoveryAccessory {

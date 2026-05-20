@@ -9,7 +9,7 @@ struct TerminalRunningIndicator: View {
     var body: some View {
         Text("Remodex is thinking...")
             .font(AppFont.body())
-            .foregroundStyle(.tertiary)
+            .foregroundStyle(.secondary)
         .accessibilityLabel("Remodex is thinking")
     }
 }

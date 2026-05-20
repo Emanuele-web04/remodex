@@ -10,6 +10,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const {
+  buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
   createMacOSBridgeWakeAssertion,
   disableUnsupportedReasoningSummaryForTurnStart,
@@ -17,6 +18,7 @@ const {
   hasRelayConnectionGoneStale,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
+  resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeThreadHistoryImagesForRelay,
 } = require("../src/bridge");
@@ -92,6 +94,28 @@ test("normalizeRelayBoundJsonRpcMessage drops client-origin RPC requests before 
     })),
     null
   );
+});
+
+test("resolveJsonlTurnsListRolloutPathForFallback searches JSONL for stale non-empty first pages", () => {
+  const calls = [];
+  const rolloutPath = resolveJsonlTurnsListRolloutPathForFallback({
+    threadId: "thread-jsonl-stale",
+    responseIsEmpty: false,
+    readCachedPath(threadId) {
+      calls.push(["cache", threadId]);
+      return "";
+    },
+    findAndCachePath(threadId) {
+      calls.push(["find", threadId]);
+      return "/tmp/thread-jsonl-stale.jsonl";
+    },
+  });
+
+  assert.equal(rolloutPath, "/tmp/thread-jsonl-stale.jsonl");
+  assert.deepEqual(calls, [
+    ["cache", "thread-jsonl-stale"],
+    ["find", "thread-jsonl-stale"],
+  ]);
 });
 
 test("normalizeRelayBoundJsonRpcMessage converts tracked method-bearing responses for iOS", () => {
@@ -345,6 +369,56 @@ test("fetchAdaptiveThreadTurnsListForRelay caps initial mobile pages to five tur
       { limit: 4, cursor: "cursor-after-1" },
     ]
   );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay skips JSONL augmentation while sizing relay pages", async () => {
+  const request = {
+    id: "req-turns-list-sizing-context",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-sizing-context",
+      limit: 1,
+    },
+  };
+  const sanitizeContexts = [];
+
+  const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
+    fetchPage: async () => ({ data: makeTurns(1, 1), nextCursor: null }),
+    sanitizeForRelay: (rawMessage, requestMethod, requestContext) => {
+      sanitizeContexts.push({ requestMethod, requestContext });
+      return rawMessage;
+    },
+  });
+
+  assert.equal(response.result.data.length, 1);
+  assert.ok(sanitizeContexts.length > 0);
+  assert.equal(sanitizeContexts.every(({ requestMethod }) => requestMethod === "thread/turns/list"), true);
+  assert.equal(sanitizeContexts.every(({ requestContext }) => (
+    requestContext.threadId === "thread-sizing-context"
+      && requestContext.skipJsonlArtifactAugmentation === true
+  )), true);
+});
+
+test("final thread turns-list relay sanitize context keeps JSONL artifact augmentation enabled", () => {
+  const request = {
+    id: "req-turns-list-final-context",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-final-context",
+      limit: 1,
+    },
+  };
+
+  assert.deepEqual(buildThreadTurnsListRelaySanitizeContext(request), {
+    threadId: "thread-final-context",
+    skipJsonlArtifactAugmentation: false,
+  });
+  assert.deepEqual(buildThreadTurnsListRelaySanitizeContext(request, {
+    skipJsonlArtifactAugmentation: true,
+  }), {
+    threadId: "thread-final-context",
+    skipJsonlArtifactAugmentation: true,
+  });
 });
 
 test("fetchAdaptiveThreadTurnsListForRelay returns a compacted single turn when one huge first turn is still too large", async () => {
@@ -852,6 +926,496 @@ test("sanitizeThreadHistoryImagesForRelay replaces input_image history data URLs
     type: "input_image",
     url: "remodex://history-image-elided",
   });
+});
+
+test("sanitizeThreadHistoryImagesForRelay converts desktop apply_patch history to fileChange", () => {
+  const patch = [
+    "*** Begin Patch",
+    "*** Update File: Sources/App.swift",
+    "@@",
+    "-let title = \"Old\"",
+    "+let title = \"New\"",
+    "*** End Patch",
+    "",
+  ].join("\n");
+  const rawMessage = JSON.stringify({
+    id: "req-thread-patch",
+    result: {
+      thread: {
+        id: "thread-patch",
+        turns: [
+          {
+            id: "turn-patch",
+            items: [
+              {
+                id: "call-patch",
+                type: "custom_tool_call",
+                status: "completed",
+                name: "apply_patch",
+                call_id: "call-patch",
+                input: patch,
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  const item = sanitized.result.thread.turns[0].items[0];
+
+  assert.equal(item.type, "fileChange");
+  assert.equal(item.id, "call-patch");
+  assert.deepEqual(item.changes.map((change) => ({
+    path: change.path,
+    kind: change.kind,
+    additions: change.additions,
+    deletions: change.deletions,
+  })), [{
+    path: "Sources/App.swift",
+    kind: "update",
+    additions: 1,
+    deletions: 1,
+  }]);
+});
+
+test("sanitizeThreadHistoryImagesForRelay augments app-server history with JSONL fileChange blocks", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-filechange";
+  const turnId = "turn-jsonl-filechange";
+  const cwd = "/Users/test/Project";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "05", "19");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-05-19T19-40-00-${threadId}.jsonl`),
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: threadId,
+          cwd,
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: turnId,
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "custom_tool_call",
+          status: "completed",
+          name: "apply_patch",
+          call_id: "call-jsonl-patch",
+          input: [
+            "*** Begin Patch",
+            `*** Update File: ${cwd}/Sources/App.swift`,
+            "@@",
+            "-let title = \"Old\"",
+            "+let title = \"New\"",
+            "*** End Patch",
+            "",
+          ].join("\n"),
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const rawMessage = JSON.stringify({
+    id: "req-thread-jsonl",
+    result: {
+      thread: {
+        id: threadId,
+        turns: [
+          {
+            id: turnId,
+            items: [
+              {
+                id: "assistant-jsonl",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  const items = sanitized.result.thread.turns[0].items;
+
+  assert.equal(sanitized.result.thread.cwd, cwd);
+  assert.equal(sanitized.result.thread.current_working_directory, cwd);
+  assert.equal(items.length, 2);
+  assert.equal(items[1].type, "fileChange");
+  assert.equal(items[1].remodexJsonlFileChangeAggregate, true);
+  assert.deepEqual(items[1].changes.map((change) => ({
+    path: change.path,
+    kind: change.kind,
+    additions: change.additions,
+    deletions: change.deletions,
+  })), [{
+    path: "Sources/App.swift",
+    kind: "update",
+    additions: 1,
+    deletions: 1,
+  }]);
+
+  const turnsPage = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-turns-jsonl",
+    result: {
+      threadId,
+      data: [
+        {
+          id: turnId,
+          items: [
+            {
+              id: "assistant-jsonl-page",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Done." }],
+            },
+          ],
+        },
+      ],
+    },
+  }), "thread/turns/list"));
+
+  assert.equal(turnsPage.result.data[0].items.length, 2);
+  assert.equal(turnsPage.result.data[0].items[1].type, "fileChange");
+
+  const hintedTurnsPage = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-turns-jsonl-hinted",
+    result: {
+      data: [
+        {
+          id: turnId,
+          items: [
+            {
+              id: "assistant-jsonl-page-hinted",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Done." }],
+            },
+          ],
+        },
+      ],
+    },
+  }), "thread/turns/list", { threadId }));
+
+  assert.equal(hintedTurnsPage.result.data[0].items.length, 2);
+  assert.equal(hintedTurnsPage.result.data[0].items[1].type, "fileChange");
+
+  const skippedTurnsPage = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-turns-jsonl-skip",
+    result: {
+      data: [
+        {
+          id: turnId,
+          items: [
+            {
+              id: "assistant-jsonl-page-skip",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Done." }],
+            },
+          ],
+        },
+      ],
+    },
+  }), "thread/turns/list", {
+    threadId,
+    skipJsonlArtifactAugmentation: true,
+  }));
+
+  assert.equal(skippedTurnsPage.result.data[0].items.length, 1);
+});
+
+test("sanitizeThreadHistoryImagesForRelay caches JSONL artifact scans until the rollout changes", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-cache-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  const originalReadFileSync = fs.readFileSync;
+  t.after(() => {
+    fs.readFileSync = originalReadFileSync;
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-cache";
+  const firstTurnId = "turn-jsonl-cache-one";
+  const secondTurnId = "turn-jsonl-cache-two";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "05", "19");
+  const rolloutPath = path.join(sessionsDir, `rollout-2026-05-19T19-40-00-${threadId}.jsonl`);
+  fs.mkdirSync(sessionsDir, { recursive: true });
+
+  const buildPatchCall = (turnId, callId, fileName) => [
+    JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "task_started",
+        turn_id: turnId,
+      },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        status: "completed",
+        name: "apply_patch",
+        call_id: callId,
+        input: [
+          "*** Begin Patch",
+          `*** Update File: Sources/${fileName}`,
+          "@@",
+          "-let title = \"Old\"",
+          "+let title = \"New\"",
+          "*** End Patch",
+          "",
+        ].join("\n"),
+      },
+    }),
+  ].join("\n");
+
+  fs.writeFileSync(
+    rolloutPath,
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: threadId },
+      }),
+      buildPatchCall(firstTurnId, "call-jsonl-cache-one", "One.swift"),
+    ].join("\n"),
+    "utf8"
+  );
+
+  let rolloutReads = 0;
+  fs.readFileSync = function readFileSyncWithRolloutCounter(filePath, ...args) {
+    if (path.resolve(String(filePath)) === rolloutPath) {
+      rolloutReads += 1;
+    }
+    return originalReadFileSync.call(this, filePath, ...args);
+  };
+
+  const makeTurnsPage = (turnId, requestId) => JSON.stringify({
+    id: requestId,
+    result: {
+      threadId,
+      data: [
+        {
+          id: turnId,
+          items: [
+            {
+              id: `${requestId}-assistant`,
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "Done." }],
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  const firstPage = JSON.parse(sanitizeThreadHistoryImagesForRelay(
+    makeTurnsPage(firstTurnId, "req-jsonl-cache-one"),
+    "thread/turns/list"
+  ));
+  const secondPage = JSON.parse(sanitizeThreadHistoryImagesForRelay(
+    makeTurnsPage(firstTurnId, "req-jsonl-cache-two"),
+    "thread/turns/list"
+  ));
+
+  assert.equal(firstPage.result.data[0].items[1].type, "fileChange");
+  assert.equal(secondPage.result.data[0].items[1].type, "fileChange");
+  assert.equal(rolloutReads, 1);
+
+  fs.appendFileSync(
+    rolloutPath,
+    `\n${buildPatchCall(secondTurnId, "call-jsonl-cache-two", "Two.swift")}`,
+    "utf8"
+  );
+
+  const changedPage = JSON.parse(sanitizeThreadHistoryImagesForRelay(
+    makeTurnsPage(secondTurnId, "req-jsonl-cache-three"),
+    "thread/turns/list"
+  ));
+
+  assert.equal(changedPage.result.data[0].items[1].type, "fileChange");
+  assert.equal(changedPage.result.data[0].items[1].changes[0].path, "Sources/Two.swift");
+  assert.equal(rolloutReads, 2);
+});
+
+test("sanitizeThreadHistoryImagesForRelay restores JSONL update_plan as progress plan history", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-plan-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-plan";
+  const turnId = "turn-jsonl-plan";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "05", "19");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-05-19T19-41-00-${threadId}.jsonl`),
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: threadId },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: turnId,
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "update_plan",
+          call_id: "call-jsonl-plan",
+          arguments: JSON.stringify({
+            explanation: "Keep the plan visible.",
+            plan: [
+              { step: "Inspect plan rendering", status: "completed" },
+              { step: "Patch the bridge", status: "in_progress" },
+            ],
+          }),
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const rawMessage = JSON.stringify({
+    id: "req-thread-jsonl-plan",
+    result: {
+      thread: {
+        id: threadId,
+        turns: [
+          {
+            id: turnId,
+            items: [
+              {
+                id: "assistant-jsonl-plan",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  const items = sanitized.result.thread.turns[0].items;
+
+  assert.equal(items.length, 2);
+  assert.equal(items[0].id, "assistant-jsonl-plan");
+  assert.equal(items[1].type, "plan");
+  assert.equal(items[1].id, "call-jsonl-plan");
+  assert.equal(items[1].remodexJsonlProgressPlan, true);
+  assert.equal(items[1].explanation, "Keep the plan visible.");
+  assert.deepEqual(items[1].plan, [
+    { step: "Inspect plan rendering", status: "completed" },
+    { step: "Patch the bridge", status: "in_progress" },
+  ]);
+});
+
+test("sanitizeThreadHistoryImagesForRelay restores JSONL cwd without file changes", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-cwd-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-cwd";
+  const cwd = "/Users/test/Project";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "05", "19");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-05-19T19-45-00-${threadId}.jsonl`),
+    JSON.stringify({
+      type: "session_meta",
+      payload: {
+        id: threadId,
+        cwd,
+      },
+    }),
+    "utf8"
+  );
+
+  const sanitized = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-thread-cwd",
+    result: {
+      thread: {
+        id: threadId,
+        cwd: "/tmp/stale",
+        turns: [
+          {
+            id: "turn-cwd",
+            items: [
+              {
+                id: "assistant-cwd",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  }), "thread/read"));
+
+  assert.equal(sanitized.result.thread.cwd, cwd);
+  assert.equal(sanitized.result.thread.current_working_directory, cwd);
+  assert.equal(sanitized.result.thread.turns[0].items.length, 1);
 });
 
 test("sanitizeThreadHistoryImagesForRelay annotates generated image calls with local paths", () => {

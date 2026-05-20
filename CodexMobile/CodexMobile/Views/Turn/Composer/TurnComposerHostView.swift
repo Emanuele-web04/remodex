@@ -32,6 +32,7 @@ struct TurnComposerHostView: View {
     let onOpenFeedbackMail: () -> Void
     let onShowStatus: () -> Void
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
+    var isVoiceInputActive: Bool = false
     let isVoiceRecording: Bool
     let voiceAudioLevels: [CGFloat]
     let voiceRecordingDuration: TimeInterval
@@ -94,6 +95,7 @@ struct TurnComposerHostView: View {
             composerMentionedPlugins: viewModel.composerMentionedPlugins,
             composerReviewSelection: viewModel.composerReviewSelection,
             isSubagentsSelectionArmed: viewModel.isSubagentsSelectionArmed,
+            isPlanModeArmed: viewModel.isPlanModeArmed,
             isVoiceRecording: isVoiceRecording,
             voiceAudioLevels: voiceAudioLevels,
             voiceRecordingDuration: voiceRecordingDuration
@@ -115,7 +117,8 @@ struct TurnComposerHostView: View {
             autocompleteState: autocompleteState,
             remainingAttachmentSlots: viewModel.remainingAttachmentSlots,
             isComposerInteractionLocked: viewModel.isComposerInteractionLocked(activeTurnID: activeTurnID),
-            isSendDisabled: viewModel.isSendDisabled(isConnected: codex.isConnected, activeTurnID: activeTurnID),
+            isSendDisabled: isVoiceInputActive
+                || viewModel.isSendDisabled(isConnected: codex.isConnected, activeTurnID: activeTurnID),
             isSending: viewModel.isSending,
             isPlanModeArmed: viewModel.isPlanModeArmed,
             queuedCount: viewModel.queuedCount(codex: codex, threadID: thread.id),

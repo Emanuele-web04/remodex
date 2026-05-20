@@ -20,7 +20,7 @@ test("remodex --version prints the package version", () => {
   assert.equal(output, version);
 });
 
-test("remodex restart reuses the macOS service start flow", async () => {
+test("remodex restart kickstarts the installed macOS service without requiring relay config", async () => {
   const calls = [];
   const messages = [];
 
@@ -39,25 +39,58 @@ test("remodex restart reuses the macOS service start flow", async () => {
       throw new Error(`unexpected exit ${code}`);
     },
     deps: {
-      readBridgeConfig() {
-        calls.push("read-config");
-      },
-      async startMacOSBridgeService(options) {
-        calls.push(["start-service", options]);
+      async restartMacOSBridgeService() {
+        calls.push("restart-service");
         return {
           plistPath: "/tmp/remodex.plist",
-          pairingSession: { relay: "ws://127.0.0.1:9000/relay" },
+          pairingSession: null,
         };
       },
     },
   });
 
   assert.deepEqual(calls, [
-    "read-config",
-    ["start-service", { waitForPairing: false }],
+    "restart-service",
   ]);
   assert.deepEqual(messages, [
     "[remodex] macOS bridge service restarted.",
+  ]);
+});
+
+test("remodex start refreshes macOS service config and plist", async () => {
+  const calls = [];
+  const messages = [];
+
+  await main({
+    argv: ["node", "remodex", "start"],
+    platform: "darwin",
+    consoleImpl: {
+      log(message) {
+        messages.push(message);
+      },
+      error(message) {
+        messages.push(message);
+      },
+    },
+    exitImpl(code) {
+      throw new Error(`unexpected exit ${code}`);
+    },
+    deps: {
+      async startMacOSBridgeService(options) {
+        calls.push(["start-service", options]);
+        return {
+          plistPath: "/tmp/remodex.plist",
+          pairingSession: null,
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["start-service", undefined],
+  ]);
+  assert.deepEqual(messages, [
+    "[remodex] macOS bridge service is running.",
   ]);
 });
 
@@ -98,6 +131,80 @@ test("remodex up shows a startup indicator while waiting for the pairing QR", as
   assert.deepEqual(calls, [
     ["start-service", { waitForPairing: true }],
     ["print-qr", { pairingSession: { pairingPayload: { sessionId: "session-up" } } }],
+  ]);
+});
+
+test("remodex qr refreshes service config and prints the pairing QR", async () => {
+  const calls = [];
+  const messages = [];
+
+  await main({
+    argv: ["node", "remodex", "qr"],
+    platform: "darwin",
+    consoleImpl: {
+      log(message) {
+        messages.push(message);
+      },
+      error(message) {
+        messages.push(message);
+      },
+    },
+    exitImpl(code) {
+      throw new Error(`unexpected exit ${code}`);
+    },
+    deps: {
+      async startMacOSBridgeService(options) {
+        calls.push(["start-service", options]);
+        return {
+          pairingSession: { pairingPayload: { sessionId: "session-qr" } },
+        };
+      },
+      printMacOSBridgePairingQr(options) {
+        calls.push(["print-qr", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(messages, [
+    "[remodex] Refreshing bridge pairing QR...",
+  ]);
+  assert.deepEqual(calls, [
+    ["start-service", { waitForPairing: true }],
+    ["print-qr", { pairingSession: { pairingPayload: { sessionId: "session-qr" } } }],
+  ]);
+});
+
+test("remodex pair is an alias for the QR refresh flow", async () => {
+  const calls = [];
+
+  await main({
+    argv: ["node", "remodex", "pair"],
+    platform: "darwin",
+    consoleImpl: {
+      log() {},
+      error(message) {
+        throw new Error(`unexpected error: ${message}`);
+      },
+    },
+    exitImpl(code) {
+      throw new Error(`unexpected exit ${code}`);
+    },
+    deps: {
+      async startMacOSBridgeService(options) {
+        calls.push(["start-service", options]);
+        return {
+          pairingSession: { pairingPayload: { sessionId: "session-pair" } },
+        };
+      },
+      printMacOSBridgePairingQr(options) {
+        calls.push(["print-qr", options]);
+      },
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ["start-service", { waitForPairing: true }],
+    ["print-qr", { pairingSession: { pairingPayload: { sessionId: "session-pair" } } }],
   ]);
 });
 

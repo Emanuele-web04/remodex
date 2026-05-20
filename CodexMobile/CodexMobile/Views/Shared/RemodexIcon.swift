@@ -78,6 +78,7 @@ enum RemodexIcon {
         "point.3.connected.trianglepath.dotted": "central-agent-network",
         "qrcode": "central-qr-code",
         "qrcode.viewfinder": "central-scan-code",
+        "remodex.plan-mode": "central-planning",
         "server.rack": "central-server",
         "shift": "central-shift",
         "slider.horizontal.3": "central-settings-slider-three",

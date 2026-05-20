@@ -89,11 +89,7 @@ struct ContextWindowProgressRing: View {
             return progressColorOverride
         }
 
-        switch usage.fractionUsed {
-        case 0.85...: return .primary
-        case 0.65..<0.85: return .secondary
-        default: return Color(.systemGray2)
-        }
+        return .primary
     }
 
     // Refreshes both thread context usage and account windows for the compact status popover.

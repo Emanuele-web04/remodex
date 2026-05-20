@@ -34,15 +34,16 @@ struct VoiceRecordingCapsule: View {
         .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
-        // Keeps the recording UI in the same accessory family as the pinned plan card.
-        .background(
-            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                .fill(Color.clear)
-                .adaptiveGlass(
-                    .regular,
-                    in: RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
-                )
+        // Apply glass to the capsule surface itself so waveform/text stay above
+        // the material instead of being composited behind a separate glass layer.
+        .adaptiveGlass(
+            .regular,
+            in: RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        }
         .padding(.horizontal, 4)
     }
 
@@ -167,75 +168,72 @@ private struct VoiceRecordingCapsulePreview: View {
         VStack {
             Spacer()
 
-            VStack(spacing: 0) {
-                TurnMentionChipRow.composer(
-                    chips: [
-                        .file("TurnView.swift"),
-                        .skill("refactor-code"),
-                    ],
-                    topPadding: 14,
-                    onRemove: { _ in }
-                )
+            VStack(spacing: 8) {
+                if isRecording {
+                    VoiceRecordingCapsule(
+                        audioLevels: levels,
+                        duration: elapsed,
+                        onCancel: { isRecording = false; levels = []; elapsed = 0 }
+                    )
+                    .padding(.horizontal, 12)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
 
-                Text("Ask anything... @plugins, $skills, /commands")
-                    .font(AppFont.body())
-                    .foregroundStyle(Color(.placeholderText))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .padding(.bottom, 12)
+                VStack(spacing: 0) {
+                    TurnMentionChipRow.composer(
+                        chips: [
+                            .file("TurnView.swift"),
+                            .skill("refactor-code"),
+                        ],
+                        topPadding: 14,
+                        onRemove: { _ in }
+                    )
 
-                HStack(spacing: 12) {
-                    RemodexIcon.image(systemName: "plus")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 22, height: 22)
+                    Text("Ask anything... @plugins, $skills, /commands")
+                        .font(AppFont.body())
+                        .foregroundStyle(Color(.placeholderText))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .padding(.bottom, 12)
 
-                    Text("GPT-5.3-Codex")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        RemodexIcon.image(systemName: "plus")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22, height: 22)
 
-                    Spacer()
+                        Text("GPT-5.3-Codex")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
 
-                    Button {
-                        if isRecording {
-                            isRecording = false; levels = []; elapsed = 0
-                        } else {
-                            isRecording = true
+                        Spacer()
+
+                        Button {
+                            if isRecording {
+                                isRecording = false; levels = []; elapsed = 0
+                            } else {
+                                isRecording = true
+                            }
+                        } label: {
+                            RemodexCircleBadge(
+                                systemName: isRecording ? "stop.fill" : "mic.fill",
+                                foreground: Color(.systemBackground),
+                                background: isRecording ? Color(.systemRed) : Color(.label)
+                            )
                         }
-                    } label: {
+
                         RemodexCircleBadge(
-                            systemName: isRecording ? "stop.fill" : "mic.fill",
+                            systemName: "arrow.up",
                             foreground: Color(.systemBackground),
-                            background: isRecording ? Color(.systemRed) : Color(.label)
+                            background: Color(.label)
                         )
                     }
-
-                    RemodexCircleBadge(
-                        systemName: "arrow.up",
-                        foreground: Color(.systemBackground),
-                        background: Color(.label)
-                    )
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+                    .padding(.top, 10)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 10)
-                .padding(.top, 10)
-            }
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28))
-            .overlay(alignment: .topLeading) {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)
-                    .overlay(alignment: .bottomLeading) {
-                        if isRecording {
-                            VoiceRecordingCapsule(
-                                audioLevels: levels,
-                                duration: elapsed,
-                                onCancel: { isRecording = false; levels = []; elapsed = 0 }
-                            )
-                            .transition(.opacity.combined(with: .move(edge: .bottom)))
-                        }
-                    }
-                    .offset(y: -8)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28))
             }
             .padding(.horizontal, 12)
             .padding(.bottom, 6)
@@ -253,6 +251,6 @@ private struct VoiceRecordingCapsulePreview: View {
     }
 }
 
-#Preview("Voice Capsule — In Composer") {
+#Preview("Voice Capsule — Above Composer") {
     VoiceRecordingCapsulePreview()
 }

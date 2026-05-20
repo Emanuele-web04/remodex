@@ -52,6 +52,39 @@ test("workspace/readFile can return metadata without file content", async () => 
   assert.equal(result.content, undefined);
 });
 
+test("workspace/readFile resolves a unique bare filename inside the workspace", async () => {
+  const tempDir = makeGitWorkspace();
+  const filePath = path.join(tempDir, "phodex-bridge", "test", "bridge-desktop-ipc-integration.test.js");
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, "test('demo', () => {})\n", "utf8");
+
+  const result = await handleWorkspaceMethod("workspace/readFile", {
+    cwd: tempDir,
+    path: "bridge-desktop-ipc-integration.test.js",
+  });
+
+  assert.equal(result.path, fs.realpathSync(filePath));
+  assert.equal(result.content, "test('demo', () => {})\n");
+});
+
+test("workspace/readFile rejects ambiguous bare filename matches", async () => {
+  const tempDir = makeGitWorkspace();
+  const firstPath = path.join(tempDir, "Sources", "App.swift");
+  const secondPath = path.join(tempDir, "Tests", "App.swift");
+  fs.mkdirSync(path.dirname(firstPath), { recursive: true });
+  fs.mkdirSync(path.dirname(secondPath), { recursive: true });
+  fs.writeFileSync(firstPath, "let first = true\n", "utf8");
+  fs.writeFileSync(secondPath, "let second = true\n", "utf8");
+
+  await assert.rejects(
+    () => handleWorkspaceMethod("workspace/readFile", {
+      cwd: tempDir,
+      path: "App.swift",
+    }),
+    /Multiple files named "App.swift"/
+  );
+});
+
 test("workspace/readFile skips content when cached metadata still matches", async () => {
   const tempDir = makeGitWorkspace();
   const filePath = path.join(tempDir, "README.md");
