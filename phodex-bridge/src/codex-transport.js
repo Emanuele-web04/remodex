@@ -183,6 +183,20 @@ function createCodexLaunchPlans({
   };
 
   if (platform === "win32") {
+    const npmCodexCommand = buildNpmCodexCommand({ env, fsImpl, pathImpl });
+    if (npmCodexCommand) {
+      return [{
+        command: env.ComSpec || "cmd.exe",
+        args: ["/d", "/s", "/c", `""${npmCodexCommand}" app-server"`],
+        options: {
+          ...sharedOptions,
+          windowsHide: true,
+          windowsVerbatimArguments: true,
+        },
+        description: `\`${npmCodexCommand} app-server\``,
+      }];
+    }
+
     return [{
       command: env.ComSpec || "cmd.exe",
       args: ["/d", "/c", "codex app-server"],
@@ -212,6 +226,20 @@ function createCodexLaunchPlans({
   }
 
   return launches;
+}
+
+function buildNpmCodexCommand({ env, fsImpl = fs, pathImpl = path } = {}) {
+  const appData = typeof env?.APPDATA === "string" ? env.APPDATA.trim() : "";
+  if (!appData) {
+    return "";
+  }
+
+  const candidate = pathImpl.join(appData, "npm", "codex.cmd");
+  try {
+    return fsImpl.existsSync(candidate) ? candidate : "";
+  } catch {
+    return "";
+  }
 }
 
 function buildBundledCodexPath(appPath, { fsImpl = fs, pathImpl = path } = {}) {
@@ -374,6 +402,7 @@ function createListenerBag() {
 }
 
 module.exports = {
+  buildNpmCodexCommand,
   createCodexLaunchPlans,
   createCodexTransport,
   extractMissingEnvironmentVariable,

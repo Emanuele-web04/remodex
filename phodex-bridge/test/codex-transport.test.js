@@ -11,6 +11,7 @@ const os = require("os");
 const path = require("path");
 
 const {
+  buildNpmCodexCommand,
   createCodexLaunchPlans,
   createCodexTransport,
   extractMissingEnvironmentVariable,
@@ -114,6 +115,94 @@ test("spawn launch plans keep the default codex command first even when a bundle
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test("Windows launch plans prefer the npm Codex shim over PATH wrappers", () => {
+  const launches = createCodexLaunchPlans({
+    env: {
+      APPDATA: "C:\\Users\\domix\\AppData\\Roaming",
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+    },
+    platform: "win32",
+    fsImpl: {
+      existsSync(value) {
+        return value === "C:\\Users\\domix\\AppData\\Roaming\\npm\\codex.cmd";
+      },
+    },
+    pathImpl: require("node:path").win32,
+  });
+
+  assert.equal(
+    buildNpmCodexCommand({
+      env: {
+        APPDATA: "C:\\Users\\domix\\AppData\\Roaming",
+      },
+      fsImpl: {
+        existsSync(value) {
+          return value === "C:\\Users\\domix\\AppData\\Roaming\\npm\\codex.cmd";
+        },
+      },
+      pathImpl: require("node:path").win32,
+    }),
+    "C:\\Users\\domix\\AppData\\Roaming\\npm\\codex.cmd"
+  );
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].command, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(launches[0].args, [
+    "/d",
+    "/s",
+    "/c",
+    "\"\"C:\\Users\\domix\\AppData\\Roaming\\npm\\codex.cmd\" app-server\"",
+  ]);
+  assert.equal(launches[0].options.windowsVerbatimArguments, true);
+});
+
+test("Windows launch plans quote npm Codex shim paths that contain spaces", () => {
+  const npmShimPath = "C:\\Users\\Dom Test\\AppData\\Roaming\\npm\\codex.cmd";
+  const launches = createCodexLaunchPlans({
+    env: {
+      APPDATA: "C:\\Users\\Dom Test\\AppData\\Roaming",
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+    },
+    platform: "win32",
+    fsImpl: {
+      existsSync(value) {
+        return value === npmShimPath;
+      },
+    },
+    pathImpl: require("node:path").win32,
+  });
+
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].command, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(launches[0].args, [
+    "/d",
+    "/s",
+    "/c",
+    "\"\"C:\\Users\\Dom Test\\AppData\\Roaming\\npm\\codex.cmd\" app-server\"",
+  ]);
+  assert.equal(launches[0].options.windowsVerbatimArguments, true);
+});
+
+test("Windows launch plans keep the PATH fallback when the npm Codex shim is absent", () => {
+  const launches = createCodexLaunchPlans({
+    env: {
+      APPDATA: "C:\\Users\\Dom Test\\AppData\\Roaming",
+      ComSpec: "C:\\Windows\\System32\\cmd.exe",
+    },
+    platform: "win32",
+    fsImpl: {
+      existsSync() {
+        return false;
+      },
+    },
+    pathImpl: require("node:path").win32,
+  });
+
+  assert.equal(launches.length, 1);
+  assert.equal(launches[0].command, "C:\\Windows\\System32\\cmd.exe");
+  assert.deepEqual(launches[0].args, ["/d", "/c", "codex app-server"]);
+  assert.equal(launches[0].options.windowsVerbatimArguments, undefined);
 });
 
 test("spawn transport retries with the bundled Codex binary after an ENOENT launch error", async () => {
