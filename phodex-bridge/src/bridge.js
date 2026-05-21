@@ -109,7 +109,7 @@ const jsonlArtifactItemsCacheByThread = new Map();
 const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
 const JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE = 200;
 
-function evictLRUEntries(map, maxSize) {
+function evictOldestEntries(map, maxSize) {
   if (map.size <= maxSize) {
     return;
   }
@@ -1020,11 +1020,11 @@ function startBridge({
         relaySanitizedResponseMethodsById.delete(requestId);
       }
     }
-    evictLRUEntries(forwardedRequestMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
-    evictLRUEntries(relaySanitizedResponseMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
-    evictLRUEntries(jsonlArtifactItemsCacheByThread, RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES);
-    evictLRUEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
-    evictLRUEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
+    evictOldestEntries(forwardedRequestMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    evictOldestEntries(relaySanitizedResponseMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    evictOldestEntries(jsonlArtifactItemsCacheByThread, RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES);
+    evictOldestEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
+    evictOldestEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
   }
 
   function safeParseJSON(value) {

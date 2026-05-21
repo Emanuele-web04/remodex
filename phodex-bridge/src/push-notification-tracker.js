@@ -11,6 +11,7 @@ const {
 const DEFAULT_PREVIEW_MAX_CHARS = 160;
 const MAX_THREAD_TITLE_ENTRIES = 200;
 const MAX_TURN_STATE_ENTRIES = 500;
+const MAX_THREAD_ID_BY_TURN_ENTRIES = 500;
 
 function createPushNotificationTracker({
   sessionId,
@@ -75,6 +76,10 @@ function createPushNotificationTracker({
   // Remembers thread/turn linkage before the terminal event arrives on a different payload shape.
   function rememberMessageContext({ threadId, turnId, params, eventObject }) {
     if (threadId && turnId) {
+      if (!threadIdByTurnId.has(turnId) && threadIdByTurnId.size >= MAX_THREAD_ID_BY_TURN_ENTRIES) {
+        const oldest = threadIdByTurnId.keys().next().value;
+        threadIdByTurnId.delete(oldest);
+      }
       threadIdByTurnId.set(turnId, threadId);
       ensureTurnState(threadId, turnId);
     }

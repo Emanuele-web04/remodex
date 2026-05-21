@@ -556,7 +556,7 @@ final class CodexService {
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true
     // Network quality flag: when true, sync and keepalive intervals are stretched to reduce
-    // bandwidth usage on constrained (cellular, low-signal) connections.
+    // bandwidth usage on constrained connections (Low Data Mode, hotspot tethering).
     var isConstrainedNetwork = false
     @ObservationIgnored var networkPathMonitor: NWPathMonitor?
     var threadListSyncTask: Task<Void, Never>?
@@ -926,7 +926,7 @@ final class CodexService {
         monitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let constrained = path.isConstrained || path.isExpensive
+                let constrained = path.isConstrained
                 if self.isConstrainedNetwork != constrained {
                     self.isConstrainedNetwork = constrained
                     if self.isConnected, self.isInitialized {
@@ -936,6 +936,10 @@ final class CodexService {
             }
         }
         monitor.start(queue: DispatchQueue(label: "CodexMobile.NetworkPathMonitor", qos: .utility))
+    }
+
+    deinit {
+        networkPathMonitor?.cancel()
     }
 
     // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.
