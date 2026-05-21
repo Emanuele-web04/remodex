@@ -1920,7 +1920,6 @@ function truncateCommandOutput(value, maxChars = 1_200) {
   }
   return `...${normalized.slice(-maxChars)}`;
 }
-}
 
 function parseAdaptiveThreadTurnsListRequest(rawMessage) {
   const parsed = parseBridgeJSON(rawMessage);
