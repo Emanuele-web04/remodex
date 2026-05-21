@@ -15,8 +15,16 @@ function createPushNotificationServiceClient({
   fetchImpl = globalThis.fetch,
   logPrefix = "[remodex]",
   requestTimeoutMs = DEFAULT_PUSH_SERVICE_TIMEOUT_MS,
+  retryLimit = DEFAULT_PUSH_SERVICE_RETRY_LIMIT,
+  retryBaseDelayMs = DEFAULT_PUSH_SERVICE_RETRY_BASE_DELAY_MS,
+  sleepImpl = sleep,
 } = {}) {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+  const safeRetryLimit = normalizeNonNegativeInteger(retryLimit, DEFAULT_PUSH_SERVICE_RETRY_LIMIT);
+  const safeRetryBaseDelayMs = normalizeNonNegativeInteger(
+    retryBaseDelayMs,
+    DEFAULT_PUSH_SERVICE_RETRY_BASE_DELAY_MS
+  );
 
   async function registerDevice({
     deviceToken,
@@ -59,10 +67,12 @@ function createPushNotificationServiceClient({
 
     const bodyJSON = JSON.stringify(payload);
     let lastError = null;
-    for (let attempt = 0; attempt <= DEFAULT_PUSH_SERVICE_RETRY_LIMIT; attempt += 1) {
+    for (let attempt = 0; attempt <= safeRetryLimit; attempt += 1) {
       if (attempt > 0) {
-        const delayMs = DEFAULT_PUSH_SERVICE_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        const delayMs = safeRetryBaseDelayMs * Math.pow(2, attempt - 1);
+        if (delayMs > 0) {
+          await sleepImpl(delayMs);
+        }
       }
 
       const controller = typeof AbortController === "function" && requestTimeoutMs > 0
@@ -105,7 +115,7 @@ function createPushNotificationServiceClient({
         const message = parsed?.error || parsed?.message || responseText || `HTTP ${response.status}`;
         const error = new Error(message);
         error.status = response.status;
-        if (response.status >= 500 && attempt < DEFAULT_PUSH_SERVICE_RETRY_LIMIT) {
+        if (response.status >= 500 && attempt < safeRetryLimit) {
           lastError = error;
           continue;
         }
@@ -149,6 +159,7 @@ function normalizeBaseUrl(value) {
 function createTimeoutAbortError(timeoutMs) {
   const error = new Error(`Push service request timed out after ${timeoutMs}ms`);
   error.name = "AbortError";
+  error.code = "push_request_timeout";
   return error;
 }
 
@@ -161,6 +172,14 @@ function isRetryableNetworkError(error) {
   return code === "ECONNRESET" || code === "ECONNREFUSED" || code === "ETIMEDOUT"
     || code === "ENETUNREACH" || code === "EHOSTUNREACH" || code === "ENOTFOUND"
     || error?.message?.includes("fetch failed");
+}
+
+function normalizeNonNegativeInteger(value, fallback) {
+  return Number.isInteger(value) && value >= 0 ? value : fallback;
+}
+
+function sleep(delayMs) {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function safeParseJSON(value) {
