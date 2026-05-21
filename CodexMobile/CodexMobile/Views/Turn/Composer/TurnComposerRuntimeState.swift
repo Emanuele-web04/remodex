@@ -13,6 +13,7 @@ struct TurnComposerRuntimeState: Equatable {
     let reasoningMenuDisabled: Bool
     let selectedServiceTier: CodexServiceTier?
     let supportsFastMode: Bool
+    let selectedModelProvider: String
 
     var selectedReasoningTitle: String {
         effectiveReasoningEffort.map(TurnComposerMetaMapper.reasoningTitle(for:)) ?? "Select reasoning"
@@ -32,15 +33,22 @@ struct TurnComposerRuntimeState: Equatable {
 
     static func resolve(
         codex: CodexService,
+        threadId: String?,
         reasoningDisplayOptions: [TurnComposerReasoningDisplayOption]
     ) -> TurnComposerRuntimeState {
+        let threadReasoningOverride = codex.threadRuntimeOverride(for: threadId)
+        let selectedReasoningEffort = threadReasoningOverride?.overridesReasoning == true
+            ? threadReasoningOverride?.reasoningEffort
+            : codex.selectedReasoningEffort
+
         return TurnComposerRuntimeState(
             reasoningDisplayOptions: reasoningDisplayOptions,
-            effectiveReasoningEffort: codex.selectedReasoningEffortForSelectedModel(),
-            selectedReasoningEffort: codex.selectedReasoningEffort,
-            reasoningMenuDisabled: reasoningDisplayOptions.isEmpty || codex.selectedModelOption() == nil,
-            selectedServiceTier: codex.effectiveServiceTier(),
-            supportsFastMode: codex.selectedModelSupportsServiceTier(.fast)
+            effectiveReasoningEffort: codex.selectedReasoningEffortForSelectedModel(threadId: threadId),
+            selectedReasoningEffort: selectedReasoningEffort,
+            reasoningMenuDisabled: reasoningDisplayOptions.isEmpty || codex.selectedModelOption(threadId: threadId) == nil,
+            selectedServiceTier: codex.effectiveServiceTier(for: threadId),
+            supportsFastMode: codex.selectedModelSupportsServiceTier(.fast, threadId: threadId),
+            selectedModelProvider: codex.runtimeModelProviderForTurn(threadId: threadId)
         )
     }
 }

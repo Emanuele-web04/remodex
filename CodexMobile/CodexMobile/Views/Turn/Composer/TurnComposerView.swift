@@ -662,7 +662,7 @@ private struct ComposerPreviewContent: View {
             hasWorkingDirectory: true,
             isWorktreeProject: false,
             orderedModelOptions: modelOptions,
-            selectedModelID: "gpt-5.5",
+            selectedModelID: "codex:gpt-5.5",
             selectedModelTitle: "GPT-5.5",
             isLoadingModels: false,
             isRuntimeSelectionLoading: false,
@@ -672,7 +672,8 @@ private struct ComposerPreviewContent: View {
                 selectedReasoningEffort: "high",
                 reasoningMenuDisabled: false,
                 selectedServiceTier: .fast,
-                supportsFastMode: true
+                supportsFastMode: true,
+                selectedModelProvider: "codex"
             ),
             runtimeActions: TurnComposerRuntimeActions(
                 selectModel: { _ in },

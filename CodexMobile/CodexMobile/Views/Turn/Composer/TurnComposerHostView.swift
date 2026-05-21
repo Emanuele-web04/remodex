@@ -100,12 +100,14 @@ struct TurnComposerHostView: View {
             voiceAudioLevels: voiceAudioLevels,
             voiceRecordingDuration: voiceRecordingDuration
         )
+        let runtimeThreadId = isEmptyThread ? nil : thread.id
         let runtimeState = TurnComposerRuntimeState.resolve(
             codex: codex,
+            threadId: runtimeThreadId,
             reasoningDisplayOptions: reasoningDisplayOptions
         )
-        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
-        let selectedModelID = codex.visibleSelectedModelIDForComposer()
+        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex, threadId: runtimeThreadId)
+        let selectedModelID = codex.visibleSelectedModelIDForComposer(threadId: runtimeThreadId)
         let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer()
         let hasComposerWorkingDirectory = thread.gitWorkingDirectory != nil
             && !SidebarThreadGrouping.isRootlessChatThread(thread)

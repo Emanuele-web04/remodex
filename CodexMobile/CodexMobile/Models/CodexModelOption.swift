@@ -9,6 +9,7 @@ import Foundation
 struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
     let id: String
     let model: String
+    let modelProvider: String
     let displayName: String
     let description: String
     let isDefault: Bool
@@ -19,6 +20,7 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
     init(
         id: String,
         model: String,
+        modelProvider: String = "codex",
         displayName: String,
         description: String,
         isDefault: Bool,
@@ -28,6 +30,7 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
     ) {
         self.id = id
         self.model = model
+        self.modelProvider = Self.normalizedProvider(modelProvider)
         self.displayName = displayName
         self.description = description
         self.isDefault = isDefault
@@ -41,6 +44,12 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         case model
         case slug
         case name
+        case provider
+        case modelProvider
+        case modelProviderSnake = "model_provider"
+        case runtimeProvider
+        case runtimeProviderSnake = "runtime_provider"
+        case harness
         case displayName
         case displayNameSnake = "display_name"
         case description
@@ -68,6 +77,19 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         let idValue = try container.decodeIfPresent(String.self, forKey: .id)
         let rawModel = modelValue ?? slugValue ?? idValue ?? ""
         let normalizedModel = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let modelProviderValue = try container.decodeIfPresent(String.self, forKey: .modelProvider)
+        let modelProviderSnakeValue = try container.decodeIfPresent(String.self, forKey: .modelProviderSnake)
+        let providerValue = try container.decodeIfPresent(String.self, forKey: .provider)
+        let runtimeProviderValue = try container.decodeIfPresent(String.self, forKey: .runtimeProvider)
+        let runtimeProviderSnakeValue = try container.decodeIfPresent(String.self, forKey: .runtimeProviderSnake)
+        let harnessValue = try container.decodeIfPresent(String.self, forKey: .harness)
+        let rawProvider = modelProviderValue
+            ?? modelProviderSnakeValue
+            ?? providerValue
+            ?? runtimeProviderValue
+            ?? runtimeProviderSnakeValue
+            ?? harnessValue
+            ?? "codex"
 
         let rawID = idValue ?? slugValue ?? normalizedModel
 
@@ -105,6 +127,7 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
 
         id = normalizedID.isEmpty ? normalizedModel : normalizedID
         model = normalizedModel
+        modelProvider = Self.normalizedProvider(rawProvider)
         displayName = normalizedDisplayName.isEmpty ? normalizedModel : normalizedDisplayName
         description = rawDescription.trimmingCharacters(in: .whitespacesAndNewlines)
         isDefault = camelDefaultFlag ?? snakeDefaultFlag ?? false
@@ -161,12 +184,46 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encode(model, forKey: .model)
+        try container.encode(modelProvider, forKey: .modelProvider)
         try container.encode(displayName, forKey: .displayName)
         try container.encode(description, forKey: .description)
         try container.encode(isDefault, forKey: .isDefault)
         try container.encode(supportsFastMode, forKey: .supportsFastMode)
         try container.encode(supportedReasoningEfforts, forKey: .supportedReasoningEfforts)
         try container.encodeIfPresent(defaultReasoningEffort, forKey: .defaultReasoningEffort)
+    }
+
+    var selectionKey: String {
+        Self.selectionKey(provider: modelProvider, modelId: id)
+    }
+
+    static func selectionKey(provider: String?, modelId: String?) -> String {
+        let normalizedProvider = normalizedProvider(provider)
+        let normalizedModelID = modelId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return normalizedModelID.isEmpty ? "\(normalizedProvider):" : "\(normalizedProvider):\(normalizedModelID)"
+    }
+
+    static func normalizedProvider(_ value: String?) -> String {
+        let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        switch normalized {
+        case "claude-code", "claudecode":
+            return "claude"
+        case "":
+            return "codex"
+        default:
+            return normalized
+        }
+    }
+
+    static func splitSelectionKey(_ value: String?) -> (provider: String, modelId: String?) {
+        let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let separatorIndex = normalized.firstIndex(of: ":") else {
+            return (normalizedProvider(nil), normalized.isEmpty ? nil : normalized)
+        }
+        let provider = String(normalized[..<separatorIndex])
+        let modelStart = normalized.index(after: separatorIndex)
+        let modelId = String(normalized[modelStart...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (normalizedProvider(provider), modelId.isEmpty ? nil : modelId)
     }
 }
 

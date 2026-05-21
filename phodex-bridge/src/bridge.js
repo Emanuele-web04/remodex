@@ -69,6 +69,7 @@ const {
   readThreadTurnsListPageFromSessionJsonl,
 } = require("./session-jsonl-history");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const { createRuntimeProviderRouter } = require("./runtime-provider-router");
 
 const execFileAsync = promisify(execFile);
 const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
@@ -242,6 +243,7 @@ function startBridge({
     appPath: config.codexAppPath,
     logPrefix: "[remodex]",
   });
+  let runtimeProviderRouter = null;
   const voiceHandler = createVoiceHandler({
     sendCodexRequest,
     logPrefix: "[remodex]",
@@ -482,13 +484,7 @@ function startBridge({
     }
     updatePendingAuthLoginFromCodexMessage(message);
     trackCodexHandshakeState(message);
-    desktopRefresher.handleOutbound(message);
-    pushNotificationTracker.handleOutbound(message);
-    rememberThreadFromMessage("codex", message);
-    secureTransport.queueOutboundApplicationMessage(
-      sanitizeRelayBoundCodexMessage(message),
-      sendRelayWireMessage
-    );
+    sendRuntimeApplicationMessage("codex", message);
   });
 
   codex.onClose(() => {
@@ -513,6 +509,7 @@ function startBridge({
     bridgeWakeAssertion.stop();
     clearReconnectTimer();
     stopContextUsageWatcher();
+    runtimeProviderRouter?.shutdown();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
     desktopRefresher.handleTransportReset();
@@ -529,6 +526,7 @@ function startBridge({
     clearReconnectTimer();
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
+    runtimeProviderRouter?.shutdown();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
@@ -536,6 +534,7 @@ function startBridge({
     clearReconnectTimer();
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
+    runtimeProviderRouter?.shutdown();
   }));
 
   // Routes decrypted app payloads through the same bridge handlers as before.
@@ -584,10 +583,23 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
       return;
     }
+    if (!runtimeProviderRouter) {
+      runtimeProviderRouter = createRuntimeProviderRouter({
+        sendApplicationResponse,
+        sendCodexRequest,
+        sendRuntimeMessage: (message) => sendRuntimeApplicationMessage("claude", message),
+        logPrefix: "[remodex]",
+      });
+    }
+    if (runtimeProviderRouter.handleApplicationMessage(rawMessage)) {
+      return;
+    }
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
-    const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
+    const codexRequest = stripProviderFieldsForCodex(
+      disableUnsupportedReasoningSummaryForTurnStart(rawMessage)
+    );
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
@@ -595,6 +607,17 @@ function startBridge({
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
+    secureTransport.queueOutboundApplicationMessage(
+      sanitizeRelayBoundCodexMessage(rawMessage),
+      sendRelayWireMessage
+    );
+  }
+
+  // Sends provider runtime output through the same relay, refresh, and notification side effects.
+  function sendRuntimeApplicationMessage(provider, rawMessage) {
+    desktopRefresher.handleOutbound(rawMessage);
+    pushNotificationTracker.handleOutbound(rawMessage);
+    rememberThreadFromMessage(provider, rawMessage);
     secureTransport.queueOutboundApplicationMessage(
       sanitizeRelayBoundCodexMessage(rawMessage),
       sendRelayWireMessage
@@ -1593,6 +1616,42 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
       ...params,
       summary: "none",
     },
+  });
+}
+
+// Keeps provider routing metadata on the bridge side when forwarding requests to Codex app-server.
+function stripProviderFieldsForCodex(rawMessage) {
+  const parsed = parseBridgeJSON(rawMessage);
+  if (!parsed || !parsed.params || typeof parsed.params !== "object" || Array.isArray(parsed.params)) {
+    return rawMessage;
+  }
+
+  const params = { ...parsed.params };
+  delete params.modelProvider;
+  delete params.model_provider;
+  delete params.provider;
+  delete params.runtimeProvider;
+  delete params.runtime_provider;
+  delete params.harness;
+
+  if (params.collaborationMode && typeof params.collaborationMode === "object") {
+    const collaborationMode = { ...params.collaborationMode };
+    if (collaborationMode.settings && typeof collaborationMode.settings === "object") {
+      const settings = { ...collaborationMode.settings };
+      delete settings.modelProvider;
+      delete settings.model_provider;
+      delete settings.provider;
+      delete settings.runtimeProvider;
+      delete settings.runtime_provider;
+      delete settings.harness;
+      collaborationMode.settings = settings;
+    }
+    params.collaborationMode = collaborationMode;
+  }
+
+  return JSON.stringify({
+    ...parsed,
+    params,
   });
 }
 
@@ -3423,4 +3482,5 @@ module.exports = {
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeThreadHistoryImagesForRelay,
   startBridge,
+  stripProviderFieldsForCodex,
 };
