@@ -87,32 +87,19 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   const pendingUserMessages = [];
 
   const raw = String(content || "");
-  let index = 0;
+  let index = -1;
   let lineStart = 0;
-  let lineNumber = 0;
   while (lineStart < raw.length) {
+    index += 1;
     let lineEnd = raw.indexOf("\n", lineStart);
     if (lineEnd === -1) {
       lineEnd = raw.length;
     }
-    let end = lineEnd;
-    if (end > lineStart && raw.charCodeAt(end - 1) === 13) {
-      end -= 1;
-    }
-    let start = lineStart;
-    while (start < end && (raw.charCodeAt(start) === 32 || raw.charCodeAt(start) === 9)) {
-      start += 1;
-    }
-    while (end > start && (raw.charCodeAt(end - 1) === 32 || raw.charCodeAt(end - 1) === 9)) {
-      end -= 1;
-    }
+    const line = raw.substring(lineStart, lineEnd).trim();
     lineStart = lineEnd + 1;
-    lineNumber += 1;
-    index = lineNumber - 1;
-    if (start >= end) {
+    if (!line) {
       continue;
     }
-    const line = raw.substring(start, end);
 
     let entry;
     try {

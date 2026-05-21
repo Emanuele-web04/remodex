@@ -85,9 +85,6 @@ function createPushNotificationServiceClient({
           signal: controller?.signal,
         });
       } catch (error) {
-        if (timeoutID) {
-          clearTimeout(timeoutID);
-        }
         lastError = error;
         if (isAbortError(error)) {
           continue;

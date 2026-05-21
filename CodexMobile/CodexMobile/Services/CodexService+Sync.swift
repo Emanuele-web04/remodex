@@ -35,7 +35,7 @@ extension CodexService {
         let listIntervalBackgroundNs: UInt64 = 75_000_000_000 * networkMultiplier
         let historyIntervalForegroundNs: UInt64 = 3_000_000_000 * networkMultiplier
         let historyIntervalForegroundMirroredNs: UInt64 = 1_000_000_000 * networkMultiplier
-        let historyIntervalBackgroundIdleNs: UInt64 = 90_000_000_000
+        let historyIntervalBackgroundIdleNs: UInt64 = 90_000_000_000 * networkMultiplier
         let historyIntervalBackgroundRunningNs: UInt64 = 12_000_000_000 * networkMultiplier
         let watchIntervalForegroundNs: UInt64 = 2_000_000_000 * networkMultiplier
         let watchIntervalBackgroundNs: UInt64 = 15_000_000_000 * networkMultiplier

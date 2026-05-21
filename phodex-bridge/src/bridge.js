@@ -106,8 +106,8 @@ const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "previous_cursor",
 ];
 const jsonlArtifactItemsCacheByThread = new Map();
-const JSONL_ARTIFACT_CACHE_MAX_SIZE = 64;
 const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
+const JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE = 200;
 
 function evictLRUEntries(map, maxSize) {
   if (map.size <= maxSize) {
@@ -1022,9 +1022,9 @@ function startBridge({
     }
     evictLRUEntries(forwardedRequestMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
     evictLRUEntries(relaySanitizedResponseMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
-    evictLRUEntries(jsonlArtifactItemsCacheByThread, JSONL_ARTIFACT_CACHE_MAX_SIZE);
-    evictLRUEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ARTIFACT_CACHE_MAX_SIZE);
-    evictLRUEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ARTIFACT_CACHE_MAX_SIZE);
+    evictLRUEntries(jsonlArtifactItemsCacheByThread, RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES);
+    evictLRUEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
+    evictLRUEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
   }
 
   function safeParseJSON(value) {
