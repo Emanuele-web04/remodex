@@ -106,6 +106,21 @@ const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "previous_cursor",
 ];
 const jsonlArtifactItemsCacheByThread = new Map();
+const JSONL_ARTIFACT_CACHE_MAX_SIZE = 64;
+const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
+
+function evictLRUEntries(map, maxSize) {
+  if (map.size <= maxSize) {
+    return;
+  }
+  const excess = map.size - maxSize;
+  const iterator = map.keys();
+  for (let i = 0; i < excess; i += 1) {
+    const key = iterator.next().value;
+    map.delete(key);
+  }
+}
+
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -382,7 +397,9 @@ function startBridge({
     }
 
     reconnectAttempt += 1;
-    const delayMs = Math.min(1_000 * reconnectAttempt, 5_000);
+    const baseDelayMs = Math.min(1_000 * reconnectAttempt, 5_000);
+    const jitterMs = Math.floor(Math.random() * Math.min(baseDelayMs, 2_000));
+    const delayMs = baseDelayMs + jitterMs;
     logConnectionStatus("connecting");
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -397,6 +414,11 @@ function startBridge({
 
     logConnectionStatus("connecting");
     const nextSocket = new WebSocket(relaySessionUrl, {
+      perMessageDeflate: {
+        zlibDeflateOptions: { level: 6 },
+        threshold: 256,
+        concurrencyLimit: 4,
+      },
       // The relay uses this per-session secret to authenticate the first push registration.
       headers: {
         "x-role": "mac",
@@ -998,6 +1020,11 @@ function startBridge({
         relaySanitizedResponseMethodsById.delete(requestId);
       }
     }
+    evictLRUEntries(forwardedRequestMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    evictLRUEntries(relaySanitizedResponseMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    evictLRUEntries(jsonlArtifactItemsCacheByThread, JSONL_ARTIFACT_CACHE_MAX_SIZE);
+    evictLRUEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ARTIFACT_CACHE_MAX_SIZE);
+    evictLRUEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ARTIFACT_CACHE_MAX_SIZE);
   }
 
   function safeParseJSON(value) {

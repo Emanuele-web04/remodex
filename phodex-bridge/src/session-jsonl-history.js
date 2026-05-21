@@ -37,9 +37,15 @@ function parseSessionJsonlMetadata(content) {
   let threadId = "";
   let cwd = "";
 
-  const lines = String(content || "").split(/\r?\n/);
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
+  const raw = String(content || "");
+  let lineStart = 0;
+  while (lineStart < raw.length) {
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    const line = raw.substring(lineStart, lineEnd).trim();
+    lineStart = lineEnd + 1;
     if (!line) {
       continue;
     }
@@ -80,12 +86,33 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   const skippedCallIds = new Set();
   const pendingUserMessages = [];
 
-  const lines = String(content || "").split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index].trim();
-    if (!line) {
+  const raw = String(content || "");
+  let index = 0;
+  let lineStart = 0;
+  let lineNumber = 0;
+  while (lineStart < raw.length) {
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    let end = lineEnd;
+    if (end > lineStart && raw.charCodeAt(end - 1) === 13) {
+      end -= 1;
+    }
+    let start = lineStart;
+    while (start < end && (raw.charCodeAt(start) === 32 || raw.charCodeAt(start) === 9)) {
+      start += 1;
+    }
+    while (end > start && (raw.charCodeAt(end - 1) === 32 || raw.charCodeAt(end - 1) === 9)) {
+      end -= 1;
+    }
+    lineStart = lineEnd + 1;
+    lineNumber += 1;
+    index = lineNumber - 1;
+    if (start >= end) {
       continue;
     }
+    const line = raw.substring(start, end);
 
     let entry;
     try {

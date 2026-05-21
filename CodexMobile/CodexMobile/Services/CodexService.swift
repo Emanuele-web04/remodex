@@ -555,6 +555,10 @@ final class CodexService {
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true
+    // Network quality flag: when true, sync and keepalive intervals are stretched to reduce
+    // bandwidth usage on constrained (cellular, low-signal) connections.
+    var isConstrainedNetwork = false
+    @ObservationIgnored var networkPathMonitor: NWPathMonitor?
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
@@ -912,6 +916,26 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
+        startNetworkPathMonitor()
+    }
+
+    func startNetworkPathMonitor() {
+        networkPathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        networkPathMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self] path in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let constrained = path.isConstrained || path.isExpensive
+                if self.isConstrainedNetwork != constrained {
+                    self.isConstrainedNetwork = constrained
+                    if self.isConnected, self.isInitialized {
+                        self.startSyncLoop()
+                    }
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "CodexMobile.NetworkPathMonitor", qos: .utility))
     }
 
     // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.

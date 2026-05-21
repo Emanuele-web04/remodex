@@ -5,6 +5,8 @@
 // Depends on: global fetch
 
 const DEFAULT_PUSH_SERVICE_TIMEOUT_MS = 10_000;
+const DEFAULT_PUSH_SERVICE_RETRY_LIMIT = 2;
+const DEFAULT_PUSH_SERVICE_RETRY_BASE_DELAY_MS = 500;
 
 function createPushNotificationServiceClient({
   baseUrl = "",
@@ -55,48 +57,71 @@ function createPushNotificationServiceClient({
       return { ok: false, skipped: true };
     }
 
-    const controller = typeof AbortController === "function" && requestTimeoutMs > 0
-      ? new AbortController()
-      : null;
-    const timeoutID = controller
-      ? setTimeout(() => {
-        controller.abort(createTimeoutAbortError(requestTimeoutMs));
-      }, requestTimeoutMs)
-      : null;
+    const bodyJSON = JSON.stringify(payload);
+    let lastError = null;
+    for (let attempt = 0; attempt <= DEFAULT_PUSH_SERVICE_RETRY_LIMIT; attempt += 1) {
+      if (attempt > 0) {
+        const delayMs = DEFAULT_PUSH_SERVICE_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
 
-    let response;
-    try {
-      response = await fetchImpl(`${normalizedBaseUrl}${pathname}`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(payload),
-        signal: controller?.signal,
-      });
-    } catch (error) {
-      if (isAbortError(error)) {
-        const timeoutError = new Error(`Push service request timed out after ${requestTimeoutMs}ms`);
-        timeoutError.code = "push_request_timeout";
-        throw timeoutError;
+      const controller = typeof AbortController === "function" && requestTimeoutMs > 0
+        ? new AbortController()
+        : null;
+      const timeoutID = controller
+        ? setTimeout(() => {
+          controller.abort(createTimeoutAbortError(requestTimeoutMs));
+        }, requestTimeoutMs)
+        : null;
+
+      let response;
+      try {
+        response = await fetchImpl(`${normalizedBaseUrl}${pathname}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: bodyJSON,
+          signal: controller?.signal,
+        });
+      } catch (error) {
+        if (timeoutID) {
+          clearTimeout(timeoutID);
+        }
+        lastError = error;
+        if (isAbortError(error)) {
+          continue;
+        }
+        if (isRetryableNetworkError(error)) {
+          continue;
+        }
+        throw error;
+      } finally {
+        if (timeoutID) {
+          clearTimeout(timeoutID);
+        }
       }
-      throw error;
-    } finally {
-      if (timeoutID) {
-        clearTimeout(timeoutID);
+
+      const responseText = await response.text();
+      const parsed = safeParseJSON(responseText);
+      if (!response.ok) {
+        const message = parsed?.error || parsed?.message || responseText || `HTTP ${response.status}`;
+        const error = new Error(message);
+        error.status = response.status;
+        if (response.status >= 500 && attempt < DEFAULT_PUSH_SERVICE_RETRY_LIMIT) {
+          lastError = error;
+          continue;
+        }
+        throw error;
       }
+
+      return parsed ?? { ok: true };
     }
 
-    const responseText = await response.text();
-    const parsed = safeParseJSON(responseText);
-    if (!response.ok) {
-      const message = parsed?.error || parsed?.message || responseText || `HTTP ${response.status}`;
-      const error = new Error(message);
-      error.status = response.status;
-      throw error;
+    if (lastError) {
+      throw lastError;
     }
-
-    return parsed ?? { ok: true };
+    return { ok: false };
   }
 
   return {
@@ -132,6 +157,13 @@ function createTimeoutAbortError(timeoutMs) {
 
 function isAbortError(error) {
   return error?.name === "AbortError" || error?.code === "ABORT_ERR";
+}
+
+function isRetryableNetworkError(error) {
+  const code = error?.code ?? "";
+  return code === "ECONNRESET" || code === "ECONNREFUSED" || code === "ETIMEDOUT"
+    || code === "ENETUNREACH" || code === "EHOSTUNREACH" || code === "ENOTFOUND"
+    || error?.message?.includes("fetch failed");
 }
 
 function safeParseJSON(value) {

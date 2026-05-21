@@ -467,15 +467,22 @@ function createBridgeSecureTransport({
   }
 
   function trimOutboundBuffer() {
+    let removeCount = 0;
+    let removedBytes = 0;
     while (
-      outboundBuffer.length > MAX_BRIDGE_OUTBOUND_MESSAGES
-      || outboundBufferBytes > MAX_BRIDGE_OUTBOUND_BYTES
+      (outboundBuffer.length - removeCount) > MAX_BRIDGE_OUTBOUND_MESSAGES
+      || (outboundBufferBytes - removedBytes) > MAX_BRIDGE_OUTBOUND_BYTES
     ) {
-      const removed = outboundBuffer.shift();
-      if (!removed) {
+      const entry = outboundBuffer[removeCount];
+      if (!entry) {
         break;
       }
-      outboundBufferBytes = Math.max(0, outboundBufferBytes - removed.sizeBytes);
+      removedBytes += entry.sizeBytes;
+      removeCount += 1;
+    }
+    if (removeCount > 0) {
+      outboundBuffer.splice(0, removeCount);
+      outboundBufferBytes = Math.max(0, outboundBufferBytes - removedBytes);
     }
   }
 

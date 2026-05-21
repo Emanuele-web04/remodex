@@ -170,9 +170,15 @@ function createThreadRolloutLiveMirror({
           return;
         }
 
-        const combined = `${partialLine}${chunk}`;
-        const lines = combined.split("\n");
-        partialLine = lines.pop() || "";
+        const combined = partialLine ? `${partialLine}${chunk}` : chunk;
+        let searchStart = 0;
+        let nlIndex;
+        const lines = [];
+        while ((nlIndex = combined.indexOf("\n", searchStart)) !== -1) {
+          lines.push(combined.substring(searchStart, nlIndex));
+          searchStart = nlIndex + 1;
+        }
+        partialLine = searchStart < combined.length ? combined.substring(searchStart) : "";
         processRolloutLines(lines, state, sendApplicationResponse);
         return;
       }

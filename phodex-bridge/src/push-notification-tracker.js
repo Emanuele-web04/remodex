@@ -9,6 +9,8 @@ const {
 } = require("./push-notification-completion-dedupe");
 
 const DEFAULT_PREVIEW_MAX_CHARS = 160;
+const MAX_THREAD_TITLE_ENTRIES = 200;
+const MAX_TURN_STATE_ENTRIES = 500;
 
 function createPushNotificationTracker({
   sessionId,
@@ -83,6 +85,10 @@ function createPushNotificationTracker({
 
     const nextTitle = extractThreadTitle(params, eventObject);
     if (nextTitle) {
+      if (!threadTitleById.has(threadId) && threadTitleById.size >= MAX_THREAD_TITLE_ENTRIES) {
+        const oldest = threadTitleById.keys().next().value;
+        threadTitleById.delete(oldest);
+      }
       threadTitleById.set(threadId, nextTitle);
     }
   }
@@ -225,6 +231,10 @@ function createPushNotificationTracker({
   function ensureTurnState(threadId, turnId) {
     const key = turnStateKey(threadId, turnId);
     if (!turnStateByKey.has(key)) {
+      if (turnStateByKey.size >= MAX_TURN_STATE_ENTRIES) {
+        const oldest = turnStateByKey.keys().next().value;
+        turnStateByKey.delete(oldest);
+      }
       turnStateByKey.set(key, {
         latestAssistantPreview: "",
         latestFailurePreview: "",
