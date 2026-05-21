@@ -554,6 +554,10 @@ function readBridgeConfig({
   );
   const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
   const explicitKeepMacAwakeEnabled = readOptionalBooleanEnv(["REMODEX_KEEP_MAC_AWAKE"], env);
+  const explicitDebugLoggingEnabled = readOptionalBooleanEnv(
+    ["REMODEX_DEBUG", "REMODEX_DEBUG_LOGS"],
+    env
+  );
   const persistedKeepMacAwakeEnabled = typeof daemonConfig.keepMacAwakeEnabled === "boolean"
     ? daemonConfig.keepMacAwakeEnabled
     : null;
@@ -580,6 +584,7 @@ function readBridgeConfig({
     keepMacAwakeEnabled: explicitKeepMacAwakeEnabled == null
       ? (persistedKeepMacAwakeEnabled == null ? false : persistedKeepMacAwakeEnabled)
       : explicitKeepMacAwakeEnabled,
+    debugLoggingEnabled: explicitDebugLoggingEnabled === true,
     codexEndpoint,
     desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
     refreshCommand,

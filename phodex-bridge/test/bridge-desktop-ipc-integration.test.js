@@ -424,6 +424,169 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
   });
 });
 
+test("bridge swallows late Codex initialize responses after timeout", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => {
+      const parsed = safeParseJSON(data.toString("utf8"));
+      if (parsed) {
+        relayMessages.push(parsed);
+      }
+    });
+  });
+
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+  });
+
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      pushPreviewMaxChars: 160,
+      refreshEnabled: false,
+      refreshDebounceMs: 1,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcSocketPath: "",
+      forwardedInitializeTimeoutMs: 25,
+      timedOutInitializeTTLms: 1_000,
+    },
+  });
+
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "init-timeout",
+    method: "initialize",
+    params: {},
+  }));
+
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "init-timeout"));
+  const timeoutResponse = await waitForMessage(
+    relayMessages,
+    (message) => message.id === "init-timeout" && message.error?.data?.errorCode === "codex_initialize_timeout",
+    500
+  );
+  assert.equal(timeoutResponse.error.code, -32002);
+
+  fakeCodex.emitMessage(JSON.stringify({
+    id: "init-timeout",
+    result: {
+      userAgent: "fake-codex",
+    },
+  }));
+  await wait(25);
+
+  const initializeResponses = relayMessages.filter((message) => message.id === "init-timeout");
+  assert.equal(initializeResponses.length, 1);
+});
+
+test("bridge converts forwarded Codex already-initialized errors into initialize success", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => {
+      const parsed = safeParseJSON(data.toString("utf8"));
+      if (parsed) {
+        relayMessages.push(parsed);
+      }
+    });
+  });
+
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+  });
+
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      pushPreviewMaxChars: 160,
+      refreshEnabled: false,
+      refreshDebounceMs: 1,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcSocketPath: "",
+    },
+  });
+
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "init-already",
+    method: "initialize",
+    params: {},
+  }));
+
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "init-already"));
+  fakeCodex.emitMessage(JSON.stringify({
+    id: "init-already",
+    error: {
+      code: -32000,
+      message: "Already initialized",
+    },
+  }));
+
+  const initializeResponse = await waitForMessage(
+    relayMessages,
+    (message) => message.id === "init-already" && message.result?.bridgeManaged === true,
+    500
+  );
+  assert.equal(initializeResponse.error, undefined);
+
+  relaySocket.send(JSON.stringify({
+    id: "init-warm",
+    method: "initialize",
+    params: {},
+  }));
+
+  const warmResponse = await waitForMessage(
+    relayMessages,
+    (message) => message.id === "init-warm" && message.result?.bridgeManaged === true,
+    500
+  );
+  assert.equal(warmResponse.error, undefined);
+  assert.equal(fakeCodex.sent.some((message) => message.id === "init-warm"), false);
+});
+
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
 function loadBridgeWithTestDoubles({ createCodexTransportImpl }) {
   const bridgePath = require.resolve("../src/bridge");
@@ -531,6 +694,9 @@ function createFakeCodexTransport({
     },
     emitClose() {
       listeners.close?.();
+    },
+    emitMessage(message) {
+      listeners.message?.(message);
     },
   };
 }

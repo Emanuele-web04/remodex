@@ -245,7 +245,6 @@ function createBridgeSecureTransport({
       transcriptBytes,
       expiresAtForTranscript,
     };
-    activeSession = null;
 
     sendControlMessage({
       kind: "serverHello",
@@ -539,7 +538,20 @@ function createBridgeSecureTransport({
 }
 
 function debugSecureLog(message) {
+  if (!isSecureDebugLoggingEnabled()) {
+    return;
+  }
   console.log(`[remodex][secure] ${message}`);
+}
+
+function isSecureDebugLoggingEnabled(env = process.env) {
+  return ["REMODEX_DEBUG", "REMODEX_DEBUG_LOGS", "REMODEX_SECURE_DEBUG"].some(
+    (name) => isTruthyEnvValue(env?.[name])
+  );
+}
+
+function isTruthyEnvValue(value) {
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 }
 
 function shortId(value) {

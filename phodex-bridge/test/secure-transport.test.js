@@ -448,7 +448,7 @@ test("rebinding the relay socket replays bridge output from the last phone ack",
   );
 });
 
-test("resume replay does not advance the replay watermark before a phone ack", () => {
+test("application outbound waits for resumeState and replays from phone ack", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const phoneIdentity = createOkpKeyPair("ed25519");
   const phoneEphemeral = createOkpKeyPair("x25519");
@@ -483,18 +483,31 @@ test("resume replay does not advance the replay watermark before a phone ack", (
   });
 
   secureTransport.queueOutboundApplicationMessage(
-    JSON.stringify({ id: "response-6", result: { ok: true } }),
+    JSON.stringify({ id: "response-1", result: { ok: true } }),
     () => {
-      throw new Error("expected bound sender to stay attached after secureReady");
+      throw new Error("expected outbound to wait for resumeState");
     }
   );
+  secureTransport.queueOutboundApplicationMessage(
+    JSON.stringify({ id: "response-2", result: { ok: true } }),
+    () => {
+      throw new Error("expected outbound to wait for resumeState");
+    }
+  );
+  secureTransport.queueOutboundApplicationMessage(
+    JSON.stringify({ id: "response-3", result: { ok: true } }),
+    () => {
+      throw new Error("expected outbound to wait for resumeState");
+    }
+  );
+  assert.equal(initialReplayWireMessages.length, 0);
 
   secureTransport.handleIncomingWireMessage(
     JSON.stringify({
       kind: "resumeState",
       sessionId: "session-6",
       keyEpoch: serverHello.keyEpoch,
-      lastAppliedBridgeOutboundSeq: 0,
+      lastAppliedBridgeOutboundSeq: 1,
     }),
     {
       sendControlMessage() {},
@@ -502,6 +515,7 @@ test("resume replay does not advance the replay watermark before a phone ack", (
     }
   );
 
+  assert.equal(initialReplayWireMessages.length, 2);
   const sharedSecret = diffieHellman({
     privateKey: createPrivateKey({
       key: {
@@ -526,8 +540,14 @@ test("resume replay does not advance the replay watermark before a phone ack", (
   const macToPhoneKey = Buffer.from(
     hkdfSync("sha256", sharedSecret, salt, Buffer.from(`${infoPrefix}|macToPhone`, "utf8"), 32)
   );
-
-  assert.equal(initialReplayWireMessages.length, 1);
+  const replayedPayloads = initialReplayWireMessages.map((message) => {
+    const envelope = JSON.parse(message);
+    return decryptEnvelope(envelope, macToPhoneKey);
+  });
+  assert.deepEqual(
+    replayedPayloads.map((payload) => payload.bridgeOutboundSeq),
+    [2, 3]
+  );
 
   const reboundWireMessages = [];
   secureTransport.bindLiveSendWireMessage((message) => {
@@ -535,11 +555,7 @@ test("resume replay does not advance the replay watermark before a phone ack", (
     return true;
   });
 
-  assert.equal(reboundWireMessages.length, 1);
-  const reboundEnvelope = JSON.parse(reboundWireMessages[0]);
-  const reboundPayload = decryptEnvelope(reboundEnvelope, macToPhoneKey);
-  assert.equal(reboundPayload.bridgeOutboundSeq, 1);
-  assert.equal(reboundPayload.payloadText, JSON.stringify({ id: "response-6", result: { ok: true } }));
+  assert.equal(reboundWireMessages.length, 2);
 });
 
 function finishHandshake({

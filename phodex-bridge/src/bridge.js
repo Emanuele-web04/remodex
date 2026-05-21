@@ -174,7 +174,8 @@ function startBridge({
   let lastConnectionStatus = null;
   let codexLaunchState = config.codexEndpoint ? "connected" : "starting";
   let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
-  const forwardedInitializeRequestIds = new Set();
+  const forwardedInitializeRequestIds = new Map();
+  const timedOutInitializeRequestIds = new Map();
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
@@ -192,6 +193,8 @@ function startBridge({
     "thread/turns/list",
   ]);
   const forwardedRequestMethodTTLms = 2 * 60_000;
+  const forwardedInitializeTimeoutMs = parsePositiveInteger(config.forwardedInitializeTimeoutMs, 15_000);
+  const timedOutInitializeTTLms = parsePositiveInteger(config.timedOutInitializeTTLms, 30_000);
   const pendingAuthLogin = {
     loginId: null,
     authUrl: null,
@@ -263,6 +266,7 @@ function startBridge({
 
   codex.onError((error) => {
     codexLaunchState = "error";
+    debugBridgeLog("codex", `error ${error.message}`, "error");
     publishBridgeStatus({
       state: "error",
       connectionStatus: "error",
@@ -477,11 +481,14 @@ function startBridge({
   connectRelay();
 
   codex.onMessage((message) => {
+    debugBridgeLog("codex", `message ${summarizeBridgeMessage(message)}`);
     if (handleBridgeManagedCodexResponse(message)) {
       return;
     }
+    if (trackCodexHandshakeState(message)) {
+      return;
+    }
     updatePendingAuthLoginFromCodexMessage(message);
-    trackCodexHandshakeState(message);
     desktopRefresher.handleOutbound(message);
     pushNotificationTracker.handleOutbound(message);
     rememberThreadFromMessage("codex", message);
@@ -493,6 +500,7 @@ function startBridge({
 
   codex.onClose(() => {
     const wasShuttingDown = isShuttingDown;
+    debugBridgeLog("codex", `closed shuttingDown=${wasShuttingDown}`, "warn");
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
     logConnectionStatus("disconnected");
@@ -517,6 +525,7 @@ function startBridge({
     desktopIpcActionFollower?.stopAll();
     desktopRefresher.handleTransportReset();
     failBridgeManagedCodexRequests(new Error("Codex transport closed before the bridge request completed."));
+    clearForwardedInitializeRequests();
     forwardedRequestMethodsById.clear();
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
       socket.close();
@@ -529,6 +538,7 @@ function startBridge({
     clearReconnectTimer();
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
+    clearForwardedInitializeRequests();
   }));
   process.on("SIGTERM", () => shutdown(codex, () => socket, () => {
     isShuttingDown = true;
@@ -536,6 +546,7 @@ function startBridge({
     clearReconnectTimer();
     clearRelayWatchdog();
     bridgeStatusPublisher.stopHeartbeat();
+    clearForwardedInitializeRequests();
   }));
 
   // Routes decrypted app payloads through the same bridge handlers as before.
@@ -587,14 +598,16 @@ function startBridge({
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
-    const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
+    const codexRequest = prepareForwardedCodexMessage(disableUnsupportedReasoningSummaryForTurnStart(rawMessage));
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
+    debugBridgeLog("codex", `send ${summarizeBridgeMessage(codexRequest)}`);
     codex.send(codexRequest);
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
   function sendApplicationResponse(rawMessage) {
+    debugBridgeLog("app", `response ${summarizeBridgeMessage(rawMessage)}`);
     secureTransport.queueOutboundApplicationMessage(
       sanitizeRelayBoundCodexMessage(rawMessage),
       sendRelayWireMessage
@@ -1008,6 +1021,57 @@ function startBridge({
     }
   }
 
+  function summarizeBridgeMessage(rawMessage) {
+    const parsed = safeParseJSON(rawMessage);
+    if (!parsed || typeof parsed !== "object") {
+      return "non-json";
+    }
+
+    const method = normalizeNonEmptyString(parsed.method);
+    if (method) {
+      const suffix = method === "initialize" ? ` ${summarizeInitializePayload(parsed)}` : "";
+      return `method=${method} id=${parsed.id == null ? "none" : parsed.id}${suffix}`;
+    }
+    if (parsed.id != null && parsed.result != null) {
+      const keys = Object.keys(parsed.result || {}).slice(0, 8).join(",");
+      return `response=${parsed.id} resultKeys=${keys || "none"}`;
+    }
+    if (parsed.id != null && parsed.error != null) {
+      const code = parsed.error && parsed.error.code != null ? parsed.error.code : "unknown";
+      const message = normalizeNonEmptyString(parsed.error?.message);
+      return `response=${parsed.id} error=${code}${message ? ` message=${message}` : ""}`;
+    }
+    if (parsed.id != null) {
+      return `response=${parsed.id}`;
+    }
+    return "json";
+  }
+
+  function summarizeInitializePayload(parsed) {
+    const params = parsed?.params && typeof parsed.params === "object" ? parsed.params : null;
+    const clientInfo = params?.clientInfo && typeof params.clientInfo === "object" ? params.clientInfo : null;
+    const capabilities = params?.capabilities && typeof params.capabilities === "object" ? params.capabilities : null;
+    const capabilityKeys = capabilities ? Object.keys(capabilities).slice(0, 8).join(",") : "";
+    return [
+      `hasParams=${Boolean(params)}`,
+      `hasClientInfo=${Boolean(clientInfo)}`,
+      `clientName=${normalizeNonEmptyString(clientInfo?.name) || "none"}`,
+      `clientVersion=${normalizeVersionString(clientInfo?.version) || "none"}`,
+      `hasCapabilities=${Boolean(capabilities)}`,
+      `capabilityKeys=${capabilityKeys || "none"}`,
+      `experimentalApi=${capabilities?.experimentalApi === true}`,
+    ].join(" ");
+  }
+
+  function debugBridgeLog(area, message, level = "log") {
+    if (config.debugLoggingEnabled !== true) {
+      return;
+    }
+
+    const writer = typeof console[level] === "function" ? console[level] : console.log;
+    writer.call(console, `[remodex][${area}] ${message}`);
+  }
+
   function rememberThreadFromMessage(source, rawMessage) {
     const context = extractBridgeMessageContext(rawMessage);
     if (!context.threadId) {
@@ -1100,6 +1164,7 @@ function startBridge({
     }
 
     if (method === "initialize" && parsed.id != null) {
+      debugBridgeLog("app", `initialize payload ${summarizeInitializePayload(parsed)}`);
       const compatibilityError = bridgeManagedInitializeCompatibilityError(parsed.params || {});
       if (compatibilityError) {
         sendResponse(JSON.stringify({
@@ -1110,16 +1175,13 @@ function startBridge({
       }
 
       if (codexHandshakeState !== "warm") {
-        forwardedInitializeRequestIds.add(String(parsed.id));
+        trackForwardedInitializeRequest(parsed.id);
+        debugBridgeLog("app", `initialize forwarded id=${parsed.id} state=${codexHandshakeState}`);
         return false;
       }
 
-      sendResponse(JSON.stringify({
-        id: parsed.id,
-        result: {
-          bridgeManaged: true,
-        },
-      }));
+      debugBridgeLog("app", `initialize bridge-managed id=${parsed.id} state=${codexHandshakeState}`);
+      sendBridgeManagedInitializeResponse(parsed.id, sendResponse);
       return true;
     }
 
@@ -1128,6 +1190,115 @@ function startBridge({
     }
 
     return false;
+  }
+
+  function prepareForwardedCodexMessage(rawMessage) {
+    const parsed = safeParseJSON(rawMessage);
+    if (!parsed || typeof parsed !== "object") {
+      return rawMessage;
+    }
+
+    const method = normalizeNonEmptyString(parsed.method);
+    if (method !== "initialize") {
+      return rawMessage;
+    }
+
+    const params = parsed.params && typeof parsed.params === "object" ? parsed.params : {};
+    const clientInfo = params.clientInfo && typeof params.clientInfo === "object" ? params.clientInfo : {};
+    const capabilities = params.capabilities && typeof params.capabilities === "object" ? params.capabilities : {};
+    const normalized = {
+      ...parsed,
+      params: {
+        ...params,
+        clientInfo: {
+          ...clientInfo,
+          name: normalizeNonEmptyString(clientInfo.name) || "codexmobile_ios",
+          title: normalizeNonEmptyString(clientInfo.title) || "Remodex iOS",
+          version: normalizeVersionString(clientInfo.version)
+            || normalizeVersionString(deviceState.lastSeenPhoneAppVersion)
+            || normalizeVersionString(bridgePackageVersion)
+            || "unknown",
+        },
+        capabilities: {
+          ...capabilities,
+          experimentalApi: capabilities.experimentalApi !== false,
+        },
+      },
+    };
+
+    debugBridgeLog("codex", `normalized initialize ${summarizeInitializePayload(normalized)}`);
+    return JSON.stringify(normalized);
+  }
+
+  function trackForwardedInitializeRequest(id) {
+    const key = String(id);
+    const existing = forwardedInitializeRequestIds.get(key);
+    if (existing?.timeout) {
+      clearTimeout(existing.timeout);
+    }
+    clearTimedOutInitializeRequest(key);
+
+    const timeout = setTimeout(() => {
+      forwardedInitializeRequestIds.delete(key);
+      rememberTimedOutInitializeRequest(key);
+      debugBridgeLog("codex", `initialize timeout id=${key} after ${forwardedInitializeTimeoutMs}ms`, "warn");
+      sendApplicationResponse(JSON.stringify({
+        id,
+        error: {
+          code: -32002,
+          message: "Codex app-server did not respond to initialize in time.",
+          data: {
+            errorCode: "codex_initialize_timeout",
+          },
+        },
+      }));
+    }, forwardedInitializeTimeoutMs);
+    timeout.unref?.();
+
+    forwardedInitializeRequestIds.set(key, {
+      timeout,
+      createdAt: Date.now(),
+    });
+  }
+
+  function rememberTimedOutInitializeRequest(key) {
+    const existing = timedOutInitializeRequestIds.get(key);
+    if (existing?.timeout) {
+      clearTimeout(existing.timeout);
+    }
+
+    const timeout = setTimeout(() => {
+      timedOutInitializeRequestIds.delete(key);
+    }, timedOutInitializeTTLms);
+    timeout.unref?.();
+
+    timedOutInitializeRequestIds.set(key, {
+      timeout,
+      createdAt: Date.now(),
+    });
+  }
+
+  function clearTimedOutInitializeRequest(key) {
+    const existing = timedOutInitializeRequestIds.get(key);
+    if (existing?.timeout) {
+      clearTimeout(existing.timeout);
+    }
+    timedOutInitializeRequestIds.delete(key);
+  }
+
+  function clearForwardedInitializeRequests() {
+    for (const forwardedInitialize of forwardedInitializeRequestIds.values()) {
+      if (forwardedInitialize?.timeout) {
+        clearTimeout(forwardedInitialize.timeout);
+      }
+    }
+    forwardedInitializeRequestIds.clear();
+    for (const timedOutInitialize of timedOutInitializeRequestIds.values()) {
+      if (timedOutInitialize?.timeout) {
+        clearTimeout(timedOutInitialize.timeout);
+      }
+    }
+    timedOutInitializeRequestIds.clear();
   }
 
   // Blocks bridge/app version skew before the phone starts calling newer bridge APIs.
@@ -1186,32 +1357,82 @@ function startBridge({
     try {
       parsed = JSON.parse(rawMessage);
     } catch {
-      return;
+      return false;
     }
 
     const responseId = parsed?.id;
     if (responseId == null) {
-      return;
+      return false;
     }
 
     const responseKey = String(responseId);
-    if (!forwardedInitializeRequestIds.has(responseKey)) {
-      return;
+    const forwardedInitialize = forwardedInitializeRequestIds.get(responseKey);
+    if (!forwardedInitialize) {
+      if (!timedOutInitializeRequestIds.has(responseKey)) {
+        return false;
+      }
+
+      if (parsed?.result != null) {
+        codexHandshakeState = "warm";
+        debugBridgeLog("codex", `late initialize response accepted id=${responseKey} result=true`, "warn");
+        return true;
+      }
+
+      const lateErrorMessage = normalizeCodexErrorMessage(parsed);
+      if (isAlreadyInitializedErrorMessage(lateErrorMessage)) {
+        codexHandshakeState = "warm";
+        debugBridgeLog("codex", `late initialize already warm id=${responseKey}`, "warn");
+        return true;
+      }
+
+      debugBridgeLog(
+        "codex",
+        `late initialize response swallowed id=${responseKey} message=${lateErrorMessage || "unknown"}`,
+        "warn"
+      );
+      return true;
     }
 
+    if (forwardedInitialize.timeout) {
+      clearTimeout(forwardedInitialize.timeout);
+    }
     forwardedInitializeRequestIds.delete(responseKey);
 
     if (parsed?.result != null) {
       codexHandshakeState = "warm";
-      return;
+      debugBridgeLog("codex", `initialize response accepted id=${responseKey} result=true`);
+      return false;
     }
 
-    const errorMessage = typeof parsed?.error?.message === "string"
+    const errorMessage = normalizeCodexErrorMessage(parsed);
+    if (isAlreadyInitializedErrorMessage(errorMessage)) {
+      codexHandshakeState = "warm";
+      debugBridgeLog("codex", `initialize already warm id=${responseKey}`);
+      sendBridgeManagedInitializeResponse(responseId);
+      return true;
+    }
+
+    debugBridgeLog("codex", `initialize response error id=${responseKey} message=${errorMessage || "unknown"}`, "warn");
+    return false;
+  }
+
+  function sendBridgeManagedInitializeResponse(id, sendResponse = sendApplicationResponse) {
+    sendResponse(JSON.stringify({
+      id,
+      result: {
+        bridgeManaged: true,
+      },
+    }));
+  }
+
+  function normalizeCodexErrorMessage(parsed) {
+    return typeof parsed?.error?.message === "string"
       ? parsed.error.message.toLowerCase()
       : "";
-    if (errorMessage.includes("already initialized")) {
-      codexHandshakeState = "warm";
-    }
+  }
+
+  function isAlreadyInitializedErrorMessage(message) {
+    return typeof message === "string" && message.includes("already initialized");
   }
 
   // Runs bridge-private JSON-RPC calls against the local app-server so token-bearing responses
@@ -1417,6 +1638,7 @@ function startBridge({
     desktopIpcActionFollower?.stopAll();
     desktopRefresher.handleTransportReset();
     failBridgeManagedCodexRequests(new Error("Bridge stopped before the request completed."));
+    clearForwardedInitializeRequests();
     forwardedRequestMethodsById.clear();
 
     if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
@@ -1684,6 +1906,11 @@ function readString(value) {
 
 function normalizeNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function parsePositiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
 function truncateCommandOutput(value, maxChars = 1_200) {
