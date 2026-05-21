@@ -924,9 +924,9 @@ final class CodexService {
         let monitor = NWPathMonitor()
         networkPathMonitor = monitor
         monitor.pathUpdateHandler = { [weak self] path in
+            let constrained = path.isConstrained
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                let constrained = path.isConstrained
                 if self.isConstrainedNetwork != constrained {
                     self.isConstrainedNetwork = constrained
                     if self.isConnected, self.isInitialized {
