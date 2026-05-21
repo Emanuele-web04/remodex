@@ -1010,16 +1010,26 @@ function startBridge({
   }
 
   function pruneExpiredForwardedRequestMethods(now = Date.now()) {
+    const expiredForwarded = [];
     for (const [requestId, trackedRequest] of forwardedRequestMethodsById.entries()) {
       if (!trackedRequest || (now - trackedRequest.createdAt) >= forwardedRequestMethodTTLms) {
-        forwardedRequestMethodsById.delete(requestId);
+        expiredForwarded.push(requestId);
       }
     }
+    for (const id of expiredForwarded) {
+      forwardedRequestMethodsById.delete(id);
+    }
+
+    const expiredSanitized = [];
     for (const [requestId, trackedRequest] of relaySanitizedResponseMethodsById.entries()) {
       if (!trackedRequest || (now - trackedRequest.createdAt) >= forwardedRequestMethodTTLms) {
-        relaySanitizedResponseMethodsById.delete(requestId);
+        expiredSanitized.push(requestId);
       }
     }
+    for (const id of expiredSanitized) {
+      relaySanitizedResponseMethodsById.delete(id);
+    }
+
     evictOldestEntries(forwardedRequestMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
     evictOldestEntries(relaySanitizedResponseMethodsById, FORWARDED_REQUEST_METHODS_MAX_SIZE);
     evictOldestEntries(jsonlArtifactItemsCacheByThread, RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES);
