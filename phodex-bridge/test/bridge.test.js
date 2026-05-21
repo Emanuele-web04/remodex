@@ -21,6 +21,7 @@ const {
   resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeThreadHistoryImagesForRelay,
+  stripProviderFieldsForCodex,
 } = require("../src/bridge");
 
 function expectedGeneratedImagePath(threadId, fileName) {
@@ -78,6 +79,31 @@ test("normalizeRelayBoundJsonRpcMessage unwraps nested app-server result payload
       nextCursor: null,
     },
   });
+});
+
+test("stripProviderFieldsForCodex removes bridge-only provider metadata", () => {
+  const stripped = JSON.parse(stripProviderFieldsForCodex(JSON.stringify({
+    id: "turn-1",
+    method: "turn/start",
+    params: {
+      threadId: "thread-1",
+      model: "gpt-5.5",
+      modelProvider: "codex",
+      provider: "codex",
+      collaborationMode: {
+        mode: "plan",
+        settings: {
+          model: "gpt-5.5",
+          modelProvider: "codex",
+        },
+      },
+    },
+  })));
+
+  assert.equal(stripped.params.modelProvider, undefined);
+  assert.equal(stripped.params.provider, undefined);
+  assert.equal(stripped.params.collaborationMode.settings.modelProvider, undefined);
+  assert.equal(stripped.params.model, "gpt-5.5");
 });
 
 test("normalizeRelayBoundJsonRpcMessage drops non-RPC relay payloads before iOS decode", () => {

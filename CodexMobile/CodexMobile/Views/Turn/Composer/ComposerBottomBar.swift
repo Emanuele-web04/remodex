@@ -388,7 +388,9 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
             composerMenuLabel(
                 modelPart: modelLabelPart,
                 effortPart: effortLabelPart,
-                leadingImageName: runtimeState.showsSpeedBadgeInModelMenu ? "bolt.fill" : nil
+                leadingImageName: runtimeState.showsSpeedBadgeInModelMenu
+                    ? "bolt.fill"
+                    : TurnComposerMetaMapper.providerIconName(for: runtimeState.selectedModelProvider)
             )
         } menu: {
             TurnComposerRuntimeUIKitMenuBuilder.makeMenu(
@@ -511,9 +513,9 @@ private struct AllModelsSheet: View {
                 } else {
                     List {
                         Section {
-                            ForEach(models, id: \.id) { model in
+                            ForEach(models, id: \.selectionKey) { model in
                                 Button {
-                                    onSelect(model.id)
+                                    onSelect(model.selectionKey)
                                 } label: {
                                     modelRow(for: model)
                                 }
@@ -538,9 +540,9 @@ private struct AllModelsSheet: View {
     private func modelRow(for model: CodexModelOption) -> some View {
         let title = TurnComposerMetaMapper.modelTitle(for: model)
         HStack(alignment: .top, spacing: 12) {
-            RemodexIcon.image(systemName: model.id == selectedModelID ? "checkmark.circle.fill" : "circle")
+            RemodexIcon.image(systemName: model.selectionKey == selectedModelID ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 18))
-                .foregroundStyle(model.id == selectedModelID ? Color.accentColor : Color(.tertiaryLabel))
+                .foregroundStyle(model.selectionKey == selectedModelID ? Color.accentColor : Color(.tertiaryLabel))
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 2) {

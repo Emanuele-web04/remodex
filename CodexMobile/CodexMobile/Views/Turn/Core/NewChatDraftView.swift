@@ -627,7 +627,7 @@ struct NewChatDraftView: View {
             return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }
 
-        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.selectedModelId)
+        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.runtimeModelIdentifierForTurn())
     }
 
     // Mirrors the regular TurnView mic state so empty drafts can record before a runtime thread exists.

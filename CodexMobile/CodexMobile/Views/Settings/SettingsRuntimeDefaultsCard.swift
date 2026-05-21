@@ -17,9 +17,9 @@ struct SettingsRuntimeDefaultsCard: View {
         SettingsCard(title: "Runtime defaults") {
             Picker("Model", selection: runtimeModelSelection) {
                 Text("Auto").tag(runtimeAutoValue)
-                ForEach(runtimeModelOptions, id: \.id) { model in
+                ForEach(runtimeModelOptions, id: \.selectionKey) { model in
                     Text(TurnComposerMetaMapper.modelTitle(for: model))
-                        .tag(model.id)
+                        .tag(model.selectionKey)
                 }
             }
             .pickerStyle(.menu)
@@ -55,9 +55,9 @@ struct SettingsRuntimeDefaultsCard: View {
             .tint(settingsAccentColor)
 
             Picker("Git writer model", selection: gitWriterModelSelection) {
-                ForEach(gitWriterModelOptions, id: \.id) { model in
+                ForEach(gitWriterModelOptions, id: \.selectionKey) { model in
                     Text(TurnComposerMetaMapper.modelTitle(for: model))
-                        .tag(model.id)
+                        .tag(model.selectionKey)
                 }
             }
             .pickerStyle(.menu)
@@ -82,7 +82,7 @@ struct SettingsRuntimeDefaultsCard: View {
 
     private var runtimeModelSelection: Binding<String> {
         Binding(
-            get: { codex.selectedModelOption()?.id ?? runtimeAutoValue },
+            get: { codex.selectedModelOption()?.selectionKey ?? runtimeAutoValue },
             set: { selection in
                 codex.setSelectedModelId(selection == runtimeAutoValue ? nil : selection)
             }
@@ -117,12 +117,12 @@ struct SettingsRuntimeDefaultsCard: View {
     }
 
     private var gitWriterModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+        TurnComposerMetaMapper.orderedModels(from: codex.availableModels.filter { $0.modelProvider == "codex" })
     }
 
     private var gitWriterModelSelection: Binding<String> {
         Binding(
-            get: { codex.selectedGitWriterModelOption()?.id ?? gitWriterModelOptions.first?.id ?? "" },
+            get: { codex.selectedGitWriterModelOption()?.selectionKey ?? gitWriterModelOptions.first?.selectionKey ?? "" },
             set: { codex.setSelectedGitWriterModelId($0.isEmpty ? nil : $0) }
         )
     }
