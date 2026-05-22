@@ -5,8 +5,9 @@
 // Depends on: timers
 
 const BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS = 5_000;
-// Keep the watchdog tight enough to recover quickly from sleep/wake zombie sockets.
-const RELAY_WATCHDOG_STALE_AFTER_MS = 25_000;
+// Keep this above the 25s iOS foreground keepalive cadence so normal jitter
+// does not kill a healthy Mac relay socket, while still recovering quickly.
+const RELAY_WATCHDOG_STALE_AFTER_MS = 45_000;
 const STALE_RELAY_STATUS_MESSAGE = "Relay heartbeat stalled; reconnect pending.";
 
 // Wraps daemon status publication so bridge.js does not own heartbeat bookkeeping.

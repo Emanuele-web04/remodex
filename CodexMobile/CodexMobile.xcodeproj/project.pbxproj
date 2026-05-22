@@ -34,6 +34,9 @@
 		8CE11223A4B5C6D7E8F90123 /* SidebarRunBadgePerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */; };
 		8D1F2A3B4C5D6E7F8091A2B3 /* CodexServiceConnectionErrorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1F2A3B4C5D6E7F8091A2B4 /* CodexServiceConnectionErrorTests.swift */; };
 		8F1A2B3C4D5E6F708192A3B4 /* CodexPushNotificationRegistrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1A2B3C4D5E6F708192A3B5 /* CodexPushNotificationRegistrationTests.swift */; };
+		8FA12BC34DE56F708192A3B4 /* CodexTrustedMacSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FA12BC34DE56F708192A3B5 /* CodexTrustedMacSelectionTests.swift */; };
+		8FA12BC34DE56F708192A3B6 /* ContentViewModelReconnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FA12BC34DE56F708192A3B7 /* ContentViewModelReconnectTests.swift */; };
+		8FA12BC34DE56F708192A3B8 /* CodexSecurePairingStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FA12BC34DE56F708192A3B9 /* CodexSecurePairingStateTests.swift */; };
 		90120FC72C9B8D0F5F03F14D /* CodexMobileUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */; };
 		9B4A1F81BFE9FA5190652A22 /* RemodexLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA83C07BD6661A63FFD1400F /* RemodexLaunchIntent.swift */; };
 		9D7C9A8B7E6D5C4B3A291817 /* TurnViewModelQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */; };
@@ -152,6 +155,9 @@
 		8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarRunBadgePerformanceTests.swift; sourceTree = "<group>"; };
 		8D1F2A3B4C5D6E7F8091A2B4 /* CodexServiceConnectionErrorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceConnectionErrorTests.swift; sourceTree = "<group>"; };
 		8F1A2B3C4D5E6F708192A3B5 /* CodexPushNotificationRegistrationTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexPushNotificationRegistrationTests.swift; sourceTree = "<group>"; };
+		8FA12BC34DE56F708192A3B5 /* CodexTrustedMacSelectionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexTrustedMacSelectionTests.swift; sourceTree = "<group>"; };
+		8FA12BC34DE56F708192A3B7 /* ContentViewModelReconnectTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentViewModelReconnectTests.swift; sourceTree = "<group>"; };
+		8FA12BC34DE56F708192A3B9 /* CodexSecurePairingStateTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexSecurePairingStateTests.swift; sourceTree = "<group>"; };
 		92DE4487B55C077AF7694484 /* RemodexMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemodexMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		96AB07DF1EAF634D1B823574 /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/AppIntents.framework; sourceTree = DEVELOPER_DIR; };
 		9A37794F4B32C1952A3770E0 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
@@ -292,6 +298,9 @@
 				C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */,
 				8D1F2A3B4C5D6E7F8091A2B4 /* CodexServiceConnectionErrorTests.swift */,
 				8F1A2B3C4D5E6F708192A3B5 /* CodexPushNotificationRegistrationTests.swift */,
+				8FA12BC34DE56F708192A3B7 /* ContentViewModelReconnectTests.swift */,
+				8FA12BC34DE56F708192A3B9 /* CodexSecurePairingStateTests.swift */,
+				8FA12BC34DE56F708192A3B5 /* CodexTrustedMacSelectionTests.swift */,
 				D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */,
 				A2B3C4D5E6F708192A3B4C7 /* CodexServiceThreadListTests.swift */,
 				E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */,
@@ -700,6 +709,9 @@
 				B1C2D3E4F5061728394A5B6C /* CodexServiceIncomingCommandExecutionTests.swift in Sources */,
 				8D1F2A3B4C5D6E7F8091A2B3 /* CodexServiceConnectionErrorTests.swift in Sources */,
 				8F1A2B3C4D5E6F708192A3B4 /* CodexPushNotificationRegistrationTests.swift in Sources */,
+				8FA12BC34DE56F708192A3B6 /* ContentViewModelReconnectTests.swift in Sources */,
+				8FA12BC34DE56F708192A3B8 /* CodexSecurePairingStateTests.swift in Sources */,
+				8FA12BC34DE56F708192A3B4 /* CodexTrustedMacSelectionTests.swift in Sources */,
 				D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */,
 				A2B3C4D5E6F708192A3B4C6 /* CodexServiceThreadListTests.swift in Sources */,
 				E1A2B3C4D5E6F708192A3B4C /* QRScannerPairingValidatorTests.swift in Sources */,
@@ -1025,7 +1037,7 @@
 			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
 				APS_ENVIRONMENT = development;
-				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex;
+				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;
@@ -1072,7 +1084,7 @@
 			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
 				APS_ENVIRONMENT = production;
-				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex;
+				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;

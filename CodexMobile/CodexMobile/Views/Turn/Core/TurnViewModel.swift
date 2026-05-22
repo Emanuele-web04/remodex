@@ -114,13 +114,13 @@ struct TurnComposerLocalDraft: Codable, Equatable, Sendable {
     let isSubagentsSelectionArmed: Bool
     let updatedAt: Date
 
-    var isEmpty: Bool {
+    nonisolated var isEmpty: Bool {
         input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && mentionedFiles.isEmpty
             && mentionedSkills.isEmpty
             && mentionedPlugins.isEmpty
             && attachments.isEmpty
-            && reviewSelection == nil
+            && (reviewSelection.map { _ in false } ?? true)
             && !isPlanModeArmed
             && !isSubagentsSelectionArmed
     }
@@ -1359,6 +1359,11 @@ final class TurnViewModel {
         isSending = true
         isPlanModeArmed = false
         shouldAnchorToAssistantResponse = true
+        let draftPreAppendedMessage = preAppendNewThreadUserMessageIfNeeded(
+            pendingSend,
+            codex: codex,
+            threadID: draftThreadID
+        )
         clearComposer()
 
         // Forwards the raw user input as the rootless chat slug hint so the
@@ -1374,10 +1379,22 @@ final class TurnViewModel {
                     preferredProjectPath: preferredProjectPath,
                     rootlessChatPromptHint: rootlessChatPromptHint
                 )
+                let preAppendedMessage = movePreAppendedNewThreadUserMessageIfNeeded(
+                    draftPreAppendedMessage,
+                    pendingSend: pendingSend,
+                    codex: codex,
+                    draftThreadID: draftThreadID,
+                    threadID: thread.id
+                )
                 onThreadCreated(thread)
 
                 do {
-                    try await dispatchPendingSend(pendingSend, codex: codex, threadID: thread.id)
+                    try await dispatchPendingSend(
+                        pendingSend,
+                        codex: codex,
+                        threadID: thread.id,
+                        preAppendedMessage: preAppendedMessage
+                    )
                     clearLocalDraft(codex: codex, threadID: draftThreadID, persistToDisk: true)
                     clearLocalDraft(codex: codex, threadID: thread.id, persistToDisk: true)
                 } catch {
@@ -1385,6 +1402,11 @@ final class TurnViewModel {
                     codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
                 }
             } catch {
+                discardPreAppendedNewThreadUserMessage(
+                    draftPreAppendedMessage,
+                    codex: codex,
+                    draftThreadID: draftThreadID
+                )
                 restorePendingSendOnFailure(
                     pendingSend,
                     error: error,
@@ -1466,13 +1488,72 @@ final class TurnViewModel {
         )
     }
 
+    // Moves the immediate draft bubble onto the real thread; falls back to appending
+    // there if the draft row was pruned before thread/start returned.
+    private func movePreAppendedNewThreadUserMessageIfNeeded(
+        _ draftPreAppendedMessage: CodexPreAppendedTurnMessage?,
+        pendingSend: PendingTurnSend,
+        codex: CodexService,
+        draftThreadID: String,
+        threadID: String
+    ) -> CodexPreAppendedTurnMessage? {
+        if let movedMessage = codex.movePreAppendedOutgoingUserMessage(
+            draftPreAppendedMessage,
+            from: draftThreadID,
+            to: threadID
+        ) {
+            return movedMessage
+        }
+
+        return preAppendNewThreadUserMessageIfNeeded(
+            pendingSend,
+            codex: codex,
+            threadID: threadID
+        )
+    }
+
+    // Cleans up the draft-only optimistic row if thread/start itself fails.
+    private func discardPreAppendedNewThreadUserMessage(
+        _ draftPreAppendedMessage: CodexPreAppendedTurnMessage?,
+        codex: CodexService,
+        draftThreadID: String
+    ) {
+        guard let draftPreAppendedMessage else { return }
+        codex.removeUserMessage(
+            threadId: draftThreadID,
+            messageId: draftPreAppendedMessage.messageID
+        )
+    }
+
+    // Pre-publishes the first New Chat user row before ContentView swaps in TurnView.
+    // Reviews use their own runtime event stream, so only normal turns get a row here.
+    private func preAppendNewThreadUserMessageIfNeeded(
+        _ pendingSend: PendingTurnSend,
+        codex: CodexService,
+        threadID: String
+    ) -> CodexPreAppendedTurnMessage? {
+        guard pendingSend.rawReviewSelection == nil else {
+            return nil
+        }
+
+        return codex.preAppendOutgoingUserMessage(
+            userInput: pendingSend.payload,
+            threadId: threadID,
+            attachments: pendingSend.attachments,
+            skillMentions: pendingSend.skillMentions,
+            mentionMentions: pendingSend.mentionMentions,
+            fileMentions: confirmedFileMentionPaths(from: pendingSend.rawFileMentions)
+        )
+    }
+
     // Routes a PendingTurnSend through the right runtime call (review vs turn)
     // so sendNewThread doesn't have to duplicate the review branch from
     // performTurnSend. Errors bubble to the caller for context-specific recovery.
     private func dispatchPendingSend(
         _ pendingSend: PendingTurnSend,
         codex: CodexService,
-        threadID: String
+        threadID: String,
+        preAppendedMessage: CodexPreAppendedTurnMessage? = nil
     ) async throws {
         if let reviewSelection = pendingSend.rawReviewSelection {
             try await codex.startReview(
@@ -1488,6 +1569,9 @@ final class TurnViewModel {
                 skillMentions: pendingSend.skillMentions,
                 mentionMentions: pendingSend.mentionMentions,
                 fileMentions: confirmedFileMentionPaths(from: pendingSend.rawFileMentions),
+                shouldAppendUserMessage: preAppendedMessage == nil,
+                preAppendedUserMessageID: preAppendedMessage?.messageID,
+                automaticTitleSeedOverride: preAppendedMessage?.automaticTitleSeed,
                 collaborationMode: pendingSend.collaborationMode
             )
         }

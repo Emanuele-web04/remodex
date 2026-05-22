@@ -61,7 +61,7 @@ struct ArchivedChatsView: View {
                 threadPendingDeletion = nil
             }
         } message: {
-            Text("This only removes the chat from Remodex on this phone. Nothing is removed from your computer or Codex observer.")
+            Text("This only removes the chat from Remodex on this phone. Nothing is removed from your device or Codex observer.")
         }
     }
 

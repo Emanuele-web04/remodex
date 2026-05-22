@@ -86,7 +86,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     /// Heavy-chat staged warmup is temporarily disabled until geometry settles reliably.
     private static var initialWarmTailCount: Int { 0 }
     private static var scrollToLatestButtonLift: CGFloat { 44 + 8 }
-    private static var pendingAssistantIndicatorBottomLift: CGFloat { 8 }
+    private static var pendingAssistantIndicatorBottomLift: CGFloat { 4 }
+    private static var pendingAssistantIndicatorContentGap: CGFloat { 16 }
     private static var scrollGeometryCoalescingDelayNanoseconds: UInt64 { 16_000_000 }
 
     @State private var visibleTailCount: Int = initialVisibleTailCount
@@ -185,9 +186,33 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         dynamicTypeSize.isAccessibilitySize ? 20 : 16
     }
 
-    // Accessibility text can make the sticky overlay taller than the default row.
     private var pendingAssistantIndicatorReservedHeight: CGFloat {
-        dynamicTypeSize.isAccessibilitySize ? 56 : 24
+        TerminalRunningIndicatorLayout.reservedRowHeight(
+            isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+        )
+    }
+
+    // Empty streaming assistant rows are projected away; keep their footprint in the stack.
+    private var pendingStreamingAssistantPlaceholderID: String? {
+        guard isRunStartingOrRunning else { return nil }
+
+        let renderedMessageIDs = Set(
+            renderCacheState.visibleRenderItems.compactMap { item -> String? in
+                guard case .message(let message) = item else { return nil }
+                return message.id
+            }
+        )
+
+        for message in messages.reversed() {
+            guard message.role == .assistant,
+                  message.isStreaming,
+                  message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !renderedMessageIDs.contains(message.id) else {
+                continue
+            }
+            return message.id
+        }
+        return nil
     }
 
     private var shouldStageHeavyThreadOpen: Bool {
@@ -266,7 +291,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                             onRetryUserMessage: onRetryUserMessage,
                             onTapAssistantRevert: onTapAssistantRevert,
                             onTapSubagent: onTapSubagent,
-                            onLoadEarlierMessages: handleLoadEarlierMessages
+                            onLoadEarlierMessages: handleLoadEarlierMessages,
+                            pendingStreamingAssistantPlaceholderID: pendingStreamingAssistantPlaceholderID
                         )
                         // SwiftUI can otherwise let a streaming text row report an
                         // over-wide ideal size, which makes the vertical timeline pan sideways.
@@ -497,17 +523,22 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         )
     }
 
+    // Keep the thinking label pinned above the composer for the whole run, even while
+    // assistant prose and late tool rows stream into the scroll stack above it.
     private var shouldShowStickyPendingAssistantIndicator: Bool {
         TurnTimelinePendingAssistantState.shouldShowIndicator(
             isRunStartingOrRunning: isRunStartingOrRunning
         )
-            && (autoScrollMode == .followBottom
-                || autoScrollMode == .anchorAssistantResponse
-                || shouldShowPendingAssistantResponse)
     }
 
     private func timelineRowsBottomPadding(showsStickyPendingAssistantIndicator: Bool) -> CGFloat {
-        12 + (showsStickyPendingAssistantIndicator ? pendingAssistantIndicatorReservedHeight : 0)
+        guard showsStickyPendingAssistantIndicator else {
+            return 12
+        }
+
+        return 12
+            + pendingAssistantIndicatorReservedHeight
+            + Self.pendingAssistantIndicatorContentGap
     }
 
     // Scroll geometry resumes after the optimistic send gap and assistant anchor settle.

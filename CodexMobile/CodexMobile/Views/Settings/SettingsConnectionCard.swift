@@ -23,7 +23,7 @@ struct SettingsConnectionCard: View {
                     }
                 )
             } else {
-                Text("No paired computer")
+                Text("No paired device")
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
             }
@@ -51,17 +51,17 @@ struct SettingsConnectionCard: View {
             }
 
             if codex.supportsKeepAwakeWhileBridgeRuns {
-                Toggle("Keep computer reachable", isOn: keepMacAwakeWhileBridgeRunsBinding)
+                Toggle("Keep device reachable", isOn: keepMacAwakeWhileBridgeRunsBinding)
                     .tint(settingsAccentColor)
 
-                Text(codex.keepMacAwakeWhileBridgeRuns
-                     ? "Uses the host computer's keep-awake support while the bridge is running so the computer stays reachable even if the display turns off. Best while charging."
-                     : "The computer can go back to sleeping normally when the bridge is idle.")
+                    Text(codex.keepMacAwakeWhileBridgeRuns
+                     ? "Uses the host device's keep-awake support while the bridge is running so the device stays reachable even if the display turns off. Best while charging."
+                     : "The device can go back to sleeping normally when the bridge is idle.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
                 if !codex.isConnected {
-                    Text("Saved on this iPhone. It will sync to the paired computer the next time the bridge reconnects.")
+                    Text("Saved on this iPhone. It will sync to the paired device the next time the bridge reconnects.")
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
                 }

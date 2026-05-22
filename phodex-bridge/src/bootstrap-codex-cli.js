@@ -32,7 +32,7 @@ if (!isGlobalInstall) {
 ensureCodexCLI({
   env: process.env,
   logger: console,
-  shouldUpdate: true,
+  shouldUpdate: false,
 });
 
 logCachedIOSAppCompatibilityWarning();

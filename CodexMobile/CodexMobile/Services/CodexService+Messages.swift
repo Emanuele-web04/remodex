@@ -1337,8 +1337,7 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].turnId = turnId
                 didMutate = true
             }
-            // Optional chaining turns `isEmpty` into `Bool?`, so compare explicitly here.
-            if messagesByThread[threadId]?[existingIndex].fileMentions.isEmpty == true, !fileMentions.isEmpty {
+            if (messagesByThread[threadId]?[existingIndex].fileMentions.isEmpty ?? true), !fileMentions.isEmpty {
                 messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
                 didMutate = true
             }
@@ -4202,7 +4201,7 @@ extension CodexService {
         threadIdByTurnID.removeAll()
 
         if didMutate {
-            messagePersistence.save(messagesByThread)
+            persistCurrentMacMessages()
             if let activeThreadId {
                 updateCurrentOutput(for: activeThreadId)
             }
@@ -4218,27 +4217,32 @@ extension CodexService {
             guard !Task.isCancelled, let self else { return }
 
             let snapshot = self.messagesByThread
+            let macDeviceId = self.currentMacScopedPersistenceDeviceId
             self.messagePersistenceDebounceTask = nil
 
             Task.detached { [messagePersistence] in
-                messagePersistence.save(snapshot)
+                messagePersistence.save(snapshot, macDeviceId: macDeviceId)
             }
         }
     }
 
     // Persists per-turn terminal state so completed-turn grouping survives app relaunch.
     func persistTurnTerminalStates() {
+        guard !suspendAutomaticMacScopedPersistence, !isApplyingMacScopedState else {
+            return
+        }
+
         guard !terminalStateByTurnID.isEmpty else {
-            defaults.removeObject(forKey: Self.turnTerminalStatesDefaultsKey)
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.turnTerminalStatesDefaultsKey))
             return
         }
 
         guard let data = try? encoder.encode(terminalStateByTurnID) else {
-            defaults.removeObject(forKey: Self.turnTerminalStatesDefaultsKey)
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.turnTerminalStatesDefaultsKey))
             return
         }
 
-        defaults.set(data, forKey: Self.turnTerminalStatesDefaultsKey)
+        defaults.set(data, forKey: macScopedDefaultsKey(Self.turnTerminalStatesDefaultsKey))
     }
 }
 

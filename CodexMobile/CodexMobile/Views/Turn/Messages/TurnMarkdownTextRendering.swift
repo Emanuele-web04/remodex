@@ -154,8 +154,9 @@ struct StreamingAssistantMarkdownTextView: View {
         self.enablesSelection = enablesSelection
         self.constrainsToAvailableWidth = constrainsToAvailableWidth
         self.animatesReveal = animatesReveal
-        _displayedText = State(initialValue: text)
-        _displayedSegments = State(initialValue: StreamingMarkdownBlockSplitter.split(text))
+        let initialDisplayedText = animatesReveal ? "" : text
+        _displayedText = State(initialValue: initialDisplayedText)
+        _displayedSegments = State(initialValue: StreamingMarkdownBlockSplitter.split(initialDisplayedText))
         _targetText = State(initialValue: text)
     }
 
@@ -173,7 +174,14 @@ struct StreamingAssistantMarkdownTextView: View {
             adoptText(text, animated: false)
         }
         .onChange(of: text) { _, nextText in
-            adoptText(nextText, animated: animatesReveal && !reduceMotion)
+            let shouldSnapFirstVisibleChunk = displayedText
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+                && !nextText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            adoptText(
+                nextText,
+                animated: animatesReveal && !reduceMotion && !shouldSnapFirstVisibleChunk
+            )
         }
         .onChange(of: animatesReveal) { _, isAnimating in
             if !isAnimating {
@@ -294,10 +302,10 @@ struct StreamingAssistantMarkdownTextView: View {
 private enum StreamingMarkdownRevealPolicy {
     // MessageRow already coalesces assistant text, so this view only needs a light reveal.
     // Avoid long catch-up tails that repeatedly reparse Markdown and look like line rewrites.
-    static let frameIntervalNanoseconds: UInt64 = 50_000_000
-    private static let snapBacklogCharacterCount = 900
-    private static let minimumAdvanceCharacterCount = 12
-    private static let maximumAdvanceCharacterCount = 240
+    static let frameIntervalNanoseconds: UInt64 = 45_000_000
+    private static let snapBacklogCharacterCount = 1_200
+    private static let minimumAdvanceCharacterCount = 14
+    private static let maximumAdvanceCharacterCount = 96
 
     static func shouldSnap(displayedText: String, targetText: String) -> Bool {
         guard targetText.hasPrefix(displayedText) else {

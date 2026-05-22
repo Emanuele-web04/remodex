@@ -66,7 +66,7 @@ private struct TurnViewAlertModifier: ViewModifier {
                     onConfirmMacHandoff()
                 }
             } message: {
-                Text("Remodex will force close and reopen Codex.app on this computer. Any desktop runs in progress will be stopped, and unsaved draft text there may be lost before this chat is opened.")
+                Text("Remodex will force close and reopen Codex.app on this device. Any desktop runs in progress will be stopped, and unsaved draft text there may be lost before this chat is opened.")
             }
             .alert(
                 "Couldn't continue on desktop app",

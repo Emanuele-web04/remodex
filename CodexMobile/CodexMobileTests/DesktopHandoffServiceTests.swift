@@ -140,6 +140,51 @@ final class DesktopHandoffServiceTests: XCTestCase {
         XCTAssertNil(service.lastErrorMessage)
     }
 
+    func testWakeDisplayCanResolveTrustedSessionWithoutSavedLiveSession() async throws {
+        let service = makeService()
+        let macDeviceID = "mac-\(UUID().uuidString)"
+        let relayURL = "ws://macbook-pro-di-emanuele.local:8080/ws"
+        let macPublicKey = Data(repeating: 22, count: 32).base64EncodedString()
+        service.trustedMacRegistry.records[macDeviceID] = CodexTrustedMacRecord(
+            macDeviceId: macDeviceID,
+            macIdentityPublicKey: macPublicKey,
+            lastPairedAt: Date(),
+            relayURL: relayURL
+        )
+        service.setCurrentTrustedMacDeviceId(macDeviceID)
+        service.trustedSessionResolverOverride = {
+            CodexTrustedSessionResolveResponse(
+                ok: true,
+                macDeviceId: macDeviceID,
+                macIdentityPublicKey: macPublicKey,
+                displayName: "MacBook",
+                sessionId: "fresh-session"
+            )
+        }
+
+        var capturedURL: String?
+        var capturedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            capturedMethods.append(method)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["success": .bool(true)]),
+                includeJSONRPC: false
+            )
+        }
+        let handoff = DesktopHandoffService(
+            codex: service,
+            savedPairConnector: { reconnectURL in
+                capturedURL = reconnectURL
+            }
+        )
+
+        try await handoff.wakeDisplay()
+
+        XCTAssertEqual(capturedURL, "\(relayURL)/fresh-session")
+        XCTAssertEqual(capturedMethods, ["desktop/wakeDisplay"])
+    }
+
     func testWakeDisplayRequiresSavedPairWhenDisconnected() async {
         let service = makeService()
         let handoff = DesktopHandoffService(codex: service)
@@ -150,7 +195,7 @@ final class DesktopHandoffServiceTests: XCTestCase {
         } catch let error as DesktopHandoffError {
             XCTAssertEqual(
                 error.errorDescription,
-                "Reconnect to your paired computer first."
+                "Reconnect to your paired device first."
             )
         } catch {
             XCTFail("Unexpected error: \(error)")

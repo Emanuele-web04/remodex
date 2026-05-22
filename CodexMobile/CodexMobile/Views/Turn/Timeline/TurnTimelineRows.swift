@@ -358,6 +358,7 @@ struct TurnTimelineRowsSection: View {
     let onTapAssistantRevert: (CodexMessage) -> Void
     let onTapSubagent: (CodexSubagentThreadPresentation) -> Void
     let onLoadEarlierMessages: () -> Void
+    let pendingStreamingAssistantPlaceholderID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -447,6 +448,11 @@ struct TurnTimelineRowsSection: View {
                         onTapSubagent: onTapSubagent
                     )
                 }
+            }
+
+            if let pendingStreamingAssistantPlaceholderID {
+                StreamingAssistantPlaceholderSlot()
+                    .id(pendingStreamingAssistantPlaceholderID)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

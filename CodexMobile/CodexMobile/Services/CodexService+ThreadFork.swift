@@ -75,7 +75,7 @@ extension CodexService {
             }
             if consumeUnsupportedThreadFork(error) {
                 throw CodexServiceError.invalidInput(
-                    "This computer bridge does not support native thread forks yet. Update Remodex on your computer and retry."
+                    "This device bridge does not support native thread forks yet. Update Remodex on your device and retry."
                 )
             }
             throw error

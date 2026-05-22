@@ -85,7 +85,7 @@ enum WorktreeFlowCoordinator {
     ) async throws -> WorktreeFlowHandoffOutcome {
         let normalizedSourceProjectPath = try requiredProjectPath(
             sourceProjectPath,
-            message: "The current handoff source is not available on this Mac."
+            message: "The current handoff source is not available on this device."
         )
 
         if let associatedWorktreePath,
@@ -139,7 +139,7 @@ enum WorktreeFlowCoordinator {
     ) async throws -> WorktreeFlowHandoffMove {
         let sourceProjectPath = try requiredProjectPath(
             thread.gitWorkingDirectory,
-            message: "The current handoff source is not available on this Mac."
+            message: "The current handoff source is not available on this device."
         )
 
         let gitService = GitActionsService(codex: codex, workingDirectory: sourceProjectPath)
@@ -354,7 +354,7 @@ private extension WorktreeFlowCoordinator {
                     )
                     throw WorktreeFlowError(
                         failedMessage(
-                            fallback: "The managed worktree is no longer available on this Mac.",
+                            fallback: "The managed worktree is no longer available on this device.",
                             error: error,
                             recoveryDetail: recoveryDetail
                         )

@@ -96,7 +96,7 @@ final class PetCompanionStore {
     // Loads metadata first; the selected sprite atlas is fetched separately to keep memory low.
     func refreshPets(codex: CodexService) async {
         guard codex.isConnected else {
-            errorMessage = "Connect to your Mac to load local pets."
+            errorMessage = "Connect to your device to load local pets."
             return
         }
         guard !isLoading else {

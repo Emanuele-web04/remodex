@@ -1,7 +1,7 @@
 // FILE: TurnMessageAccessoryViews.swift
 // Purpose: Shared lightweight controls and labels used by turn message rows.
 // Layer: View Component
-// Exports: DiffCountsLabel, TypingIndicator, ApprovalBanner, AssistantTurnEndActionVisibility
+// Exports: DiffCountsLabel, ApprovalBanner, AssistantTurnEndActionVisibility
 // Depends on: SwiftUI
 
 import SwiftUI
@@ -18,44 +18,6 @@ struct DiffCountsLabel: View {
             Text("-\(deletions)")
                 .foregroundStyle(Color.red)
         }
-    }
-}
-
-struct TypingIndicator: View {
-    private let trackWidth: CGFloat = 26
-    private let trackHeight: CGFloat = 6
-    private let highlightWidth: CGFloat = 16
-    private let duration: TimeInterval = 1.0
-    @State private var shimmerOffset: CGFloat = -21
-
-    var body: some View {
-        Capsule(style: .continuous)
-            .fill(Color.secondary.opacity(0.12))
-            .frame(width: trackWidth, height: trackHeight)
-            .overlay {
-                Capsule(style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.secondary.opacity(0.04),
-                                Color.secondary.opacity(0.42),
-                                Color.secondary.opacity(0.04),
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .frame(width: highlightWidth, height: trackHeight)
-                    .offset(x: shimmerOffset)
-            }
-            .clipShape(Capsule(style: .continuous))
-            .onAppear {
-                guard shimmerOffset < 0 else { return }
-                withAnimation(.linear(duration: duration).repeatForever(autoreverses: false)) {
-                    shimmerOffset = 21
-                }
-            }
-            .accessibilityHidden(true)
     }
 }
 

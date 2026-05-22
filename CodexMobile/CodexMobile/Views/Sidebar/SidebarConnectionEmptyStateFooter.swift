@@ -48,7 +48,7 @@ struct SidebarConnectionEmptyStateFooter: View {
 #if DEBUG
 #Preview("Message + Forget Pair") {
     SidebarConnectionEmptyStateFooter(
-        statusMessage: "This iPhone is no longer trusted by the paired computer. Scan a new QR code to reconnect.",
+        statusMessage: "This iPhone is no longer trusted by the paired device. Scan a new QR code to reconnect.",
         canForgetPair: true,
         onForgetPair: {}
     )

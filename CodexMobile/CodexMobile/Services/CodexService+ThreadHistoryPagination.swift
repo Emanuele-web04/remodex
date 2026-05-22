@@ -678,13 +678,13 @@ extension CodexService {
         }
 
         guard !stateByThreadID.isEmpty else {
-            defaults.removeObject(forKey: Self.threadHistoryPaginationStateDefaultsKey)
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.threadHistoryPaginationStateDefaultsKey))
             return
         }
         guard let data = try? encoder.encode(stateByThreadID) else {
             return
         }
-        defaults.set(data, forKey: Self.threadHistoryPaginationStateDefaultsKey)
+        defaults.set(data, forKey: macScopedDefaultsKey(Self.threadHistoryPaginationStateDefaultsKey))
     }
 
     // One-time migration for transcripts saved before cursor-backed history existed.

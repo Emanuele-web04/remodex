@@ -16,10 +16,10 @@ struct RemodexLaunchControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(kind: Self.kind) {
             ControlWidgetButton(action: RemodexLaunchIntent()) {
-                // Control Center only accepts symbol images. This custom SF
-                // Symbol uses the unmodified SF Symbols template from
-                // SwiftDraw; manual scaling can make iOS render it as blank.
-                Label("Remodex", image: "remodex_symbol_medium")
+                // Control Center only accepts symbol images, so this routes
+                // through the dedicated Remodex symbolset instead of the
+                // regular vector image used by Lock Screen widgets.
+                Label("Remodex", image: "remodex_control_symbol")
             }
         }
         .displayName("Remodex")

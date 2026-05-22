@@ -11,7 +11,6 @@ import SwiftUI
 struct SubagentActionCard: View {
     let parentThreadId: String
     let action: CodexSubagentAction
-    let isStreaming: Bool
     let onOpenSubagent: ((CodexSubagentThreadPresentation) -> Void)?
 
     @Environment(CodexService.self) private var codex
@@ -32,10 +31,6 @@ struct SubagentActionCard: View {
                 .padding(.top, agentRowsTopPadding)
             }
 
-            if isStreaming {
-                TypingIndicator()
-                    .padding(.top, action.agentRows.isEmpty ? 2 : 3)
-            }
         }
         .task(id: action.agentRows.map(\.threadId)) {
             await hydrateChildThreadMetadata()

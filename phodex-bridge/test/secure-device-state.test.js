@@ -15,6 +15,7 @@ const {
   rememberLastSeenPhoneAppVersion,
   rememberTrustedPhone,
   resetBridgeDeviceState,
+  resetBridgeTrustState,
   resolveBridgeRelaySession,
 } = require("../src/secure-device-state");
 
@@ -215,6 +216,43 @@ test("resetBridgeDeviceState removes both canonical and mirrored pairing state",
   });
 });
 
+test("resetBridgeTrustState clears phone trust without rotating the Mac identity", () => {
+  withTempDeviceStateEnv(() => {
+    const state = makeDeviceState({
+      trustedPhones: {
+        "phone-6": "phone-public-key-6",
+      },
+    });
+    writeStateToDisk(state);
+
+    const result = resetBridgeTrustState();
+    const reloaded = loadOrCreateBridgeDeviceState();
+
+    assert.deepEqual(result, {
+      hadState: true,
+      preservedMacIdentity: true,
+      clearedTrustedPhones: true,
+    });
+    assert.equal(reloaded.macDeviceId, state.macDeviceId);
+    assert.equal(reloaded.macIdentityPublicKey, state.macIdentityPublicKey);
+    assert.equal(reloaded.macIdentityPrivateKey, state.macIdentityPrivateKey);
+    assert.deepEqual(reloaded.trustedPhones, {});
+  });
+});
+
+test("resetBridgeTrustState reports missing state without creating a new identity", () => {
+  withTempDeviceStateEnv(() => {
+    const result = resetBridgeTrustState();
+
+    assert.deepEqual(result, {
+      hadState: false,
+      preservedMacIdentity: false,
+      clearedTrustedPhones: false,
+    });
+    assert.equal(readBridgeDeviceState(), null);
+  });
+});
+
 function makeDeviceState(overrides = {}) {
   return {
     version: 1,
@@ -225,6 +263,14 @@ function makeDeviceState(overrides = {}) {
     lastSeenPhoneAppVersion: null,
     ...overrides,
   };
+}
+
+function writeStateToDisk(state) {
+  const canonicalStateFile = path.join(process.env.REMODEX_DEVICE_STATE_DIR, "device-state.json");
+  const keychainMirrorFile = process.env.REMODEX_DEVICE_STATE_KEYCHAIN_MOCK_FILE;
+  fs.mkdirSync(path.dirname(canonicalStateFile), { recursive: true });
+  fs.writeFileSync(canonicalStateFile, JSON.stringify(state, null, 2));
+  fs.writeFileSync(keychainMirrorFile, JSON.stringify(state, null, 2));
 }
 
 function withTempDeviceStateEnv(run) {

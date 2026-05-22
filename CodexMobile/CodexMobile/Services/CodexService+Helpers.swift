@@ -152,7 +152,7 @@ extension CodexService {
             return
         }
 
-        defaults.set(encoded, forKey: Self.forkedThreadOriginsDefaultsKey)
+        defaults.set(encoded, forKey: macScopedDefaultsKey(Self.forkedThreadOriginsDefaultsKey))
     }
 
     // Re-arms one canonical refresh when thread/list shows newer server metadata for a large active chat.
@@ -200,7 +200,7 @@ extension CodexService {
             return
         }
 
-        defaults.set(encoded, forKey: Self.renamedThreadNamesDefaultsKey)
+        defaults.set(encoded, forKey: macScopedDefaultsKey(Self.renamedThreadNamesDefaultsKey))
     }
 
     func persistedThreadRename(for threadId: String?) -> String? {
@@ -363,8 +363,8 @@ extension CodexService {
 
         guard !uniquePinnedThreadIDs.isEmpty else {
             pinnedThreadSnapshotsByRootID.removeAll()
-            defaults.removeObject(forKey: Self.pinnedThreadIDsDefaultsKey)
-            defaults.removeObject(forKey: Self.pinnedThreadSnapshotsDefaultsKey)
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.pinnedThreadIDsDefaultsKey))
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.pinnedThreadSnapshotsDefaultsKey))
             return
         }
 
@@ -372,7 +372,7 @@ extension CodexService {
             return
         }
 
-        defaults.set(encodedPinnedThreadIDs, forKey: Self.pinnedThreadIDsDefaultsKey)
+        defaults.set(encodedPinnedThreadIDs, forKey: macScopedDefaultsKey(Self.pinnedThreadIDsDefaultsKey))
 
         let filteredSnapshots = pinnedThreadSnapshotsByRootID.filter { uniquePinnedThreadIDs.contains($0.key) }
         pinnedThreadSnapshotsByRootID = filteredSnapshots
@@ -380,7 +380,7 @@ extension CodexService {
             return
         }
 
-        defaults.set(encodedSnapshots, forKey: Self.pinnedThreadSnapshotsDefaultsKey)
+        defaults.set(encodedSnapshots, forKey: macScopedDefaultsKey(Self.pinnedThreadSnapshotsDefaultsKey))
     }
 
     private func pinnedRootThreadID(for threadId: String?) -> String? {

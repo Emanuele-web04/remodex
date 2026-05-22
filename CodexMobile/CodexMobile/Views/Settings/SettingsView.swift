@@ -187,7 +187,7 @@ private struct SettingsPetCompanionSection: View {
             if petStore.isEnabled {
                 if petStore.availablePets.isEmpty {
                     Text(petStore.isLoading
-                         ? "Loading local Codex pets from your Mac..."
+                         ? "Loading local Codex pets from your device..."
                          : "No local Codex pets found in ~/.codex/pets.")
                         .font(AppFont.caption())
                         .foregroundStyle(.secondary)
@@ -363,7 +363,7 @@ private struct SettingsBridgeVersionCard: View {
             }
 
             settingsVersionRow(
-                title: "Installed on Computer",
+                title: "Installed on Device",
                 value: installedVersionLabel,
                 valueStyle: installedValueStyle
             )
@@ -416,7 +416,7 @@ private struct SettingsBridgeVersionCard: View {
 
     private var guidanceText: String? {
         guard let installedVersion else {
-            return "Connect to a computer bridge to read the installed package version."
+            return "Connect to a device bridge to read the installed package version."
         }
 
         guard let latestVersion else {
@@ -431,7 +431,7 @@ private struct SettingsBridgeVersionCard: View {
             return "A newer Remodex package is available on npm."
         }
 
-        return "This Mac is running a different build than the current npm latest."
+        return "This device is running a different build than the current npm latest."
     }
 
     private var versionStatusLabel: String {
@@ -468,10 +468,10 @@ private struct SettingsBridgeVersionCard: View {
         if let installedVersion,
            let latestVersion,
            installedVersion.compare(latestVersion, options: .numeric) == .orderedAscending {
-            return "Update Bridge on Computer"
+            return "Update Bridge on Device"
         }
 
-        return "Reinstall Bridge on Computer"
+        return "Reinstall Bridge on Device"
     }
 
     private var installedValueStyle: Color {
@@ -495,7 +495,7 @@ private struct SettingsBridgeVersionCard: View {
     private func updateBridgeFromSettings() async {
         guard codex.isConnected else {
             bridgeUpdateFailed = true
-            bridgeUpdateMessage = "Connect to your paired computer first."
+            bridgeUpdateMessage = "Connect to your paired device first."
             return
         }
 

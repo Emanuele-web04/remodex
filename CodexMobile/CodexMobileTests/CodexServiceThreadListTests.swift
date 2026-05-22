@@ -191,6 +191,53 @@ final class CodexServiceThreadListTests: XCTestCase {
         XCTAssertEqual(service.threads.map(\.id), ["thread-active"])
     }
 
+    func testListThreadsFlushesPendingRuntimeOptionRefreshAfterHydration() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.pendingRuntimeOptionRefresh = true
+
+        var threadListRequestCount = 0
+        var modelListRequestCount = 0
+        var didReturnThreadListResponse = false
+        var didLoadModelsBeforeThreadListReturned = false
+
+        service.requestTransportOverride = { method, _ in
+            switch method {
+            case "thread/list":
+                threadListRequestCount += 1
+                try await Task.sleep(nanoseconds: 20_000_000)
+                didReturnThreadListResponse = true
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["threads": .array([])]),
+                    includeJSONRPC: false
+                )
+            case "model/list":
+                modelListRequestCount += 1
+                didLoadModelsBeforeThreadListReturned = !didReturnThreadListResponse
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["items": .array([])]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        try await service.listThreads()
+        await waitUntil { modelListRequestCount > 0 }
+
+        XCTAssertEqual(threadListRequestCount, 1)
+        XCTAssertEqual(modelListRequestCount, 1)
+        XCTAssertFalse(didLoadModelsBeforeThreadListReturned)
+        XCTAssertFalse(service.pendingRuntimeOptionRefresh)
+        XCTAssertNil(service.runtimeOptionRefreshTask)
+        XCTAssertNil(service.runtimeOptionRefreshToken)
+    }
+
     func testSortThreadsUsesUpdatedAtBeforeCreatedAtFallback() {
         let service = makeService()
         let laterByUpdatedAt = CodexThread(
@@ -254,5 +301,14 @@ final class CodexServiceThreadListTests: XCTestCase {
         let service = CodexService(defaults: defaults)
         Self.retainedServices.append(service)
         return service
+    }
+
+    private func waitUntil(_ condition: () -> Bool, maxPollCount: Int = 50) async {
+        for _ in 0..<maxPollCount {
+            if condition() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 }

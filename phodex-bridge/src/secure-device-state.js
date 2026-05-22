@@ -1,7 +1,7 @@
 // FILE: secure-device-state.js
 // Purpose: Persists canonical bridge identity, trusted-phone state, and last seen iPhone app version for local QR pairing.
 // Layer: CLI helper
-// Exports: loadOrCreateBridgeDeviceState, readBridgeDeviceState, resetBridgeDeviceState, rememberTrustedPhone, rememberLastSeenPhoneAppVersion, getTrustedPhonePublicKey, resolveBridgeRelaySession
+// Exports: loadOrCreateBridgeDeviceState, readBridgeDeviceState, resetBridgeDeviceState, resetBridgeTrustState, rememberTrustedPhone, rememberLastSeenPhoneAppVersion, getTrustedPhonePublicKey, resolveBridgeRelaySession
 // Depends on: fs, os, path, crypto, child_process
 
 const fs = require("fs");
@@ -74,6 +74,30 @@ function resetBridgeDeviceState() {
     hadState: removedCanonicalFile || removedKeychainMirror,
     removedCanonicalFile,
     removedKeychainMirror,
+  };
+}
+
+// Clears trusted phones while preserving the Mac's stable identity across re-pairing.
+function resetBridgeTrustState() {
+  const existingState = readBridgeDeviceState();
+  if (!existingState) {
+    return {
+      hadState: false,
+      preservedMacIdentity: false,
+      clearedTrustedPhones: false,
+    };
+  }
+
+  const nextState = normalizeBridgeDeviceState({
+    ...existingState,
+    trustedPhones: {},
+  });
+  const clearedTrustedPhones = Object.keys(existingState.trustedPhones || {}).length > 0;
+  writeBridgeDeviceState(nextState);
+  return {
+    hadState: true,
+    preservedMacIdentity: true,
+    clearedTrustedPhones,
   };
 }
 
@@ -425,5 +449,6 @@ module.exports = {
   rememberLastSeenPhoneAppVersion,
   rememberTrustedPhone,
   resetBridgeDeviceState,
+  resetBridgeTrustState,
   resolveBridgeRelaySession,
 };

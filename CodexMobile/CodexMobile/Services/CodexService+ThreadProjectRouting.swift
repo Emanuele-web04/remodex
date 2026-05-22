@@ -265,11 +265,21 @@ private extension CodexService {
     }
 
     func persistAssociatedManagedWorktreePaths() {
+        guard !suspendAutomaticMacScopedPersistence, !isApplyingMacScopedState else {
+            return
+        }
+
+        let defaultsKey = macScopedDefaultsKey(Self.associatedManagedWorktreePathsDefaultsKey)
+        guard !associatedManagedWorktreePathByThreadID.isEmpty else {
+            defaults.removeObject(forKey: defaultsKey)
+            return
+        }
+
         guard let encoded = try? encoder.encode(associatedManagedWorktreePathByThreadID) else {
             return
         }
 
-        defaults.set(encoded, forKey: Self.associatedManagedWorktreePathsDefaultsKey)
+        defaults.set(encoded, forKey: defaultsKey)
     }
 
     func normalizedThreadIdValue(_ value: String?) -> String? {

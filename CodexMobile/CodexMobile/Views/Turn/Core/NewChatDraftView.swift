@@ -41,6 +41,7 @@ struct NewChatDraftView: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     let route: NewChatDraftRoute
     var leadingControl: NewChatDraftLeadingControl = .back
@@ -80,9 +81,13 @@ struct NewChatDraftView: View {
     var body: some View {
         // Keep the draft surface static while first send creates the real thread.
         VStack(spacing: 0) {
-            Spacer(minLength: 0)
-            promptStack
-            Spacer(minLength: 0)
+            if let pendingDraftUserMessage {
+                pendingDraftUserMessageView(pendingDraftUserMessage)
+            } else {
+                Spacer(minLength: 0)
+                promptStack
+                Spacer(minLength: 0)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemBackground))
@@ -238,11 +243,45 @@ struct NewChatDraftView: View {
         .sheet(isPresented: $isShowingVoiceSetupSheet) {
             GPTVoiceSetupSheet()
         }
+        .animation(.easeInOut(duration: 0.18), value: pendingDraftUserMessage?.id)
+    }
+
+    // Shows the first user bubble while the app is still waiting for thread/start.
+    private var pendingDraftUserMessage: CodexMessage? {
+        codex.messages(for: route.id).last { message in
+            message.role == .user && message.deliveryState == .pending
+        }
+    }
+
+    private func pendingDraftUserMessageView(_ message: CodexMessage) -> some View {
+        VStack(spacing: 0) {
+            UserMessageBubble(
+                message: message,
+                text: message.text,
+                actionText: message.text,
+                isRetryAvailable: false,
+                onRetryUserMessage: { _ in }
+            )
+            .padding(.horizontal, draftTimelineHorizontalPadding)
+            .padding(.top, 12)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .transition(.opacity)
+    }
+
+    private var draftTimelineHorizontalPadding: CGFloat {
+        dynamicTypeSize.isAccessibilitySize ? 20 : 16
     }
 
     // Source-specific prompt UI:
-    // - General Chat exposes the picker only while it is project-backed; rootless Quick Chat stays bare.
+    // - Project-backed General Chat exposes the available-folder context menu
+    //   before first send; global/rootless Chat stays picker-free.
     // - Folder/project button keeps the normal title because that folder is already implied.
+    // Regression guard: the Projects general-chat empty state must stay as
+    // "What should we work on?" followed by the folder-only picker, while the
+    // global Chats pill stays just "What should we work on?" + input.
     private var promptStack: some View {
         Group {
             if isFromGeneralChat {
@@ -256,12 +295,7 @@ struct NewChatDraftView: View {
 
     private var generalChatPrompt: some View {
         VStack(spacing: 8) {
-            Image("AppLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 50, height: 50)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            ChatLogoBadge()
                 .padding(.bottom, 4)
             Text("What should we work on?")
                 .font(AppFont.title2(weight: .regular))
@@ -269,25 +303,21 @@ struct NewChatDraftView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 28)
 
-            if hasSelectedProject {
+            if showsGeneralFolderPicker {
+                // Visible only for project-backed general chat; rootless global Chat stays bare.
                 folderPickerPill
-                Text("Chats are End-to-end encrypted")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 28)
             }
+            Text("Chats are End-to-end encrypted")
+                .font(AppFont.caption())
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 28)
         }
     }
 
     private var folderButtonPrompt: some View {
         VStack(spacing: 12) {
-            Image("AppLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 50, height: 50)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            ChatLogoBadge()
             ChatEmptyStateTitleBuilder.makeTitle(for: placeholderFolderName)
                 .font(AppFont.title2(weight: .regular))
                 .multilineTextAlignment(.center)
@@ -304,8 +334,9 @@ struct NewChatDraftView: View {
         TurnChatToolbarTitleLabel(
             title: "New thread",
             subtitle: placeholderFolderName ?? trustedHostName,
-            onTap: hasSelectedProject ? { activeSheet = .projectPicker } : nil,
-            accessibilityHint: hasSelectedProject ? "Opens the project picker" : nil
+            // General chat uses the inline context menu; folder-backed drafts can still open the sheet.
+            onTap: !isFromGeneralChat && hasSelectedProject ? { activeSheet = .projectPicker } : nil,
+            accessibilityHint: !isFromGeneralChat && hasSelectedProject ? "Opens the project picker" : nil
         )
     }
 
@@ -394,6 +425,11 @@ struct NewChatDraftView: View {
         selectedProjectPath?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
     }
 
+    private var showsGeneralFolderPicker: Bool {
+        isFromGeneralChat
+            && CodexThreadStartProjectBinding.normalizedProjectPath(route.preferredProjectPath) != nil
+    }
+
     private func handleDraftGitActionSelection(_ action: TurnGitActionKind) {
         guard isDraftGitActionEnabled else { return }
         viewModel.triggerGitAction(
@@ -480,13 +516,10 @@ struct NewChatDraftView: View {
     }
 
     // Compact inline picker shown below the "What should we work on?" prompt.
-    // Mirrors the toolbar subtitle target so tapping either entry point opens
-    // the same project picker sheet.
+    // Regression guard: this is a context menu of available folders only, not
+    // the full new-chat sheet and not a Quick Chat selector.
     private var folderPickerPill: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            activeSheet = .projectPicker
-        } label: {
+        UIKitMenuButton {
             HStack(spacing: 6) {
                 pickerIcon
                 Text(folderPillLabel)
@@ -494,16 +527,43 @@ struct NewChatDraftView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Image(systemName: "chevron.up.chevron.down")
-                    .font(AppFont.title2(weight: .regular))
+                    .font(AppFont.body(weight: .regular))
             }
             .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
             .contentShape(Capsule())
+        } menu: {
+            folderPickerMenu()
         }
-        .buttonStyle(.plain)
         .accessibilityLabel("Select folder")
-        .accessibilityHint("Opens the project picker")
+        .accessibilityHint("Opens available folders")
         .accessibilityValue(folderPillLabel)
+    }
+
+    // Builds the small folder-only menu used by the general-chat empty state.
+    private func folderPickerMenu() -> UIMenu {
+        guard !projectChoices.isEmpty else {
+            return UIMenu(children: [
+                UIAction(
+                    title: "No folders available",
+                    image: RemodexIcon.menuUIImage(systemName: "folder"),
+                    attributes: [.disabled]
+                ) { _ in },
+            ])
+        }
+
+        let actions = projectChoices.map { choice in
+            UIAction(
+                title: choice.label,
+                image: RemodexIcon.menuUIImage(systemName: choice.iconSystemName),
+                state: selectedProjectPath == choice.projectPath ? .on : .off
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                selectedProjectPath = choice.projectPath
+            }
+        }
+
+        return UIMenu(title: "", options: [.displayInline, .singleSelection], children: actions)
     }
 
     // Uses the custom Remodex folder glyph so the inline picker matches the rest of the sidebar.
@@ -955,7 +1015,8 @@ struct NewChatDraftView: View {
         case .projectPicker:
             SidebarNewChatProjectPickerSheet(
                 choices: projectChoices,
-                showsWithoutProjectOption: isFromGeneralChat,
+                // Fallback sheet path stays folder-only; Quick Chat is not part of the folder picker.
+                showsWithoutProjectOption: false,
                 showsWorktreeOptions: false,
                 onSelectProject: { projectPath in
                     selectedProjectPath = projectPath

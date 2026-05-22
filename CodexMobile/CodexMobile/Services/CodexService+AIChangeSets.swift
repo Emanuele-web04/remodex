@@ -14,7 +14,7 @@ enum AIChangeSetError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingWorkingDirectory:
-            return "The selected local folder is not available on this Mac."
+            return "The selected local folder is not available on this device."
         case .missingPatch:
             return "This response cannot be auto-reverted because no exact patch was captured."
         case .bridgeError(let code, let message):
@@ -22,7 +22,7 @@ enum AIChangeSetError: LocalizedError {
             case "missing_patch":
                 return "This response cannot be auto-reverted because no exact patch was captured."
             case "missing_working_directory":
-                return "The selected local folder is not available on this Mac."
+                return "The selected local folder is not available on this device."
             default:
                 return message ?? "Patch revert failed."
             }
@@ -86,7 +86,7 @@ extension CodexService {
                 return AssistantRevertPresentation(
                     title: "Cannot undo",
                     isEnabled: false,
-                    helperText: "The selected local folder is not available on this Mac.",
+                    helperText: "The selected local folder is not available on this device.",
                     riskLevel: .blocked
                 )
             }
@@ -639,7 +639,8 @@ private extension CodexService {
                     return $0.createdAt < $1.createdAt
                 }
                 return $0.id < $1.id
-            }
+            },
+            macDeviceId: currentMacScopedPersistenceDeviceId
         )
     }
 

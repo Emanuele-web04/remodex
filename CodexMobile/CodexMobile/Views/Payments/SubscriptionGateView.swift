@@ -99,7 +99,7 @@ struct SubscriptionGateView: View {
                     .foregroundStyle(primaryTextColor)
                     .multilineTextAlignment(.center)
 
-                Text("Unlock monthly, yearly, or lifetime access to connect your iPhone to Codex running on your computer.")
+                Text("Unlock monthly, yearly, or lifetime access to connect your iPhone to Codex running on your device.")
                     .font(AppFont.caption())
                     .foregroundStyle(secondaryTextColor)
                     .multilineTextAlignment(.center)
@@ -590,19 +590,19 @@ private struct SubscriptionMacLoginInfoSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Text("Remodex connects to Codex running on your computer. Buying Pro unlocks the app, but you still need Codex already logged in on that computer.")
+                    Text("Remodex connects to Codex running on your device. Buying Pro unlocks the app, but you still need Codex already logged in on that device.")
                         .font(AppFont.body())
 
                     infoStep(
                         number: 1,
-                        title: "Open Codex on your computer",
-                        body: "Use the Codex desktop app or the Codex CLI on the computer you want to pair."
+                        title: "Open Codex on your device",
+                        body: "Use the Codex desktop app or the Codex CLI on the device you want to pair."
                     )
 
                     infoStep(
                         number: 2,
                         title: "Log in there first",
-                        body: "Finish the account login flow on the computer before pairing from iPhone."
+                        body: "Finish the account login flow on the device before pairing from iPhone."
                     )
 
                     infoStep(
@@ -613,7 +613,7 @@ private struct SubscriptionMacLoginInfoSheet: View {
                 }
                 .padding(20)
             }
-            .navigationTitle("Use with Your Computer")
+            .navigationTitle("Use with Your Device")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

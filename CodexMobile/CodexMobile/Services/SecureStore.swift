@@ -16,6 +16,7 @@ enum CodexSecureKeys {
     nonisolated static let relayLastAppliedBridgeOutboundSeq = "codex.relay.lastAppliedBridgeOutboundSeq"
     nonisolated static let pushDeviceToken = "codex.push.deviceToken"
     nonisolated static let trustedMacRegistry = "codex.secure.trustedMacRegistry"
+    nonisolated static let currentTrustedMacDeviceId = "codex.secure.currentTrustedMacDeviceId"
     nonisolated static let lastTrustedMacDeviceId = "codex.secure.lastTrustedMacDeviceId"
     nonisolated static let phoneIdentityState = "codex.secure.phoneIdentityState"
     nonisolated static let messageHistoryKey = "codex.local.messageHistoryKey"

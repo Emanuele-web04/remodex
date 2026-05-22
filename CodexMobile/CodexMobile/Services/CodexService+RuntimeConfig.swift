@@ -599,11 +599,11 @@ private extension CodexService {
     func persistThreadRuntimeOverrides() {
         guard !threadRuntimeOverridesByThreadID.isEmpty,
               let encodedOverrides = try? encoder.encode(threadRuntimeOverridesByThreadID) else {
-            defaults.removeObject(forKey: Self.threadRuntimeOverridesDefaultsKey)
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.threadRuntimeOverridesDefaultsKey))
             return
         }
 
-        defaults.set(encodedOverrides, forKey: Self.threadRuntimeOverridesDefaultsKey)
+        defaults.set(encodedOverrides, forKey: macScopedDefaultsKey(Self.threadRuntimeOverridesDefaultsKey))
     }
 }
 

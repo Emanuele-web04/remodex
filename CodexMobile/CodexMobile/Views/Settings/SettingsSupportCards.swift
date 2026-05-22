@@ -12,7 +12,7 @@ struct SettingsAboutCard: View {
 
     var body: some View {
         SettingsCard(title: "About") {
-            Text("Chats are End-to-end encrypted between your iPhone and Mac. The relay only sees ciphertext and connection metadata after the secure handshake completes.")
+            Text("Chats are End-to-end encrypted between your iPhone and paired device. The relay only sees ciphertext and connection metadata after the secure handshake completes.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
@@ -104,8 +104,7 @@ struct SettingsTrustedComputerCard: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 HStack(spacing: 10) {
-                    RemodexIcon.image(systemName: "desktopcomputer")
-                        .font(.system(size: 14, weight: .semibold))
+                    RemodexIcon.image(systemName: "laptopcomputer", size: 16, weight: .semibold)
                         .foregroundStyle(.secondary)
                         .frame(width: 32, height: 32)
                         .background(
@@ -114,7 +113,7 @@ struct SettingsTrustedComputerCard: View {
                         )
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("Computer")
+                        Text("Device")
                             .font(AppFont.caption(weight: .semibold))
                             .foregroundStyle(.secondary)
 
@@ -139,7 +138,7 @@ struct SettingsTrustedComputerCard: View {
                         )
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Edit computer name")
+                .accessibilityLabel("Edit device name")
             }
 
             HStack(spacing: 8) {
@@ -197,7 +196,7 @@ struct SettingsComputerNameSheet: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Computer name")
+                    Text("Device name")
                         .font(AppFont.subheadline(weight: .semibold))
                         .foregroundStyle(.primary)
 
@@ -217,7 +216,7 @@ struct SettingsComputerNameSheet: View {
                             .fill(Color(.secondarySystemFill))
                     )
 
-                Text("This nickname stays on this iPhone and appears anywhere this computer is shown.")
+                Text("This nickname stays on this iPhone and appears anywhere this device is shown.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
@@ -262,7 +261,7 @@ struct SettingsComputerNameSheet: View {
             .padding(20)
             .presentationDetents([.height(300)])
             .presentationDragIndicator(.visible)
-            .navigationTitle("Edit Computer Name")
+            .navigationTitle("Edit Device Name")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

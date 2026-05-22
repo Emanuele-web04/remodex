@@ -91,7 +91,7 @@ struct SidebarLocalFolderBrowserSheet: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Create this folder on your Mac and start a chat there.")
+            Text("Create this folder on your device and start a chat there.")
         }
     }
 
@@ -123,7 +123,7 @@ struct SidebarLocalFolderBrowserSheet: View {
             if let startPath {
                 await loadDirectory(startPath)
             } else {
-                errorMessage = "No local folders are available from this Mac."
+                errorMessage = "No local folders are available from this device."
             }
         } catch {
             errorMessage = error.localizedDescription

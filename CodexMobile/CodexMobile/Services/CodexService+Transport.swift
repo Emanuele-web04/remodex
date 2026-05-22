@@ -16,6 +16,48 @@ let codexWebSocketMaximumMessageSizeBytes = 16 * 1024 * 1024
 
 private enum CodexWebSocketKeepAlivePolicy {
     static let intervalNanoseconds: UInt64 = 25_000_000_000
+    static let foregroundProbeTimeoutNanoseconds: UInt64 = 1_500_000_000
+}
+
+private final class CodexForegroundProbeWaiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private let continuation: CheckedContinuation<Result<Void, Error>, Never>
+    private var didFinish = false
+    private var tasks: [Task<Void, Never>] = []
+
+    init(continuation: CheckedContinuation<Result<Void, Error>, Never>) {
+        self.continuation = continuation
+    }
+
+    func addTask(_ task: Task<Void, Never>) {
+        lock.lock()
+        let shouldCancel = didFinish
+        if !didFinish {
+            tasks.append(task)
+        }
+        lock.unlock()
+
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    func finish(_ result: Result<Void, Error>) {
+        lock.lock()
+        guard !didFinish else {
+            lock.unlock()
+            return
+        }
+        didFinish = true
+        let tasksToCancel = tasks
+        tasks.removeAll()
+        lock.unlock()
+
+        for task in tasksToCancel {
+            task.cancel()
+        }
+        continuation.resume(returning: result)
+    }
 }
 
 private enum CodexRelayTransportPreference {
@@ -348,6 +390,54 @@ extension CodexService {
                     return
                 }
             }
+        }
+    }
+
+    // Probes a foregrounded socket immediately so overnight zombie connections do not wait for the next 25s keepalive.
+    func probeForegroundConnectionIfNeeded() async {
+        guard isConnected, isInitialized, isAppInForeground else {
+            return
+        }
+
+        let result = await foregroundConnectionProbeResult(
+            timeoutNanoseconds: webSocketForegroundProbeTimeoutOverrideNanoseconds
+                ?? CodexWebSocketKeepAlivePolicy.foregroundProbeTimeoutNanoseconds
+        )
+
+        if case .failure(let error) = result,
+           isAppInForeground,
+           isConnected || isInitialized {
+            handleReceiveError(error)
+        }
+    }
+
+    private func foregroundConnectionProbeResult(timeoutNanoseconds: UInt64) async -> Result<Void, Error> {
+        await withCheckedContinuation { continuation in
+            let waiter = CodexForegroundProbeWaiter(continuation: continuation)
+
+            let pingTask = Task { @MainActor [weak self] in
+                guard let self else {
+                    waiter.finish(.success(()))
+                    return
+                }
+
+                do {
+                    try await self.sendWebSocketKeepAlivePing()
+                    waiter.finish(.success(()))
+                } catch {
+                    waiter.finish(.failure(error))
+                }
+            }
+            waiter.addTask(pingTask)
+
+            let timeoutTask = Task {
+                try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                guard !Task.isCancelled else {
+                    return
+                }
+                waiter.finish(.failure(NWError.posix(.ETIMEDOUT)))
+            }
+            waiter.addTask(timeoutTask)
         }
     }
 

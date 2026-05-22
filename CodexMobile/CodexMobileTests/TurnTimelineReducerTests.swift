@@ -3397,6 +3397,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
 
         XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
+        XCTAssertNil(blockInfo[0]?.copyText)
     }
 
     func testAssistantBlockInfoHidesCopyWhileStopControlIsVisible() {
@@ -3600,7 +3601,7 @@ final class TurnTimelineReducerTests: XCTestCase {
             stoppedTurnIDs: ["turn-1"]
         )
 
-        XCTAssertEqual(blockInfo, [nil])
+        XCTAssertEqual(blockInfo.map { $0?.copyText }, [nil])
     }
 
     func testAssistantBlockInfoDeduplicatesEquivalentSingleFileDiffSnapshots() {

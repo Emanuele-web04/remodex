@@ -1,16 +1,49 @@
 // FILE: TerminalRunningIndicator.swift
-// Purpose: Compact ">_" terminal glyph with blinking cursor, shown while an assistant block is running.
+// Purpose: Pending assistant status label with a lightweight shimmer while a block is running.
 // Layer: View Component
-// Exports: TerminalRunningIndicator
+// Exports: TerminalRunningIndicator, TerminalRunningIndicatorLayout, StreamingAssistantPlaceholderSlot
 
 import SwiftUI
 
+enum TerminalRunningIndicatorLayout {
+    // Shared with timeline bottom padding and the hidden streaming-assistant slot so
+    // the first assistant delta does not jump past the thinking placeholder height.
+    static func reservedRowHeight(isAccessibilitySize: Bool) -> CGFloat {
+        isAccessibilitySize ? 56 : 24
+    }
+}
+
 struct TerminalRunningIndicator: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
-        Text("Remodex is thinking...")
-            .font(AppFont.body())
-            .foregroundStyle(.secondary)
+        ShimmerText(
+            text: "Remodex is thinking",
+            font: AppFont.body(),
+            foregroundStyle: .secondary
+        )
+        .frame(
+            minHeight: TerminalRunningIndicatorLayout.reservedRowHeight(
+                isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+            ),
+            alignment: .leading
+        )
         .accessibilityLabel("Remodex is thinking")
+    }
+}
+
+// Reserves scroll space for a hidden empty streaming assistant row.
+struct StreamingAssistantPlaceholderSlot: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        Color.clear
+            .frame(
+                height: TerminalRunningIndicatorLayout.reservedRowHeight(
+                    isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
+                )
+            )
+            .accessibilityHidden(true)
     }
 }
 

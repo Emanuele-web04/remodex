@@ -37,10 +37,12 @@ function createBridgeSecureTransport({
   sessionId,
   relayUrl,
   deviceState,
+  displayName = "",
   onTrustedPhoneUpdate = null,
   persistTrustedPhone = true,
 }) {
   let currentDeviceState = deviceState;
+  const bridgeDisplayName = normalizeNonEmptyString(displayName);
   let pendingHandshake = null;
   let activeSession = null;
   let liveSendWireMessage = null;
@@ -62,6 +64,7 @@ function createBridgeSecureTransport({
       macDeviceId: currentDeviceState.macDeviceId,
       macIdentityPublicKey: currentDeviceState.macIdentityPublicKey,
       expiresAt: currentPairingExpiresAt,
+      displayName: bridgeDisplayName,
     };
   }
 
@@ -259,6 +262,7 @@ function createBridgeSecureTransport({
       expiresAtForTranscript,
       macSignature,
       clientNonce: clientNonceBase64,
+      displayName: bridgeDisplayName,
     });
   }
 
@@ -346,6 +350,7 @@ function createBridgeSecureTransport({
       nextOutboundCounter: 0,
       isResumed: false,
       sendWireMessage: liveSendWireMessage,
+      firstOutboundSeq: nextBridgeOutboundSeq,
     };
 
     nextKeyEpoch = pendingHandshake.keyEpoch + 1;
@@ -373,6 +378,7 @@ function createBridgeSecureTransport({
     }
     if (pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {
       resetOutboundReplayState();
+      activeSession.firstOutboundSeq = nextBridgeOutboundSeq;
     }
 
     pendingHandshake = null;
@@ -397,7 +403,9 @@ function createBridgeSecureTransport({
 
     const lastAppliedBridgeOutboundSeq = Number(message.lastAppliedBridgeOutboundSeq) || 0;
     lastRelayedBridgeOutboundSeq = lastAppliedBridgeOutboundSeq;
-    const missingEntries = replayableOutboundEntries(lastAppliedBridgeOutboundSeq);
+    const missingEntries = replayableOutboundEntries(lastAppliedBridgeOutboundSeq, {
+      includeCurrentSessionEntries: true,
+    });
     activeSession.isResumed = true;
     for (const entry of missingEntries) {
       if (!sendBufferedEntry(entry, activeSession.sendWireMessage)) {
@@ -506,10 +514,21 @@ function createBridgeSecureTransport({
     return sendWireMessage(JSON.stringify(envelope)) !== false;
   }
 
-  function replayableOutboundEntries(lastAppliedBridgeOutboundSeq) {
-    return outboundBuffer.filter(
-      (entry) => entry.bridgeOutboundSeq > lastAppliedBridgeOutboundSeq
-    );
+  function replayableOutboundEntries(
+    lastAppliedBridgeOutboundSeq,
+    { includeCurrentSessionEntries = false } = {}
+  ) {
+    return outboundBuffer.filter((entry) => {
+      if (entry.bridgeOutboundSeq > lastAppliedBridgeOutboundSeq) {
+        return true;
+      }
+
+      // Stale cursors from a previous Mac/session must not suppress responses
+      // produced after this secure channel became active, including initialize.
+      return includeCurrentSessionEntries
+        && activeSession
+        && entry.bridgeOutboundSeq >= activeSession.firstOutboundSeq;
+    });
   }
 
   // Replays from the last phone ack instead of local socket writes, so a relay
@@ -556,7 +575,7 @@ function isTruthyEnvValue(value) {
 
 function shortId(value) {
   const normalized = normalizeNonEmptyString(value);
-  return normalized ? normalized.slice(0, 8) : "none";
+  return normalized ? createHash("sha256").update(normalized).digest("hex").slice(0, 8) : "none";
 }
 
 function shortFingerprint(publicKeyBase64) {

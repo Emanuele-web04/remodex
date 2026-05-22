@@ -78,19 +78,21 @@ extension CodexService {
 
 private extension CodexService {
     // Chooses the host identity the UI should surface first: the live relay target when available,
-    // otherwise the preferred trusted computer remembered for reconnect.
+    // otherwise the explicitly selected current trusted computer.
     var visibleTrustedMacRecord: CodexTrustedMacRecord? {
         if let normalizedRelayMacDeviceId,
+           (normalizedCurrentTrustedMacDeviceId == nil
+                || normalizedCurrentTrustedMacDeviceId == normalizedRelayMacDeviceId),
            let trustedMac = trustedMacRegistry.records[normalizedRelayMacDeviceId] {
             return trustedMac
         }
 
-        return preferredTrustedMacRecord
+        return currentTrustedMacRecord
     }
 
-    // Reuses the connected device id when available, otherwise falls back to the saved preferred host.
+    // Reuses the connected device id when available, otherwise falls back to the explicit current host.
     var trustedPairDeviceId: String? {
-        normalizedRelayMacDeviceId ?? visibleTrustedMacRecord?.macDeviceId
+        visibleTrustedMacRecord?.macDeviceId ?? normalizedRelayMacDeviceId
     }
 
     var trustedPairDisplayName: String? {
@@ -110,7 +112,7 @@ private extension CodexService {
 
         switch secureConnectionState {
         case .handshaking:
-            return "Pairing Computer"
+            return "Pairing Device"
         case .liveSessionUnresolved, .reconnecting, .trustedMac:
             return "Saved Pair"
         case .rePairRequired:

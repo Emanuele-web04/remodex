@@ -68,8 +68,7 @@ struct SidebarToolbarIconButton: View {
     private var iconView: some View {
         switch icon {
         case .systemImage(let name):
-            Image(systemName: name)
-                .font(.system(size: iconSize, weight: iconWeight))
+            RemodexIcon.image(systemName: name, size: iconSize, weight: iconWeight)
         case .custom(let view):
             view
         }

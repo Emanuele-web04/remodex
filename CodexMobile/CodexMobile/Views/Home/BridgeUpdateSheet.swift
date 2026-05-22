@@ -30,7 +30,7 @@ struct BridgeUpdateSheet: View {
 
                 VStack(alignment: .leading, spacing: 10) {
                     if let command = prompt.command, !command.isEmpty {
-                        Text("Run this on your computer")
+                        Text("Run this on your device")
                             .font(AppFont.caption(weight: .semibold))
                             .foregroundStyle(.secondary)
 
@@ -79,8 +79,8 @@ struct BridgeUpdateSheet: View {
                 }
 
                 Text(prompt.command == nil
-                    ? "After the app finishes updating on your iPhone, reconnect to the computer bridge."
-                    : "After the package finishes updating, restart the bridge on your computer and come back here."
+                    ? "After the app finishes updating on your iPhone, reconnect to the device bridge."
+                    : "After the package finishes updating, restart the bridge on your device and come back here."
                 )
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)

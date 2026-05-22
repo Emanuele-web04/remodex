@@ -101,7 +101,7 @@ struct UserMessageBubble: View {
     private var deliveryStatusText: String? {
         switch message.deliveryState {
         case .pending:
-            return "Sending"
+            return "sending..."
         case .failed:
             return "Failed"
         case .confirmed:

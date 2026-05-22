@@ -14,7 +14,7 @@ enum DesktopHandoffError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .disconnected:
-            return "Not connected to your paired computer."
+            return "Not connected to your paired device."
         case .invalidResponse:
             return "The desktop app did not return a valid response."
         case .bridgeError(let code, let message):
@@ -83,14 +83,14 @@ final class DesktopHandoffService {
         guard codex.canWakePreferredMacDisplay else {
             throw DesktopHandoffError.bridgeError(
                 code: "saved_pair_required",
-                message: "Reconnect to your paired computer first."
+                message: "Reconnect to your paired device first."
             )
         }
 
         guard let reconnectURL = try await preferredReconnectURLForWake() else {
             throw DesktopHandoffError.bridgeError(
                 code: "saved_pair_required",
-                message: "Reconnect to your paired computer or scan a new QR code first."
+                message: "Reconnect to your paired device or scan a new QR code first."
             )
         }
 
@@ -191,7 +191,7 @@ final class DesktopHandoffService {
         if codex.hasTrustedMacReconnectCandidate {
             do {
                 let resolved = try await codex.resolveTrustedMacSession()
-                guard let relayURL = codex.normalizedRelayURL else {
+                guard let relayURL = codex.normalizedRelayURL ?? codex.preferredWakeRelayURL else {
                     return nil
                 }
                 return "\(relayURL)/\(resolved.sessionId)"
@@ -221,21 +221,21 @@ private extension DesktopHandoffError {
         case "unsupported_platform":
             return "Desktop app handoff works only when the bridge is running on a supported desktop platform."
         case "handoff_failed":
-            return fallback ?? "Could not relaunch Codex.app on this computer."
+            return fallback ?? "Could not relaunch Codex.app on this device."
         case "wake_display_failed":
-            return fallback ?? "Could not wake this computer's display right now."
+            return fallback ?? "Could not wake this device's display right now."
         case "saved_pair_required":
-            return fallback ?? "Reconnect to your paired computer or scan a new QR code first."
+            return fallback ?? "Reconnect to your paired device or scan a new QR code first."
         case "unsupported_bridge_preferences":
-            return fallback ?? "Update the Remodex bridge on your computer to sync this setting."
+            return fallback ?? "Update the Remodex bridge on your device to sync this setting."
         case "invalid_bridge_preferences":
-            return fallback ?? "The computer bridge rejected this setting update."
+            return fallback ?? "The device bridge rejected this setting update."
         case "bridge_preferences_persist_failed":
-            return fallback ?? "The computer bridge could not save this setting."
+            return fallback ?? "The device bridge could not save this setting."
         case "unsupported_bridge_update":
-            return fallback ?? "Update the Remodex bridge on your computer before updating it from iPhone."
+            return fallback ?? "Update the Remodex bridge on your device before updating it from iPhone."
         case "bridge_update_failed":
-            return fallback ?? "The computer bridge could not update itself."
+            return fallback ?? "The device bridge could not update itself."
         default:
             return fallback ?? "Could not continue this chat on the desktop app."
         }

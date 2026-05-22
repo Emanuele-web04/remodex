@@ -11,7 +11,7 @@ const path = require("path");
 const { startBridge } = require("./bridge");
 const { readBridgeConfig } = require("./codex-desktop-refresher");
 const { printQR } = require("./qr");
-const { resetBridgeDeviceState } = require("./secure-device-state");
+const { resetBridgeTrustState } = require("./secure-device-state");
 const {
   clearBridgeStatus,
   clearPairingSession,
@@ -209,7 +209,7 @@ function resetMacOSBridgePairing({
   platform = process.platform,
   execFileSyncImpl = execFileSync,
   fsImpl = fs,
-  resetBridgePairingImpl = resetBridgeDeviceState,
+  resetBridgePairingImpl = resetBridgeTrustState,
 } = {}) {
   assertDarwinPlatform(platform);
   stopMacOSBridgeService({

@@ -249,16 +249,16 @@ test("hasRelayConnectionGoneStale returns false for fresh or missing activity ti
   assert.equal(hasRelayConnectionGoneStale(Number.NaN), false);
 });
 
-test("hasRelayConnectionGoneStale default threshold waits 25 seconds", () => {
+test("hasRelayConnectionGoneStale default threshold waits 45 seconds", () => {
   assert.equal(
     hasRelayConnectionGoneStale(1_000, {
-      now: 25_999,
+            now: 45_999,
     }),
     false
   );
   assert.equal(
     hasRelayConnectionGoneStale(1_000, {
-      now: 26_000,
+            now: 46_000,
     }),
     true
   );

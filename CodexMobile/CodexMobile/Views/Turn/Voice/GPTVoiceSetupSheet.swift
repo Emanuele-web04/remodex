@@ -21,9 +21,9 @@ struct GPTVoiceSetupSheet: View {
                         )
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("GPT voice uses OpenAI auth on your computer")
+                        Text("GPT voice uses OpenAI auth on your device")
                             .font(AppFont.subheadline(weight: .semibold))
-                        Text("Remodex does not keep a separate GPT voice secret on the iPhone. It uses the ChatGPT session or OpenAI API key already active on your paired computer.")
+                        Text("Remodex does not keep a separate GPT voice secret on the iPhone. It uses the ChatGPT session or OpenAI API key already active on your paired device.")
                             .font(AppFont.caption())
                             .foregroundStyle(.secondary)
                     }
@@ -37,13 +37,13 @@ struct GPTVoiceSetupSheet: View {
                     )
                     infoStep(
                         number: "2",
-                        title: "The phone checks your paired computer",
-                        detail: "Remodex asks the paired computer bridge for the active ChatGPT session or OpenAI API key available there."
+                        title: "The phone checks your paired device",
+                        detail: "Remodex asks the paired device bridge for the active ChatGPT session or OpenAI API key available there."
                     )
                     infoStep(
                         number: "3",
                         title: "GPT transcribes the clip",
-                        detail: "The voice clip is sent through the paired computer bridge so OpenAI can turn it into text."
+                        detail: "The voice clip is sent through the paired device bridge so OpenAI can turn it into text."
                     )
                     infoStep(
                         number: "4",
@@ -52,7 +52,7 @@ struct GPTVoiceSetupSheet: View {
                     )
                 }
 
-                Text("In short: iPhone voice in, computer OpenAI auth for transcription, transcript back to the iPhone.")
+                Text("In short: iPhone voice in, device OpenAI auth for transcription, transcript back to the iPhone.")
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 

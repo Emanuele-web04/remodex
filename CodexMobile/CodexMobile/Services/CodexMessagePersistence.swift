@@ -19,10 +19,10 @@ nonisolated struct CodexMessagePersistence {
     ]
 
     // Loads the saved message map from disk. Returns an empty store on failure.
-    func load() -> [String: [CodexMessage]] {
+    func load(macDeviceId: String? = nil, includeLegacyFallback: Bool = false) -> [String: [CodexMessage]] {
         let decoder = JSONDecoder()
 
-        for fileURL in storeURLs {
+        for fileURL in storeURLs(macDeviceId: macDeviceId, includeLegacyFallback: includeLegacyFallback) {
             guard let data = try? Data(contentsOf: fileURL) else {
                 continue
             }
@@ -42,30 +42,60 @@ nonisolated struct CodexMessagePersistence {
     }
 
     // Persists all thread timelines atomically to avoid corrupt partial writes.
-    func save(_ value: [String: [CodexMessage]]) {
+    func save(_ value: [String: [CodexMessage]], macDeviceId: String? = nil) {
         let encoder = JSONEncoder()
         guard let plaintext = try? encoder.encode(sanitizedForPersistence(value)),
               let data = encryptPersistedPayload(plaintext) else {
             return
         }
 
-        let fileURL = storeURL
+        let fileURL = storeURL(macDeviceId: macDeviceId)
         ensureParentDirectoryExists(for: fileURL)
         try? data.write(to: fileURL, options: [.atomic])
     }
 
-    private var storeURL: URL {
-        storeURLs[0]
+    // Removes the scoped timeline cache after a rotated device id has been merged elsewhere.
+    func delete(macDeviceId: String?) {
+        for fileURL in storeURLs(macDeviceId: macDeviceId) {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
     }
 
-    private var storeURLs: [URL] {
+    private func storeURL(macDeviceId: String?) -> URL {
+        storeURLs(macDeviceId: macDeviceId)[0]
+    }
+
+    private func storeURLs(macDeviceId: String?, includeLegacyFallback: Bool = false) -> [URL] {
         let fm = FileManager.default
         let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? fm.temporaryDirectory
         let bundleID = Bundle.main.bundleIdentifier ?? "com.codexmobile.app"
-        let directory = base.appendingPathComponent(bundleID, isDirectory: true)
+        let directory = messageHistoryDirectory(base: base, bundleID: bundleID, macDeviceId: macDeviceId)
         let names = [fileName] + legacyFileNames
-        return names.map { directory.appendingPathComponent($0, isDirectory: false) }
+        let scopedStoreURLs = names.map { directory.appendingPathComponent($0, isDirectory: false) }
+
+        guard normalizedMacDeviceId(macDeviceId) != nil else {
+            return scopedStoreURLs
+        }
+
+        guard includeLegacyFallback else {
+            return scopedStoreURLs
+        }
+
+        let legacyDirectory = base.appendingPathComponent(bundleID, isDirectory: true)
+        let legacyStoreURLs = names.map { legacyDirectory.appendingPathComponent($0, isDirectory: false) }
+        return scopedStoreURLs + legacyStoreURLs
+    }
+
+    private func messageHistoryDirectory(base: URL, bundleID: String, macDeviceId: String?) -> URL {
+        let rootDirectory = base.appendingPathComponent(bundleID, isDirectory: true)
+        guard let normalizedMacDeviceId = normalizedMacDeviceId(macDeviceId) else {
+            return rootDirectory
+        }
+
+        return rootDirectory
+            .appendingPathComponent("mac", isDirectory: true)
+            .appendingPathComponent(normalizedMacDeviceId, isDirectory: true)
     }
 
     private func ensureParentDirectoryExists(for fileURL: URL) {
@@ -117,5 +147,13 @@ nonisolated struct CodexMessagePersistence {
                 return sanitizedMessage
             }
         }
+    }
+
+    private func normalizedMacDeviceId(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }

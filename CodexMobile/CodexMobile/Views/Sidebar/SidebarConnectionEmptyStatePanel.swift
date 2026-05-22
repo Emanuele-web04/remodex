@@ -107,7 +107,7 @@ struct SidebarConnectionEmptyStatePanel: View {
     }
 
     private var heroTitle: String {
-        trustedPairPresentation?.name ?? "No Mac paired yet"
+        trustedPairPresentation?.name ?? "No device paired yet"
     }
 
     private var accessibilityIdentityLabel: String {
@@ -299,8 +299,8 @@ struct SidebarConnectionEmptyStatePanel: View {
         connectionPhase: .offline,
         trustedPairPresentation: CodexTrustedPairPresentation(
             deviceId: "abc",
-            title: "Trusted Computer",
-            name: "Mac 8026751ACA1A",
+            title: "Trusted Device",
+            name: "Device 8026751ACA1A",
             systemName: nil,
             detail: "Re-pair required"
         ),
@@ -323,10 +323,10 @@ struct SidebarConnectionEmptyStatePanel: View {
         connectionPhase: .offline,
         trustedPairPresentation: CodexTrustedPairPresentation(
             deviceId: "abc",
-            title: "Trusted Computer",
+            title: "Trusted Device",
             name: "Studio Mini",
             systemName: nil,
-            detail: "Trusted Computer ready"
+            detail: "Trusted Device ready"
         ),
         securityLabel: nil,
         hasReconnectCandidate: true,

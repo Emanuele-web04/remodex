@@ -4,7 +4,7 @@
 //          its own tighter prompt-and-picker layout instead of this hero block.
 // Layer: View Component
 // Exports: ChatEmptyStatePlaceholder
-// Depends on: SwiftUI, AppFont, adaptiveGlass
+// Depends on: SwiftUI, AppFont
 
 import SwiftUI
 
@@ -15,12 +15,7 @@ struct ChatEmptyStatePlaceholder: View {
     var body: some View {
         VStack(spacing: 12) {
             Spacer()
-            Image("AppLogo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 56, height: 56)
-                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                .adaptiveGlass(in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            ChatLogoBadge(size: 56, cornerRadius: 18)
             title
                 .font(AppFont.title2(weight: .regular))
                 .multilineTextAlignment(.center)
@@ -34,6 +29,22 @@ struct ChatEmptyStatePlaceholder: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
+    }
+}
+
+struct ChatLogoBadge: View {
+    var size: CGFloat = 50
+    var cornerRadius: CGFloat = 16
+
+    var body: some View {
+        Image("AppLogo")
+            .resizable()
+            .renderingMode(.template)
+            .scaledToFit()
+            .foregroundStyle(Color(.systemBackground))
+            .padding(8)
+            .frame(width: size, height: size)
+            .background(.primary, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
     }
 }
 

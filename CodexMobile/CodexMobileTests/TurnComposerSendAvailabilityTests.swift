@@ -112,6 +112,80 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertEqual(viewModel.composerAttachments.count, 1)
     }
 
+    func testSendNewThreadPreAppendsFirstMessageBeforeOpeningThread() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+
+        var recordedMethods: [String] = []
+        var openedThreadID: String?
+        var openedThreadMessageText: String?
+        var didOpenBeforeTurnStart = false
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            switch method {
+            case "thread/start":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string("thread-new"),
+                            "title": .string(CodexThread.defaultDisplayTitle),
+                            "cwd": .string("/tmp/remodex-local"),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "workspace/checkpointCapture":
+                return self.workspaceCheckpointResponse(kind: "messageStart")
+            case "workspace/checkpointCopy":
+                return self.workspaceCheckpointResponse(kind: "turnStart", copied: true)
+            case "turn/start":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["turnId": .string("turn-new")]),
+                    includeJSONRPC: false
+                )
+            case "thread/generateTitle":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["title": .string("First message")]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        let viewModel = TurnViewModel()
+        viewModel.input = "First message"
+
+        let didStart = viewModel.sendNewThread(
+            codex: service,
+            draftThreadID: "draft-thread",
+            preferredProjectPath: "/tmp/remodex-local"
+        ) { thread in
+            openedThreadID = thread.id
+            didOpenBeforeTurnStart = !recordedMethods.contains("turn/start")
+            openedThreadMessageText = service.messages(for: thread.id).first?.text
+        }
+        let immediateDraftMessage = service.messages(for: "draft-thread").first
+        await waitForSendCompletion(viewModel)
+
+        XCTAssertTrue(didStart)
+        XCTAssertEqual(immediateDraftMessage?.text, "First message")
+        XCTAssertEqual(immediateDraftMessage?.deliveryState, .pending)
+        XCTAssertEqual(openedThreadID, "thread-new")
+        XCTAssertTrue(didOpenBeforeTurnStart)
+        XCTAssertEqual(openedThreadMessageText, "First message")
+        XCTAssertTrue(service.messages(for: "draft-thread").isEmpty)
+        XCTAssertEqual(recordedMethods.filter { $0 == "thread/start" }.count, 1)
+        XCTAssertEqual(recordedMethods.filter { $0 == "turn/start" }.count, 1)
+        XCTAssertEqual(service.messages(for: "thread-new").filter { $0.role == .user }.count, 1)
+        XCTAssertEqual(service.messages(for: "thread-new").first?.turnId, "turn-new")
+    }
+
     func testLocalDraftRestoresComposerStateForSameThread() {
         let service = makeService()
         let firstViewModel = TurnViewModel()
@@ -408,6 +482,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
             composerMentionedPlugins: [],
             composerReviewSelection: nil,
             isSubagentsSelectionArmed: false,
+            isPlanModeArmed: false,
             isVoiceRecording: false,
             voiceAudioLevels: [],
             voiceRecordingDuration: 0
@@ -427,6 +502,23 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
             .compactMap(\.objectValue)
             .first(where: { $0["type"]?.stringValue == "text" })?["text"]?
             .stringValue
+    }
+
+    private func workspaceCheckpointResponse(kind: String, copied: Bool? = nil) -> RPCMessage {
+        var result: RPCObject = [
+            "repoRoot": .string("/tmp/remodex-local"),
+            "checkpointRef": .string("refs/remodex/checkpoints/test"),
+            "checkpointKind": .string(kind),
+            "threadId": .string("thread-new"),
+        ]
+        if let copied {
+            result["copied"] = .bool(copied)
+        }
+        return RPCMessage(
+            id: .string(UUID().uuidString),
+            result: .object(result),
+            includeJSONRPC: false
+        )
     }
 
     private func makeService() -> CodexService {

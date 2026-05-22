@@ -38,6 +38,7 @@ struct CodexPairingQRPayload: Codable, Sendable {
     let macDeviceId: String
     let macIdentityPublicKey: String
     let expiresAt: Int64
+    var displayName: String? = nil
 }
 
 struct CodexPhoneIdentityState: Codable, Sendable {
@@ -107,6 +108,7 @@ struct SecureServerHello: Codable, Sendable {
     let expiresAtForTranscript: Int64
     let macSignature: String
     let clientNonce: String?
+    var displayName: String? = nil
 }
 
 struct SecureClientAuth: Codable, Sendable {
@@ -215,6 +217,7 @@ struct CodexPairingCodeResolveResponse: Codable, Sendable {
     let macDeviceId: String
     let macIdentityPublicKey: String
     let expiresAt: Int64
+    var displayName: String? = nil
 }
 
 struct CodexRelayErrorResponse: Codable, Sendable {
@@ -263,7 +266,7 @@ enum CodexTrustedSessionResolveError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noTrustedMac:
-            return "No trusted computer is available to reconnect."
+            return "No trusted device is available to reconnect."
         case .unsupportedRelay:
             return "This relay does not support trusted reconnect yet."
         case .macOffline(let message),
@@ -281,9 +284,9 @@ extension CodexSecureConnectionState {
         case .notPaired:
             return "Not paired"
         case .trustedMac:
-            return "Trusted Computer"
+            return "Trusted Device"
         case .liveSessionUnresolved:
-            return "Trusted Computer ready"
+            return "Trusted Device ready"
         case .handshaking:
             return "Secure handshake in progress"
         case .encrypted:

@@ -32,7 +32,7 @@ extension CodexService {
         case .qrBootstrap:
             guard let pairingPublicKey = normalizedRelayMacIdentityPublicKey else {
                 throw CodexSecureTransportError.invalidHandshake(
-                    "The initial pairing metadata is missing the Mac identity key. Scan a new QR code to reconnect."
+                    "The initial pairing metadata is missing the device identity key. Scan a new QR code to reconnect."
                 )
             }
             expectedMacIdentityPublicKey = pairingPublicKey
@@ -70,20 +70,20 @@ extension CodexService {
         )
         guard serverHello.protocolVersion == codexSecureProtocolVersion else {
             presentBridgeUpdatePrompt(
-                message: "This bridge is using a different secure transport version. Update the Remodex package on your computer and try again."
+                message: "This bridge is using a different secure transport version. Update the Remodex package on your device and try again."
             )
             throw CodexSecureTransportError.incompatibleVersion(
-                "This bridge is using a different secure transport version. Update Remodex on the iPhone or Mac and try again."
+                "This bridge is using a different secure transport version. Update Remodex on the iPhone or paired device and try again."
             )
         }
         guard serverHello.sessionId == sessionId else {
             throw CodexSecureTransportError.invalidHandshake("The secure bridge session ID did not match the saved pairing.")
         }
         guard serverHello.macDeviceId == macDeviceId else {
-            throw CodexSecureTransportError.invalidHandshake("The bridge reported a different Mac identity for this relay session.")
+            throw CodexSecureTransportError.invalidHandshake("The bridge reported a different device identity for this relay session.")
         }
         guard serverHello.macIdentityPublicKey == expectedMacIdentityPublicKey else {
-            throw CodexSecureTransportError.invalidHandshake("The secure Mac identity key did not match the paired device.")
+            throw CodexSecureTransportError.invalidHandshake("The secure device identity key did not match the paired device.")
         }
 
         let serverNonce = Data(base64EncodedOrEmpty: serverHello.serverNonce)
@@ -121,7 +121,7 @@ extension CodexService {
             + "signature=\(shortTranscriptDigest(macSignature))"
         )
         guard isSignatureValid else {
-            throw CodexSecureTransportError.invalidHandshake("The secure Mac signature could not be verified.")
+            throw CodexSecureTransportError.invalidHandshake("The secure device signature could not be verified.")
         }
 
         pendingHandshake = CodexPendingHandshake(
@@ -190,7 +190,8 @@ extension CodexService {
                 deviceId: macDeviceId,
                 publicKey: serverHello.macIdentityPublicKey,
                 relayURL: normalizedRelayURL,
-                displayName: trustedMac?.displayName
+                displayName: serverHello.displayName ?? trustedMac?.displayName,
+                liveSessionId: sessionId
             )
         }
 
@@ -315,7 +316,7 @@ extension CodexService {
            let trustedMac = trustedMacRegistry.records[relayMacDeviceId] {
             secureConnectionState = .trustedMac
             secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
-        } else if let trustedMac = preferredTrustedMacRecord {
+        } else if let trustedMac = currentTrustedMacRecord {
             secureConnectionState = .liveSessionUnresolved
             secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         } else if normalizedRelaySessionId != nil {
@@ -328,12 +329,12 @@ extension CodexService {
     }
 
     // Used by: ContentViewModel trusted reconnect path.
-    func resolveTrustedMacSession() async throws -> CodexTrustedSessionResolveResponse {
+    func resolveTrustedMacSession(deviceId: String? = nil) async throws -> CodexTrustedSessionResolveResponse {
         let resolver = trustedSessionResolverOverride ?? { [weak self] in
             guard let self else {
                 throw CancellationError()
             }
-            return try await self.resolveTrustedMacSessionImpl()
+            return try await self.resolveTrustedMacSessionImpl(deviceId: deviceId)
         }
         let resolveTaskID = UUID()
         let task = Task {
@@ -424,16 +425,17 @@ extension CodexService {
                 sessionId: resolved.sessionId,
                 macDeviceId: resolved.macDeviceId,
                 macIdentityPublicKey: resolved.macIdentityPublicKey,
-                expiresAt: resolved.expiresAt
+                expiresAt: resolved.expiresAt,
+                displayName: resolved.displayName
             )
         }
 
         let errorResponse = try? JSONDecoder().decode(CodexRelayErrorResponse.self, from: data)
         switch errorResponse?.code {
         case "pairing_code_expired":
-            throw CodexSecureTransportError.invalidQR("This pairing code has expired. Generate a new one from the computer bridge.")
+            throw CodexSecureTransportError.invalidQR("This pairing code has expired. Generate a new one from the device bridge.")
         case "pairing_code_unavailable":
-            throw CodexSecureTransportError.invalidQR("That pairing code is not available right now. Make sure your computer bridge is running and try again.")
+            throw CodexSecureTransportError.invalidQR("That pairing code is not available right now. Make sure your device bridge is running and try again.")
         default:
             if httpResponse.statusCode == 404 {
                 throw CodexSecureTransportError.invalidQR("This relay does not support pairing codes yet. Scan the QR code instead.")
@@ -442,6 +444,349 @@ extension CodexService {
                 errorResponse?.error ?? "The relay could not resolve that pairing code."
             )
         }
+    }
+}
+
+extension CodexService {
+    func trustMac(
+        deviceId: String,
+        publicKey: String,
+        relayURL: String?,
+        displayName: String?,
+        liveSessionId: String? = nil
+    ) {
+        let normalizedPublicKey = publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedDisplayName = trimmedDisplayName?.isEmpty == false ? trimmedDisplayName : nil
+        let trimmedLiveSessionId = liveSessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedLiveSessionId = trimmedLiveSessionId?.isEmpty == false ? trimmedLiveSessionId : nil
+        let now = Date()
+        let incomingDisplayNameKey = trustedMacDisplayNameCompactionKey(normalizedDisplayName)
+        let staleDuplicateRecords = trustedMacRegistry.records.values
+            .filter { trustedMac in
+                guard trustedMac.macDeviceId != deviceId else {
+                    return false
+                }
+
+                if hasSameTrustedMacIdentity(trustedMac, asPublicKey: normalizedPublicKey) {
+                    return true
+                }
+
+                guard let incomingDisplayNameKey,
+                      trustedMacDisplayNameCompactionKey(trustedMac.displayName) == incomingDisplayNameKey else {
+                    return false
+                }
+                return shouldCoalesceTrustedMacRecordByDisplayName(
+                    trustedMac,
+                    incomingPublicKey: normalizedPublicKey,
+                    now: now
+                )
+            }
+            .sorted { shouldPreferTrustedMacRecord($0, over: $1) }
+        let existing = preferredExistingTrustedMacRecord(
+            current: trustedMacRegistry.records[deviceId],
+            duplicates: staleDuplicateRecords
+        )
+        let existingHasSameIdentity = existing.map {
+            hasSameTrustedMacIdentity($0, asPublicKey: normalizedPublicKey)
+        } ?? false
+
+        // Old bridge resets could rotate ids; collapse those historical records when a fresh QR proves the current one.
+        let migratedScopedState = migrateMacScopedState(
+            from: staleDuplicateRecords.map(\.macDeviceId),
+            to: deviceId
+        )
+        for staleRecord in staleDuplicateRecords {
+            trustedMacRegistry.records.removeValue(forKey: staleRecord.macDeviceId)
+        }
+        if let normalizedPreviousTrustedMacDeviceId,
+           staleDuplicateRecords.contains(where: { $0.macDeviceId == normalizedPreviousTrustedMacDeviceId }) {
+            clearPreviousTrustedMacDeviceId()
+        }
+
+        trustedMacRegistry.records[deviceId] = CodexTrustedMacRecord(
+            macDeviceId: deviceId,
+            macIdentityPublicKey: normalizedPublicKey,
+            lastPairedAt: now,
+            relayURL: relayURL ?? existing?.relayURL,
+            displayName: preferredTrustedMacDisplayName(
+                incoming: normalizedDisplayName,
+                existing: existing?.displayName
+            ),
+            lastResolvedSessionId: normalizedLiveSessionId
+                ?? (existingHasSameIdentity ? existing?.lastResolvedSessionId : nil),
+            lastResolvedAt: normalizedLiveSessionId == nil
+                ? (existingHasSameIdentity ? existing?.lastResolvedAt : nil)
+                : now,
+            lastUsedAt: now
+        )
+        SecureStore.writeCodable(trustedMacRegistry, for: CodexSecureKeys.trustedMacRegistry)
+        setCurrentTrustedMacDeviceId(deviceId)
+        if migratedScopedState {
+            loadMacScopedDefaultsState(for: deviceId)
+        }
+        SecureStore.writeString(deviceId, for: CodexSecureKeys.lastTrustedMacDeviceId)
+        lastTrustedMacDeviceId = deviceId
+        secureMacFingerprint = codexSecureFingerprint(for: normalizedPublicKey)
+    }
+
+    @discardableResult
+    func pruneOfflineTrustedMacRecords(matching trustedMac: CodexTrustedMacRecord) -> Int {
+        let targetPublicKey = trustedMac.macIdentityPublicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let protectedDeviceIds = Set([
+            normalizedCurrentTrustedMacDeviceId,
+            normalizedRelayMacDeviceId,
+        ].compactMap { $0 })
+        let now = Date()
+
+        let removableDeviceIds = trustedMacRegistry.records.values
+            .filter { record in
+                guard !protectedDeviceIds.contains(record.macDeviceId) else {
+                    return false
+                }
+                guard isStaleTrustedMacDisplayDuplicate(record, now: now) else {
+                    return false
+                }
+
+                if record.macDeviceId == trustedMac.macDeviceId {
+                    return true
+                }
+
+                guard !targetPublicKey.isEmpty else {
+                    return false
+                }
+                return record.macIdentityPublicKey.trimmingCharacters(in: .whitespacesAndNewlines) == targetPublicKey
+            }
+            .map(\.macDeviceId)
+
+        guard !removableDeviceIds.isEmpty else {
+            return 0
+        }
+
+        for deviceId in removableDeviceIds {
+            trustedMacRegistry.records.removeValue(forKey: deviceId)
+        }
+        if let normalizedPreviousTrustedMacDeviceId,
+           removableDeviceIds.contains(normalizedPreviousTrustedMacDeviceId) {
+            clearPreviousTrustedMacDeviceId()
+        }
+        SecureStore.writeCodable(trustedMacRegistry, for: CodexSecureKeys.trustedMacRegistry)
+        return removableDeviceIds.count
+    }
+
+    func presentationTrustedMacRecords() -> [CodexTrustedMacRecord] {
+        let records = compactedTrustedMacRecords(Array(trustedMacRegistry.records.values))
+        return hidingStaleGenericPresentationRecords(records)
+    }
+
+    private func preferredTrustedMacDisplayName(incoming: String?, existing: String?) -> String? {
+        let normalizedIncoming = normalizedTrustedMacDisplayName(incoming)
+        let normalizedExisting = normalizedTrustedMacDisplayName(existing)
+        if let normalizedIncoming,
+           isGenericTrustedMacDisplayName(normalizedIncoming),
+           let normalizedExisting,
+           !isGenericTrustedMacDisplayName(normalizedExisting) {
+            return normalizedExisting
+        }
+        return normalizedIncoming ?? normalizedExisting
+    }
+
+    private func preferredExistingTrustedMacRecord(
+        current: CodexTrustedMacRecord?,
+        duplicates: [CodexTrustedMacRecord]
+    ) -> CodexTrustedMacRecord? {
+        guard let current else {
+            return duplicates.first
+        }
+
+        let candidates = ([current] + duplicates).sorted { shouldPreferTrustedMacRecord($0, over: $1) }
+        if isGenericOrMissingTrustedMacDisplayName(current.displayName),
+           let specificCandidate = candidates.first(where: { !isGenericOrMissingTrustedMacDisplayName($0.displayName) }) {
+            return specificCandidate
+        }
+
+        return candidates.first ?? current
+    }
+
+    private func normalizedTrustedMacDisplayName(_ displayName: String?) -> String? {
+        let trimmedDisplayName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedDisplayName?.isEmpty == false ? trimmedDisplayName : nil
+    }
+
+    private func isGenericTrustedMacDisplayName(_ displayName: String) -> Bool {
+        displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare("Mac") == .orderedSame
+    }
+
+    private func isGenericOrMissingTrustedMacDisplayName(_ displayName: String?) -> Bool {
+        guard let displayName = normalizedTrustedMacDisplayName(displayName) else {
+            return true
+        }
+        return isGenericTrustedMacDisplayName(displayName)
+    }
+
+    // Keeps old bridge-era "Mac" placeholders out of the picker without deleting trust records.
+    private func hidingStaleGenericPresentationRecords(_ records: [CodexTrustedMacRecord]) -> [CodexTrustedMacRecord] {
+        let now = Date()
+        guard records.contains(where: { !isStaleGenericPresentationRecord($0, now: now) }) else {
+            return records
+        }
+        return records.filter { !isStaleGenericPresentationRecord($0, now: now) }
+    }
+
+    private func isStaleGenericPresentationRecord(_ trustedMac: CodexTrustedMacRecord, now: Date) -> Bool {
+        let protectedDeviceIds = Set([
+            normalizedCurrentTrustedMacDeviceId,
+            normalizedRelayMacDeviceId,
+        ].compactMap { $0 })
+        guard !protectedDeviceIds.contains(trustedMac.macDeviceId),
+              isGenericOrMissingTrustedMacDisplayName(trustedMac.displayName),
+              isStaleTrustedMacDisplayDuplicate(trustedMac, now: now) else {
+            return false
+        }
+
+        return true
+    }
+
+    private func compactedTrustedMacRecords(_ records: [CodexTrustedMacRecord]) -> [CodexTrustedMacRecord] {
+        var keyedRecords: [String: [CodexTrustedMacRecord]] = [:]
+        var unkeyedRecords: [CodexTrustedMacRecord] = []
+
+        for record in records {
+            guard let key = trustedMacIdentityCompactionKey(for: record) else {
+                unkeyedRecords.append(record)
+                continue
+            }
+            keyedRecords[key, default: []].append(record)
+        }
+
+        let identityCompactedRecords = unkeyedRecords + keyedRecords.values.compactMap { records in
+            records.sorted { shouldPreferTrustedMacRecord($0, over: $1) }.first
+        }
+        let sortedRecords = identityCompactedRecords.sorted { shouldPreferTrustedMacRecord($0, over: $1) }
+        var selectedRecords: [CodexTrustedMacRecord] = []
+        var selectedDisplayNameKeys = Set<String>()
+        let now = Date()
+
+        for record in sortedRecords {
+            let displayNameKey = trustedMacDisplayNameCompactionKey(record.displayName)
+            if let displayNameKey,
+               selectedDisplayNameKeys.contains(displayNameKey),
+               isStaleTrustedMacDisplayDuplicate(record, now: now) {
+                continue
+            }
+
+            selectedRecords.append(record)
+            if let displayNameKey {
+                selectedDisplayNameKeys.insert(displayNameKey)
+            }
+        }
+
+        return selectedRecords
+    }
+
+    private func shouldPreferTrustedMacRecord(
+        _ lhs: CodexTrustedMacRecord,
+        over rhs: CodexTrustedMacRecord
+    ) -> Bool {
+        let lhsRank = trustedMacCompactionRank(lhs)
+        let rhsRank = trustedMacCompactionRank(rhs)
+        if lhsRank != rhsRank {
+            return lhsRank > rhsRank
+        }
+
+        let lhsDate = trustedMacActivityDate(lhs)
+        let rhsDate = trustedMacActivityDate(rhs)
+        if lhsDate != rhsDate {
+            return lhsDate > rhsDate
+        }
+
+        let lhsHasResolvedSession = hasResolvedTrustedMacSession(lhs)
+        let rhsHasResolvedSession = hasResolvedTrustedMacSession(rhs)
+        if lhsHasResolvedSession != rhsHasResolvedSession {
+            return lhsHasResolvedSession
+        }
+
+        return lhs.macDeviceId < rhs.macDeviceId
+    }
+
+    private func trustedMacCompactionRank(_ trustedMac: CodexTrustedMacRecord) -> Int {
+        if trustedMac.macDeviceId == normalizedCurrentTrustedMacDeviceId {
+            return 500
+        }
+        if trustedMac.macDeviceId == normalizedRelayMacDeviceId {
+            return 450
+        }
+        if trustedMac.macDeviceId == normalizedPreviousTrustedMacDeviceId {
+            return 400
+        }
+        return 0
+    }
+
+    private func hasResolvedTrustedMacSession(_ trustedMac: CodexTrustedMacRecord) -> Bool {
+        if trustedMac.lastResolvedAt != nil {
+            return true
+        }
+        return trustedMac.lastResolvedSessionId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    private func trustedMacActivityDate(_ trustedMac: CodexTrustedMacRecord) -> Date {
+        trustedMac.lastResolvedAt ?? trustedMac.lastUsedAt ?? trustedMac.lastPairedAt
+    }
+
+    private func trustedMacIdentityCompactionKey(for trustedMac: CodexTrustedMacRecord) -> String? {
+        let normalizedPublicKey = trustedMac.macIdentityPublicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedPublicKey.isEmpty else {
+            return nil
+        }
+        return "key:\(normalizedPublicKey)"
+    }
+
+    private func trustedMacDisplayNameCompactionKey(_ displayName: String?) -> String? {
+        if let displayName = normalizedTrustedMacDisplayName(displayName),
+           !isGenericTrustedMacDisplayName(displayName) {
+            return "name:\(displayName.lowercased())"
+        }
+
+        return nil
+    }
+
+    private func hasSameTrustedMacIdentity(_ trustedMac: CodexTrustedMacRecord, asPublicKey publicKey: String) -> Bool {
+        let normalizedPublicKey = publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedPublicKey.isEmpty else {
+            return false
+        }
+
+        return trustedMac.macIdentityPublicKey.trimmingCharacters(in: .whitespacesAndNewlines) == normalizedPublicKey
+    }
+
+    private func shouldCoalesceTrustedMacRecordByDisplayName(
+        _ trustedMac: CodexTrustedMacRecord,
+        incomingPublicKey: String,
+        now: Date
+    ) -> Bool {
+        guard !incomingPublicKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+
+        return isStaleTrustedMacDisplayDuplicate(trustedMac, now: now)
+    }
+
+    private func isStaleTrustedMacDisplayDuplicate(_ trustedMac: CodexTrustedMacRecord, now: Date) -> Bool {
+        guard !isProtectedTrustedMacRecord(trustedMac) else {
+            return false
+        }
+
+        return now.timeIntervalSince(trustedMacActivityDate(trustedMac)) > TimeInterval(24 * 60 * 60)
+    }
+
+    private func isProtectedTrustedMacRecord(_ trustedMac: CodexTrustedMacRecord) -> Bool {
+        let protectedDeviceIds = Set([
+            normalizedCurrentTrustedMacDeviceId,
+            normalizedRelayMacDeviceId,
+            normalizedPreviousTrustedMacDeviceId,
+        ].compactMap { $0 })
+        return protectedDeviceIds.contains(trustedMac.macDeviceId)
     }
 }
 
@@ -493,7 +838,7 @@ private extension CodexService {
     // Centralizes the bridge-update guidance so every mismatch shows the same Mac command.
     func presentBridgeUpdatePrompt(message: String) {
         bridgeUpdatePrompt = CodexBridgeUpdatePrompt(
-            title: "Update the Remodex package on your computer",
+            title: "Update the Remodex package on your device",
             message: message,
             command: "npm install -g remodex@latest"
         )
@@ -649,26 +994,9 @@ private extension CodexService {
         }
     }
 
-    func trustMac(deviceId: String, publicKey: String, relayURL: String?, displayName: String?) {
-        let existing = trustedMacRegistry.records[deviceId]
-        trustedMacRegistry.records[deviceId] = CodexTrustedMacRecord(
-            macDeviceId: deviceId,
-            macIdentityPublicKey: publicKey,
-            lastPairedAt: Date(),
-            relayURL: relayURL ?? existing?.relayURL,
-            displayName: displayName ?? existing?.displayName,
-            lastResolvedSessionId: existing?.lastResolvedSessionId,
-            lastResolvedAt: existing?.lastResolvedAt,
-            lastUsedAt: Date()
-        )
-        SecureStore.writeCodable(trustedMacRegistry, for: CodexSecureKeys.trustedMacRegistry)
-        SecureStore.writeString(deviceId, for: CodexSecureKeys.lastTrustedMacDeviceId)
-        lastTrustedMacDeviceId = deviceId
-        secureMacFingerprint = codexSecureFingerprint(for: publicKey)
-    }
     // Resolves the live relay session for the preferred trusted Mac before we reconnect the socket.
-    func resolveTrustedMacSessionImpl() async throws -> CodexTrustedSessionResolveResponse {
-        guard let trustedMac = preferredTrustedMacRecord else {
+    func resolveTrustedMacSessionImpl(deviceId: String? = nil) async throws -> CodexTrustedSessionResolveResponse {
+        guard let trustedMac = trustedMacRecord(for: deviceId) ?? currentTrustedMacRecord else {
             throw CodexTrustedSessionResolveError.noTrustedMac
         }
         guard let relayURL = trustedMac.relayURL?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -677,7 +1005,7 @@ private extension CodexService {
         }
         let resolveURLs = CodexTrustedSessionResolveURLBuilder.candidates(from: relayURL)
         guard !resolveURLs.isEmpty else {
-            throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay URL is invalid.")
+            throw CodexTrustedSessionResolveError.invalidResponse("The trusted device relay URL is invalid.")
         }
 
         var lastRetriableResolveError: CodexTrustedSessionResolveError?
@@ -685,6 +1013,7 @@ private extension CodexService {
             do {
                 return try await sendTrustedSessionResolveRequest(
                     makeTrustedSessionResolveRequestBody(for: trustedMac),
+                    trustedMac: trustedMac,
                     resolveURL: resolveURL,
                     relayURL: relayURL
                 )
@@ -739,6 +1068,7 @@ private extension CodexService {
 
     private func sendTrustedSessionResolveRequest(
         _ requestBody: CodexTrustedSessionResolveRequest,
+        trustedMac: CodexTrustedMacRecord,
         resolveURL: URL,
         relayURL: String
     ) async throws -> CodexTrustedSessionResolveResponse {
@@ -763,18 +1093,19 @@ private extension CodexService {
                 || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled) {
                 throw CancellationError()
             }
-            throw CodexTrustedSessionResolveError.network("Could not reach the trusted computer relay. Check your connection and try again.")
+            throw CodexTrustedSessionResolveError.network("Could not reach the trusted device relay. Check your connection and try again.")
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {
-            throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay returned an invalid response.")
+            throw CodexTrustedSessionResolveError.invalidResponse("The trusted device relay returned an invalid response.")
         }
 
         if (200..<300).contains(httpResponse.statusCode) {
             guard let resolved = try? JSONDecoder().decode(CodexTrustedSessionResolveResponse.self, from: data),
                   resolved.ok else {
-                throw CodexTrustedSessionResolveError.invalidResponse("The trusted computer relay returned malformed session data.")
+                throw CodexTrustedSessionResolveError.invalidResponse("The trusted device relay returned malformed session data.")
             }
+            try validateResolvedTrustedSession(resolved, for: trustedMac)
             applyResolvedTrustedSession(resolved, relayURL: relayURL)
             return resolved
         }
@@ -783,11 +1114,11 @@ private extension CodexService {
         switch errorResponse?.code {
         case "session_unavailable":
             secureConnectionState = .liveSessionUnresolved
-            throw CodexTrustedSessionResolveError.macOffline("Your trusted computer is offline right now.")
+            throw CodexTrustedSessionResolveError.macOffline("Your trusted device is offline right now.")
         case "phone_not_trusted", "invalid_signature":
             secureConnectionState = .rePairRequired
             throw CodexTrustedSessionResolveError.rePairRequired(
-                "This iPhone is no longer trusted by the paired computer. Scan a new QR code to reconnect."
+                "This iPhone is no longer trusted by the paired device. Scan a new QR code to reconnect."
             )
         case "resolve_request_replayed", "resolve_request_expired":
             throw CodexTrustedSessionResolveError.network(
@@ -799,7 +1130,27 @@ private extension CodexService {
             }
             throw CodexTrustedSessionResolveError.network(
                 errorResponse?.error
-                ?? "The trusted computer relay could not resolve the current bridge session."
+                ?? "The trusted device relay could not resolve the current bridge session."
+            )
+        }
+    }
+
+    // Refuses relay bugs or stale indexes that point a switch at a different Mac than requested.
+    private func validateResolvedTrustedSession(
+        _ resolved: CodexTrustedSessionResolveResponse,
+        for trustedMac: CodexTrustedMacRecord
+    ) throws {
+        guard resolved.macDeviceId == trustedMac.macDeviceId else {
+            throw CodexTrustedSessionResolveError.invalidResponse(
+                "The trusted device relay returned a session for a different device."
+            )
+        }
+
+        let resolvedPublicKey = resolved.macIdentityPublicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trustedPublicKey = trustedMac.macIdentityPublicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !resolvedPublicKey.isEmpty, resolvedPublicKey == trustedPublicKey else {
+            throw CodexTrustedSessionResolveError.invalidResponse(
+                "The trusted device relay returned a different device identity key."
             )
         }
     }
@@ -819,6 +1170,10 @@ private extension CodexService {
         trustedReconnectFailureCount = 0
         secureConnectionState = .trustedMac
         secureMacFingerprint = codexSecureFingerprint(for: resolved.macIdentityPublicKey)
+        if normalizedCurrentTrustedMacDeviceId == nil
+            || normalizedCurrentTrustedMacDeviceId == resolved.macDeviceId {
+            setCurrentTrustedMacDeviceId(resolved.macDeviceId)
+        }
         SecureStore.writeString(resolved.macDeviceId, for: CodexSecureKeys.lastTrustedMacDeviceId)
         lastTrustedMacDeviceId = resolved.macDeviceId
 
@@ -1014,7 +1369,10 @@ private extension CodexService {
 
     func shortSecureId(_ value: String) -> String {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return normalized.isEmpty ? "none" : String(normalized.prefix(8))
+        guard !normalized.isEmpty else {
+            return "none"
+        }
+        return shortTranscriptDigest(Data(normalized.utf8)).prefix(8).description
     }
 
     func shortSecureFingerprint(_ publicKeyBase64: String) -> String {

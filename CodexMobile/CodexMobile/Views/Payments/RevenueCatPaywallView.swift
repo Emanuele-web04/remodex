@@ -161,7 +161,7 @@ struct RevenueCatPaywallView: View {
             Text("Unlock Remodex Pro")
                 .font(AppFont.system(size: 24, weight: .bold))
 
-            Text("Everything runs on your computer. Your phone is the remote.")
+            Text("Everything runs on your device. Your phone is the remote.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

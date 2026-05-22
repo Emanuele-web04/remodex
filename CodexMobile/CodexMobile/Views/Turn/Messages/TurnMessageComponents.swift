@@ -362,13 +362,36 @@ struct MessageRow: View, Equatable {
 
     // Reuses the body-scoped display window so large clipped rows are not scanned twice.
     private func displayText(from window: TimelineTextClippingPolicy.DisplayWindow) -> String {
-        if message.role == .assistant,
-           message.isStreaming,
-           let throttledAssistantDisplayText {
-            return throttledAssistantDisplayText
+        if message.role == .assistant, message.isStreaming {
+            // Never fall back to the full live buffer before throttle/onAppear runs;
+            // that one frame paints the whole response height and then collapses.
+            if let throttledAssistantDisplayText {
+                return throttledAssistantDisplayText
+            }
+
+            // Let the first small chunk appear immediately so a fresh send does not
+            // feel stalled, while still blocking recovered/coalesced large buffers.
+            return shouldShowInitialStreamingText(window.text) ? window.text : ""
         }
 
         return window.text
+    }
+
+    private func shouldShowInitialStreamingText(_ text: String) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return text.utf8.count <= 512
+    }
+
+    private func shouldSynchronizeAssistantDisplayImmediately() -> Bool {
+        guard message.isStreaming else { return true }
+        if showsStreamingAnimations {
+            return true
+        }
+
+        let nextText = timelineDisplayWindow(for: message, expansionLevel: textExpansionLevel).text
+        return shouldShowInitialStreamingText(nextText)
     }
 
     var body: some View {
@@ -394,7 +417,6 @@ struct MessageRow: View, Equatable {
                             text: text,
                             actionText: actionText,
                             renderModel: renderModel,
-                            showsStreamingAnimations: showsStreamingAnimations,
                             subagentOpenAction: subagentOpenAction,
                             onSelectText: { selectableTextSheet = $0 }
                         )
@@ -433,7 +455,7 @@ struct MessageRow: View, Equatable {
             synchronizeAssistantDisplayText(immediate: true)
         }
         .onChange(of: message.text) { _, _ in
-            synchronizeAssistantDisplayText(immediate: !message.isStreaming)
+            synchronizeAssistantDisplayText(immediate: shouldSynchronizeAssistantDisplayImmediately())
         }
         .onChange(of: message.isStreaming) { _, isStreaming in
             synchronizeAssistantDisplayText(immediate: !isStreaming)
@@ -608,14 +630,10 @@ struct MessageRow: View, Equatable {
                         }
                     }
                 } else if message.isStreaming {
-                    if hasVisibleAssistantText {
-                        StreamingAssistantMarkdownTextView(
-                            text: visibleAssistantTextWithoutImageSyntax,
-                            enablesSelection: enablesInlineMarkdownSelectionInTimeline,
-                            constrainsToAvailableWidth: true,
-                            animatesReveal: showsStreamingAnimations
-                        )
-                    }
+                    streamingAssistantContent(
+                        hasVisibleAssistantText: hasVisibleAssistantText,
+                        visibleAssistantTextWithoutImageSyntax: visibleAssistantTextWithoutImageSyntax
+                    )
                 } else {
                     if hasVisibleAssistantText {
                         MarkdownTextView(
@@ -675,7 +693,22 @@ struct MessageRow: View, Equatable {
     // Assistant rows get their copy payload from the row text, so the accessory state
     // carries the copy permission separately from the potentially large text value.
     private func shouldRenderAssistantCopyAccessory(_ state: AssistantBlockAccessoryState) -> Bool {
-        state.showsRunningIndicator || state.allowsCopy
+        state.allowsCopy
+    }
+
+    @ViewBuilder
+    private func streamingAssistantContent(
+        hasVisibleAssistantText: Bool,
+        visibleAssistantTextWithoutImageSyntax: String
+    ) -> some View {
+        if hasVisibleAssistantText {
+            StreamingAssistantMarkdownTextView(
+                text: visibleAssistantTextWithoutImageSyntax,
+                enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                constrainsToAvailableWidth: true,
+                animatesReveal: showsStreamingAnimations
+            )
+        }
     }
 
     private func expandVisibleText() {

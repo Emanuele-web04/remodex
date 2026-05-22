@@ -12,7 +12,6 @@ struct SystemMessageContentView: View {
     let text: String
     let actionText: String
     let renderModel: MessageRowRenderModel
-    let showsStreamingAnimations: Bool
     let subagentOpenAction: ((CodexSubagentThreadPresentation) -> Void)?
     let onSelectText: (SelectableMessageTextSheetState) -> Void
 
@@ -71,9 +70,6 @@ struct SystemMessageContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            if message.isStreaming && showsStreamingAnimations {
-                TypingIndicator()
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
@@ -132,9 +128,6 @@ struct SystemMessageContentView: View {
                 }
             }
 
-            if showsStreamingAnimations {
-                TypingIndicator()
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
@@ -157,7 +150,6 @@ struct SystemMessageContentView: View {
             SubagentActionCard(
                 parentThreadId: message.threadId,
                 action: subagentAction,
-                isStreaming: message.isStreaming && showsStreamingAnimations,
                 onOpenSubagent: subagentOpenAction
             )
         } else {

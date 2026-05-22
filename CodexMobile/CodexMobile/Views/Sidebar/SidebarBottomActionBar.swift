@@ -1,10 +1,12 @@
 // FILE: SidebarBottomActionBar.swift
-// Purpose: Bottom-anchored sidebar bar. Hosts the Terminal pill on the leading
-//          edge and the primary Chat pill on the trailing edge. Both pills are
-//          built from the same reusable `SidebarActionPill` component so they
-//          share font, icon size, padding and capsule shape — only the style
-//          differs. iOS 26 wraps the pair in `AdaptiveGlassContainer` so the
-//          Terminal pill participates in the Liquid Glass sampling region.
+// Purpose: Bottom-anchored sidebar bar. Hosts the Terminal pill and the primary
+//          Chat pill, built from the shared `SidebarActionPill` component so
+//          they share font, icon size, padding, and capsule shape — only the
+//          style differs. Trusted-device switching now lives entirely inside
+//          the Connections sheet (reached via the sidebar overflow menu), so
+//          the bottom bar no longer carries a devices affordance. iOS 26 wraps
+//          the row in `AdaptiveGlassContainer` so both pills participate in
+//          the same Liquid Glass sampling region.
 // Layer: View Component
 // Exports: SidebarBottomActionBar
 // Depends on: SwiftUI, SidebarActionPill, AdaptiveGlassModifier
@@ -60,9 +62,9 @@ struct SidebarBottomActionBar: View {
     // MARK: - Layouts
 
     private var iOS26LiquidGlassLayout: some View {
-        // Groups the Terminal pill and Chat pill in the same native Liquid
-        // Glass sampling region so Terminal's glass background stays
-        // consistent with the surrounding sidebar surface.
+        // Groups Terminal and Chat pills in the same native Liquid Glass
+        // sampling region so the glass backgrounds stay consistent with the
+        // surrounding sidebar surface.
         AdaptiveGlassContainer(spacing: 10) {
             pillRow
         }
@@ -89,5 +91,6 @@ struct SidebarBottomActionBar: View {
         onTapChat: {},
         onTapTerminal: {}
     )
+    .environment(CodexService())
 }
 #endif

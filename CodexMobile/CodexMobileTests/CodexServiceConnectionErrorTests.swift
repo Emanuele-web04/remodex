@@ -201,6 +201,41 @@ final class CodexServiceConnectionErrorTests: XCTestCase {
         XCTAssertNil(service.lastErrorMessage)
     }
 
+    func testForegroundProbeImmediatelyArmsReconnectForZombieSocket() async {
+        let service = CodexService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = true
+        service.webSocketKeepAlivePingOverride = {
+            throw NWError.posix(.ECONNRESET)
+        }
+
+        await service.probeForegroundConnectionIfNeeded()
+
+        XCTAssertFalse(service.isConnected)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testForegroundProbeTimeoutArmsReconnectWhenPingHangs() async {
+        let service = CodexService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.isAppInForeground = true
+        service.webSocketForegroundProbeTimeoutOverrideNanoseconds = 1
+        service.webSocketKeepAlivePingOverride = {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+
+        await service.probeForegroundConnectionIfNeeded()
+
+        XCTAssertFalse(service.isConnected)
+        XCTAssertTrue(service.shouldAutoReconnectOnForeground)
+        XCTAssertEqual(service.connectionRecoveryState, .retrying(attempt: 0, message: "Reconnecting..."))
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
     func testBenignDisconnectStaysSilentWhileAutoReconnectIsRunning() {
         let service = CodexService()
         let error = CodexServiceError.disconnected

@@ -33,7 +33,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
             return ConnectionRecoverySnapshot(
                 summary: trimmedError?.isEmpty == false
                     ? trimmedError ?? ""
-                    : "Trying to wake the computer display.",
+                    : "Trying to wake the device display.",
                 status: .reconnecting,
                 trailingStyle: .progress
             )
@@ -43,7 +43,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
         // instead of surfacing the manual wake fallback on every app switch.
         if isConnecting || shouldAutoReconnectOnForeground || isRetryingConnectionRecovery {
             return ConnectionRecoverySnapshot(
-                summary: "Trying to reconnect to your computer.",
+                summary: "Trying to reconnect to your device.",
                 status: .reconnecting,
                 trailingStyle: .progress
             )
@@ -53,7 +53,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
             return ConnectionRecoverySnapshot(
                 summary: trimmedError?.isEmpty == false
                     ? trimmedError ?? ""
-                    : "Your computer is not reachable, so this chat is paused.",
+                    : "Your device is not reachable, so this chat is paused.",
                 status: .interrupted,
                 trailingStyle: .action("Wake Screen")
             )
@@ -62,7 +62,7 @@ enum TurnConnectionRecoverySnapshotBuilder {
         return ConnectionRecoverySnapshot(
             summary: trimmedError?.isEmpty == false
                 ? trimmedError ?? ""
-                : "Reconnect to your computer to keep this chat in sync.",
+                : "Reconnect to your device to keep this chat in sync.",
             status: .interrupted,
             trailingStyle: .action("Reconnect")
         )
