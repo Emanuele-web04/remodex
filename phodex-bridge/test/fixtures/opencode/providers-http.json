@@ -1,0 +1,15 @@
+{
+  "all": [
+    {
+      "id": "opencode-go",
+      "models": {
+        "deepseek-v4-flash": { "id": "deepseek-v4-flash" },
+        "qwen3.6-plus": { "id": "qwen3.6-plus" }
+      }
+    }
+  ],
+  "default": {
+    "opencode-go": "deepseek-v4-flash"
+  },
+  "connected": ["opencode-go"]
+}

@@ -1,0 +1,28 @@
+Sisyphus - Ultraworker (primary)
+  [
+  {
+    "permission": "*",
+    "action": "allow",
+    "pattern": "*"
+  }
+  ]
+Hephaestus - Deep Agent (primary)
+  [
+  {
+    "permission": "*",
+    "action": "allow",
+    "pattern": "*"
+  }
+  ]
+build (subagent)
+  []
+plan (subagent)
+  []
+title (primary)
+  []
+compaction (primary)
+  []
+summary (primary)
+  []
+explore (subagent)
+  []

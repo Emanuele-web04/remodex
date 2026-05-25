@@ -82,6 +82,7 @@ final class SubscriptionService {
     private static let freeSendLimit = 5
 
     private let defaults: UserDefaults
+    private let localDevelopmentAccessEnabled: Bool
     @ObservationIgnored private let customerInfoUpdatesTaskStore = CustomerInfoUpdatesTaskStore()
     private var isBootstrapping = false
     private var hasCachedOptimisticAccess = false
@@ -100,8 +101,12 @@ final class SubscriptionService {
     private(set) var isRestoring = false
     private(set) var lastErrorMessage: String?
 
-    init(defaults: UserDefaults = .standard) {
+    init(
+        defaults: UserDefaults = .standard,
+        localDevelopmentAccessEnabled: Bool = AppEnvironment.localDevelopmentSubscriptionBypassEnabled
+    ) {
         self.defaults = defaults
+        self.localDevelopmentAccessEnabled = localDevelopmentAccessEnabled
         restoreCachedStateIfAvailable()
         startCustomerInfoObserverIfConfigured()
     }
@@ -114,17 +119,21 @@ final class SubscriptionService {
         max(0, Self.freeSendLimit - freeSendCount)
     }
 
+    var hasLocalDevelopmentAccess: Bool {
+        localDevelopmentAccessEnabled
+    }
+
     var hasFreeSendAccess: Bool {
-        freeSendCount < Self.freeSendLimit
+        localDevelopmentAccessEnabled || freeSendCount < Self.freeSendLimit
     }
 
     var hasAppAccess: Bool {
-        hasProAccess || hasFreeSendAccess
+        localDevelopmentAccessEnabled || hasProAccess || hasFreeSendAccess
     }
 
     // Counts a valid send attempt for free users even if the turn later fails.
     func consumeFreeSendAttemptIfNeeded() {
-        guard !hasProAccess, freeSendCount < Self.freeSendLimit else {
+        guard !localDevelopmentAccessEnabled, !hasProAccess, freeSendCount < Self.freeSendLimit else {
             return
         }
 

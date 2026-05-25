@@ -414,14 +414,12 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
 
   const deltaMessage = await waitForMessage(
     relayMessages,
-    (message) => message.method === "item/agentMessage/delta"
+    (message) => message.method === "remodex/event/assistant_delta"
   );
-  assert.deepEqual(deltaMessage.params, {
-    threadId: "thread-ipc-delta",
-    turnId: "turn-ipc-delta",
-    itemId: "assistant-ipc-delta",
-    delta: " world",
-  });
+  assert.equal(deltaMessage.params.threadId, "thread-ipc-delta");
+  assert.equal(deltaMessage.params.turnId, "turn-ipc-delta");
+  assert.equal(deltaMessage.params.itemId, "assistant-ipc-delta");
+  assert.match(String(deltaMessage.params.payload?.delta), /world/);
 });
 
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.

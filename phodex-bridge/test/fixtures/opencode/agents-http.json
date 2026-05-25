@@ -1,0 +1,14 @@
+[
+  {
+    "name": "build",
+    "mode": "primary"
+  },
+  {
+    "name": "plan",
+    "mode": "subagent"
+  },
+  {
+    "name": "explore",
+    "mode": "subagent"
+  }
+]

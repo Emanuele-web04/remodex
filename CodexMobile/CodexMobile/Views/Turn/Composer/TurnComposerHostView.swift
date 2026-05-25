@@ -85,9 +85,16 @@ struct TurnComposerHostView: View {
             selectedGitBaseBranch: viewModel.selectedGitBaseBranch,
             gitDefaultBranch: viewModel.gitDefaultBranch
         )
+        let runtimeState = TurnComposerRuntimeState.resolve(
+            codex: codex,
+            reasoningDisplayOptions: reasoningDisplayOptions,
+            thread: thread,
+            isAgentRuntimeLocked: !isEmptyThread
+        )
+        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex, thread: isEmptyThread ? nil : thread)
         let accessoryState = TurnComposerAccessoryState(
             queuedDrafts: viewModel.queuedDraftsList(codex: codex, threadID: thread.id),
-            canSteerQueuedDrafts: isThreadRunning && activeTurnID != nil,
+            canSteerQueuedDrafts: runtimeState.agentRuntimeCapabilities.steer && isThreadRunning && activeTurnID != nil,
             canRestoreQueuedDrafts: viewModel.canRestoreQueuedDrafts,
             steeringDraftID: viewModel.steeringDraftID,
             composerAttachments: viewModel.composerAttachments,
@@ -95,19 +102,15 @@ struct TurnComposerHostView: View {
             composerMentionedSkills: viewModel.composerMentionedSkills,
             composerMentionedPlugins: viewModel.composerMentionedPlugins,
             composerReviewSelection: viewModel.composerReviewSelection,
-            isSubagentsSelectionArmed: viewModel.isSubagentsSelectionArmed,
-            isPlanModeArmed: viewModel.isPlanModeArmed,
+            isSubagentsSelectionArmed: runtimeState.agentRuntimeCapabilities.subagents && viewModel.isSubagentsSelectionArmed,
+            isPlanModeArmed: runtimeState.agentRuntimeCapabilities.planMode && viewModel.isPlanModeArmed,
             isVoiceRecording: isVoiceRecording,
             voiceAudioLevels: voiceAudioLevels,
             voiceRecordingDuration: voiceRecordingDuration
         )
-        let runtimeState = TurnComposerRuntimeState.resolve(
-            codex: codex,
-            reasoningDisplayOptions: reasoningDisplayOptions
-        )
-        let runtimeActions = TurnComposerRuntimeActions.resolve(codex: codex)
-        let selectedModelID = codex.visibleSelectedModelIDForComposer()
-        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer()
+        let modelThread = isEmptyThread ? nil : thread
+        let selectedModelID = codex.visibleSelectedModelIDForComposer(thread: modelThread)
+        let isRuntimeSelectionLoading = codex.isRuntimeSelectionLoadingForComposer(thread: modelThread)
         let hasComposerWorkingDirectory = thread.gitWorkingDirectory != nil
             && !SidebarThreadGrouping.isRootlessChatThread(thread)
 
@@ -119,6 +122,7 @@ struct TurnComposerHostView: View {
             remainingAttachmentSlots: viewModel.remainingAttachmentSlots,
             isComposerInteractionLocked: viewModel.isComposerInteractionLocked(activeTurnID: activeTurnID),
             isSendDisabled: isVoiceInputActive
+                || !runtimeState.agentRuntimeOptions.contains(where: { $0.id == runtimeState.selectedAgentRuntimeID && $0.isReady })
                 || viewModel.isSendDisabled(isConnected: codex.isConnected, activeTurnID: activeTurnID),
             isSending: viewModel.isSending,
             isPlanModeArmed: viewModel.isPlanModeArmed,
@@ -167,12 +171,22 @@ struct TurnComposerHostView: View {
             canHandOffToWorktree: isGitBranchSelectorEnabled
                 && !isWorktreeProject
                 && !viewModel.isCreatingGitWorktree,
-            onTapAddImage: { viewModel.openPhotoLibraryPicker(codex: codex) },
-            onTapTakePhoto: { viewModel.openCamera(codex: codex) },
+            onTapAddImage: {
+                guard runtimeState.agentRuntimeCapabilities.photos else { return }
+                viewModel.openPhotoLibraryPicker(codex: codex)
+            },
+            onTapTakePhoto: {
+                guard runtimeState.agentRuntimeCapabilities.photos else { return }
+                viewModel.openCamera(codex: codex)
+            },
             onTapVoice: onTapVoice,
             onCancelVoiceRecording: onCancelVoiceRecording,
             onTapCreateWorktree: onOpenWorktreeHandoff,
             onSetPlanModeArmed: { isArmed in
+                guard runtimeState.agentRuntimeCapabilities.planMode else {
+                    viewModel.setPlanModeArmed(false)
+                    return
+                }
                 viewModel.setPlanModeArmed(isArmed)
                 viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
             },

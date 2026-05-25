@@ -142,11 +142,12 @@ extension CodexService {
         var includesServiceTier = explicitServiceTier != nil
 
         while true {
-            let params = CodexThreadStartProjectBinding.makeThreadStartParams(
+            var params = CodexThreadStartProjectBinding.makeThreadStartParams(
                 modelIdentifier: runtimeModelIdentifierForTurn(),
                 preferredProjectPath: normalizedPreferredProjectPath,
                 serviceTier: includesServiceTier ? explicitServiceTier : nil
             )
+            appendAgentRuntimeParams(to: &params, for: nil)
 
             do {
                 let response = try await sendRequestWithSandboxFallback(method: "thread/start", baseParams: params)
@@ -1154,7 +1155,7 @@ extension CodexService {
         let requestedSignature = CodexThreadResumeRequestSignature(
             projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
                 ?? thread(for: threadId)?.gitWorkingDirectory,
-            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn()
+            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn(thread: thread(for: threadId))
         )
         let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
         if let existingTask = threadResumeTaskByThreadID[threadId] {
@@ -1184,6 +1185,7 @@ extension CodexService {
             var params: RPCObject = [
                 "threadId": .string(threadId),
             ]
+            appendAgentRuntimeParams(to: &params, for: thread(for: threadId))
             let resolvedProjectPath = requestedSignature.projectPath
             if let workingDirectory = resolvedProjectPath {
                 params["cwd"] = .string(workingDirectory)
@@ -2294,7 +2296,8 @@ extension CodexService {
         ]
         // Keep the legacy top-level fields populated so plan-mode turns still honor
         // the user's selected model on runtimes that do not read collaboration settings.
-        if let modelIdentifier = runtimeModelIdentifierForTurn() {
+        let runtimeThread = thread(for: threadId)
+        if let modelIdentifier = runtimeModelIdentifierForTurn(thread: runtimeThread) {
             params["model"] = .string(modelIdentifier)
         }
         if let effort = selectedReasoningEffortForSelectedModel(threadId: threadId) {
@@ -2322,8 +2325,9 @@ extension CodexService {
             return nil
         }
 
-        let resolvedModel = runtimeModelIdentifierForTurn()
-            ?? selectedModelOption()?.model
+        let runtimeThread = threadId.flatMap { thread(for: $0) }
+        let resolvedModel = runtimeModelIdentifierForTurn(thread: runtimeThread)
+            ?? selectedModelOption(for: runtimeThread)?.model
             ?? availableModels.first?.model
             ?? selectedModelId
         guard let resolvedModel,
@@ -3154,5 +3158,31 @@ extension CodexService {
         }
 
         return normalized.isEmpty ? "/" : normalized
+    }
+
+    private func appendAgentRuntimeParams(to params: inout RPCObject, for thread: CodexThread?) {
+        let runtime = normalizedAgentRuntime(thread?.agentRuntime ?? selectedAgentRuntimeForNewThreads)
+        params["agentRuntime"] = .string(runtime)
+        if runtime == "opencode" {
+            let descriptor = agentRuntimeDescriptor(id: runtime)
+            params["opencodeBuildAgentName"] = .string(effectiveOpenCodeBuildAgentName(for: thread))
+            params["opencodePlanAgentName"] = .string(
+                thread?.opencodePlanAgentName
+                    ?? descriptor?.defaultPlanAgentName
+                    ?? "plan"
+            )
+        }
+        if runtime == "cursor" {
+            params["mode"] = .string(effectiveCursorMode(for: thread))
+        }
+    }
+
+    private func normalizedAgentRuntime(_ value: String) -> String {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "opencode", "cursor":
+            return value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        default:
+            return "codex"
+        }
     }
 }

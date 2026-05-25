@@ -85,6 +85,66 @@ test("push tracker sends one completion push with a stable ready body", async ()
   assert.equal(notifications[0].body, "Response ready");
 });
 
+test("push tracker understands canonical Remodex completion events", async () => {
+  const notifications = [];
+  const tracker = createPushNotificationTracker({
+    sessionId: "session-canonical",
+    pushServiceClient: {
+      hasConfiguredBaseUrl: true,
+      async notifyCompletion(payload) {
+        notifications.push(payload);
+        return { ok: true };
+      },
+    },
+  });
+
+  tracker.handleOutbound(JSON.stringify({
+    method: "remodex/event/turn_started",
+    params: {
+      schemaVersion: 1,
+      agentRuntime: "cursor",
+      threadId: "thread-canonical",
+      turnId: "turn-canonical",
+      createdAt: "2026-05-24T00:00:00.000Z",
+      payload: {},
+    },
+  }));
+  tracker.handleOutbound(JSON.stringify({
+    method: "remodex/event/assistant_completed",
+    params: {
+      schemaVersion: 1,
+      agentRuntime: "cursor",
+      threadId: "thread-canonical",
+      turnId: "turn-canonical",
+      itemId: "assistant-canonical",
+      createdAt: "2026-05-24T00:00:01.000Z",
+      payload: {
+        text: "Cursor finished the edit.",
+      },
+    },
+  }));
+  tracker.handleOutbound(JSON.stringify({
+    method: "remodex/event/turn_completed",
+    params: {
+      schemaVersion: 1,
+      agentRuntime: "cursor",
+      threadId: "thread-canonical",
+      turnId: "turn-canonical",
+      createdAt: "2026-05-24T00:00:02.000Z",
+      payload: {
+        status: "completed",
+      },
+    },
+  }));
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].threadId, "thread-canonical");
+  assert.equal(notifications[0].turnId, "turn-canonical");
+  assert.equal(notifications[0].result, "completed");
+});
+
 test("push tracker ignores non-assistant item completions when a turn finishes", async () => {
   const notifications = [];
   const tracker = createPushNotificationTracker({

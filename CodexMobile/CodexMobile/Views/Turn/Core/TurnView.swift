@@ -1255,7 +1255,7 @@ struct TurnView: View {
     // MARK: - Derived UI state
 
     private var orderedModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+        TurnComposerMetaMapper.orderedModels(from: codex.modelOptions(for: thread))
     }
 
     private var reasoningDisplayOptions: [TurnComposerReasoningDisplayOption] {
@@ -1265,11 +1265,11 @@ struct TurnView: View {
     }
 
     private var selectedModelTitle: String {
-        if let selectedModel = codex.selectedModelOption() {
+        if let selectedModel = codex.selectedModelOption(for: thread) {
             return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }
 
-        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.selectedModelId)
+        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.runtimeModelIdentifierForTurn(thread: thread))
     }
 
     private var approvalForThread: CodexApprovalRequest? {

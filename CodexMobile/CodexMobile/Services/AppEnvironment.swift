@@ -11,6 +11,7 @@ enum AppEnvironment {
     private static let revenueCatPublicAPIKeyInfoPlistKey = "REVENUECAT_PUBLIC_API_KEY"
     private static let revenueCatEntitlementNameInfoPlistKey = "REVENUECAT_ENTITLEMENT_NAME"
     private static let revenueCatDefaultOfferingIDInfoPlistKey = "REVENUECAT_DEFAULT_OFFERING_ID"
+    private static let localDevelopmentSubscriptionBypassInfoPlistKey = "REMODEX_LOCAL_DEV_SUBSCRIPTION_BYPASS"
     private static let supportEmailAddress = "emandipietro@gmail.com"
 
     // Open-source builds should provide an explicit relay instead of silently
@@ -37,6 +38,14 @@ enum AppEnvironment {
     // Mirrors the RevenueCat default offering ID used in the dashboard.
     static var revenueCatDefaultOfferingID: String {
         resolvedString(forInfoPlistKey: revenueCatDefaultOfferingIDInfoPlistKey) ?? "default"
+    }
+
+    nonisolated static var localDevelopmentSubscriptionBypassEnabled: Bool {
+        #if DEBUG
+        resolvedBool(forInfoPlistKey: localDevelopmentSubscriptionBypassInfoPlistKey)
+        #else
+        false
+        #endif
     }
 
     // Legal links shown in the paywall footer and Settings.
@@ -85,7 +94,7 @@ private extension AppEnvironment {
         return formatter
     }()
 
-    static func resolvedString(forInfoPlistKey key: String) -> String? {
+    nonisolated static func resolvedString(forInfoPlistKey key: String) -> String? {
         guard let rawValue = Bundle.main.object(forInfoDictionaryKey: key) as? String else {
             return nil
         }
@@ -100,6 +109,23 @@ private extension AppEnvironment {
         }
 
         return trimmedValue
+    }
+
+    nonisolated static func resolvedBool(forInfoPlistKey key: String) -> Bool {
+        if let rawValue = Bundle.main.object(forInfoDictionaryKey: key) as? Bool {
+            return rawValue
+        }
+
+        guard let rawValue = resolvedString(forInfoPlistKey: key) else {
+            return false
+        }
+
+        switch rawValue.lowercased() {
+        case "1", "true", "yes", "y", "on":
+            return true
+        default:
+            return false
+        }
     }
 
     static func feedbackBody(

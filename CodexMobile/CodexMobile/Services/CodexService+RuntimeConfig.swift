@@ -31,6 +31,73 @@ private enum RuntimeSelectionDefaults {
 }
 
 extension CodexService {
+    func learnAgentRuntimesFromInitializeResponse(_ response: RPCMessage) {
+        guard let object = response.result?.objectValue else {
+            return
+        }
+
+        if let rawDefault = object["defaultAgentRuntime"]?.stringValue {
+            defaultAgentRuntime = normalizedAgentRuntimeID(rawDefault)
+        }
+
+        let decoded = (object["agentRuntimes"]?.arrayValue ?? [])
+            .compactMap(decodeAgentRuntimeDescriptor)
+        guard !decoded.isEmpty else {
+            agentRuntimeDescriptors = [.codex]
+            selectedAgentRuntimeForNewThreads = normalizedAgentRuntimeID(defaultAgentRuntime)
+            return
+        }
+
+        var byID: [String: AgentRuntimeDescriptor] = [:]
+        byID["codex"] = .codex
+        for descriptor in decoded {
+            byID[descriptor.id] = descriptor
+        }
+
+        let orderedIDs = ["codex", "opencode", "cursor"]
+        agentRuntimeDescriptors = orderedIDs.compactMap { byID[$0] }
+        let normalizedDefault = normalizedAgentRuntimeID(defaultAgentRuntime)
+        if agentRuntimeDescriptor(id: normalizedDefault)?.isReady == true {
+            selectedAgentRuntimeForNewThreads = normalizedDefault
+        } else {
+            selectedAgentRuntimeForNewThreads = "codex"
+        }
+    }
+
+    func agentRuntimeDescriptor(id rawID: String?) -> AgentRuntimeDescriptor? {
+        let runtimeID = normalizedAgentRuntimeID(rawID ?? "codex")
+        return agentRuntimeDescriptors.first { $0.id == runtimeID }
+    }
+
+    func effectiveAgentRuntimeID(for thread: CodexThread?) -> String {
+        normalizedAgentRuntimeID(thread?.agentRuntime ?? selectedAgentRuntimeForNewThreads)
+    }
+
+    func effectiveAgentRuntimeCapabilities(for thread: CodexThread?) -> AgentRuntimeCapabilities {
+        agentRuntimeDescriptor(id: effectiveAgentRuntimeID(for: thread))?.capabilities ?? .codex
+    }
+
+    func setSelectedAgentRuntimeForNewThreads(_ runtimeID: String) {
+        let normalized = normalizedAgentRuntimeID(runtimeID)
+        guard agentRuntimeDescriptor(id: normalized)?.isReady == true else {
+            return
+        }
+        selectedAgentRuntimeForNewThreads = normalized
+    }
+
+    func agentRuntimeOptionsForComposer() -> [AgentRuntimeDescriptor] {
+        agentRuntimeDescriptors.filter { descriptor in
+            switch descriptor.id {
+            case "codex":
+                return true
+            case "opencode", "cursor":
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
         guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
@@ -107,15 +174,23 @@ extension CodexService {
     }
 
     func setSelectedModelId(_ modelId: String?) {
+        setSelectedModelId(modelId, forAgentRuntime: effectiveAgentRuntimeID(for: nil))
+    }
+
+    func setSelectedModelId(_ modelId: String?, forAgentRuntime runtimeID: String) {
+        let runtime = normalizedAgentRuntimeID(runtimeID)
+        guard runtime != "codex" else {
+            setSelectedCodexModelId(modelId)
+            return
+        }
+
         let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized?.isEmpty == false {
-            selectedModelId = normalized
+            selectedModelIdByAgentRuntime[runtime] = normalized
         } else {
-            selectedModelId = RuntimeSelectionDefaults.modelId
-            selectedReasoningEffort = RuntimeSelectionDefaults.reasoningEffort
+            selectedModelIdByAgentRuntime.removeValue(forKey: runtime)
         }
-        hasPersistedSelectedModelId = true
-        normalizeRuntimeSelectionsAfterModelsUpdate()
+        persistRuntimeSelections()
     }
 
     func setSelectedGitWriterModelId(_ modelId: String?) {
@@ -207,13 +282,22 @@ extension CodexService {
     }
 
     func selectedModelOption() -> CodexModelOption? {
-        selectedModelOption(from: availableModels)
+        selectedModelOption(for: nil)
+    }
+
+    func selectedModelOption(for thread: CodexThread?) -> CodexModelOption? {
+        selectedModelOption(from: modelOptions(for: thread), agentRuntime: effectiveAgentRuntimeID(for: thread))
     }
 
     // Composer chrome should not present the canonical fallback as a loaded user choice.
-    func visibleSelectedModelIDForComposer() -> String? {
-        if let selectedModel = selectedModelOption() {
+    func visibleSelectedModelIDForComposer(thread: CodexThread? = nil) -> String? {
+        if let selectedModel = selectedModelOption(for: thread) {
             return selectedModel.id
+        }
+
+        let runtime = effectiveAgentRuntimeID(for: thread)
+        guard runtime == "codex" else {
+            return nil
         }
 
         guard hasPersistedSelectedModelId else {
@@ -228,8 +312,8 @@ extension CodexService {
     }
 
     // Keeps the model pill honest while bridge runtime metadata is still in flight.
-    func isRuntimeSelectionLoadingForComposer() -> Bool {
-        guard visibleSelectedModelIDForComposer() == nil else {
+    func isRuntimeSelectionLoadingForComposer(thread: CodexThread? = nil) -> Bool {
+        guard visibleSelectedModelIDForComposer(thread: thread) == nil else {
             return false
         }
         return isBootstrappingConnectionSync || isLoadingThreads || isLoadingModels
@@ -304,8 +388,14 @@ extension CodexService {
         return model.supportedReasoningEfforts.first?.reasoningEffort
     }
 
-    func runtimeModelIdentifierForTurn() -> String? {
-        selectedModelOption()?.model ?? selectedModelId ?? RuntimeSelectionDefaults.modelId
+    func runtimeModelIdentifierForTurn(thread: CodexThread? = nil) -> String? {
+        let runtime = effectiveAgentRuntimeID(for: thread)
+        if runtime == "codex" {
+            return selectedModelOption(for: thread)?.model ?? selectedModelId ?? RuntimeSelectionDefaults.modelId
+        }
+        return selectedModelOption(for: thread)?.model
+            ?? selectedModelIdByAgentRuntime[runtime]
+            ?? agentRuntimeDescriptor(id: runtime)?.modelCatalog?.defaultModelId
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
@@ -475,6 +565,299 @@ extension CodexService {
         }
         return selectedModel.supportsServiceTier(serviceTier) ? serviceTier : nil
     }
+
+    private func decodeAgentRuntimeDescriptor(_ value: JSONValue) -> AgentRuntimeDescriptor? {
+        guard let object = value.objectValue,
+              let id = object["id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !id.isEmpty else {
+            return nil
+        }
+
+        let capabilitiesObject = object["capabilities"]?.objectValue ?? [:]
+        let capabilities = AgentRuntimeCapabilities(
+            queue: capabilitiesObject["queue"]?.boolValue ?? false,
+            steer: capabilitiesObject["steer"]?.boolValue ?? false,
+            photos: capabilitiesObject["photos"]?.boolValue ?? false,
+            planMode: capabilitiesObject["planMode"]?.boolValue ?? false,
+            permissions: capabilitiesObject["permissions"]?.boolValue ?? false,
+            desktopHandoff: capabilitiesObject["desktopHandoff"]?.boolValue ?? false,
+            subagents: capabilitiesObject["subagents"]?.boolValue ?? false
+        )
+
+        return AgentRuntimeDescriptor(
+            id: Self.normalizedStaticAgentRuntimeID(id),
+            displayName: object["displayName"]?.stringValue ?? id,
+            status: object["status"]?.stringValue ?? "not_installed",
+            statusMessage: object["statusMessage"]?.stringValue,
+            capabilities: capabilities,
+            defaultBuildAgentName: object["defaultBuildAgentName"]?.stringValue,
+            defaultPlanAgentName: object["defaultPlanAgentName"]?.stringValue,
+            openCodeAgents: decodeOpenCodeAgents(object["openCodeAgents"]),
+            openCodeSkills: decodeOpenCodeSkills(object["openCodeSkills"]),
+            modelCatalog: decodeAgentRuntimeModelCatalog(object["modelCatalog"])
+        )
+    }
+
+    private func decodeOpenCodeSkills(_ value: JSONValue?) -> [OpenCodeSkillOption]? {
+        guard let entries = value?.arrayValue, !entries.isEmpty else {
+            return nil
+        }
+        let skills = entries.compactMap { entry -> OpenCodeSkillOption? in
+            guard let object = entry.objectValue else { return nil }
+            let id = object["id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? object["name"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let id, !id.isEmpty else { return nil }
+            return OpenCodeSkillOption(
+                id: id,
+                name: object["name"]?.stringValue ?? id,
+                displayName: object["displayName"]?.stringValue ?? id,
+                description: object["description"]?.stringValue
+            )
+        }
+        return skills.isEmpty ? nil : skills
+    }
+
+    func openCodeSkillMetadata(for thread: CodexThread?) -> [CodexSkillMetadata] {
+        guard effectiveAgentRuntimeID(for: thread) == "opencode" else {
+            return []
+        }
+        let skills = agentRuntimeDescriptor(id: "opencode")?.openCodeSkills ?? []
+        return skills.map { skill in
+            CodexSkillMetadata(
+                name: skill.name,
+                description: skill.description,
+                path: nil,
+                scope: "opencode",
+                enabled: true
+            )
+        }
+    }
+
+    private func decodeOpenCodeAgents(_ value: JSONValue?) -> [OpenCodeAgentOption]? {
+        guard let entries = value?.arrayValue, !entries.isEmpty else {
+            return nil
+        }
+        let agents = entries.compactMap { entry -> OpenCodeAgentOption? in
+            guard let object = entry.objectValue,
+                  let id = object["id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !id.isEmpty else {
+                return nil
+            }
+            return OpenCodeAgentOption(
+                id: id,
+                displayName: object["displayName"]?.stringValue ?? id,
+                isDefaultBuild: object["isDefaultBuild"]?.boolValue ?? false,
+                isDefaultPlan: object["isDefaultPlan"]?.boolValue ?? false
+            )
+        }
+        return agents.isEmpty ? nil : agents
+    }
+
+    func openCodeAgentOptions(for thread: CodexThread?) -> [OpenCodeAgentOption] {
+        let descriptor = agentRuntimeDescriptor(id: effectiveAgentRuntimeID(for: thread))
+        if let agents = descriptor?.openCodeAgents, !agents.isEmpty {
+            return agents
+        }
+        let buildDefault = descriptor?.defaultBuildAgentName ?? "build"
+        let planDefault = descriptor?.defaultPlanAgentName ?? "plan"
+        return [
+            OpenCodeAgentOption(id: buildDefault, displayName: buildDefault.capitalized, isDefaultBuild: true),
+            OpenCodeAgentOption(id: planDefault, displayName: planDefault.capitalized, isDefaultPlan: true),
+        ]
+    }
+
+    func effectiveOpenCodeBuildAgentName(for thread: CodexThread?) -> String {
+        if let locked = thread?.opencodeBuildAgentName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !locked.isEmpty {
+            return locked
+        }
+        let selected = selectedOpenCodeBuildAgentForNewThreads.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !selected.isEmpty {
+            return selected
+        }
+        return agentRuntimeDescriptor(id: "opencode")?.defaultBuildAgentName ?? "build"
+    }
+
+    func setSelectedOpenCodeBuildAgentForNewThreads(_ agentName: String) {
+        let normalized = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        selectedOpenCodeBuildAgentForNewThreads = normalized
+    }
+
+    func setOpenCodeBuildAgentName(_ agentName: String, for thread: CodexThread?) {
+        let normalized = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        if var mutableThread = thread {
+            mutableThread.opencodeBuildAgentName = normalized
+            upsertThread(mutableThread)
+            return
+        }
+        setSelectedOpenCodeBuildAgentForNewThreads(normalized)
+    }
+
+    func effectiveOpenCodePlanAgentName(for thread: CodexThread?) -> String {
+        if let locked = thread?.opencodePlanAgentName?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !locked.isEmpty {
+            return locked
+        }
+        let selected = selectedOpenCodePlanAgentForNewThreads.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !selected.isEmpty {
+            return selected
+        }
+        return agentRuntimeDescriptor(id: "opencode")?.defaultPlanAgentName ?? "plan"
+    }
+
+    func setSelectedOpenCodePlanAgentForNewThreads(_ agentName: String) {
+        let normalized = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        selectedOpenCodePlanAgentForNewThreads = normalized
+    }
+
+    func setOpenCodePlanAgentName(_ agentName: String, for thread: CodexThread?) {
+        let normalized = agentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return }
+        if var mutableThread = thread {
+            mutableThread.opencodePlanAgentName = normalized
+            upsertThread(mutableThread)
+            return
+        }
+        setSelectedOpenCodePlanAgentForNewThreads(normalized)
+    }
+
+    func effectiveCursorMode(for thread: CodexThread?) -> String {
+        let override = threadRuntimeOverride(for: thread?.id)?.cursorMode?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !override.isEmpty {
+            return normalizedCursorMode(override)
+        }
+        return normalizedCursorMode(selectedCursorModeForNewThreads)
+    }
+
+    func setSelectedCursorModeForNewThreads(_ mode: String) {
+        selectedCursorModeForNewThreads = normalizedCursorMode(mode)
+    }
+
+    func setCursorMode(_ mode: String, for thread: CodexThread?) {
+        let normalized = normalizedCursorMode(mode)
+        guard let threadID = normalizedInterruptIdentifier(thread?.id) else {
+            selectedCursorModeForNewThreads = normalized
+            return
+        }
+        mutateThreadRuntimeOverride(for: threadID) { override in
+            override.cursorMode = normalized
+        }
+    }
+
+    private func normalizedCursorMode(_ value: String) -> String {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "plan", "debug", "multitask", "ask":
+            return value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        case "none", "agent", "":
+            return "agent"
+        default:
+            return "agent"
+        }
+    }
+
+    private func normalizedAgentRuntimeID(_ value: String) -> String {
+        Self.normalizedStaticAgentRuntimeID(value)
+    }
+
+    func modelOptions(for thread: CodexThread?) -> [CodexModelOption] {
+        let runtime = effectiveAgentRuntimeID(for: thread)
+        guard runtime != "codex" else {
+            return availableModels
+        }
+        return agentRuntimeDescriptor(id: runtime)?.modelCatalog?.models ?? []
+    }
+
+    func setSelectedRuntimeModelId(_ modelId: String?, for thread: CodexThread?) {
+        setSelectedModelId(modelId, forAgentRuntime: effectiveAgentRuntimeID(for: thread))
+    }
+
+    func setSelectedRuntimeProviderId(_ providerId: String, for thread: CodexThread?) {
+        let normalizedProviderID = providerId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedProviderID.isEmpty else { return }
+
+        let models = modelOptions(for: thread).filter { model in
+            model.providerID == normalizedProviderID
+        }
+        guard let selectedModel = models.first(where: { $0.isDefault }) ?? models.first else {
+            return
+        }
+        setSelectedRuntimeModelId(selectedModel.id, for: thread)
+    }
+
+    private func setSelectedCodexModelId(_ modelId: String?) {
+        let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized?.isEmpty == false {
+            selectedModelId = normalized
+        } else {
+            selectedModelId = RuntimeSelectionDefaults.modelId
+            selectedReasoningEffort = RuntimeSelectionDefaults.reasoningEffort
+        }
+        hasPersistedSelectedModelId = true
+        normalizeRuntimeSelectionsAfterModelsUpdate()
+    }
+
+    private func decodeAgentRuntimeModelCatalog(_ value: JSONValue?) -> AgentRuntimeModelCatalog? {
+        guard let object = value?.objectValue else {
+            return nil
+        }
+
+        let models = (object["models"]?.arrayValue ?? [])
+            .compactMap { decodeModel(CodexModelOption.self, from: $0) }
+        let providers = (object["providers"]?.arrayValue ?? [])
+            .compactMap(decodeAgentRuntimeModelProvider)
+        return AgentRuntimeModelCatalog(
+            defaultModelId: object["defaultModelId"]?.stringValue ?? object["default_model_id"]?.stringValue,
+            defaultProviderId: object["defaultProviderId"]?.stringValue ?? object["default_provider_id"]?.stringValue,
+            status: object["status"]?.stringValue,
+            statusMessage: object["statusMessage"]?.stringValue ?? object["status_message"]?.stringValue,
+            providers: providers,
+            models: models
+        )
+    }
+
+    private func decodeAgentRuntimeModelProvider(_ value: JSONValue) -> AgentRuntimeModelProvider? {
+        guard let object = value.objectValue else { return nil }
+        let rawID = object["id"]?.stringValue ?? object["providerID"]?.stringValue ?? object["provider_id"]?.stringValue
+        guard let id = rawID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !id.isEmpty else {
+            return nil
+        }
+
+        let displayName = object["displayName"]?.stringValue
+            ?? object["display_name"]?.stringValue
+            ?? id
+        let modelIds = (object["modelIds"]?.arrayValue
+            ?? object["modelIDs"]?.arrayValue
+            ?? object["model_ids"]?.arrayValue
+            ?? [])
+            .compactMap { value -> String? in
+                let normalized = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return normalized.isEmpty ? nil : normalized
+            }
+        let isDefault = object["isDefault"]?.boolValue
+            ?? object["is_default"]?.boolValue
+            ?? false
+
+        return AgentRuntimeModelProvider(
+            id: id,
+            displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
+            modelIds: modelIds,
+            isDefault: isDefault
+        )
+    }
+
+    private static func normalizedStaticAgentRuntimeID(_ value: String) -> String {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "opencode", "cursor":
+            return value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        default:
+            return "codex"
+        }
+    }
 }
 
 private extension CodexService {
@@ -500,6 +883,7 @@ private extension CodexService {
         var currentOverride = threadRuntimeOverridesByThreadID[threadId] ?? CodexThreadRuntimeOverride(
             reasoningEffort: nil,
             serviceTierRawValue: nil,
+            cursorMode: nil,
             overridesReasoning: false,
             overridesServiceTier: false
         )
@@ -515,14 +899,25 @@ private extension CodexService {
         persistThreadRuntimeOverrides()
     }
 
-    func selectedModelOption(from models: [CodexModelOption]) -> CodexModelOption? {
+    func selectedModelOption(
+        from models: [CodexModelOption],
+        agentRuntime runtime: String = "codex"
+    ) -> CodexModelOption? {
         guard !models.isEmpty else {
             return nil
         }
 
-        if let selectedModelId,
-           let directMatch = models.first(where: { $0.id == selectedModelId || $0.model == selectedModelId }) {
+        let selected = normalizedAgentRuntimeID(runtime) == "codex"
+            ? selectedModelId
+            : selectedModelIdByAgentRuntime[normalizedAgentRuntimeID(runtime)]
+
+        if let selected,
+           let directMatch = models.first(where: { $0.id == selected || $0.model == selected }) {
             return directMatch
+        }
+
+        if let defaultModel = models.first(where: { $0.isDefault }) {
+            return defaultModel
         }
 
         return nil
@@ -572,6 +967,13 @@ private extension CodexService {
             defaults.set(selectedModelId, forKey: Self.selectedModelIdDefaultsKey)
         } else {
             defaults.removeObject(forKey: Self.selectedModelIdDefaultsKey)
+        }
+
+        if !selectedModelIdByAgentRuntime.isEmpty,
+           let encodedRuntimeModels = try? encoder.encode(selectedModelIdByAgentRuntime) {
+            defaults.set(encodedRuntimeModels, forKey: Self.selectedModelIdByAgentRuntimeDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.selectedModelIdByAgentRuntimeDefaultsKey)
         }
 
         if let selectedGitWriterModelId, !selectedGitWriterModelId.isEmpty {

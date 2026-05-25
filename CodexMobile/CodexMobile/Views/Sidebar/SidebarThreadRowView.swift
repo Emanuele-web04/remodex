@@ -132,6 +132,15 @@ struct SidebarThreadRowView: View {
 
             SidebarThreadStatusIcon(thread: thread, pointSize: 12)
 
+            if thread.agentRuntime != "codex" {
+                Text(thread.agentRuntime == "opencode" ? "OC" : thread.agentRuntime.uppercased())
+                    .font(AppFont.caption2(weight: .semibold))
+                    .foregroundStyle(SidebarForegroundStyle.meta)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color(.tertiarySystemFill), in: Capsule())
+            }
+
             if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
                 Text(pinnedProjectLabel)
                     .font(AppFont.footnote())

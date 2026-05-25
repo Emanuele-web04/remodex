@@ -15,6 +15,10 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
     let supportsFastMode: Bool
     let supportedReasoningEfforts: [CodexReasoningEffortOption]
     let defaultReasoningEffort: String?
+    let providerID: String?
+    let providerDisplayName: String?
+    let modelID: String?
+    let modelDisplayName: String?
 
     init(
         id: String,
@@ -24,7 +28,11 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         isDefault: Bool,
         supportsFastMode: Bool = false,
         supportedReasoningEfforts: [CodexReasoningEffortOption],
-        defaultReasoningEffort: String?
+        defaultReasoningEffort: String?,
+        providerID: String? = nil,
+        providerDisplayName: String? = nil,
+        modelID: String? = nil,
+        modelDisplayName: String? = nil
     ) {
         self.id = id
         self.model = model
@@ -34,6 +42,10 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         self.supportsFastMode = supportsFastMode
         self.supportedReasoningEfforts = supportedReasoningEfforts
         self.defaultReasoningEffort = defaultReasoningEffort
+        self.providerID = providerID
+        self.providerDisplayName = providerDisplayName
+        self.modelID = modelID
+        self.modelDisplayName = modelDisplayName
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -58,6 +70,16 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         case supportedReasoningEffortsSnake = "supported_reasoning_efforts"
         case defaultReasoningEffort
         case defaultReasoningEffortSnake = "default_reasoning_effort"
+        case providerID
+        case providerIDSuffix = "providerId"
+        case providerIDSnake = "provider_id"
+        case providerDisplayName
+        case providerDisplayNameSnake = "provider_display_name"
+        case modelID
+        case modelIDSuffix = "modelId"
+        case modelIDSnake = "model_id"
+        case modelDisplayName
+        case modelDisplayNameSnake = "model_display_name"
     }
 
     init(from decoder: Decoder) throws {
@@ -118,6 +140,18 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
 
         let normalizedDefault = defaultEffort?.trimmingCharacters(in: .whitespacesAndNewlines)
         defaultReasoningEffort = (normalizedDefault?.isEmpty == true) ? nil : normalizedDefault
+        providerID = Self.decodeTrimmedString(from: container, keys: [
+            .providerID, .providerIDSuffix, .providerIDSnake,
+        ])
+        providerDisplayName = Self.decodeTrimmedString(from: container, keys: [
+            .providerDisplayName, .providerDisplayNameSnake,
+        ])
+        modelID = Self.decodeTrimmedString(from: container, keys: [
+            .modelID, .modelIDSuffix, .modelIDSnake,
+        ])
+        modelDisplayName = Self.decodeTrimmedString(from: container, keys: [
+            .modelDisplayName, .modelDisplayNameSnake,
+        ])
     }
 
     // Codex model/list has shipped several field spellings; keep this parser
@@ -150,6 +184,21 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         return camelTiers + snakeTiers
     }
 
+    private static func decodeTrimmedString(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        keys: [CodingKeys]
+    ) -> String? {
+        for key in keys {
+            if let value = try? container.decodeIfPresent(String.self, forKey: key) {
+                let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !normalized.isEmpty {
+                    return normalized
+                }
+            }
+        }
+        return nil
+    }
+
     func supportsServiceTier(_ serviceTier: CodexServiceTier) -> Bool {
         switch serviceTier {
         case .fast:
@@ -167,6 +216,10 @@ struct CodexModelOption: Identifiable, Codable, Hashable, Sendable {
         try container.encode(supportsFastMode, forKey: .supportsFastMode)
         try container.encode(supportedReasoningEfforts, forKey: .supportedReasoningEfforts)
         try container.encodeIfPresent(defaultReasoningEffort, forKey: .defaultReasoningEffort)
+        try container.encodeIfPresent(providerID, forKey: .providerID)
+        try container.encodeIfPresent(providerDisplayName, forKey: .providerDisplayName)
+        try container.encodeIfPresent(modelID, forKey: .modelID)
+        try container.encodeIfPresent(modelDisplayName, forKey: .modelDisplayName)
     }
 }
 

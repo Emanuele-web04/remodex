@@ -31,10 +31,26 @@ final class SubscriptionServiceAccessTests: XCTestCase {
         XCTAssertFalse(service.hasAppAccess)
     }
 
-    private func makeService() -> SubscriptionService {
+    func testLocalDevelopmentAccessBypassesFreeSendLimitWithoutConsumingAttempts() {
+        let service = makeService(localDevelopmentAccessEnabled: true)
+
+        for _ in 0..<7 {
+            service.consumeFreeSendAttemptIfNeeded()
+        }
+
+        XCTAssertEqual(service.freeSendCount, 0)
+        XCTAssertEqual(service.remainingFreeSendAttempts, 5)
+        XCTAssertTrue(service.hasFreeSendAccess)
+        XCTAssertTrue(service.hasAppAccess)
+    }
+
+    private func makeService(localDevelopmentAccessEnabled: Bool = false) -> SubscriptionService {
         let suiteName = "SubscriptionServiceAccessTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
-        return SubscriptionService(defaults: defaults)
+        return SubscriptionService(
+            defaults: defaults,
+            localDevelopmentAccessEnabled: localDevelopmentAccessEnabled
+        )
     }
 }

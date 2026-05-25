@@ -649,7 +649,7 @@ struct NewChatDraftView: View {
     }
 
     private var orderedModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+        TurnComposerMetaMapper.orderedModels(from: codex.modelOptions(for: nil))
     }
 
     private var reasoningDisplayOptions: [TurnComposerReasoningDisplayOption] {
@@ -659,11 +659,11 @@ struct NewChatDraftView: View {
     }
 
     private var selectedModelTitle: String {
-        if let selectedModel = codex.selectedModelOption() {
+        if let selectedModel = codex.selectedModelOption(for: nil) {
             return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }
 
-        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.selectedModelId)
+        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.runtimeModelIdentifierForTurn())
     }
 
     // Mirrors the regular TurnView mic state so empty drafts can record before a runtime thread exists.

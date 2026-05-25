@@ -10,6 +10,7 @@ struct ComposerBottomBar: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     @State private var showsAllModelsSheet = false
+    @State private var bottomBarWidth: CGFloat = 0
 
     // Data
     let orderedModelOptions: [CodexModelOption]
@@ -82,6 +83,13 @@ struct ComposerBottomBar: View {
             attachmentMenu
                 .padding(.leading, 8)
             inlineAccessMenuLabel
+            agentRuntimeMenuControl
+            if runtimeState.selectedAgentRuntimeID == "opencode", runtimeState.openCodeAgentOptions.count > 1 {
+                openCodeBuildAgentMenuControl
+            }
+            if runtimeState.selectedAgentRuntimeID == "opencode", runtimeState.agentRuntimeCapabilities.planMode {
+                openCodePlanAgentMenuControl
+            }
             Spacer(minLength: 0)
 
             inlineStatusControl
@@ -154,6 +162,17 @@ struct ComposerBottomBar: View {
         .padding(.horizontal, 8)
         .padding(.bottom, 8)
         .padding(.top, 2)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: ComposerBottomBarWidthPreferenceKey.self, value: proxy.size.width)
+            }
+        }
+        .onPreferenceChange(ComposerBottomBarWidthPreferenceKey.self) { width in
+            let roundedWidth = width.rounded()
+            if abs(bottomBarWidth - roundedWidth) > 0.5 {
+                bottomBarWidth = roundedWidth
+            }
+        }
         .sheet(isPresented: $showsAllModelsSheet) {
             AllModelsSheet(
                 models: orderedModelOptions,
@@ -244,9 +263,121 @@ struct ComposerBottomBar: View {
             isRuntimeSelectionLoading: isRuntimeSelectionLoading,
             runtimeState: runtimeState,
             runtimeActions: runtimeActions,
+            availableBottomBarWidth: bottomBarWidth,
             showsAllModelsSheet: $showsAllModelsSheet
         )
         .equatable()
+    }
+
+    private var openCodeBuildAgentMenuControl: some View {
+        Menu {
+            ForEach(runtimeState.openCodeAgentOptions) { agent in
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    runtimeActions.selectOpenCodeBuildAgent(agent.id)
+                } label: {
+                    if runtimeState.selectedOpenCodeBuildAgentID == agent.id {
+                        Label(agent.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(agent.displayName)
+                    }
+                }
+                .disabled(runtimeState.isAgentRuntimeLocked)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                RemodexIcon.image(systemName: "person.crop.circle", size: 14)
+                Text(runtimeState.selectedOpenCodeBuildAgentTitle)
+                    .font(AppFont.caption(weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(runtimeState.isAgentRuntimeLocked ? Color(.secondaryLabel) : Color(.label))
+            .padding(.horizontal, 9)
+            .frame(maxWidth: 140)
+            .frame(height: 30)
+            .background(
+                Capsule().fill(Color(.secondarySystemBackground))
+            )
+            .contentShape(Capsule())
+        }
+        .menuIndicator(.hidden)
+        .disabled(runtimeState.isAgentRuntimeLocked)
+        .accessibilityLabel("OpenCode build agent")
+    }
+
+    private var openCodePlanAgentMenuControl: some View {
+        Menu {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                runtimeActions.selectOpenCodePlanAgent(runtimeState.selectedOpenCodePlanAgentID)
+            } label: {
+                Label(runtimeState.selectedOpenCodePlanAgentTitle, systemImage: "checkmark")
+            }
+            .disabled(runtimeState.isAgentRuntimeLocked)
+        } label: {
+            HStack(spacing: 4) {
+                RemodexIcon.image(systemName: "list.bullet.clipboard", size: 14)
+                Text(runtimeState.selectedOpenCodePlanAgentTitle)
+                    .font(AppFont.caption(weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(runtimeState.isAgentRuntimeLocked ? Color(.secondaryLabel) : Color(.label))
+            .padding(.horizontal, 9)
+            .frame(maxWidth: 96)
+            .frame(height: 30)
+            .background(
+                Capsule().fill(Color(.secondarySystemBackground))
+            )
+            .contentShape(Capsule())
+        }
+        .menuIndicator(.hidden)
+        .disabled(runtimeState.isAgentRuntimeLocked)
+        .accessibilityLabel("OpenCode plan agent")
+    }
+
+    private var agentRuntimeMenuControl: some View {
+        Menu {
+            ForEach(runtimeState.agentRuntimeOptions) { runtime in
+                Button {
+                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                    runtimeActions.selectAgentRuntime(runtime.id)
+                } label: {
+                    if runtimeState.selectedAgentRuntimeID == runtime.id {
+                        Label(runtime.displayName, systemImage: "checkmark")
+                    } else if runtime.isReady {
+                        Text(runtime.displayName)
+                    } else if runtime.showsRuntimeStatusWarning,
+                              let statusMessage = runtime.statusMessage,
+                              !statusMessage.isEmpty {
+                        Label("\(runtime.displayName) — \(statusMessage)", systemImage: "exclamationmark.triangle")
+                    } else {
+                        Label(runtime.displayName, systemImage: "exclamationmark.triangle")
+                    }
+                }
+                .disabled(runtimeState.isAgentRuntimeLocked || !runtime.isReady)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                RemodexIcon.image(systemName: "cpu", size: 14)
+                Text(runtimeState.selectedAgentRuntimeTitle)
+                    .font(AppFont.caption(weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(runtimeState.isAgentRuntimeLocked ? Color(.secondaryLabel) : Color(.label))
+            .padding(.horizontal, 9)
+            .frame(maxWidth: 96)
+            .frame(height: 30)
+            .background(
+                Capsule().fill(Color(.secondarySystemBackground))
+            )
+            .contentShape(Capsule())
+        }
+        .menuIndicator(.hidden)
+        .disabled(runtimeState.isAgentRuntimeLocked)
+        .accessibilityLabel("Agent")
     }
 
     private var inlineStatusControl: some View {
@@ -267,14 +398,16 @@ struct ComposerBottomBar: View {
             // `RemodexIcon.menuLabel` keeps Central artwork in SwiftUI Menus
             // by routing through `Label(_, image:)` for mapped assets and
             // falling back to `Label(_, systemImage:)` for plain SF Symbols.
-            Toggle(isOn: Binding(
-                get: { isPlanModeArmed },
-                set: { newValue in
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onSetPlanModeArmed(newValue)
+            if runtimeState.agentRuntimeCapabilities.planMode {
+                Toggle(isOn: Binding(
+                    get: { isPlanModeArmed },
+                    set: { newValue in
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        onSetPlanModeArmed(newValue)
+                    }
+                )) {
+                    RemodexIcon.menuLabel("Plan mode", systemName: "remodex.plan-mode")
                 }
-            )) {
-                RemodexIcon.menuLabel("Plan mode", systemName: "remodex.plan-mode")
             }
 
             if runtimeState.supportsFastMode {
@@ -288,22 +421,24 @@ struct ComposerBottomBar: View {
                 }
             }
 
-            Section {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapAddImage()
-                } label: {
-                    RemodexIcon.menuLabel("Photo library", systemName: "photo")
-                }
-                .disabled(remainingAttachmentSlots == 0)
+            if runtimeState.agentRuntimeCapabilities.photos {
+                Section {
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback()
+                        onTapAddImage()
+                    } label: {
+                        RemodexIcon.menuLabel("Photo library", systemName: "photo")
+                    }
+                    .disabled(remainingAttachmentSlots == 0)
 
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapTakePhoto()
-                } label: {
-                    RemodexIcon.menuLabel("Take a photo", systemName: "camera.fill")
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback()
+                        onTapTakePhoto()
+                    } label: {
+                        RemodexIcon.menuLabel("Take a photo", systemName: "camera.fill")
+                    }
+                    .disabled(remainingAttachmentSlots == 0)
                 }
-                .disabled(remainingAttachmentSlots == 0)
             }
         } label: {
             RemodexIcon.image(systemName: "plus")
@@ -358,12 +493,22 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     let isRuntimeSelectionLoading: Bool
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
+    let availableBottomBarWidth: CGFloat
     @Binding var showsAllModelsSheet: Bool
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.callout() }
     private var leadingIconFont: Font { AppFont.subheadline() }
-    private let maxInlineRuntimeLabelWidth: CGFloat = 130
+    private let minInlineRuntimeLabelWidth: CGFloat = 88
+    private let maxInlineRuntimeLabelWidth: CGFloat = 200
+
+    private var inlineRuntimeLabelMaxWidth: CGFloat {
+        guard availableBottomBarWidth > 0 else {
+            return maxInlineRuntimeLabelWidth
+        }
+        let budget = availableBottomBarWidth * 0.22
+        return min(max(budget, minInlineRuntimeLabelWidth), maxInlineRuntimeLabelWidth)
+    }
 
     static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {
         lhs.orderedModelOptions == rhs.orderedModelOptions
@@ -372,6 +517,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
             && lhs.isLoadingModels == rhs.isLoadingModels
             && lhs.isRuntimeSelectionLoading == rhs.isRuntimeSelectionLoading
             && lhs.runtimeState == rhs.runtimeState
+            && lhs.availableBottomBarWidth == rhs.availableBottomBarWidth
     }
 
     // Renders one consolidated runtime pill backed by a real UIKit UIMenu so we
@@ -478,13 +624,13 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 .font(metaTextFont)
                 .fontWeight(.regular)
                 .lineLimit(1)
+                .minimumScaleFactor(0.82)
                 .truncationMode(.tail)
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
         .fixedSize(horizontal: true, vertical: false)
-        .frame(maxWidth: maxInlineRuntimeLabelWidth, alignment: .leading)
-        .clipped()
+        .frame(maxWidth: inlineRuntimeLabelMaxWidth, alignment: .leading)
         .contentShape(Rectangle())
     }
 
@@ -495,6 +641,14 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
         return model
             + Text(" ")
             + Text(effortPart).foregroundStyle(.tertiary)
+    }
+}
+
+private struct ComposerBottomBarWidthPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
@@ -574,6 +728,11 @@ private struct AllModelsSheet: View {
                     Text(model.description)
                         .font(AppFont.subheadline())
                         .foregroundStyle(Color(.secondaryLabel))
+                }
+                if let providerName = model.providerDisplayName, !providerName.isEmpty {
+                    Text(providerName)
+                        .font(AppFont.caption())
+                        .foregroundStyle(Color(.tertiaryLabel))
                 }
             }
 

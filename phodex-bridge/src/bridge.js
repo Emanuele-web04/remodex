@@ -69,6 +69,12 @@ const {
   readThreadTurnsListPageFromSessionJsonl,
 } = require("./session-jsonl-history");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const { createAgentRuntimeRegistry } = require("./agent-runtime-registry");
+const { createThreadAgentStateStore } = require("./thread-agent-state");
+const { convertCodexNotificationToCanonical } = require("./codex-to-canonical-adapter");
+const { createOpenCodeServerManager } = require("./opencode-server");
+const { createOpenCodeRuntimeAdapter } = require("./opencode-runtime-adapter");
+const { createCursorRuntimeAdapter } = require("./cursor-runtime-adapter");
 
 const execFileAsync = promisify(execFile);
 const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
@@ -258,6 +264,26 @@ function startBridge({
     appPath: config.codexAppPath,
     logPrefix: "[remodex]",
   });
+  const threadAgentState = createThreadAgentStateStore();
+  const openCodeServerManager = createOpenCodeServerManager({
+    logImpl: console,
+  });
+  const openCodeRuntimeAdapter = createOpenCodeRuntimeAdapter({
+    serverManager: openCodeServerManager,
+    threadAgentState,
+  });
+  const cursorRuntimeAdapter = createCursorRuntimeAdapter({
+    threadAgentState,
+    logImpl: console,
+  });
+  const agentRuntimeRegistry = createAgentRuntimeRegistry({
+    threadAgentState,
+    runtimeAdapters: [openCodeRuntimeAdapter, cursorRuntimeAdapter],
+    logPrefix: "[remodex]",
+  });
+  void agentRuntimeRegistry.refreshInitializeCache().catch((error) => {
+    console.warn(`[remodex] Failed to refresh agent runtime status: ${error?.message || error}`);
+  });
   const voiceHandler = createVoiceHandler({
     sendCodexRequest,
     logPrefix: "[remodex]",
@@ -338,6 +364,9 @@ function startBridge({
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
+    openCodeRuntimeAdapter.stopAll();
+    openCodeServerManager.stop();
+    cursorRuntimeAdapter.stopAll();
   }
 
   function stopBridge() {
@@ -470,7 +499,9 @@ function startBridge({
           }
         },
         onApplicationMessage(plaintextMessage) {
-          handleApplicationMessage(plaintextMessage);
+          void handleApplicationMessage(plaintextMessage).catch((error) => {
+            console.warn(`[remodex] failed to handle app message: ${error?.message || error}`);
+          });
         },
       })) {
         return;
@@ -525,12 +556,22 @@ function startBridge({
       return;
     }
     updatePendingAuthLoginFromCodexMessage(message);
+    const parsedOutbound = safeParseJSON(message);
+    const isForwardedInitialize = parsedOutbound?.id != null
+      && forwardedInitializeRequestIds.has(String(parsedOutbound.id));
     trackCodexHandshakeState(message);
     desktopRefresher.handleOutbound(message);
     pushNotificationTracker.handleOutbound(message);
+    agentRuntimeRegistry.observeOutboundMessage(message);
     rememberThreadFromMessage("codex", message);
+    let outboundMessage = message;
+    if (isForwardedInitialize && parsedOutbound?.result != null) {
+      outboundMessage = agentRuntimeRegistry.enrichOutboundResponse(outboundMessage, {
+        method: "initialize",
+      });
+    }
     secureTransport.queueOutboundApplicationMessage(
-      sanitizeRelayBoundCodexMessage(message),
+      sanitizeRelayBoundCodexMessage(outboundMessage),
       sendRelayWireMessage
     );
   });
@@ -566,8 +607,8 @@ function startBridge({
   process.on("SIGTERM", () => shutdown(codex, () => socket, prepareBridgeShutdown));
 
   // Routes decrypted app payloads through the same bridge handlers as before.
-  function handleApplicationMessage(rawMessage) {
-    if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse)) {
+  async function handleApplicationMessage(rawMessage) {
+    if (await handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse)) {
       return;
     }
     if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse)) {
@@ -611,10 +652,32 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
       return;
     }
+    if (await agentRuntimeRegistry.handleRuntimeResponse(rawMessage, {
+      sendResponse: sendApplicationResponse,
+    })) {
+      return;
+    }
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
+    if (await agentRuntimeRegistry.handleInboundRequest(rawMessage, sendApplicationResponse)) {
+      return;
+    }
     const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
+    if (await agentRuntimeRegistry.handleRuntimeRequest(codexRequest, {
+      sendResponse: sendApplicationResponse,
+      sendToRuntime(runtimeId, runtimeMessage) {
+        if (runtimeId !== "codex") {
+          throw new Error(`Unsupported runtime dispatch target: ${runtimeId}`);
+        }
+        rememberForwardedRequestMethod(runtimeMessage);
+        rememberThreadFromMessage("phone", runtimeMessage);
+        codex.send(runtimeMessage);
+      },
+    })) {
+      return;
+    }
+    agentRuntimeRegistry.trackForwardedRequest(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
@@ -953,7 +1016,33 @@ function startBridge({
     const parsed = safeParseJSON(normalizedMessage);
     const responseId = parsed?.id;
     if (responseId == null) {
-      return sanitizeLiveGeneratedImageMessageForRelay(normalizedMessage);
+      const sanitizedForImage = sanitizeLiveGeneratedImageMessageForRelay(normalizedMessage);
+      if (!sanitizedForImage) {
+        return null;
+      }
+      // Wire Codex notifications to canonical `remodex/event/*` (Gap #1 / blueprint #19).
+      // Minimal seam: post all sidecars + pre-relay. Try convert; silent raw fallback on any issue (no Codex regression).
+      // Rollback: set REMODEX_CANONICAL_CODEX_EVENTS=0 (or extend to full config flag).
+      try {
+        if (process.env.REMODEX_CANONICAL_CODEX_EVENTS !== "0" && process.env.REMODEX_CANONICAL_CODEX_EVENTS !== "false") {
+          const converted = convertCodexNotificationToCanonical(sanitizedForImage, {
+            agentRuntime: "codex",
+            resolveAgentSessionId: ({ threadId }) => {
+              // threadAgentState is in scope via closure in the broader sanitize context (used elsewhere in file for similar).
+              const rec = threadAgentState && typeof threadAgentState.get === "function"
+                ? threadAgentState.get(readString(threadId))
+                : null;
+              return rec?.agentSessionId || readString(threadId) || "";
+            },
+          });
+          if (converted) {
+            return JSON.stringify(converted);
+          }
+        }
+      } catch (err) {
+        console.warn(`[remodex] Codex-to-canonical conversion failed (raw fallback, no regression): ${err?.message || err}`);
+      }
+      return sanitizedForImage;
     }
 
     const trackedRequest = relaySanitizedResponseMethodsById.get(String(responseId));
@@ -962,7 +1051,11 @@ function startBridge({
     }
     relaySanitizedResponseMethodsById.delete(String(responseId));
 
-    return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
+    const enrichedMessage = agentRuntimeRegistry.enrichOutboundResponse(
+      normalizedMessage,
+      trackedRequest
+    );
+    return sanitizeThreadHistoryImagesForRelay(enrichedMessage, trackedRequest.method, trackedRequest);
   }
 
   function updatePendingAuthLoginFromCodexMessage(rawMessage) {
@@ -1128,7 +1221,7 @@ function startBridge({
   // The spawned/shared Codex app-server stays warm across phone reconnects.
   // When iPhone reconnects it sends initialize again, but forwarding that to the
   // already-initialized Codex transport only produces "Already initialized".
-  function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse) {
+  async function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse) {
     let parsed = null;
     try {
       parsed = JSON.parse(rawMessage);
@@ -1156,11 +1249,10 @@ function startBridge({
         return false;
       }
 
+      await agentRuntimeRegistry.refreshInitializeCache();
       sendResponse(JSON.stringify({
         id: parsed.id,
-        result: {
-          bridgeManaged: true,
-        },
+        result: agentRuntimeRegistry.buildWarmInitializeResult(),
       }));
       return true;
     }

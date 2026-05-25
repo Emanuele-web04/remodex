@@ -104,6 +104,37 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertEqual(thread.gitWorkingDirectory, "/Users/me/work/project")
     }
 
+    func testDecoderBackfillsLegacyAgentRuntimeAsCodex() throws {
+        let payload: JSONValue = .object([
+            "id": .string("thread-legacy"),
+        ])
+
+        let data = try JSONEncoder().encode(payload)
+        let thread = try JSONDecoder().decode(CodexThread.self, from: data)
+
+        XCTAssertEqual(thread.agentRuntime, "codex")
+        XCTAssertEqual(thread.agentSessionId, "thread-legacy")
+    }
+
+    func testDecoderReadsAgentRuntimeFieldsFromBridgePayload() throws {
+        let payload = """
+        {
+          "id": "thread-opencode",
+          "agentRuntime": "opencode",
+          "agentSessionId": "ses_123",
+          "opencodeBuildAgentName": "build-fast",
+          "opencodePlanAgentName": "plan-careful"
+        }
+        """.data(using: .utf8)!
+
+        let thread = try JSONDecoder().decode(CodexThread.self, from: payload)
+
+        XCTAssertEqual(thread.agentRuntime, "opencode")
+        XCTAssertEqual(thread.agentSessionId, "ses_123")
+        XCTAssertEqual(thread.opencodeBuildAgentName, "build-fast")
+        XCTAssertEqual(thread.opencodePlanAgentName, "plan-careful")
+    }
+
     func testGitWorkingDirectoryIsNilForUnboundThread() {
         let thread = CodexThread(id: "thread-1", cwd: "   ")
 

@@ -13,6 +13,7 @@ const {
 } = require("./rollout-watch");
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const { convertCodexNotificationToCanonical } = require("./codex-to-canonical-adapter");
 
 const DEFAULT_POLL_INTERVAL_MS = 700;
 const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
@@ -317,7 +318,7 @@ function processRolloutLines(lines, state, sendApplicationResponse) {
 
     const notifications = synthesizeNotificationsFromRolloutEntry(parsed, state);
     for (const notification of notifications) {
-      sendApplicationResponse(JSON.stringify(notification));
+      emitRolloutNotification(notification, state, sendApplicationResponse);
     }
   }
 }
@@ -987,6 +988,30 @@ function createNotification(method, params = {}) {
       ...params,
     },
   };
+}
+
+function emitRolloutNotification(notification, state, sendApplicationResponse) {
+  const method = readString(notification?.method);
+  const threadId = readString(notification?.params?.threadId) || readString(state?.threadId) || "";
+  const canonicalDisabled = process.env.REMODEX_CANONICAL_CODEX_EVENTS === "0"
+    || process.env.REMODEX_CANONICAL_CODEX_EVENTS === "false";
+
+  if (!canonicalDisabled && method.startsWith("codex/event/")) {
+    try {
+      const converted = convertCodexNotificationToCanonical(notification, {
+        agentRuntime: "codex",
+        resolveAgentSessionId: ({ threadId: resolvedThreadId }) => resolvedThreadId || threadId,
+      });
+      if (converted) {
+        sendApplicationResponse(JSON.stringify(converted));
+        return;
+      }
+    } catch (err) {
+      console.warn(`${readString(state?.logPrefix) || "[remodex]"} rollout canonical conversion failed: ${err?.message || err}`);
+    }
+  }
+
+  sendApplicationResponse(JSON.stringify(notification));
 }
 
 function flushPendingUserMessageNotifications(state, turnId) {

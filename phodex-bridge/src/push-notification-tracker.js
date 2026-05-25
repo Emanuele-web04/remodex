@@ -280,8 +280,9 @@ function parseOutboundMessage(rawMessage) {
     return null;
   }
 
-  const method = parsed.method.trim();
-  const params = objectValue(parsed.params) || {};
+  const normalized = normalizeCanonicalOutbound(parsed);
+  const method = normalized.method;
+  const params = normalized.params;
   const eventObject = envelopeEventObject(params);
 
   return {
@@ -291,6 +292,42 @@ function parseOutboundMessage(rawMessage) {
     threadId: resolveThreadId(method, params, eventObject),
     turnId: resolveTurnId(method, params, eventObject),
   };
+}
+
+function normalizeCanonicalOutbound(parsed) {
+  const rawMethod = parsed.method.trim();
+  const rawParams = objectValue(parsed.params) || {};
+  if (!rawMethod.startsWith("remodex/event/")) {
+    return { method: rawMethod, params: rawParams };
+  }
+
+  const eventType = rawMethod.slice("remodex/event/".length);
+  const payload = objectValue(rawParams.payload) || {};
+  const params = {
+    ...payload,
+    threadId: rawParams.threadId || payload.threadId,
+    turnId: rawParams.turnId || payload.turnId,
+    itemId: rawParams.itemId || payload.itemId,
+    agentRuntime: rawParams.agentRuntime,
+    event: payload.raw,
+  };
+
+  switch (eventType) {
+  case "assistant_delta":
+    return { method: "item/agentMessage/delta", params };
+  case "assistant_completed":
+    return { method: "item/completed", params: { ...params, item: { type: "agent_message", text: payload.text } } };
+  case "error":
+    return { method: "error", params };
+  case "turn_completed":
+    return { method: "turn/completed", params };
+  case "thread_started":
+    return { method: "thread/started", params };
+  case "turn_started":
+    return { method: "turn/started", params };
+  default:
+    return { method: rawMethod, params: rawParams };
+  }
 }
 
 function envelopeEventObject(params) {

@@ -144,6 +144,19 @@ private extension CodexService {
             if decodedThread.modelProvider == nil {
                 decodedThread.modelProvider = sourceThread.modelProvider
             }
+            let sourceRuntime = sourceThread.agentRuntime
+            if sourceRuntime != "codex" || decodedThread.agentRuntime == "codex" {
+                decodedThread.agentRuntime = sourceRuntime
+            }
+            if decodedThread.agentSessionId == nil {
+                decodedThread.agentSessionId = sourceThread.agentSessionId
+            }
+            if decodedThread.opencodeBuildAgentName == nil {
+                decodedThread.opencodeBuildAgentName = sourceThread.opencodeBuildAgentName
+            }
+            if decodedThread.opencodePlanAgentName == nil {
+                decodedThread.opencodePlanAgentName = sourceThread.opencodePlanAgentName
+            }
         }
 
         upsertThread(decodedThread, treatAsServerState: true)

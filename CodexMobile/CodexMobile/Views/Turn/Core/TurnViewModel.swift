@@ -862,6 +862,12 @@ final class TurnViewModel {
                 let indexedSkills: [TurnSkillSearchIndexEntry]
                 if let cachedIndex = self.cachedSkillSearchIndexByRoot[cacheKey] {
                     indexedSkills = cachedIndex
+                } else if codex.effectiveAgentRuntimeID(for: thread) == "opencode" {
+                    let listedSkills = codex.openCodeSkillMetadata(for: thread)
+                    guard !Task.isCancelled else { return }
+                    indexedSkills = listedSkills
+                        .map(TurnSkillSearchIndexEntry.init(skill:))
+                    self.cachedSkillSearchIndexByRoot[cacheKey] = indexedSkills
                 } else {
                     let listedSkills = try await codex.listSkills(
                         cwds: normalizedRoot.map { [$0] },
@@ -1306,7 +1312,8 @@ final class TurnViewModel {
     ) {
         guard let pendingSend = buildValidatedPendingSend(
             codex: codex,
-            subscriptions: subscriptions
+            subscriptions: subscriptions,
+            threadID: threadID
         ) else {
             return
         }
@@ -1361,7 +1368,8 @@ final class TurnViewModel {
     ) -> Bool {
         guard let pendingSend = buildValidatedPendingSend(
             codex: codex,
-            subscriptions: subscriptions
+            subscriptions: subscriptions,
+            threadID: nil
         ) else {
             return false
         }
@@ -1434,7 +1442,8 @@ final class TurnViewModel {
     // so the empty/connected/blocking/review/subscription guards stay in one place.
     private func buildValidatedPendingSend(
         codex: CodexService,
-        subscriptions: SubscriptionService?
+        subscriptions: SubscriptionService?,
+        threadID: String?
     ) -> PendingTurnSend? {
         let payload = buildPayloadWithMentions()
         let attachments = readyComposerAttachments
@@ -1460,6 +1469,32 @@ final class TurnViewModel {
 
         if let subscriptions, !subscriptions.hasAppAccess {
             codex.lastErrorMessage = "Your 5 free messages are over. Unlock Remodex Pro to keep chatting."
+            return nil
+        }
+
+        let thread = threadID.flatMap { codex.thread(for: $0) }
+        let capabilities = codex.effectiveAgentRuntimeCapabilities(for: thread)
+        let runtimeTitle = codex.agentRuntimeDescriptor(id: codex.effectiveAgentRuntimeID(for: thread))?.displayName ?? "This agent"
+
+        if isPlanModeArmed && !capabilities.planMode {
+            codex.lastErrorMessage = "\(runtimeTitle) does not support plan mode for this thread."
+            return nil
+        }
+
+        if !attachments.isEmpty && !capabilities.photos {
+            codex.lastErrorMessage = "\(runtimeTitle) does not support image attachments yet."
+            return nil
+        }
+
+        if isSubagentsSelectionArmed && !capabilities.subagents {
+            codex.lastErrorMessage = "\(runtimeTitle) does not support subagents yet."
+            return nil
+        }
+
+        if let threadID,
+           isThreadBusy(codex: codex, threadID: threadID),
+           !capabilities.queue {
+            codex.lastErrorMessage = "\(runtimeTitle) does not support queued follow-up messages yet."
             return nil
         }
 

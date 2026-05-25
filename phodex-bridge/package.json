@@ -1,7 +1,11 @@
 {
   "name": "remodex",
   "version": "1.5.7",
+  "private": true,
   "description": "Local bridge between Codex and the Remodex mobile app. Run `remodex up` to start.",
+  "engines": {
+    "node": ">=18"
+  },
   "main": "src/index.js",
   "bin": {
     "remodex": "./bin/remodex.js",

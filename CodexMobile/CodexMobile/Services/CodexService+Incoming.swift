@@ -84,6 +84,11 @@ extension CodexService {
     }
 
     func handleIncomingRPCMessage(_ message: RPCMessage) {
+        if let wireMethod = message.method, wireMethod.hasPrefix("codex/event/") {
+            return
+        }
+
+        let message = remodexAdaptedRPCMessage(message)
         if let method = message.method {
             let normalizedMethod = normalizedIncomingMethodName(method)
             if let requestID = message.id {
@@ -211,7 +216,7 @@ extension CodexService {
              "codex/event/agent_message_delta":
             appendAgentDelta(from: paramsObject)
 
-        case "codex/event/user_message":
+        case "timeline/user_message", "codex/event/user_message":
             appendMirroredUserMessage(from: paramsObject)
 
         case "item/plan/delta":
@@ -605,6 +610,7 @@ extension CodexService {
                 confirmLatestPendingUserMessage(threadId: threadId, turnId: completedTurnID)
             }
             let resolvedTurnID = completedTurnID ?? activeTurnIdByThread[threadId]
+            let alreadyFailedFromRuntimeError = resolvedTurnID.flatMap { terminalStateByTurnID[$0] } == .failed
             let terminalState = parseTurnTerminalState(
                 from: paramsObject,
                 turnFailureMessage: turnFailureMessage
@@ -632,6 +638,9 @@ extension CodexService {
             requestThreadHistoryReconcile(threadId: threadId)
 
             guard let turnFailureMessage else {
+                return
+            }
+            if alreadyFailedFromRuntimeError {
                 return
             }
 
@@ -838,6 +847,7 @@ extension CodexService {
 
         return turnObject?["error"]?.objectValue?["message"]?.stringValue
             ?? paramsObject?["error"]?.objectValue?["message"]?.stringValue
+            ?? paramsObject?["error"]?.stringValue
             ?? paramsObject?["errorMessage"]?.stringValue
             ?? "Turn failed with no details"
     }

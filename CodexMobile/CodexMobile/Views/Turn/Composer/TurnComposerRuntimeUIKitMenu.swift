@@ -38,7 +38,16 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
     static func makeMenu(_ input: Input) -> UIMenu {
         var children: [UIMenuElement] = []
 
+        if let cursorModeMenu = cursorModeMenu(input) {
+            children.append(cursorModeMenu)
+        }
+        if let providerMenu = providerMenu(input) {
+            children.append(providerMenu)
+        }
         children.append(modelMenu(input))
+        if let openCodeAgentMenu = openCodeAgentMenu(input) {
+            children.append(openCodeAgentMenu)
+        }
 
         if let intelligenceMenu = intelligenceMenu(input) {
             children.append(intelligenceMenu)
@@ -51,7 +60,86 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
         return UIMenu(title: "", options: [.displayInline], children: children)
     }
 
-    // MARK: - Model
+    // MARK: - Cursor / Provider / Model / OpenCode agent
+
+    private static func cursorModeMenu(_ input: Input) -> UIMenu? {
+        guard input.runtimeState.selectedAgentRuntimeID == "cursor" else {
+            return nil
+        }
+
+        let selectedModeID = input.runtimeState.selectedCursorModeID
+        let selectedTitle = input.runtimeState.selectedCursorModeTitle
+        let actions = CursorComposerModeOption.all.map { mode in
+            UIAction(
+                title: mode.displayName,
+                state: mode.id == selectedModeID ? .on : .off
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                input.runtimeActions.selectCursorMode(mode.id)
+            }
+        }
+
+        return UIMenu(
+            title: "Mode",
+            subtitle: selectedTitle,
+            image: RemodexIcon.menuUIImage(systemName: "slider.horizontal.3"),
+            options: [.singleSelection],
+            children: actions
+        )
+    }
+
+    private static func openCodeAgentMenu(_ input: Input) -> UIMenu? {
+        guard input.runtimeState.selectedAgentRuntimeID == "opencode",
+              input.runtimeState.openCodeAgentOptions.count > 1 else {
+            return nil
+        }
+
+        let selectedAgentID = input.runtimeState.selectedOpenCodeBuildAgentID
+        let selectedTitle = input.runtimeState.selectedOpenCodeBuildAgentTitle
+        let actions = input.runtimeState.openCodeAgentOptions.map { agent in
+            UIAction(
+                title: agent.displayName,
+                state: agent.id == selectedAgentID ? .on : .off
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                input.runtimeActions.selectOpenCodeBuildAgent(agent.id)
+            }
+        }
+
+        return UIMenu(
+            title: "Agent",
+            subtitle: selectedTitle,
+            image: RemodexIcon.menuUIImage(systemName: "person.crop.circle"),
+            options: [.singleSelection],
+            children: actions
+        )
+    }
+
+    private static func providerMenu(_ input: Input) -> UIMenu? {
+        let providers = providerOptions(input)
+        guard providers.count > 1 else { return nil }
+
+        let selectedProviderID = selectedProviderID(input)
+        let selectedProviderName = providers.first(where: { $0.id == selectedProviderID })?.displayName
+            ?? "Provider"
+        let actions: [UIMenuElement] = providers.map { provider in
+            UIAction(
+                title: provider.modelCount > 0 ? "\(provider.displayName) (\(provider.modelCount))" : provider.displayName,
+                state: provider.id == selectedProviderID ? .on : .off
+            ) { _ in
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                input.runtimeActions.selectProvider(provider.id)
+            }
+        }
+
+        return UIMenu(
+            title: "Provider",
+            subtitle: selectedProviderName,
+            image: RemodexIcon.menuUIImage(systemName: "server.rack"),
+            options: [.singleSelection],
+            children: actions
+        )
+    }
 
     private static func modelMenu(_ input: Input) -> UIMenu {
         let subtitle: String
@@ -73,12 +161,13 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
                 ]
             }
 
-            let featured = featuredOrderedModels(input)
+            let visibleModels = modelsForSelectedProvider(input)
+            let featured = featuredOrderedModels(input, models: visibleModels)
             var items: [UIMenuElement] = featured.map { model in
                 modelAction(model: model, input: input)
             }
 
-            let hasOthers = input.orderedModelOptions.contains { model in
+            let hasOthers = visibleModels.contains { model in
                 !featured.contains(where: { $0.id == model.id })
             }
             if hasOthers {
@@ -121,25 +210,76 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
         }
     }
 
-    private static func featuredOrderedModels(_ input: Input) -> [CodexModelOption] {
+    private static func featuredOrderedModels(_ input: Input, models: [CodexModelOption]) -> [CodexModelOption] {
         var seen = Set<String>()
         var result: [CodexModelOption] = []
 
-        for model in input.orderedModelOptions {
+        for model in models {
             let normalizedID = model.id.lowercased()
             let normalizedModel = model.model.lowercased()
             let isFeatured = input.featuredModelIdentifiers.contains(normalizedID)
                 || input.featuredModelIdentifiers.contains(normalizedModel)
+                || providerOptions(input).count > 1
             guard isFeatured, seen.insert(model.id).inserted else { continue }
             result.append(model)
+            if result.count >= 8 {
+                break
+            }
         }
 
         if let selectedID = input.selectedModelID,
            seen.insert(selectedID).inserted,
-           let selected = input.orderedModelOptions.first(where: { $0.id == selectedID }) {
+           let selected = models.first(where: { $0.id == selectedID }) {
             result.append(selected)
         }
         return result
+    }
+
+    private static func modelsForSelectedProvider(_ input: Input) -> [CodexModelOption] {
+        let providers = providerOptions(input)
+        guard providers.count > 1, let providerID = selectedProviderID(input) else {
+            return input.orderedModelOptions
+        }
+        let filtered = input.orderedModelOptions.filter { $0.providerID == providerID }
+        return filtered.isEmpty ? input.orderedModelOptions : filtered
+    }
+
+    private static func selectedProviderID(_ input: Input) -> String? {
+        if let selectedID = input.selectedModelID,
+           let selectedModel = input.orderedModelOptions.first(where: { $0.id == selectedID || $0.model == selectedID }),
+           let providerID = selectedModel.providerID,
+           !providerID.isEmpty {
+            return providerID
+        }
+        return providerOptions(input).first(where: { $0.isDefault })?.id
+            ?? providerOptions(input).first?.id
+    }
+
+    private static func providerOptions(_ input: Input) -> [RuntimeMenuProviderOption] {
+        var providersByID: [String: RuntimeMenuProviderOption] = [:]
+        var orderedProviderIDs: [String] = []
+        for model in input.orderedModelOptions {
+            guard let providerID = model.providerID, !providerID.isEmpty else {
+                continue
+            }
+            if providersByID[providerID] == nil {
+                providersByID[providerID] = RuntimeMenuProviderOption(
+                    id: providerID,
+                    displayName: model.providerDisplayName?.isEmpty == false ? model.providerDisplayName! : providerID,
+                    modelCount: 0,
+                    isDefault: model.isDefault
+                )
+                orderedProviderIDs.append(providerID)
+            }
+            if var provider = providersByID[providerID] {
+                provider.modelCount += 1
+                if model.isDefault {
+                    provider.isDefault = true
+                }
+                providersByID[providerID] = provider
+            }
+        }
+        return orderedProviderIDs.compactMap { providersByID[$0] }
     }
 
     // MARK: - Intelligence (reasoning effort)
@@ -222,4 +362,11 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
         action.attributes.insert(.disabled)
         return action
     }
+}
+
+private struct RuntimeMenuProviderOption {
+    let id: String
+    var displayName: String
+    var modelCount: Int
+    var isDefault: Bool
 }

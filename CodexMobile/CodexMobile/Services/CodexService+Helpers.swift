@@ -116,6 +116,14 @@ extension CodexService {
         if merged.agentId == nil { merged.agentId = existing.agentId }
         if merged.agentNickname == nil { merged.agentNickname = existing.agentNickname }
         if merged.agentRole == nil { merged.agentRole = existing.agentRole }
+        if merged.agentSessionId == nil { merged.agentSessionId = existing.agentSessionId }
+        if merged.opencodeBuildAgentName == nil { merged.opencodeBuildAgentName = existing.opencodeBuildAgentName }
+        if merged.opencodePlanAgentName == nil { merged.opencodePlanAgentName = existing.opencodePlanAgentName }
+        if merged.agentRuntime == "codex" {
+            if existing.agentRuntime != "codex" {
+                merged.agentRuntime = existing.agentRuntime
+            }
+        }
         if merged.model == nil { merged.model = existing.model }
         if merged.modelProvider == nil { merged.modelProvider = existing.modelProvider }
         return applyingAuthoritativeProjectPath(

@@ -9,11 +9,20 @@ const os = require("os");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const STATE_DIR = path.join(os.homedir(), ".remodex");
-const STATE_FILE = path.join(STATE_DIR, "last-thread.json");
+const DEFAULT_STATE_DIR_NAME = ".remodex";
+const LAST_THREAD_FILE = "last-thread.json";
 const DEFAULT_BUNDLE_ID = "com.openai.codex";
 
-function rememberActiveThread(threadId, source) {
+function resolveRemodexStateDir({ env = process.env, osImpl = os } = {}) {
+  const override = typeof env.REMODEX_DEVICE_STATE_DIR === "string" && env.REMODEX_DEVICE_STATE_DIR.trim();
+  return override || path.join(osImpl.homedir(), DEFAULT_STATE_DIR_NAME);
+}
+
+function resolveLastThreadPath(options = {}) {
+  return path.join(resolveRemodexStateDir(options), LAST_THREAD_FILE);
+}
+
+function rememberActiveThread(threadId, source, options = {}) {
   if (!threadId || typeof threadId !== "string") {
     return false;
   }
@@ -24,8 +33,9 @@ function rememberActiveThread(threadId, source) {
     updatedAt: new Date().toISOString(),
   };
 
-  fs.mkdirSync(STATE_DIR, { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(payload, null, 2));
+  const stateFile = resolveLastThreadPath(options);
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  fs.writeFileSync(stateFile, JSON.stringify(payload, null, 2));
   return true;
 }
 
@@ -41,17 +51,24 @@ function openLastActiveThread({ bundleId = DEFAULT_BUNDLE_ID } = {}) {
   return state;
 }
 
-function readState() {
-  if (!fs.existsSync(STATE_FILE)) {
+function readState(options = {}) {
+  const stateFile = resolveLastThreadPath(options);
+  if (!fs.existsSync(stateFile)) {
     return null;
   }
 
-  const raw = fs.readFileSync(STATE_FILE, "utf8");
-  return JSON.parse(raw);
+  try {
+    const raw = fs.readFileSync(stateFile, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 module.exports = {
   rememberActiveThread,
   openLastActiveThread,
   readLastActiveThread: readState,
+  resolveLastThreadPath,
+  resolveRemodexStateDir,
 };

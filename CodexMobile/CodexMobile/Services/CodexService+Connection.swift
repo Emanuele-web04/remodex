@@ -351,6 +351,7 @@ extension CodexService {
                 timeoutMessage: "Connection timed out while reconnecting. Try again."
             )
             learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
+            learnAgentRuntimesFromInitializeResponse(initializeResponse)
             // A successful modern initialize means the runtime accepted the experimental
             // capability negotiation. Keep plan-mode sends enabled unless the runtime
             // explicitly rejects `collaborationMode` on a turn request later.
@@ -377,6 +378,7 @@ extension CodexService {
                     timeoutMessage: "Connection timed out while reconnecting. Try again."
                 )
                 learnTurnPaginationSupportFromInitializeResponse(initializeResponse)
+                learnAgentRuntimesFromInitializeResponse(initializeResponse)
             } catch {
                 if let incompatibleAppVersionError = incompatibleBridgeAppVersionError(from: error) {
                     throw incompatibleAppVersionError

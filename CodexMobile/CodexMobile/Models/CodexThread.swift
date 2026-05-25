@@ -81,6 +81,10 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     var agentId: String?
     var agentNickname: String?
     var agentRole: String?
+    var agentRuntime: String
+    var agentSessionId: String?
+    var opencodeBuildAgentName: String?
+    var opencodePlanAgentName: String?
     var model: String?
     var modelProvider: String?
     var syncState: CodexThreadSyncState
@@ -101,6 +105,10 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         agentId: String? = nil,
         agentNickname: String? = nil,
         agentRole: String? = nil,
+        agentRuntime: String = "codex",
+        agentSessionId: String? = nil,
+        opencodeBuildAgentName: String? = nil,
+        opencodePlanAgentName: String? = nil,
         model: String? = nil,
         modelProvider: String? = nil,
         syncState: CodexThreadSyncState = .live
@@ -118,6 +126,10 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         self.agentId = Self.normalizeIdentifier(agentId)
         self.agentNickname = Self.normalizeIdentifier(agentNickname)
         self.agentRole = Self.normalizeIdentifier(agentRole)
+        self.agentRuntime = Self.normalizeAgentRuntime(agentRuntime)
+        self.agentSessionId = Self.normalizeIdentifier(agentSessionId) ?? id
+        self.opencodeBuildAgentName = Self.normalizeIdentifier(opencodeBuildAgentName)
+        self.opencodePlanAgentName = Self.normalizeIdentifier(opencodePlanAgentName)
         self.model = Self.normalizeIdentifier(model)
         self.modelProvider = Self.normalizeIdentifier(modelProvider)
         self.syncState = syncState
@@ -150,6 +162,14 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         case agentNicknameSnake = "agent_nickname"
         case agentRole
         case agentRoleSnake = "agent_role"
+        case agentRuntime
+        case agentRuntimeSnake = "agent_runtime"
+        case agentSessionId
+        case agentSessionIdSnake = "agent_session_id"
+        case opencodeBuildAgentName
+        case opencodeBuildAgentNameSnake = "opencode_build_agent_name"
+        case opencodePlanAgentName
+        case opencodePlanAgentNameSnake = "opencode_plan_agent_name"
         case model
         case modelProvider
         case modelProviderSnake = "model_provider"
@@ -200,6 +220,30 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
             keys: [.agentRole, .agentRoleSnake],
             metadataKeys: ["agentRole", "agent_role", "agentType", "agent_type"]
         )
+        agentRuntime = Self.normalizeAgentRuntime(Self.decodeThreadIdentity(
+            from: container,
+            metadata: metadata,
+            keys: [.agentRuntime, .agentRuntimeSnake],
+            metadataKeys: ["agentRuntime", "agent_runtime"]
+        ))
+        agentSessionId = Self.decodeThreadIdentity(
+            from: container,
+            metadata: metadata,
+            keys: [.agentSessionId, .agentSessionIdSnake],
+            metadataKeys: ["agentSessionId", "agent_session_id"]
+        ) ?? id
+        opencodeBuildAgentName = Self.decodeThreadIdentity(
+            from: container,
+            metadata: metadata,
+            keys: [.opencodeBuildAgentName, .opencodeBuildAgentNameSnake],
+            metadataKeys: ["opencodeBuildAgentName", "opencode_build_agent_name"]
+        )
+        opencodePlanAgentName = Self.decodeThreadIdentity(
+            from: container,
+            metadata: metadata,
+            keys: [.opencodePlanAgentName, .opencodePlanAgentNameSnake],
+            metadataKeys: ["opencodePlanAgentName", "opencode_plan_agent_name"]
+        )
         model = Self.decodeThreadIdentity(
             from: container,
             metadata: metadata,
@@ -233,6 +277,10 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(Self.normalizeIdentifier(agentId), forKey: .agentId)
         try container.encodeIfPresent(Self.normalizeIdentifier(agentNickname), forKey: .agentNickname)
         try container.encodeIfPresent(Self.normalizeIdentifier(agentRole), forKey: .agentRole)
+        try container.encode(Self.normalizeAgentRuntime(agentRuntime), forKey: .agentRuntime)
+        try container.encodeIfPresent(Self.normalizeIdentifier(agentSessionId), forKey: .agentSessionId)
+        try container.encodeIfPresent(Self.normalizeIdentifier(opencodeBuildAgentName), forKey: .opencodeBuildAgentName)
+        try container.encodeIfPresent(Self.normalizeIdentifier(opencodePlanAgentName), forKey: .opencodePlanAgentName)
         try container.encodeIfPresent(Self.normalizeIdentifier(model), forKey: .model)
         try container.encodeIfPresent(Self.normalizeIdentifier(modelProvider), forKey: .modelProvider)
         try container.encode(syncState, forKey: .syncState)
@@ -292,7 +340,8 @@ extension CodexThread {
         parentThreadId != nil
     }
 
-    // App-server exposes the rollout session identifier as Thread.id.
+    // Codex app-server exposes the rollout session identifier as Thread.id.
+    // Multi-runtime routing must use agentSessionId instead.
     var sessionId: String {
         id
     }
@@ -528,6 +577,16 @@ extension CodexThread {
 
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func normalizeAgentRuntime(_ value: String?) -> String {
+        let normalized = normalizeIdentifier(value)?.lowercased()
+        switch normalized {
+        case "opencode", "cursor":
+            return normalized ?? "codex"
+        default:
+            return "codex"
+        }
     }
 
     private static func normalizeProjectPath(_ value: String?) -> String? {

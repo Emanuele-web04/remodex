@@ -2,6 +2,10 @@
 
 Keep this file and `CLAUDE.md` aligned.
 
+## Agent bootstrap
+
+Before picking work, read [Docs/agents/README.md](Docs/agents/README.md). Issue queue: [Docs/agents/issue-tracker.md](Docs/agents/issue-tracker.md). Domain: [Docs/agents/domain.md](Docs/agents/domain.md).
+
 This repo is local-first now. Do not reintroduce hosted-service assumptions, remote deployment runbooks, or hardcoded production domains.
 
 ## Core guardrails
@@ -40,13 +44,32 @@ This repo is local-first now. Do not reintroduce hosted-service assumptions, rem
 
 ## Build guardrails
 
-- Do not run Xcode tests unless the user explicitly asks. Do not decide to run them on your own.
+- After Swift/iOS changes, run **`xcodebuild` compile** for the affected scheme (`CodexMobile`, `RemodexPad` when present) unless the task is docs-only.
+- Do not run full XCTest/UI suites or simulator pairing E2E unless the task explicitly requires it.
 - Markdown files inside Xcode-synced groups can still produce harmless warnings.
-- For small iOS/mobile fixes, prefer inspection and targeted edits over simulator runs by default.
+
+## Multi-agent runtime program
+
+When working on OpenCode, Cursor, canonical events, or `agentRuntime`, read **[Docs/plans/multi-agent-runtime.md](Docs/plans/multi-agent-runtime.md)** after [Docs/agents/README.md](Docs/agents/README.md). Work tickets live as GitHub issues on **kartikkabadi/remodex** — see [Docs/agents/issue-tracker.md](Docs/agents/issue-tracker.md). Do not merge upstream `modelProvider` router branches wholesale.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues on fork **kartikkabadi/remodex** (always `--repo kartikkabadi/remodex`). See [Docs/agents/issue-tracker.md](Docs/agents/issue-tracker.md).
+
+### Triage labels
+
+Canonical roles mapped in [Docs/agents/triage-labels.md](Docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context: [CONTEXT.md](CONTEXT.md) + [Docs/adr/](Docs/adr/). See [Docs/agents/domain.md](Docs/agents/domain.md).
 
 ## Local quick runbook
 
 ```bash
-cd phodex-bridge
-npm start
+./run-local-remodex.sh
 ```
+
+For bridge-only dev without the launcher script: `cd phodex-bridge && npm start` (does not start local relay for device pairing).

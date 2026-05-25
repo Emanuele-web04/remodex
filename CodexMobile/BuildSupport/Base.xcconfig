@@ -1,10 +1,13 @@
 // Shared public defaults for open-source builds.
 // Real private endpoints belong in the ignored PrivateOverrides.xcconfig file.
 
+APP_DISPLAY_NAME = Remodex
+PHODEX_CALLBACK_URL_NAME = com.emanueledipietro.CodexMobile.auth
 PHODEX_CHATGPT_CALLBACK_SCHEME = phodex
 PHODEX_DEFAULT_RELAY_URL =
 REVENUECAT_PUBLIC_API_KEY = appl_CgHnEgWVRFbTKruYphXzpXeGwIb
 REVENUECAT_ENTITLEMENT_NAME = Pro
 REVENUECAT_DEFAULT_OFFERING_ID = default
+REMODEX_LOCAL_DEV_SUBSCRIPTION_BYPASS = NO
 
 #include? "PrivateOverrides.xcconfig"

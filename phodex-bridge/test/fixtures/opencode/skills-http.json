@@ -1,0 +1,10 @@
+[
+  {
+    "name": "diagnose",
+    "description": "Disciplined diagnosis loop"
+  },
+  {
+    "name": "tdd",
+    "description": "Test-driven development"
+  }
+]

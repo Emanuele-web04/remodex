@@ -153,6 +153,7 @@ struct CodexBridgeUpdatePrompt: Identifiable, Equatable, Sendable {
 struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
     var reasoningEffort: String?
     var serviceTierRawValue: String?
+    var cursorMode: String?
     var overridesReasoning: Bool
     var overridesServiceTier: Bool
 
@@ -164,8 +165,122 @@ struct CodexThreadRuntimeOverride: Codable, Equatable, Sendable {
     }
 
     var isEmpty: Bool {
-        !overridesReasoning && !overridesServiceTier
+        !overridesReasoning && !overridesServiceTier && (cursorMode?.isEmpty ?? true)
     }
+}
+
+struct AgentRuntimeCapabilities: Codable, Equatable, Sendable {
+    var queue: Bool
+    var steer: Bool
+    var photos: Bool
+    var planMode: Bool
+    var permissions: Bool
+    var desktopHandoff: Bool
+    var subagents: Bool
+
+    static let codex = AgentRuntimeCapabilities(
+        queue: true,
+        steer: true,
+        photos: true,
+        planMode: true,
+        permissions: true,
+        desktopHandoff: true,
+        subagents: true
+    )
+
+    static let coreOnly = AgentRuntimeCapabilities(
+        queue: false,
+        steer: false,
+        photos: false,
+        planMode: true,
+        permissions: true,
+        desktopHandoff: false,
+        subagents: false
+    )
+}
+
+struct AgentRuntimeModelProvider: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var displayName: String
+    var modelIds: [String]
+    var isDefault: Bool
+}
+
+struct AgentRuntimeModelCatalog: Codable, Equatable, Sendable {
+    var defaultModelId: String?
+    var defaultProviderId: String?
+    var status: String?
+    var statusMessage: String?
+    var providers: [AgentRuntimeModelProvider]
+    var models: [CodexModelOption]
+
+    var isUnavailable: Bool {
+        status == "unavailable"
+    }
+
+    static let empty = AgentRuntimeModelCatalog(
+        defaultModelId: nil,
+        defaultProviderId: nil,
+        status: nil,
+        statusMessage: nil,
+        providers: [],
+        models: []
+    )
+}
+
+struct OpenCodeAgentOption: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var displayName: String
+    var isDefaultBuild: Bool = false
+    var isDefaultPlan: Bool = false
+}
+
+struct OpenCodeSkillOption: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var name: String
+    var displayName: String
+    var description: String? = nil
+}
+
+struct CursorComposerModeOption: Equatable, Identifiable, Sendable {
+    let id: String
+    let displayName: String
+
+    static let all: [CursorComposerModeOption] = [
+        CursorComposerModeOption(id: "agent", displayName: "None"),
+        CursorComposerModeOption(id: "plan", displayName: "Plan"),
+        CursorComposerModeOption(id: "debug", displayName: "Debug"),
+        CursorComposerModeOption(id: "multitask", displayName: "Multitask"),
+        CursorComposerModeOption(id: "ask", displayName: "Ask"),
+    ]
+}
+
+struct AgentRuntimeDescriptor: Codable, Equatable, Identifiable, Sendable {
+    var id: String
+    var displayName: String
+    var status: String
+    var statusMessage: String? = nil
+    var capabilities: AgentRuntimeCapabilities
+    var defaultBuildAgentName: String? = nil
+    var defaultPlanAgentName: String? = nil
+    var openCodeAgents: [OpenCodeAgentOption]? = nil
+    var openCodeSkills: [OpenCodeSkillOption]? = nil
+    var modelCatalog: AgentRuntimeModelCatalog? = nil
+
+    var isReady: Bool {
+        status == "ready"
+    }
+
+    var showsRuntimeStatusWarning: Bool {
+        status == "needs_auth" || status == "degraded" || status == "error"
+    }
+
+    static let codex = AgentRuntimeDescriptor(
+        id: "codex",
+        displayName: "Codex",
+        status: "ready",
+        capabilities: .codex
+    )
 }
 
 struct CodexThreadCompletionBanner: Identifiable, Equatable, Sendable {
@@ -391,11 +506,18 @@ final class CodexService {
     var availableModels: [CodexModelOption] = []
     var selectedModelId: String?
     var hasPersistedSelectedModelId = false
+    var selectedModelIdByAgentRuntime: [String: String] = [:]
     var selectedGitWriterModelId: String?
     var selectedReasoningEffort: String?
     var selectedServiceTier: CodexServiceTier?
     // Per-chat runtime overrides let the composer diverge from app-wide defaults.
     var threadRuntimeOverridesByThreadID: [String: CodexThreadRuntimeOverride] = [:]
+    var defaultAgentRuntime: String = "codex"
+    var selectedAgentRuntimeForNewThreads: String = "codex"
+    var selectedOpenCodeBuildAgentForNewThreads: String = "build"
+    var selectedOpenCodePlanAgentForNewThreads: String = "plan"
+    var selectedCursorModeForNewThreads: String = "agent"
+    var agentRuntimeDescriptors: [AgentRuntimeDescriptor] = [.codex]
     var selectedAccessMode: CodexAccessMode = .onRequest
     // Bridge-owned ChatGPT auth snapshot used by Settings and voice gating.
     var gptAccountSnapshot: CodexGPTAccountSnapshot = codexGPTAccountInitialSnapshot() {
@@ -691,6 +813,7 @@ final class CodexService {
     var remoteNotificationRegistrar: CodexRemoteNotificationRegistering?
 
     static let selectedModelIdDefaultsKey = "codex.selectedModelId"
+    static let selectedModelIdByAgentRuntimeDefaultsKey = "codex.selectedModelIdByAgentRuntime"
     static let selectedGitWriterModelIdDefaultsKey = "codex.selectedGitWriterModelId"
     static let selectedReasoningEffortDefaultsKey = "codex.selectedReasoningEffort"
     static let selectedServiceTierDefaultsKey = "codex.selectedServiceTier"
@@ -737,6 +860,10 @@ final class CodexService {
         let hasSavedModelId = savedModelId?.isEmpty == false
         self.hasPersistedSelectedModelId = hasSavedModelId
         self.selectedModelId = hasSavedModelId ? savedModelId : nil
+        if let data = defaults.data(forKey: Self.selectedModelIdByAgentRuntimeDefaultsKey),
+           let decoded = try? decoder.decode([String: String].self, from: data) {
+            self.selectedModelIdByAgentRuntime = decoded
+        }
 
         let savedGitWriterModelId = defaults.string(forKey: Self.selectedGitWriterModelIdDefaultsKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)

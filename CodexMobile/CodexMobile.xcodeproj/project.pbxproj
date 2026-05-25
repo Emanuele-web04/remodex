@@ -88,6 +88,42 @@
 		D27B9CA5F0B60ECA8AF38016 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */; };
 		DAAD0C0C717F9415C3E9D21A /* RemodexMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0B9CCCCC45E47616AB452FA /* RemodexMenuBarApp.swift */; };
+		DAD000000000000000000101 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A01 /* GhosttyKit.xcframework */; };
+		DAD000000000000000000102 /* IOSurface.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A03 /* IOSurface.framework */; };
+		DAD000000000000000000103 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A05 /* Metal.framework */; };
+		DAD000000000000000000104 /* MetalKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A07 /* MetalKit.framework */; };
+		DAD000000000000000000105 /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A09 /* QuartzCore.framework */; };
+		DAD000000000000000000106 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0F /* UIKit.framework */; };
+		DAD000000000000000000107 /* libc++.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0B /* libc++.tbd */; };
+		DAD000000000000000000108 /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0D /* libz.tbd */; };
+		DAD00000000000000000010A /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = C078C1A12F79000100BEEF01 /* Citadel */; };
+		DAD00000000000000000010B /* RevenueCat in Frameworks */ = {isa = PBXBuildFile; productRef = C04E214A2F71D34100AA3193 /* RevenueCat */; };
+		DAD00000000000000000010C /* Runestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000100 /* Runestone */; };
+		DAD00000000000000000010D /* TreeSitterBashRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000101 /* TreeSitterBashRunestone */; };
+		DAD00000000000000000010E /* TreeSitterCRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000102 /* TreeSitterCRunestone */; };
+		DAD00000000000000000010F /* TreeSitterCPPRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000103 /* TreeSitterCPPRunestone */; };
+		DAD000000000000000000110 /* TreeSitterCSSRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000104 /* TreeSitterCSSRunestone */; };
+		DAD000000000000000000111 /* TreeSitterCSharpRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000105 /* TreeSitterCSharpRunestone */; };
+		DAD000000000000000000112 /* TreeSitterGoRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000106 /* TreeSitterGoRunestone */; };
+		DAD000000000000000000113 /* TreeSitterHTMLRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000107 /* TreeSitterHTMLRunestone */; };
+		DAD000000000000000000114 /* TreeSitterJavaRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000108 /* TreeSitterJavaRunestone */; };
+		DAD000000000000000000115 /* TreeSitterJavaScriptRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000109 /* TreeSitterJavaScriptRunestone */; };
+		DAD000000000000000000116 /* TreeSitterJSONRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A00000000000000000010A /* TreeSitterJSONRunestone */; };
+		DAD000000000000000000117 /* TreeSitterMarkdownRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A00000000000000000010B /* TreeSitterMarkdownRunestone */; };
+		DAD000000000000000000118 /* TreeSitterPythonRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A00000000000000000010C /* TreeSitterPythonRunestone */; };
+		DAD000000000000000000119 /* TreeSitterRubyRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A00000000000000000010D /* TreeSitterRubyRunestone */; };
+		DAD00000000000000000011A /* TreeSitterRustRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A00000000000000000010E /* TreeSitterRustRunestone */; };
+		DAD00000000000000000011B /* TreeSitterSQLRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A00000000000000000010F /* TreeSitterSQLRunestone */; };
+		DAD00000000000000000011C /* TreeSitterSwiftRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000110 /* TreeSitterSwiftRunestone */; };
+		DAD00000000000000000011D /* TreeSitterTOMLRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000111 /* TreeSitterTOMLRunestone */; };
+		DAD00000000000000000011E /* TreeSitterTSXRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000112 /* TreeSitterTSXRunestone */; };
+		DAD00000000000000000011F /* TreeSitterTypeScriptRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000113 /* TreeSitterTypeScriptRunestone */; };
+		DAD000000000000000000120 /* TreeSitterYAMLRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000114 /* TreeSitterYAMLRunestone */; };
+		DAD000000000000000000121 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 96AB07DF1EAF634D1B823574 /* AppIntents.framework */; };
+		DAD000000000000000000122 /* RemodexTextKit in Frameworks */ = {isa = PBXBuildFile; productRef = C0A34C392FBA9D04007294E3 /* RemodexTextKit */; };
+		DAD000000000000000000123 /* RemodexLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA83C07BD6661A63FFD1400F /* RemodexLaunchIntent.swift */; };
+		DAD000000000000000000125 /* CodexServiceRemodexEventAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAD000000000000000000124 /* CodexServiceRemodexEventAdapterTests.swift */; };
+		DAD000000000000000000126 /* SubscriptionServiceAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAD000000000000000000127 /* SubscriptionServiceAccessTests.swift */; };
 		DC6E023DD6E4FA68DF3D7FDE /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E5E1FA12CF5120C8C8A64111 /* Cocoa.framework */; };
 		DC74E420421DFA86D90D14BF /* RemodexWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 821C46F274E62AA48DE694F4 /* RemodexWidgetBundle.swift */; };
 		E1A2B3C4D5E6F708192A3B4C /* QRScannerPairingValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */; };
@@ -192,6 +228,9 @@
 		D0C0FFEE0000000000000002 /* RemodexTextKitMarkdownRenderingRegressionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexTextKitMarkdownRenderingRegressionTests.swift; sourceTree = "<group>"; };
 		D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingRunIndicatorTests.swift; sourceTree = "<group>"; };
 		D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileUITests.swift; sourceTree = "<group>"; };
+		DAD000000000000000000001 /* RemodexPad.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemodexPad.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DAD000000000000000000124 /* CodexServiceRemodexEventAdapterTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceRemodexEventAdapterTests.swift; sourceTree = "<group>"; };
+		DAD000000000000000000127 /* SubscriptionServiceAccessTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SubscriptionServiceAccessTests.swift; sourceTree = "<group>"; };
 		E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QRScannerPairingValidatorTests.swift; sourceTree = "<group>"; };
 		E5E1FA12CF5120C8C8A64111 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		E6F1A2B3C4D5E6F708192A50 /* UserBubbleInlineMarkdownRendererTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UserBubbleInlineMarkdownRendererTests.swift; sourceTree = "<group>"; };
@@ -271,6 +310,46 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DAD000000000000000000007 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DAD000000000000000000101 /* GhosttyKit.xcframework in Frameworks */,
+				DAD000000000000000000102 /* IOSurface.framework in Frameworks */,
+				DAD000000000000000000103 /* Metal.framework in Frameworks */,
+				DAD000000000000000000104 /* MetalKit.framework in Frameworks */,
+				DAD000000000000000000105 /* QuartzCore.framework in Frameworks */,
+				DAD000000000000000000106 /* UIKit.framework in Frameworks */,
+				DAD000000000000000000107 /* libc++.tbd in Frameworks */,
+				DAD000000000000000000108 /* libz.tbd in Frameworks */,
+				DAD00000000000000000010A /* Citadel in Frameworks */,
+				DAD00000000000000000010B /* RevenueCat in Frameworks */,
+				DAD00000000000000000010C /* Runestone in Frameworks */,
+				DAD00000000000000000010D /* TreeSitterBashRunestone in Frameworks */,
+				DAD00000000000000000010E /* TreeSitterCRunestone in Frameworks */,
+				DAD00000000000000000010F /* TreeSitterCPPRunestone in Frameworks */,
+				DAD000000000000000000110 /* TreeSitterCSSRunestone in Frameworks */,
+				DAD000000000000000000111 /* TreeSitterCSharpRunestone in Frameworks */,
+				DAD000000000000000000112 /* TreeSitterGoRunestone in Frameworks */,
+				DAD000000000000000000113 /* TreeSitterHTMLRunestone in Frameworks */,
+				DAD000000000000000000114 /* TreeSitterJavaRunestone in Frameworks */,
+				DAD000000000000000000115 /* TreeSitterJavaScriptRunestone in Frameworks */,
+				DAD000000000000000000116 /* TreeSitterJSONRunestone in Frameworks */,
+				DAD000000000000000000117 /* TreeSitterMarkdownRunestone in Frameworks */,
+				DAD000000000000000000118 /* TreeSitterPythonRunestone in Frameworks */,
+				DAD000000000000000000119 /* TreeSitterRubyRunestone in Frameworks */,
+				DAD00000000000000000011A /* TreeSitterRustRunestone in Frameworks */,
+				DAD00000000000000000011B /* TreeSitterSQLRunestone in Frameworks */,
+				DAD00000000000000000011C /* TreeSitterSwiftRunestone in Frameworks */,
+				DAD00000000000000000011D /* TreeSitterTOMLRunestone in Frameworks */,
+				DAD00000000000000000011E /* TreeSitterTSXRunestone in Frameworks */,
+				DAD00000000000000000011F /* TreeSitterTypeScriptRunestone in Frameworks */,
+				DAD000000000000000000120 /* TreeSitterYAMLRunestone in Frameworks */,
+				DAD000000000000000000121 /* AppIntents.framework in Frameworks */,
+				DAD000000000000000000122 /* RemodexTextKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		EF30E93BAEC4406148BDFC5B /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -298,6 +377,7 @@
 				C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */,
 				8D1F2A3B4C5D6E7F8091A2B4 /* CodexServiceConnectionErrorTests.swift */,
 				8F1A2B3C4D5E6F708192A3B5 /* CodexPushNotificationRegistrationTests.swift */,
+				DAD000000000000000000124 /* CodexServiceRemodexEventAdapterTests.swift */,
 				8FA12BC34DE56F708192A3B7 /* ContentViewModelReconnectTests.swift */,
 				8FA12BC34DE56F708192A3B9 /* CodexSecurePairingStateTests.swift */,
 				8FA12BC34DE56F708192A3B5 /* CodexTrustedMacSelectionTests.swift */,
@@ -310,6 +390,7 @@
 				7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */,
 				B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */,
 				8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */,
+				DAD000000000000000000127 /* SubscriptionServiceAccessTests.swift */,
 				8B4A2F5E7D1C4B9AA1234568 /* TurnComposerAttachmentIntakePlanTests.swift */,
 				74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */,
 				AB1C2D3E4F5061728394A5B6 /* TurnComposerReviewModeTests.swift */,
@@ -392,6 +473,7 @@
 				F0EE6A924EE6B288E7D0DFE1 /* CodexMobileUITests.xctest */,
 				92DE4487B55C077AF7694484 /* RemodexMenuBar.app */,
 				C31FD4BBF43CBB431839BBF8 /* RemodexWidget.appex */,
+				DAD000000000000000000001 /* RemodexPad.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -572,6 +654,52 @@
 			productReference = C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */;
 			productType = "com.apple.product-type.application";
 		};
+		DAD000000000000000000009 /* RemodexPad */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DAD00000000000000000000C /* Build configuration list for PBXNativeTarget "RemodexPad" */;
+			buildPhases = (
+				DAD000000000000000000006 /* Sources */,
+				DAD000000000000000000007 /* Frameworks */,
+				DAD000000000000000000008 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C09A76B02F4B8D7B003B3F3A /* CodexMobile */,
+			);
+			name = RemodexPad;
+			packageProductDependencies = (
+				C04E214A2F71D34100AA3193 /* RevenueCat */,
+				C078C1A12F79000100BEEF01 /* Citadel */,
+				C0A34C392FBA9D04007294E3 /* RemodexTextKit */,
+				D1A000000000000000000100 /* Runestone */,
+				D1A000000000000000000101 /* TreeSitterBashRunestone */,
+				D1A000000000000000000102 /* TreeSitterCRunestone */,
+				D1A000000000000000000103 /* TreeSitterCPPRunestone */,
+				D1A000000000000000000104 /* TreeSitterCSSRunestone */,
+				D1A000000000000000000105 /* TreeSitterCSharpRunestone */,
+				D1A000000000000000000106 /* TreeSitterGoRunestone */,
+				D1A000000000000000000107 /* TreeSitterHTMLRunestone */,
+				D1A000000000000000000108 /* TreeSitterJavaRunestone */,
+				D1A000000000000000000109 /* TreeSitterJavaScriptRunestone */,
+				D1A00000000000000000010A /* TreeSitterJSONRunestone */,
+				D1A00000000000000000010B /* TreeSitterMarkdownRunestone */,
+				D1A00000000000000000010C /* TreeSitterPythonRunestone */,
+				D1A00000000000000000010D /* TreeSitterRubyRunestone */,
+				D1A00000000000000000010E /* TreeSitterRustRunestone */,
+				D1A00000000000000000010F /* TreeSitterSQLRunestone */,
+				D1A000000000000000000110 /* TreeSitterSwiftRunestone */,
+				D1A000000000000000000111 /* TreeSitterTOMLRunestone */,
+				D1A000000000000000000112 /* TreeSitterTSXRunestone */,
+				D1A000000000000000000113 /* TreeSitterTypeScriptRunestone */,
+				D1A000000000000000000114 /* TreeSitterYAMLRunestone */,
+			);
+			productName = RemodexPad;
+			productReference = DAD000000000000000000001 /* RemodexPad.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -586,6 +714,9 @@
 						CreatedOnToolsVersion = 26.2;
 					};
 					C09A76AD2F4B8D7B003B3F3A = {
+						CreatedOnToolsVersion = 26.2;
+					};
+					DAD000000000000000000009 = {
 						CreatedOnToolsVersion = 26.2;
 					};
 				};
@@ -612,6 +743,7 @@
 			projectRoot = "";
 			targets = (
 				C09A76AD2F4B8D7B003B3F3A /* CodexMobile */,
+				DAD000000000000000000009 /* RemodexPad */,
 				75087BFA4D34C41906650C95 /* CodexMobileTests */,
 				4DA12F4370C3EC1B9280A66F /* CodexMobileUITests */,
 				4FFD549D910217B7A40E28FF /* RemodexMenuBar */,
@@ -658,6 +790,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		DAD000000000000000000008 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -696,7 +835,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				9B4A1F81BFE9FA5190652A22 /* RemodexLaunchIntent.swift in Sources */,
+				DAD000000000000000000123 /* RemodexLaunchIntent.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -709,6 +848,7 @@
 				B1C2D3E4F5061728394A5B6C /* CodexServiceIncomingCommandExecutionTests.swift in Sources */,
 				8D1F2A3B4C5D6E7F8091A2B3 /* CodexServiceConnectionErrorTests.swift in Sources */,
 				8F1A2B3C4D5E6F708192A3B4 /* CodexPushNotificationRegistrationTests.swift in Sources */,
+				DAD000000000000000000125 /* CodexServiceRemodexEventAdapterTests.swift in Sources */,
 				8FA12BC34DE56F708192A3B6 /* ContentViewModelReconnectTests.swift in Sources */,
 				8FA12BC34DE56F708192A3B8 /* CodexSecurePairingStateTests.swift in Sources */,
 				8FA12BC34DE56F708192A3B4 /* CodexTrustedMacSelectionTests.swift in Sources */,
@@ -721,6 +861,7 @@
 				7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */,
 				B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */,
 				8CE11223A4B5C6D7E8F90123 /* SidebarRunBadgePerformanceTests.swift in Sources */,
+				DAD000000000000000000126 /* SubscriptionServiceAccessTests.swift in Sources */,
 				8B4A2F5E7D1C4B9AA1234567 /* TurnComposerAttachmentIntakePlanTests.swift in Sources */,
 				4C0F0D55A5051D8301463C69 /* TurnComposerSendAvailabilityTests.swift in Sources */,
 				AB1C2D3E4F5061728394A5B7 /* TurnComposerReviewModeTests.swift in Sources */,
@@ -735,6 +876,14 @@
 				B3C4D5E6F708192A3B4C5D6E /* CodexPlanModeTests.swift in Sources */,
 				4CCE0926DAD312571934343A /* TurnTimelineReducerTests.swift in Sources */,
 				E6F1A2B3C4D5E6F708192A51 /* UserBubbleInlineMarkdownRendererTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		DAD000000000000000000006 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9B4A1F81BFE9FA5190652A22 /* RemodexLaunchIntent.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1036,11 +1185,55 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
-				APS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
-				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 130;
+				DEVELOPMENT_TEAM = HR24WHR326;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "BuildSupport/CodexMobile-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Remodex;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "CodexMobile needs local network access to connect to your Codex app-server running on your Mac.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "CodexMobile needs photo library access to let you attach images to your messages.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.6;
+				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				REMODEX_LOCAL_DEV_SUBSCRIPTION_BYPASS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		C09A76BB2F4B8D7C003B3F3A /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 130;
@@ -1077,28 +1270,27 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
-			name = Debug;
+			name = Release;
 		};
-		C09A76BB2F4B8D7C003B3F3A /* Release */ = {
+		DAD00000000000000000000A /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
-				APS_ENVIRONMENT = production;
+				APP_DISPLAY_NAME = "Remodex Pad";
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
-				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 130;
-				DEVELOPMENT_TEAM = HR24WHR326;
+				DEVELOPMENT_TEAM = DZD9GGN897;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "BuildSupport/CodexMobile-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = Remodex;
+				INFOPLIST_KEY_CFBundleDisplayName = "Remodex Pad";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "CodexMobile needs local network access to connect to your Codex app-server running on your Mac.";
-				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "CodexMobile needs photo library access to let you attach images to your messages.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Remodex Pad needs local network access to connect to your local Remodex bridge running on your Mac.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Remodex Pad needs photo library access to let you attach images to your messages.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -1110,7 +1302,56 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex;
+				PHODEX_CALLBACK_URL_NAME = com.emanueledipietro.RemodexPad.auth;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kartikkabadi.remodexpad.dev;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				REMODEX_LOCAL_DEV_SUBSCRIPTION_BYPASS = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
+		};
+		DAD00000000000000000000B /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
+			buildSettings = {
+				APP_DISPLAY_NAME = "Remodex Pad";
+				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 130;
+				DEVELOPMENT_TEAM = DZD9GGN897;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "BuildSupport/CodexMobile-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Remodex Pad";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Remodex Pad needs local network access to connect to your local Remodex bridge running on your Mac.";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Remodex Pad needs photo library access to let you attach images to your messages.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.6;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.6;
+				PHODEX_CALLBACK_URL_NAME = com.emanueledipietro.RemodexPad.auth;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kartikkabadi.remodexpad.dev;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1122,7 +1363,8 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
+				TARGETED_DEVICE_FAMILY = 2;
+				VALIDATE_PRODUCT = YES;
 			};
 			name = Release;
 		};
@@ -1247,6 +1489,15 @@
 			buildConfigurations = (
 				F3FD411C7FC1B35EF716DE7C /* Release */,
 				FAEEA48258EA5647873C3AD6 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		DAD00000000000000000000C /* Build configuration list for PBXNativeTarget "RemodexPad" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DAD00000000000000000000A /* Debug */,
+				DAD00000000000000000000B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
