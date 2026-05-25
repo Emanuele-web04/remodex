@@ -11,6 +11,7 @@ struct TurnComposerSecondaryBar: View {
     let isEmptyThread: Bool
     let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
+    var activeFileChangeStatus: FileChangeStatusSnapshot? = nil
 
     let showsGitBranchSelector: Bool
     let isGitBranchSelectorEnabled: Bool
@@ -58,10 +59,16 @@ struct TurnComposerSecondaryBar: View {
                         onTapCreateWorktree: onTapCreateWorktree
                     )
 
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 12)
+
+                    if let activeFileChangeStatus {
+                        FileChangeStatusCapsule(snapshot: activeFileChangeStatus)
+                            .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .trailing)))
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
+                .animation(.spring(response: 0.28, dampingFraction: 0.88), value: activeFileChangeStatus)
             }
         }
     }

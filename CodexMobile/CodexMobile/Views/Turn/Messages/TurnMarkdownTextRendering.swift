@@ -211,14 +211,33 @@ struct StreamingAssistantMarkdownTextView: View {
             }
 
             if !segments.activeMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownTextView(
-                    text: segments.activeMarkdown,
-                    profile: .assistantProse,
-                    enablesSelection: enablesSelection,
-                    constrainsToAvailableWidth: constrainsToAvailableWidth,
-                    usesCaches: false
-                )
+                if StreamingMarkdownRenderPolicy.usesPlainActiveRenderer(for: segments.activeMarkdown) {
+                    streamingPlainText(segments.activeMarkdown)
+                } else {
+                    MarkdownTextView(
+                        text: segments.activeMarkdown,
+                        profile: .assistantProse,
+                        enablesSelection: enablesSelection,
+                        constrainsToAvailableWidth: constrainsToAvailableWidth,
+                        usesCaches: false
+                    )
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func streamingPlainText(_ text: String) -> some View {
+        let plainText = Text(text)
+            .font(AppFont.body())
+            .foregroundStyle(.primary)
+            .frame(maxWidth: constrainsToAvailableWidth ? .infinity : nil, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+
+        if enablesSelection {
+            plainText.textSelection(.enabled)
+        } else {
+            plainText
         }
     }
 
@@ -317,13 +336,22 @@ private enum StreamingMarkdownRevealPolicy {
     // MessageRow already coalesces assistant text, so this view only needs a light reveal.
     static let frameIntervalNanoseconds: UInt64 = 45_000_000
     private static let largeInitialRevealCharacterCount = 512
+    private static let maximumAnimatedByteCount = 8_000
+    private static let maximumAnimatedBacklogByteCount = 2_000
     private static let minimumAdvanceCharacterCount = 14
     private static let maximumAdvanceCharacterCount = 96
     private static let largeBacklogAdvanceCharacterCount = 256
     private static let hugeBacklogAdvanceCharacterCount = 512
 
     static func shouldSnap(displayedText: String, targetText: String) -> Bool {
-        !targetText.hasPrefix(displayedText)
+        if !targetText.hasPrefix(displayedText) {
+            return true
+        }
+        if targetText.utf8.count > maximumAnimatedByteCount {
+            return true
+        }
+        let backlogByteCount = max(0, targetText.utf8.count - displayedText.utf8.count)
+        return backlogByteCount > maximumAnimatedBacklogByteCount
     }
 
     static func shouldAnimateInitialReveal(_ text: String) -> Bool {
@@ -341,6 +369,14 @@ private enum StreamingMarkdownRevealPolicy {
             minimumAdvanceCharacterCount,
             min(remaining / 2, maximumAdvanceCharacterCount)
         )
+    }
+}
+
+private enum StreamingMarkdownRenderPolicy {
+    private static let plainActiveRendererByteCount = 4_000
+
+    static func usesPlainActiveRenderer(for text: String) -> Bool {
+        text.utf8.count > plainActiveRendererByteCount
     }
 }
 

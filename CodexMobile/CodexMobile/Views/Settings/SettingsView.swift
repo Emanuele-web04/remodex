@@ -6,8 +6,18 @@
 import SwiftUI
 import UIKit
 
+private struct SettingsComputerNamePresentation: Identifiable {
+    let deviceId: String?
+    let currentName: String
+    let systemName: String
+
+    var id: String { deviceId ?? currentName }
+}
+
 struct SettingsView: View {
+    @Environment(CodexService.self) private var codex
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
+    @State private var computerNamePresentation: SettingsComputerNamePresentation?
 
     var body: some View {
         List {
@@ -18,21 +28,54 @@ struct SettingsView: View {
             SettingsGPTAccountCard()
             SettingsSubscriptionCard()
             SettingsBridgeVersionCard()
+            SettingsCommandReferenceCard()
             SettingsRuntimeDefaultsCard()
             SettingsAboutCard()
             SettingsUsageCard()
-            SettingsConnectionCard()
+            SettingsConnectionCard {
+                presentComputerNameSheet()
+            }
         }
         .listStyle(.insetGrouped)
         .font(AppFont.body())
         .tint(.primary)
         .navigationTitle("Settings")
+        // Own settings modals from the stable screen root; List rows can be
+        // rebuilt while connection status changes and should not own sheets.
+        .sheet(item: $computerNamePresentation) { presentation in
+            SettingsComputerNameSheet(
+                nickname: sidebarComputerNicknameBinding(for: presentation.deviceId),
+                currentName: presentation.currentName,
+                systemName: presentation.systemName
+            )
+        }
     }
 
     private var appFontStyleBinding: Binding<AppFont.Style> {
         Binding(
             get: { AppFont.Style(rawValue: appFontStyleRawValue) ?? AppFont.defaultStyle },
             set: { appFontStyleRawValue = $0.rawValue }
+        )
+    }
+
+    // Captures the visible device details before presenting so reconnect updates cannot dismiss the editor.
+    private func presentComputerNameSheet() {
+        guard let trustedPairPresentation = codex.trustedPairPresentation else {
+            return
+        }
+
+        computerNamePresentation = SettingsComputerNamePresentation(
+            deviceId: trustedPairPresentation.deviceId,
+            currentName: trustedPairPresentation.name,
+            systemName: trustedPairPresentation.systemName ?? trustedPairPresentation.name
+        )
+    }
+
+    // Writes nicknames against the tapped trusted computer so switching pairs does not reuse the wrong alias.
+    private func sidebarComputerNicknameBinding(for deviceId: String?) -> Binding<String> {
+        Binding(
+            get: { SidebarComputerNicknameStore.nickname(for: deviceId) },
+            set: { SidebarComputerNicknameStore.setNickname($0, for: deviceId) }
         )
     }
 }

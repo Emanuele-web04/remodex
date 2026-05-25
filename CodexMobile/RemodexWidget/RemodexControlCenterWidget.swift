@@ -17,8 +17,7 @@ struct RemodexLaunchControl: ControlWidget {
         StaticControlConfiguration(kind: Self.kind) {
             ControlWidgetButton(action: RemodexLaunchIntent()) {
                 // Control Center only accepts symbol images, so this routes
-                // through the dedicated Remodex symbolset instead of the
-                // regular vector image used by Lock Screen widgets.
+                // through the control-sized Remodex symbolset.
                 Label("Remodex", image: "remodex_control_symbol")
             }
         }

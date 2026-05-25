@@ -189,6 +189,42 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertFalse(service.protectedRunningFallbackThreadIDs.contains(threadID))
     }
 
+    func testDuplicateCommentaryDeltaWithDifferentItemIDDoesNotAppendSecondBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let text = "Checking whether the bridge or UI duplicated this commentary."
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string("desktop-commentary"),
+                "phase": .string("commentary"),
+                "delta": .string(text),
+            ])
+        )
+        service.flushAllPendingStreamingDeltas()
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string("rollout-commentary"),
+                "phase": .string("commentary"),
+                "delta": .string(text),
+            ])
+        )
+        service.flushAllPendingStreamingDeltas()
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.assistantPhase, "commentary")
+        XCTAssertEqual(assistantMessages.first?.text, text)
+    }
+
     func testDesktopMirrorActivityHeartbeatRestoresRunningAfterStaleClear() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -207,6 +243,257 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
         XCTAssertTrue(service.desktopMirroredRunningThreadIDs.contains(threadID))
+    }
+
+    func testRolloutBootstrapReplayKeepsLiveMirrorResponsiveDuringCatchup() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "remodex/rollout/bootstrapReplay",
+            params: .object([
+                "threadId": .string(threadID),
+                "replayId": .string("replay-\(UUID().uuidString)"),
+                "batchIndex": .integer(0),
+                "batchCount": .integer(1),
+                "notifications": .array([
+                    .object([
+                        "method": .string("turn/started"),
+                        "params": .object([
+                            "threadId": .string(threadID),
+                            "turnId": .string(turnID),
+                            "remodexDesktopMirror": .bool(true),
+                            "remodexRolloutLiveMirror": .bool(true),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexRolloutLiveMirror": .bool(true),
+            ])
+        )
+
+        await flushAsyncSideEffects()
+
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
+    }
+
+    func testRolloutBootstrapReplayCoalescesTimelineWorkUntilBatchEnd() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+        service.activeThreadId = threadID
+        _ = service.timelineState(for: threadID)
+
+        service.handleNotification(
+            method: "remodex/rollout/bootstrapReplay",
+            params: .object([
+                "threadId": .string(threadID),
+                "replayId": .string("replay-\(UUID().uuidString)"),
+                "batchIndex": .integer(0),
+                "batchCount": .integer(1),
+                "notifications": .array([
+                    .object([
+                        "method": .string("codex/event/user_message"),
+                        "params": .object([
+                            "threadId": .string(threadID),
+                            "turnId": .string(turnID),
+                            "message": .string("Prompt from desktop"),
+                            "remodexDesktopMirror": .bool(true),
+                            "remodexRolloutLiveMirror": .bool(true),
+                        ]),
+                    ]),
+                    .object([
+                        "method": .string("item/completed"),
+                        "params": .object([
+                            "threadId": .string(threadID),
+                            "turnId": .string(turnID),
+                            "itemId": .string(itemID),
+                            "item": .object([
+                                "id": .string(itemID),
+                                "type": .string("message"),
+                                "role": .string("assistant"),
+                                "text": .string("Final from desktop"),
+                            ]),
+                            "remodexDesktopMirror": .bool(true),
+                            "remodexRolloutLiveMirror": .bool(true),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.messages(for: threadID).map(\.text), ["Prompt from desktop", "Final from desktop"])
+        XCTAssertEqual(service.currentOutput, "Final from desktop")
+        XCTAssertEqual(
+            service.timelineState(for: threadID).renderSnapshot.messages.map(\.text),
+            ["Prompt from desktop", "Final from desktop"]
+        )
+        XCTAssertEqual(service.rolloutBootstrapReplayCoalescingDepth, 0)
+        XCTAssertFalse(service.rolloutBootstrapReplayNeedsMessagePersist)
+        XCTAssertTrue(service.rolloutBootstrapReplayDeferredTimelineThreadIDs.isEmpty)
+        XCTAssertTrue(service.rolloutBootstrapReplayDeferredSyncThreadIDs.isEmpty)
+        XCTAssertTrue(service.rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs.isEmpty)
+    }
+
+    func testRolloutBootstrapReplayDefersSyncWorkUntilFinalBatch() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let replayID = "replay-\(UUID().uuidString)"
+        service.isConnected = true
+        service.isInitialized = true
+
+        service.handleNotification(
+            method: "remodex/rollout/bootstrapReplay",
+            params: .object([
+                "threadId": .string(threadID),
+                "replayId": .string(replayID),
+                "batchIndex": .integer(0),
+                "batchCount": .integer(2),
+                "notifications": .array([
+                    .object([
+                        "method": .string("turn/completed"),
+                        "params": .object([
+                            "threadId": .string(threadID),
+                            "turnId": .string(turnID),
+                            "remodexDesktopMirror": .bool(true),
+                            "remodexRolloutLiveMirror": .bool(true),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        await flushAsyncSideEffects()
+
+        XCTAssertTrue(service.rolloutBootstrapReplayDeferredSyncThreadIDs.contains(threadID))
+        XCTAssertTrue(service.rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs.contains(threadID))
+
+        service.handleNotification(
+            method: "remodex/rollout/bootstrapReplay",
+            params: .object([
+                "threadId": .string(threadID),
+                "replayId": .string(replayID),
+                "batchIndex": .integer(1),
+                "batchCount": .integer(2),
+                "notifications": .array([
+                    .object([
+                        "method": .string("turn/activity"),
+                        "params": .object([
+                            "threadId": .string(threadID),
+                            "turnId": .string(turnID),
+                            "remodexDesktopMirror": .bool(true),
+                            "remodexRolloutLiveMirror": .bool(true),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        await flushAsyncSideEffects()
+
+        XCTAssertTrue(service.rolloutBootstrapReplayDeferredSyncThreadIDs.isEmpty)
+        XCTAssertTrue(service.rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs.isEmpty)
+    }
+
+    func testRolloutBootstrapReplayAllowsLiveMirrorBeforeFinalBatch() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let replayID = "replay-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "remodex/rollout/bootstrapReplay",
+            params: .object([
+                "threadId": .string(threadID),
+                "replayId": .string(replayID),
+                "batchIndex": .integer(0),
+                "batchCount": .integer(2),
+                "notifications": .array([
+                    .object([
+                        "method": .string("codex/event/user_message"),
+                        "params": .object([
+                            "threadId": .string(threadID),
+                            "turnId": .string("turn-history-0"),
+                            "message": .string("history zero"),
+                            "remodexDesktopMirror": .bool(true),
+                            "remodexRolloutLiveMirror": .bool(true),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        service.handleNotification(
+            method: "codex/event/user_message",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string("turn-live"),
+                "message": .string("live after history"),
+                "remodexDesktopMirror": .bool(true),
+                "remodexRolloutLiveMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertEqual(
+            service.messages(for: threadID).map(\.text),
+            ["history zero", "live after history"]
+        )
+
+        service.handleNotification(
+            method: "remodex/rollout/bootstrapReplay",
+            params: .object([
+                "threadId": .string(threadID),
+                "replayId": .string(replayID),
+                "batchIndex": .integer(1),
+                "batchCount": .integer(2),
+                "notifications": .array([
+                    .object([
+                        "method": .string("codex/event/user_message"),
+                        "params": .object([
+                            "threadId": .string(threadID),
+                            "turnId": .string("turn-history-1"),
+                            "message": .string("history one"),
+                            "remodexDesktopMirror": .bool(true),
+                            "remodexRolloutLiveMirror": .bool(true),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(
+            service.messages(for: threadID).map(\.text),
+            ["history zero", "live after history", "history one"]
+        )
+    }
+
+    func testCancelPerThreadRefreshWorkClearsRolloutBootstrapReplayWork() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let replayKey = "\(threadID)|replay-1|0"
+
+        service.appliedRolloutBootstrapReplayBatchKeys.insert(replayKey)
+        service.appliedRolloutBootstrapReplayBatchKeyOrder.append(replayKey)
+
+        service.cancelPerThreadRefreshWork(for: threadID)
+
+        XCTAssertFalse(service.appliedRolloutBootstrapReplayBatchKeys.contains(replayKey))
+        XCTAssertFalse(service.appliedRolloutBootstrapReplayBatchKeyOrder.contains(replayKey))
     }
 
     func testTurnStartedAcceptsTopLevelIDAsTurnID() {

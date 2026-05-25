@@ -414,6 +414,76 @@ test("projects canonical desktop agentMessage items as live app-server deltas", 
   );
 });
 
+test("keeps commentary assistant phase on desktop live deltas", () => {
+  const nextState = {
+    turns: [{
+      id: "turn-commentary",
+      items: [{
+        id: "commentary-1",
+        type: "message",
+        role: "assistant",
+        phase: "commentary",
+        content: [{ type: "output_text", text: "Working through the files..." }],
+      }],
+    }],
+  };
+
+  assert.deepEqual(
+    projectDesktopAssistantDeltaNotifications("thread-commentary", { turns: [] }, nextState),
+    [{
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-commentary",
+        turnId: "turn-commentary",
+        itemId: "commentary-1",
+        delta: "Working through the files...",
+        phase: "commentary",
+      },
+    }]
+  );
+});
+
+test("keeps final assistant phase on desktop live deltas", () => {
+  const previousState = {
+    turns: [{
+      id: "turn-final",
+      items: [{
+        id: "final-1",
+        type: "message",
+        role: "assistant",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: "Done" }],
+      }],
+    }],
+  };
+  const nextState = {
+    turns: [{
+      id: "turn-final",
+      items: [{
+        id: "final-1",
+        type: "message",
+        role: "assistant",
+        phase: "final_answer",
+        content: [{ type: "output_text", text: "Done now" }],
+      }],
+    }],
+  };
+
+  assert.deepEqual(
+    projectDesktopAssistantDeltaNotifications("thread-final", previousState, nextState),
+    [{
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-final",
+        turnId: "turn-final",
+        itemId: "final-1",
+        delta: " now",
+        phase: "final_answer",
+      },
+    }]
+  );
+});
+
 test("does not replay unchanged or rewritten assistant text as live deltas", () => {
   const previousState = {
     turns: [{

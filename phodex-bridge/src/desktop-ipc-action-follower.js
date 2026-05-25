@@ -605,6 +605,7 @@ function projectDesktopAssistantDeltaNotifications(
         turnId: message.turnId,
         itemId: message.itemId,
         delta,
+        ...(message.phase ? { phase: message.phase } : {}),
       },
     });
   }
@@ -629,6 +630,7 @@ function collectAssistantMessages(conversationState) {
 
       const itemId = readString(item?.id) || readString(item?.itemId) || readString(item?.item_id);
       const text = assistantMessageText(item);
+      const phase = assistantMessagePhase(item);
       if (!turnId || !itemId) {
         continue;
       }
@@ -637,6 +639,7 @@ function collectAssistantMessages(conversationState) {
         key: `${turnId}:${itemId}`,
         turnId,
         itemId,
+        phase,
         text,
       });
     }
@@ -650,6 +653,26 @@ function isAssistantMessageItem(item) {
     return true;
   }
   return type === "message" && normalizeToken(item?.role) === "assistant";
+}
+
+function assistantMessagePhase(item) {
+  return normalizeAssistantPhase(
+    readString(item?.phase)
+      || readString(item?.assistantPhase)
+      || readString(item?.assistant_phase)
+      || readString(item?.metadata?.phase)
+  );
+}
+
+function normalizeAssistantPhase(value) {
+  const normalized = normalizeToken(value);
+  if (!normalized) {
+    return "";
+  }
+  if (normalized === "finalanswer") {
+    return "final_answer";
+  }
+  return normalized;
 }
 
 function assistantMessageText(item) {

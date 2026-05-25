@@ -168,14 +168,16 @@ struct TurnComposerCollapsibleContextCluster: View {
     }
 }
 
-// Scale-from-leading makes the pills appear to grow out of (and collapse back
-// into) the chevron rather than sliding from the screen edge. Because the
-// pills are conditionally rendered, the Menu hosting view is destroyed between
-// states, so the earlier scaleEffect glitch (half-rendered label) cannot
-// re-appear.
+// Scale-from-leading makes the pills appear to grow out of the chevron, while
+// removal fades in place to avoid the row visually sliding across the composer.
+// Because the pills are conditionally rendered, the Menu hosting view is
+// destroyed between states, so the earlier scaleEffect glitch cannot re-appear.
 private extension AnyTransition {
     static var contextClusterReveal: AnyTransition {
-        .scale(scale: 0, anchor: .leading).combined(with: .opacity)
+        .asymmetric(
+            insertion: .scale(scale: 0, anchor: .leading).combined(with: .opacity),
+            removal: .opacity
+        )
     }
 }
 

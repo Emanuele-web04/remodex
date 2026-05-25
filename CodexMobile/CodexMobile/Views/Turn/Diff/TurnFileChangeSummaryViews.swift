@@ -57,74 +57,70 @@ struct FileChangeSummaryBox: View {
     let detailBodyText: String
     let messageID: String
 
-    // Default to expanded so the recap stays informative without an extra tap;
-    // collapse remains available for long lists or visual decluttering.
-    @State private var isExpanded: Bool = true
-    @State private var activeDiffPresentation: FileChangeSummaryDiffPresentation?
+    @Environment(\.colorScheme) private var colorScheme
 
-    private var canCollapse: Bool {
-        !entries.isEmpty || !fallbackText.isEmpty
-    }
+    @State private var activeDiffPresentation: FileChangeSummaryDiffPresentation?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            if isExpanded {
-                if !entries.isEmpty {
-                    softDivider
+            if !entries.isEmpty {
+                softDivider
 
-                    ForEach(entries.indices, id: \.self) { index in
-                        let entry = entries[index]
-                        let isLastEntry = index == entries.index(before: entries.endIndex)
+                ForEach(entries.indices, id: \.self) { index in
+                    let entry = entries[index]
+                    let isLastEntry = index == entries.index(before: entries.endIndex)
 
-                        Button {
-                            activeDiffPresentation = .singleEntry(entry)
-                        } label: {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(entry.compactPath)
-                                    .font(AppFont.subheadline())
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
+                    Button {
+                        activeDiffPresentation = .singleEntry(entry)
+                    } label: {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(entry.compactPath)
+                                .font(AppFont.body())
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
 
-                                Spacer(minLength: 8)
+                            Spacer(minLength: 8)
 
-                                if entry.additions > 0 || entry.deletions > 0 {
-                                    DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
-                                        .font(AppFont.subheadline())
-                                }
+                            if entry.additions > 0 || entry.deletions > 0 {
+                                DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
+                                    .font(AppFont.body())
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
 
-                        if !isLastEntry {
-                            softDivider
-                                .padding(.leading, 12)
+                            RemodexIcon.image(systemName: "chevron.down")
+                                .font(AppFont.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                        .contentShape(Rectangle())
                     }
-                } else if !fallbackText.isEmpty {
-                    Text(fallbackText)
-                        .font(AppFont.footnote())
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.bottom, 10)
+                    .buttonStyle(.plain)
+
+                    if !isLastEntry {
+                        softDivider
+                            .padding(.leading, 16)
+                    }
                 }
+            } else if !fallbackText.isEmpty {
+                Text(fallbackText)
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            .regularMaterial,
+            cardBackgroundColor,
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(softDividerColor, lineWidth: 0.5)
+                .stroke(cardOutlineColor, lineWidth: 1)
         }
-        .padding(2)
         .sheet(item: $activeDiffPresentation) { presentation in
             switch presentation {
             case .singleEntry(let entry):
@@ -148,21 +144,26 @@ struct FileChangeSummaryBox: View {
 
     @ViewBuilder
     private var header: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 12) {
             Image("changes")
                 .renderingMode(.template)
                 .resizable()
                 .scaledToFit()
-                .frame(width: 16, height: 16)
+                .frame(width: 18, height: 18)
                 .foregroundStyle(.secondary)
+                .frame(width: 40, height: 40)
+                .background(iconBackgroundColor, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            Text("File changes")
-                .font(AppFont.footnote(weight: .medium))
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(summaryTitle)
+                    .font(AppFont.body(weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
 
-            if totalAdditions > 0 || totalDeletions > 0 {
-                DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
-                    .font(AppFont.subheadline())
+                if totalAdditions > 0 || totalDeletions > 0 {
+                    DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
+                        .font(AppFont.subheadline())
+                }
             }
 
             Spacer(minLength: 8)
@@ -172,37 +173,25 @@ struct FileChangeSummaryBox: View {
                     HapticFeedback.shared.triggerImpactFeedback(style: .light)
                     activeDiffPresentation = .allEntries
                 } label: {
-                    RemodexIcon.image(systemName: "arrow.up.right")
-                        .font(AppFont.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Circle())
+                    Text("Review")
+                        .font(AppFont.body(weight: .medium))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 7)
+                        .background(Color(.systemBackground).opacity(colorScheme == .dark ? 0.08 : 0.75), in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(cardOutlineColor, lineWidth: 1)
+                        }
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Open diff")
-            }
-
-            if canCollapse {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isExpanded.toggle()
-                    }
-                } label: {
-                    RemodexIcon.image(systemName: "chevron.down")
-                        .font(AppFont.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(isExpanded ? 0 : -90))
-                        .frame(width: 24, height: 24)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isExpanded ? "Collapse file changes" : "Expand file changes")
+                .accessibilityLabel("Review file changes")
             }
         }
         .padding(.leading, 12)
-        .padding(.trailing, 8)
-        .padding(.top, 6)
-        .padding(.bottom, isExpanded && !entries.isEmpty ? 6 : 8)
+        .padding(.trailing, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 12)
     }
 
     private var totalAdditions: Int {
@@ -221,5 +210,34 @@ struct FileChangeSummaryBox: View {
 
     private var softDividerColor: Color {
         Color(.separator).opacity(0.6)
+    }
+
+    private var summaryTitle: String {
+        guard !entries.isEmpty else {
+            return "File changes"
+        }
+
+        return "\(summaryActionTitle) \(entries.count) \(entries.count == 1 ? "file" : "files")"
+    }
+
+    private var summaryActionTitle: String {
+        let actionTitles = Set(entries.compactMap { $0.action?.rawValue })
+        return actionTitles.count == 1 ? (actionTitles.first ?? "Edited") : "Edited"
+    }
+
+    private var cardBackgroundColor: Color {
+        colorScheme == .dark
+            ? Color(red: 0.12, green: 0.12, blue: 0.13)
+            : Color(.systemBackground)
+    }
+
+    private var cardOutlineColor: Color {
+        Color(.separator).opacity(colorScheme == .dark ? 0.52 : 0.44)
+    }
+
+    private var iconBackgroundColor: Color {
+        colorScheme == .dark
+            ? Color.white.opacity(0.04)
+            : Color(.secondarySystemBackground).opacity(0.65)
     }
 }

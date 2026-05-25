@@ -208,7 +208,7 @@ test("remodex pair is an alias for the QR refresh flow", async () => {
   ]);
 });
 
-test("remodex pair --json exposes the refreshed pairing payload", async () => {
+test("remodex pair --json exposes pairing readiness without private payload fields", async () => {
   const writes = [];
   const originalWrite = process.stdout.write;
 
@@ -242,8 +242,12 @@ test("remodex pair --json exposes the refreshed pairing payload", async () => {
             plistPath: "/tmp/remodex.plist",
             pairingSession: {
               pairingPayload: {
+                relay: "ws://127.0.0.1:9000/relay",
                 sessionId: "session-json-pair",
+                macIdentityPublicKey: "pub-key-pair",
+                expiresAt: 1_900_000_000_000,
               },
+              pairingCode: "ABCDEFGHJK",
             },
           };
         },
@@ -260,7 +264,15 @@ test("remodex pair --json exposes the refreshed pairing payload", async () => {
   assert.equal(payload.ok, true);
   assert.equal(payload.currentVersion, version);
   assert.equal(payload.plistPath, "/tmp/remodex.plist");
-  assert.equal(payload.pairingSession?.pairingPayload?.sessionId, "session-json-pair");
+  assert.equal(payload.pairingSession?.pairingPayload?.relay, undefined);
+  assert.equal(payload.pairingSession?.pairingPayload?.sessionId, undefined);
+  assert.equal(payload.pairingSession?.pairingPayload?.macIdentityPublicKey, undefined);
+  assert.equal(payload.pairingSession?.pairingPayload?.hasRelay, true);
+  assert.equal(payload.pairingSession?.pairingPayload?.hasSessionId, true);
+  assert.equal(payload.pairingSession?.pairingPayload?.hasMacIdentityPublicKey, true);
+  assert.equal(payload.pairingSession?.pairingPayload?.expiresAt, 1_900_000_000_000);
+  assert.equal(writes.join("").includes("ws://127.0.0.1:9000/relay"), false);
+  assert.equal(writes.join("").includes("session-json-pair"), false);
 });
 
 test("runCli prints expected failures without a Node stack trace", async () => {

@@ -323,6 +323,72 @@ final class CodexThreadProjectRoutingTests: XCTestCase {
         XCTAssertNil(service.thread(for: "quick-chat")?.gitWorkingDirectory)
     }
 
+    func testEmbeddedResumeHistoryRestoresCompletedTurnCollapseState() async throws {
+        let service = makeService()
+        let threadID = "thread-history-\(UUID().uuidString)"
+        let turnID = "turn-history-\(UUID().uuidString)"
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/resume")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "id": .string(threadID),
+                        "title": .string("Old mirrored chat"),
+                        "turns": .array([
+                            .object([
+                                "id": .string(turnID),
+                                "status": .string("completed"),
+                                "items": .array([
+                                    .object([
+                                        "id": .string("user-1"),
+                                        "type": .string("user_message"),
+                                        "text": .string("Fix mirrored chat"),
+                                    ]),
+                                    .object([
+                                        "id": .string("commentary-1"),
+                                        "type": .string("agentMessage"),
+                                        "phase": .string("commentary"),
+                                        "text": .string("Checking history"),
+                                    ]),
+                                    .object([
+                                        "id": .string("final-1"),
+                                        "type": .string("message"),
+                                        "role": .string("assistant"),
+                                        "phase": .string("final_answer"),
+                                        "content": .array([
+                                            .object([
+                                                "type": .string("output_text"),
+                                                "text": .string("Fixed."),
+                                            ]),
+                                        ]),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        _ = try await service.ensureThreadResumed(threadId: threadID, force: true)
+
+        let snapshot = service.timelineState(for: threadID).renderSnapshot
+        let renderItems = TurnTimelineRenderProjection.project(
+            messages: snapshot.messages,
+            completedTurnIDs: snapshot.completedTurnIDs
+        )
+
+        XCTAssertEqual(service.turnTerminalState(for: turnID), .completed)
+        XCTAssertTrue(snapshot.completedTurnIDs.contains(turnID))
+        XCTAssertTrue(renderItems.contains {
+            if case .previousMessages = $0 { return true }
+            return false
+        })
+    }
+
     func testProjectlessThreadTurnStartDoesNotInjectCwd() async throws {
         let service = makeService()
         service.upsertThread(CodexThread(id: "quick-chat", title: "Quick Chat", cwd: nil))

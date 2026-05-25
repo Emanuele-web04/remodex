@@ -60,6 +60,7 @@ struct ContentView: View {
     @State private var isRetryingBridgeUpdate = false
     @State private var isPreparingManualScanner = false
     @State private var macSwitchTask: Task<Void, Never>?
+    @State private var threadSelectionSyncTask: Task<Void, Never>?
     @State private var isWakingSavedMacDisplay = false
     @State private var hasAttemptedAutomaticWakeSavedMacDisplay = false
     @State private var threadCompletionBannerDismissTask: Task<Void, Never>?
@@ -159,7 +160,7 @@ struct ContentView: View {
             }
             .onChange(of: codex.threads) { _, threads in
                 debugSidebarLog("threads changed count=\(threads.count) sidebarOpen=\(isSidebarOpen) prewarmed=\(isSidebarPrewarmed)")
-                syncSelectedThread(with: threads)
+                scheduleSelectedThreadSync()
                 scheduleSidebarPrewarmIfNeeded()
             }
             .onChange(of: scenePhase) { _, phase in
@@ -1891,6 +1892,15 @@ struct ContentView: View {
     }
 
     // Keeps selected thread coherent with server list updates.
+    private func scheduleSelectedThreadSync() {
+        threadSelectionSyncTask?.cancel()
+        threadSelectionSyncTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            syncSelectedThread(with: codex.threads)
+        }
+    }
+
     private func syncSelectedThread(with threads: [CodexThread]) {
         guard !isOpeningNewChatFromSidebar else { return }
 

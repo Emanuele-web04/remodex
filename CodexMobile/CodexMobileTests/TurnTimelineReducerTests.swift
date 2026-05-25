@@ -599,6 +599,129 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(final.id, "final-a")
     }
 
+    func testTimelineProjectionKeepsLiveTurnMessagesVisibleUntilCompletion() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Optimize mirroring",
+                createdAt: now,
+                turnID: "turn-live",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "commentary-a",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "Checking the live stream.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-live",
+                itemID: "commentary-a",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Inspecting session history",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-live",
+                itemID: "tool",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "commentary-b",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "Found the duplicate source.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-live",
+                itemID: "commentary-b",
+                isStreaming: true,
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: "turn-live",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "commentary-a", "tool", "commentary-b"])
+        XCTAssertFalse(items.contains {
+            if case .previousMessages = $0 { return true }
+            return false
+        })
+    }
+
+    func testTimelineProjectionHidesDuplicateCommentaryAssistantRows() {
+        let now = Date()
+        let commentary = "La cosa non è un semplice scroll: sto controllando bridge e UI."
+        let messages = [
+            makeMessage(
+                id: "commentary-a",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: commentary,
+                createdAt: now,
+                turnID: "turn-live",
+                itemID: "desktop-commentary",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "commentary-b",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: commentary,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-live",
+                itemID: "rollout-commentary",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["commentary-a"])
+    }
+
+    func testTimelineProjectionKeepsTurnlessRepeatedCommentaryRowsVisible() {
+        let now = Date()
+        let commentary = "Checking whether the bridge or UI duplicated this commentary."
+        let messages = [
+            makeMessage(
+                id: "commentary-a",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: commentary,
+                createdAt: now,
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "commentary-b",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: commentary,
+                createdAt: now.addingTimeInterval(1),
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["commentary-a", "commentary-b"])
+    }
+
     func testTimelineProjectionSkipsFinalReplaysAndMergedImageArtifactsInPreviousMessages() {
         let now = Date()
         let imagePath = "/Users/example/.codex/generated_images/thread/generated-icon.png"
@@ -1063,6 +1186,86 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(summary?.entries.map(\.path), ["Sources/App.swift", "Sources/Composer.swift"])
         XCTAssertEqual(summary?.entries.map(\.additions), [2, 3])
         XCTAssertEqual(summary?.entries.map(\.deletions), [1, 0])
+    }
+
+    func testTimelineProjectionHidesActiveTurnFileChangesUntilTurnCompletes() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant",
+                threadID: "thread",
+                role: .assistant,
+                text: "Working on it.",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +1 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+        ]
+
+        let runningItems = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+        let completedItems = TurnTimelineRenderProjection.project(
+            messages: messages,
+            activeTurnID: nil,
+            isThreadRunning: false
+        )
+
+        XCTAssertEqual(runningItems.map(\.id), ["assistant"])
+        XCTAssertEqual(completedItems.map(\.id), ["assistant", "file-change"])
+    }
+
+    func testActiveFileChangeStatusSnapshotCarriesDiffSheetPayload() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "file-change",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/App.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+        ]
+
+        let snapshot = FileChangeStatusSnapshot.activeTurnSnapshot(
+            from: messages,
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(snapshot?.fileCount, 1)
+        XCTAssertEqual(snapshot?.additions, 2)
+        XCTAssertEqual(snapshot?.deletions, 1)
+        XCTAssertEqual(snapshot?.entries.map(\.path), ["Sources/App.swift"])
+        XCTAssertTrue(snapshot?.detailBodyText.contains("Sources/App.swift") == true)
+        XCTAssertTrue(snapshot?.messageID.contains("active-file-change-turn-1") == true)
     }
 
     func testTimelineProjectionMergesAdjacentSameFileChangeRows() {

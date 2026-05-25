@@ -73,7 +73,12 @@ enum TurnTimelineRenderProjection {
     private static let smallWhitespaceScanByteLimit = 512
 
     // Groups tool runs and completed-turn preamble rows so the visible timeline stays compact.
-    static func project(messages: [CodexMessage], completedTurnIDs: Set<String> = []) -> [TurnTimelineRenderItem] {
+    static func project(
+        messages: [CodexMessage],
+        completedTurnIDs: Set<String> = [],
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
+    ) -> [TurnTimelineRenderItem] {
         var items: [TurnTimelineRenderItem] = []
         var bufferedToolMessages: [CodexMessage] = []
         let fileChangePlan = fileChangeCollapsePlan(in: messages)
@@ -81,8 +86,10 @@ enum TurnTimelineRenderProjection {
             in: messages,
             completedTurnIDs: completedTurnIDs
         )
+        let duplicateAssistantHiddenIndices = duplicateCommentaryAssistantIndices(in: messages)
         let hiddenIndices = Set(finalCollapsePlan.values.flatMap(\.indices))
             .union(fileChangePlan.hiddenIndices)
+            .union(duplicateAssistantHiddenIndices)
         let groupByInsertionIndex = finalCollapsePlan.values.reduce(into: [Int: PreviousMessagesCollapse]()) { result, collapse in
             result[collapse.insertionIndex] = collapse
         }
@@ -115,7 +122,11 @@ enum TurnTimelineRenderProjection {
             }
 
             let renderedMessage = previousReplacementByIndex[index] ?? fileChangePlan.replacementByIndex[index] ?? message
-            if shouldSkipVisualRow(renderedMessage) {
+            if shouldSkipVisualRow(
+                renderedMessage,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning
+            ) {
                 continue
             }
             guard isToolBurstCandidate(message) else {
@@ -168,6 +179,37 @@ enum TurnTimelineRenderProjection {
     private struct FileChangeCollapsePlan {
         let hiddenIndices: Set<Int>
         let replacementByIndex: [Int: CodexMessage]
+    }
+
+    // Hides already-persisted duplicate commentary emitted by both desktop live state and rollout replay.
+    private static func duplicateCommentaryAssistantIndices(in messages: [CodexMessage]) -> Set<Int> {
+        var seenKeys: Set<String> = []
+        var hiddenIndices = Set<Int>()
+
+        for index in messages.indices {
+            let message = messages[index]
+            guard message.role == .assistant,
+                  isCommentaryAssistantPhase(message.assistantPhase),
+                  let turnID = normalizedIdentifier(message.turnId),
+                  message.text.utf8.count <= largeArtifactTextByteLimit else {
+                continue
+            }
+
+            let text = normalizedVisibleAssistantText(message.text)
+            guard text.count >= 24 else {
+                continue
+            }
+
+            let key = [
+                turnID,
+                text,
+            ].joined(separator: "\u{1F}")
+            if !seenKeys.insert(key).inserted {
+                hiddenIndices.insert(index)
+            }
+        }
+
+        return hiddenIndices
     }
 
     // Shows one end-of-turn file table even when the bridge streams multiple file-change snapshots.
@@ -671,10 +713,21 @@ enum TurnTimelineRenderProjection {
     }
 
     // Drops placeholder-only rows before SwiftUI can reserve timeline spacing for them.
-    private static func shouldSkipVisualRow(_ message: CodexMessage) -> Bool {
+    private static func shouldSkipVisualRow(
+        _ message: CodexMessage,
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
+    ) -> Bool {
         if message.role == .assistant,
            message.isStreaming,
            isEmptyStreamingPlaceholderText(message.text) {
+            return true
+        }
+
+        if isThreadRunning,
+           message.role == .system,
+           message.kind == .fileChange,
+           normalizedIdentifier(message.turnId) == normalizedIdentifier(activeTurnID) {
             return true
         }
 

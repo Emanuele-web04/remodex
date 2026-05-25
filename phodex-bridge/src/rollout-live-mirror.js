@@ -18,6 +18,10 @@ const DEFAULT_POLL_INTERVAL_MS = 700;
 const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_ACTIVITY_HEARTBEAT_MS = 5_000;
+const DEFAULT_BOOTSTRAP_REPLAY_BATCH_INTERVAL_MS = 0;
+const BOOTSTRAP_REPLAY_CHUNK_SIZE = 50;
+const BOOTSTRAP_REPLAY_CHUNK_MAX_BYTES = 128 * 1024;
+const BOOTSTRAP_REPLAY_CACHE_LIMIT = 32;
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
 
 // Observes desktop-authored rollout files and replays the currently active run as
@@ -29,12 +33,16 @@ function createRolloutLiveMirrorController({
   now = () => Date.now(),
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   lookupTimeoutMs = DEFAULT_LOOKUP_TIMEOUT_MS,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
   activityHeartbeatMs = DEFAULT_ACTIVITY_HEARTBEAT_MS,
+  bootstrapReplayBatchIntervalMs = DEFAULT_BOOTSTRAP_REPLAY_BATCH_INTERVAL_MS,
 } = {}) {
   const mirrorsByThreadId = new Map();
+  const bootstrapReplayCache = new Map();
 
   function observeInbound(rawMessage) {
     const request = safeParseJSON(rawMessage);
@@ -63,10 +71,14 @@ function createRolloutLiveMirrorController({
       now,
       setIntervalFn,
       clearIntervalFn,
+      setTimeoutFn,
+      clearTimeoutFn,
       pollIntervalMs,
       lookupTimeoutMs,
       idleTimeoutMs,
       activityHeartbeatMs,
+      bootstrapReplayBatchIntervalMs,
+      bootstrapReplayCache,
       onStop() {
         if (mirrorsByThreadId.get(threadId) === mirror) {
           mirrorsByThreadId.delete(threadId);
@@ -99,14 +111,19 @@ function createThreadRolloutLiveMirror({
   now,
   setIntervalFn,
   clearIntervalFn,
+  setTimeoutFn,
+  clearTimeoutFn,
   pollIntervalMs,
   lookupTimeoutMs,
   idleTimeoutMs,
   activityHeartbeatMs,
+  bootstrapReplayBatchIntervalMs,
+  bootstrapReplayCache,
   onStop = () => {},
 }) {
   const startedAt = now();
   const state = createMirrorState(threadId);
+  const bootstrapReplayTimeouts = new Set();
 
   let isStopped = false;
   let rolloutPath = null;
@@ -151,6 +168,10 @@ function createThreadRolloutLiveMirror({
           state,
           fsModule,
           sendApplicationResponse,
+          bootstrapReplayCache,
+          setTimeoutFn,
+          bootstrapReplayBatchIntervalMs,
+          pendingTimeouts: bootstrapReplayTimeouts,
         });
         lastSize = fileSize;
         lastActivityAt = currentTime;
@@ -216,6 +237,10 @@ function createThreadRolloutLiveMirror({
 
     isStopped = true;
     clearIntervalFn(intervalId);
+    for (const timeout of bootstrapReplayTimeouts) {
+      clearTimeoutFn(timeout);
+    }
+    bootstrapReplayTimeouts.clear();
     onStop();
   }
 
@@ -231,6 +256,10 @@ function bootstrapFromExistingRollout({
   state,
   fsModule,
   sendApplicationResponse,
+  bootstrapReplayCache,
+  setTimeoutFn = setTimeout,
+  bootstrapReplayBatchIntervalMs = DEFAULT_BOOTSTRAP_REPLAY_BATCH_INTERVAL_MS,
+  pendingTimeouts,
 }) {
   const initialContents = readFileSlice(rolloutPath, 0, fileSize, fsModule);
   if (!initialContents) {
@@ -261,7 +290,7 @@ function bootstrapFromExistingRollout({
     const taskEventType = parsed?.type === "event_msg"
       ? readString(parsed?.payload?.type)
       : "";
-    if (taskEventType === "user_message") {
+    if (taskEventType === "user_message" && !insideActiveRun) {
       pendingUserPreludeLine = line;
     }
     if (taskEventType === "task_started") {
@@ -273,6 +302,7 @@ function bootstrapFromExistingRollout({
       if (pendingUserPreludeLine) {
         activeRunLines.push(pendingUserPreludeLine);
       }
+      pendingUserPreludeLine = null;
       activeRunLines.push(line);
       continue;
     }
@@ -282,7 +312,7 @@ function bootstrapFromExistingRollout({
     }
 
     activeRunLines.push(line);
-    if (taskEventType === "task_complete") {
+    if (isRolloutTerminalTaskEvent(taskEventType)) {
       insideActiveRun = false;
       activeTurnId = "";
       activeRunLines.length = 0;
@@ -296,7 +326,33 @@ function bootstrapFromExistingRollout({
   }
 
   state.isDesktopOrigin = true;
-  processRolloutLines(activeRunLines, state, sendApplicationResponse);
+  const replayId = bootstrapReplayId(state.threadId, rolloutPath, initialContents);
+  const cachedBatches = bootstrapReplayCache?.get(replayId);
+  const replayNotifications = cachedBatches ? null : [];
+  // Rebuild local mirror state from the already-written run while collecting
+  // every notification into bounded catch-up batches for the phone.
+  processRolloutLines(activeRunLines, state, (rawNotification) => {
+    if (cachedBatches) {
+      return;
+    }
+    const notification = safeParseJSON(rawNotification);
+    if (notification) {
+      replayNotifications.push(notification);
+    }
+  });
+  const batches = cachedBatches || chunkBootstrapReplayNotifications(replayNotifications);
+  rememberBootstrapReplayBatches(bootstrapReplayCache, replayId, batches);
+  emitBootstrapReplayBatches(state, replayId, batches, sendApplicationResponse, {
+    setTimeoutFn,
+    batchIntervalMs: bootstrapReplayBatchIntervalMs,
+    pendingTimeouts,
+  });
+}
+
+function isRolloutTerminalTaskEvent(eventType) {
+  return eventType === "task_complete"
+    || eventType === "turn_aborted"
+    || eventType === "task_aborted";
 }
 
 function processRolloutLines(lines, state, sendApplicationResponse) {
@@ -319,6 +375,106 @@ function processRolloutLines(lines, state, sendApplicationResponse) {
     for (const notification of notifications) {
       sendApplicationResponse(JSON.stringify(notification));
     }
+  }
+}
+
+function emitBootstrapReplayBatches(
+  state,
+  replayId,
+  batches,
+  sendApplicationResponse,
+  {
+    setTimeoutFn = setTimeout,
+    batchIntervalMs = DEFAULT_BOOTSTRAP_REPLAY_BATCH_INTERVAL_MS,
+    pendingTimeouts,
+  } = {}
+) {
+  if (!Array.isArray(batches) || batches.length === 0) {
+    return;
+  }
+
+  const sendBatch = (batch, batchIndex) => {
+    sendApplicationResponse(JSON.stringify(createNotification("remodex/rollout/bootstrapReplay", {
+      threadId: state.threadId,
+      replayId,
+      batchIndex,
+      batchCount: batches.length,
+      notifications: batch,
+    })));
+  };
+
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batch = batches[batchIndex];
+    if (batchIndex === 0) {
+      sendBatch(batch, batchIndex);
+      continue;
+    }
+
+    if (batchIntervalMs <= 0) {
+      sendBatch(batch, batchIndex);
+      continue;
+    }
+
+    const timeout = setTimeoutFn(() => {
+      pendingTimeouts?.delete(timeout);
+      sendBatch(batch, batchIndex);
+    }, batchIndex * batchIntervalMs);
+    pendingTimeouts?.add(timeout);
+  }
+}
+
+function chunkBootstrapReplayNotifications(notifications) {
+  const batches = [];
+  let batch = [];
+  let batchBytes = 0;
+
+  for (const notification of notifications) {
+    const notificationBytes = Buffer.byteLength(JSON.stringify(notification), "utf8");
+    const shouldStartNextBatch = batch.length > 0
+      && (
+        batch.length >= BOOTSTRAP_REPLAY_CHUNK_SIZE
+        || batchBytes + notificationBytes > BOOTSTRAP_REPLAY_CHUNK_MAX_BYTES
+      );
+    if (shouldStartNextBatch) {
+      batches.push(batch);
+      batch = [];
+      batchBytes = 0;
+    }
+
+    batch.push(notification);
+    batchBytes += notificationBytes;
+  }
+
+  if (batch.length > 0) {
+    batches.push(batch);
+  }
+  return batches;
+}
+
+function bootstrapReplayId(threadId, rolloutPath, contents) {
+  return crypto
+    .createHash("sha256")
+    .update(readString(threadId))
+    .update("\0")
+    .update(readString(rolloutPath))
+    .update("\0")
+    .update(String(contents || ""))
+    .digest("hex")
+    .slice(0, 24);
+}
+
+function rememberBootstrapReplayBatches(cache, replayId, batches) {
+  if (!cache || cache.has(replayId)) {
+    return;
+  }
+
+  cache.set(replayId, batches);
+  while (cache.size > BOOTSTRAP_REPLAY_CACHE_LIMIT) {
+    const oldestKey = cache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    cache.delete(oldestKey);
   }
 }
 

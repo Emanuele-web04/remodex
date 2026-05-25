@@ -16,7 +16,7 @@ const {
   isDesktopRolloutOrigin,
 } = require("../src/rollout-live-mirror");
 
-test("desktop-origin active runs replay thinking and exec command activity on resume", async (t) => {
+test("desktop-origin active runs bootstrap compactly and keep command state for new output", async (t) => {
   const { homeDir, rolloutPath } = createTemporaryRolloutHome({
     threadId: "thread-desktop",
     originator: "Codex Desktop",
@@ -27,7 +27,6 @@ test("desktop-origin active runs replay thinking and exec command activity on re
         cmd: "git status",
         workdir: "/repo",
       }),
-      functionCallOutput("call-1", "On branch main"),
     ],
   });
   const previousCodexHome = process.env.CODEX_HOME;
@@ -38,9 +37,11 @@ test("desktop-origin active runs replay thinking and exec command activity on re
   });
 
   const outbound = [];
+  const rawOutbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      rawOutbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -57,6 +58,26 @@ test("desktop-origin active runs replay thinking and exec command activity on re
   await wait(30);
 
   assert.equal(rolloutPath.includes("thread-desktop"), true);
+  assert.equal(rawOutbound[0].method, "remodex/rollout/bootstrapReplay");
+  assert.match(rawOutbound[0].params.replayId, /^[a-f0-9]{24}$/);
+  assert.equal(rawOutbound[0].params.notifications.length, 3);
+  assert.deepEqual(
+    outbound.map((message) => message.method),
+    [
+      "turn/started",
+      "item/reasoning/textDelta",
+      "codex/event/exec_command_begin",
+    ]
+  );
+  assert.equal(outbound[1].params.delta, "Thinking...");
+  assert.equal(outbound[0].params.remodexDesktopMirror, true);
+  assert.equal(outbound[2].params.command, "git status");
+
+  appendRolloutLines(rolloutPath, [
+    functionCallOutput("call-1", "On branch main"),
+  ]);
+  await wait(30);
+
   assert.deepEqual(
     outbound.map((message) => message.method),
     [
@@ -67,9 +88,7 @@ test("desktop-origin active runs replay thinking and exec command activity on re
       "codex/event/exec_command_end",
     ]
   );
-  assert.equal(outbound[1].params.delta, "Thinking...");
-  assert.equal(outbound[0].params.remodexDesktopMirror, true);
-  assert.equal(outbound[2].params.command, "git status");
+  assert.equal(outbound[3].params.command, "git status");
   assert.equal(outbound[3].params.chunk, "On branch main");
 });
 
@@ -92,7 +111,7 @@ test("desktop-origin active runs emit activity heartbeat while rollout is quiet"
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 80,
@@ -117,7 +136,7 @@ test("desktop-origin active runs emit activity heartbeat while rollout is quiet"
   assert.equal(outbound.at(-1).params.remodexRolloutLiveMirror, true);
 });
 
-test("desktop-origin bootstrap replays the pending user message and final assistant text", async (t) => {
+test("desktop-origin bootstrap replays pending user and assistant text in one catch-up batch", async (t) => {
   const { homeDir } = createTemporaryRolloutHome({
     threadId: "thread-chat",
     originator: "Codex Desktop",
@@ -138,7 +157,7 @@ test("desktop-origin bootstrap replays the pending user message and final assist
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -175,6 +194,124 @@ test("desktop-origin bootstrap replays the pending user message and final assist
   );
 });
 
+test("desktop-origin bootstrap drops aborted run state before replaying the next turn", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-aborted-bootstrap",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      userMessage("old interrupted screenshot"),
+      taskStarted("turn-aborted"),
+      userMessage("old active follow-up"),
+      turnAborted("turn-aborted"),
+      taskStarted("turn-current"),
+      userMessage("current follow-up"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      recordOutbound(outbound, message);
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-aborted-bootstrap",
+    },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(
+    outbound.map((message) => message.method),
+    [
+      "turn/started",
+      "item/reasoning/textDelta",
+      "codex/event/user_message",
+    ]
+  );
+  assert.equal(outbound[0].params.turnId, "turn-current");
+  assert.equal(outbound[2].params.turnId, "turn-current");
+  assert.equal(outbound[2].params.message, "current follow-up");
+  assert.equal(outbound.some((message) => message.params?.message === "old interrupted screenshot"), false);
+  assert.equal(outbound.some((message) => message.params?.message === "old active follow-up"), false);
+});
+
+test("desktop-origin bootstrap replay splits large catch-up sets into ordered batches", async (t) => {
+  const toolCalls = Array.from({ length: 105 }, (_, index) => (
+    functionCall(`call-${index}`, "exec_command", {
+      cmd: `echo ${index}`,
+      workdir: "/repo",
+    })
+  ));
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-large-bootstrap",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-large-bootstrap"),
+      ...toolCalls,
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const rawOutbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      rawOutbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-large-bootstrap",
+    },
+  }));
+
+  await wait(30);
+
+  assert.equal(rawOutbound.length, 3);
+  assert.deepEqual(rawOutbound.map((message) => message.method), [
+    "remodex/rollout/bootstrapReplay",
+    "remodex/rollout/bootstrapReplay",
+    "remodex/rollout/bootstrapReplay",
+  ]);
+  assert.equal(rawOutbound[0].params.batchIndex, 0);
+  assert.equal(rawOutbound[1].params.batchIndex, 1);
+  assert.equal(rawOutbound[2].params.batchIndex, 2);
+  assert.equal(rawOutbound[0].params.replayId, rawOutbound[1].params.replayId);
+  assert.equal(rawOutbound[0].params.replayId, rawOutbound[2].params.replayId);
+  assert.equal(rawOutbound[0].params.batchCount, 3);
+  assert.equal(rawOutbound[1].params.batchCount, 3);
+  assert.equal(rawOutbound[2].params.batchCount, 3);
+  assert.equal(rawOutbound[0].params.notifications.length, 50);
+  assert.equal(rawOutbound[1].params.notifications.length, 50);
+  assert.equal(rawOutbound[2].params.notifications.length, 7);
+  assert.equal(rawOutbound[0].params.notifications[0].method, "turn/started");
+  assert.equal(rawOutbound[2].params.notifications.at(-1).params.command, "echo 104");
+});
+
 test("desktop-origin live tail attaches pre-task user messages to the next turn", async (t) => {
   const { homeDir, rolloutPath } = createTemporaryRolloutHome({
     threadId: "thread-live-prelude",
@@ -192,7 +329,7 @@ test("desktop-origin live tail attaches pre-task user messages to the next turn"
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 100,
@@ -235,13 +372,6 @@ test("desktop-origin update_plan calls mirror as structured activity plan update
     source: "desktop",
     lines: [
       taskStarted("turn-plan"),
-      functionCall("call-plan", "update_plan", {
-        explanation: "Break the work into safe slices.",
-        plan: [
-          { step: "Inspect plan rendering", status: "completed" },
-          { step: "Keep it visible", status: "in_progress" },
-        ],
-      }),
     ],
   });
   const previousCodexHome = process.env.CODEX_HOME;
@@ -254,7 +384,7 @@ test("desktop-origin update_plan calls mirror as structured activity plan update
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -268,6 +398,16 @@ test("desktop-origin update_plan calls mirror as structured activity plan update
     },
   }));
 
+  await wait(20);
+  appendRolloutLines(rolloutPathForHome(homeDir, "thread-plan"), [
+    functionCall("call-plan", "update_plan", {
+      explanation: "Break the work into safe slices.",
+      plan: [
+        { step: "Inspect plan rendering", status: "completed" },
+        { step: "Keep it visible", status: "in_progress" },
+      ],
+    }),
+  ]);
   await wait(30);
 
   assert.deepEqual(
@@ -311,7 +451,7 @@ test("desktop-origin completed plan items mirror as final plan rows", async (t) 
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -374,7 +514,7 @@ test("desktop-origin task_started without turn_id still mirrors live file change
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -426,7 +566,6 @@ test("desktop-origin active runs mirror generated image previews", async (t) => 
     source: "desktop",
     lines: [
       taskStarted("turn-image"),
-      imageGenerationCall("ig_123"),
     ],
   });
   const previousCodexHome = process.env.CODEX_HOME;
@@ -439,7 +578,7 @@ test("desktop-origin active runs mirror generated image previews", async (t) => 
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -453,6 +592,10 @@ test("desktop-origin active runs mirror generated image previews", async (t) => 
     },
   }));
 
+  await wait(20);
+  appendRolloutLines(rolloutPathForHome(homeDir, "thread-image"), [
+    imageGenerationCall("ig_123"),
+  ]);
   await wait(30);
 
   assert.deepEqual(
@@ -479,7 +622,6 @@ test("desktop-origin active runs mirror imageView items", async (t) => {
     source: "desktop",
     lines: [
       taskStarted("turn-image-view"),
-      imageViewItem("view_123", "/tmp/generated view.png"),
     ],
   });
   const previousCodexHome = process.env.CODEX_HOME;
@@ -492,7 +634,7 @@ test("desktop-origin active runs mirror imageView items", async (t) => {
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -506,6 +648,10 @@ test("desktop-origin active runs mirror imageView items", async (t) => {
     },
   }));
 
+  await wait(20);
+  appendRolloutLines(rolloutPathForHome(homeDir, "thread-image-view"), [
+    imageViewItem("view_123", "/tmp/generated view.png"),
+  ]);
   await wait(30);
 
   assert.deepEqual(
@@ -527,7 +673,6 @@ test("desktop-origin active runs mirror image_generation items", async (t) => {
     source: "desktop",
     lines: [
       taskStarted("turn-image-generation"),
-      imageGenerationItem("ig_generation", "/tmp/generated item.png"),
     ],
   });
   const previousCodexHome = process.env.CODEX_HOME;
@@ -540,7 +685,7 @@ test("desktop-origin active runs mirror image_generation items", async (t) => {
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -554,6 +699,10 @@ test("desktop-origin active runs mirror image_generation items", async (t) => {
     },
   }));
 
+  await wait(20);
+  appendRolloutLines(rolloutPathForHome(homeDir, "thread-image-generation"), [
+    imageGenerationItem("ig_generation", "/tmp/generated item.png"),
+  ]);
   await wait(30);
 
   assert.deepEqual(
@@ -575,7 +724,6 @@ test("desktop-origin active runs mirror generated image end events without respo
     source: "desktop",
     lines: [
       taskStarted("turn-image-event"),
-      imageGenerationEnd("turn-image-event", "ig_event", "/tmp/generated event.png"),
     ],
   });
   const previousCodexHome = process.env.CODEX_HOME;
@@ -588,7 +736,7 @@ test("desktop-origin active runs mirror generated image end events without respo
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -602,6 +750,10 @@ test("desktop-origin active runs mirror generated image end events without respo
     },
   }));
 
+  await wait(20);
+  appendRolloutLines(rolloutPathForHome(homeDir, "thread-image-event"), [
+    imageGenerationEnd("turn-image-event", "ig_event", "/tmp/generated event.png"),
+  ]);
   await wait(30);
 
   assert.deepEqual(
@@ -641,7 +793,7 @@ test("phone-origin rollouts do not emit mirrored updates", async (t) => {
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -677,7 +829,7 @@ test("desktop-origin idle watchers stream new rollout growth after the phone reo
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 100,
@@ -719,14 +871,12 @@ test("desktop-origin rollouts mirror custom apply_patch as file-change lifecycle
     "*** End Patch",
     "",
   ].join("\n");
-  const { homeDir } = createTemporaryRolloutHome({
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
     threadId: "thread-patch",
     originator: "Codex Desktop",
     source: "desktop",
     lines: [
       taskStarted("turn-patch"),
-      customToolCall("call-patch", "apply_patch", patch),
-      patchApplyEnd("turn-patch", "call-patch"),
     ],
   });
   const previousCodexHome = process.env.CODEX_HOME;
@@ -739,7 +889,7 @@ test("desktop-origin rollouts mirror custom apply_patch as file-change lifecycle
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -753,6 +903,11 @@ test("desktop-origin rollouts mirror custom apply_patch as file-change lifecycle
     },
   }));
 
+  await wait(20);
+  appendRolloutLines(rolloutPath, [
+    customToolCall("call-patch", "apply_patch", patch),
+    patchApplyEnd("turn-patch", "call-patch"),
+  ]);
   await wait(30);
 
   assert.deepEqual(
@@ -817,7 +972,7 @@ test("desktop-origin rollouts emit turn-end file-change snapshot after final tex
   const outbound = [];
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
+      recordOutbound(outbound, message);
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
@@ -881,8 +1036,31 @@ function createTemporaryRolloutHome({ threadId, originator, source, lines }) {
   return { homeDir, rolloutPath };
 }
 
+function rolloutPathForHome(homeDir, threadId) {
+  return path.join(
+    homeDir,
+    "sessions",
+    "2026",
+    "03",
+    "15",
+    `rollout-2026-03-15T19-47-36-${threadId}.jsonl`
+  );
+}
+
 function appendRolloutLines(rolloutPath, lines) {
   fs.appendFileSync(rolloutPath, `${lines.join("\n")}\n`);
+}
+
+function recordOutbound(outbound, message) {
+  const parsed = JSON.parse(message);
+  if (parsed.method !== "remodex/rollout/bootstrapReplay") {
+    outbound.push(parsed);
+    return;
+  }
+
+  for (const notification of parsed.params?.notifications || []) {
+    outbound.push(notification);
+  }
 }
 
 function taskStarted(turnId) {
@@ -996,6 +1174,18 @@ function taskComplete(turnId) {
     payload: {
       type: "task_complete",
       turn_id: turnId,
+    },
+  });
+}
+
+function turnAborted(turnId) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:41.000Z",
+    type: "event_msg",
+    payload: {
+      type: "turn_aborted",
+      turn_id: turnId,
+      reason: "interrupted",
     },
   });
 }

@@ -17,7 +17,8 @@ struct FileAutocompletePanel: View {
     var onSelectPlugin: (CodexPluginMetadata) -> Void = { _ in }
 
     private static let rowHeight: CGFloat = 38
-    private static let maxVisibleRows = 6
+    // Keep the floating composer menu compact above the iOS keyboard.
+    private static let maxVisibleRows = 4
     private static let sectionHeaderHeight: CGFloat = 24
 
     private static func visibleListHeight(for count: Int) -> CGFloat {

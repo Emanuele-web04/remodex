@@ -386,64 +386,36 @@ extension CodexService {
             throw CodexSecureTransportError.invalidQR("Enter a valid pairing code.")
         }
 
-        guard let relayURL = preferredPairingCodeRelayURL,
-              let resolveURL = pairingCodeResolveURL(from: relayURL) else {
+        guard let relayURL = preferredPairingCodeRelayURL else {
             throw CodexSecureTransportError.invalidQR(
                 "This iPhone does not know which relay to ask for that pairing code yet. Scan the QR code instead."
             )
         }
 
-        var request = URLRequest(url: resolveURL)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 8
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(["code": normalizedCode])
-
-        let session = trustedSessionResolveURLSession(for: resolveURL)
-        defer { session.invalidateAndCancel() }
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw CodexSecureTransportError.invalidQR("Could not reach the relay for this pairing code. Try again or scan the QR code.")
+        let resolveURLs = CodexPairingCodeResolveURLBuilder.candidates(from: relayURL)
+        guard !resolveURLs.isEmpty else {
+            throw CodexSecureTransportError.invalidQR("The relay URL for pairing codes is invalid.")
         }
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw CodexSecureTransportError.invalidQR("The relay returned an invalid response for this pairing code.")
-        }
-
-        if (200..<300).contains(httpResponse.statusCode),
-           let resolved = try? JSONDecoder().decode(CodexPairingCodeResolveResponse.self, from: data),
-           resolved.ok {
-            return CodexPairingQRPayload(
-                v: resolved.v,
-                relay: relayURL,
-                sessionId: resolved.sessionId,
-                macDeviceId: resolved.macDeviceId,
-                macIdentityPublicKey: resolved.macIdentityPublicKey,
-                expiresAt: resolved.expiresAt,
-                displayName: resolved.displayName
-            )
-        }
-
-        let errorResponse = try? JSONDecoder().decode(CodexRelayErrorResponse.self, from: data)
-        switch errorResponse?.code {
-        case "pairing_code_expired":
-            throw CodexSecureTransportError.invalidQR("This pairing code has expired. Generate a new one from the Mac bridge.")
-        case "pairing_code_unavailable":
-            throw CodexSecureTransportError.invalidQR("That pairing code is not available right now. Make sure your Mac bridge is running and try again.")
-        default:
-            if httpResponse.statusCode == 404 {
-                throw CodexSecureTransportError.invalidQR("This relay does not support pairing codes yet. Scan the QR code instead.")
+        var lastRetriableError: CodexSecureTransportError?
+        for (index, resolveURL) in resolveURLs.enumerated() {
+            do {
+                return try await sendPairingCodeResolveRequest(
+                    code: normalizedCode,
+                    relayURL: relayURL,
+                    resolveURL: resolveURL
+                )
+            } catch let error as CodexSecureTransportError {
+                guard shouldTryNextPairingCodeResolveCandidate(after: error),
+                      index < resolveURLs.count - 1 else {
+                    throw error
+                }
+                lastRetriableError = error
+                continue
             }
-            throw CodexSecureTransportError.invalidQR(
-                errorResponse?.error ?? "The relay could not resolve that pairing code."
-            )
         }
+
+        throw lastRetriableError ?? CodexSecureTransportError.invalidQR("The relay could not resolve that pairing code.")
     }
 }
 
@@ -793,45 +765,77 @@ extension CodexService {
 enum CodexTrustedSessionResolveURLBuilder {
     // Builds both proxy-relative and root HTTP resolve routes from the remembered WebSocket relay URL.
     static func candidates(from relayURL: String) -> [URL] {
-        guard var components = URLComponents(string: relayURL) else {
-            return []
-        }
+        relayResolveCandidates(
+            from: relayURL,
+            route: ["v1", "trusted", "session", "resolve"],
+            includePathPreservingRoute: false
+        )
+    }
+}
 
-        normalizeRelayResolveComponents(&components)
+enum CodexPairingCodeResolveURLBuilder {
+    // Tries path-preserving, proxy-stripped, and root resolve routes without exposing the relay URL in UI errors.
+    static func candidates(from relayURL: String) -> [URL] {
+        relayResolveCandidates(
+            from: relayURL,
+            route: ["v1", "pairing", "code", "resolve"],
+            includePathPreservingRoute: true
+        )
+    }
+}
 
-        var candidates: [URL] = []
-        let pathComponents = components.path.split(separator: "/").map(String.init)
-        if pathComponents.last == "relay" {
-            let prefix = pathComponents.dropLast()
-            components.path = "/" + (prefix + ["v1", "trusted", "session", "resolve"]).joined(separator: "/")
-        } else {
-            components.path = "/v1/trusted/session/resolve"
-        }
-        if let url = components.url {
-            candidates.append(url)
-        }
-
-        if var rootComponents = URLComponents(string: relayURL) {
-            normalizeRelayResolveComponents(&rootComponents)
-            rootComponents.path = "/v1/trusted/session/resolve"
-            if let rootURL = rootComponents.url,
-               !candidates.contains(where: { $0.absoluteString == rootURL.absoluteString }) {
-                candidates.append(rootURL)
-            }
-        }
-
-        return candidates
+private func relayResolveCandidates(
+    from relayURL: String,
+    route: [String],
+    includePathPreservingRoute: Bool
+) -> [URL] {
+    guard var components = URLComponents(string: relayURL) else {
+        return []
     }
 
-    private static func normalizeRelayResolveComponents(_ components: inout URLComponents) {
-        if components.scheme == "wss" {
-            components.scheme = "https"
-        } else if components.scheme == "ws" {
-            components.scheme = "http"
-        }
-        components.query = nil
-        components.fragment = nil
+    normalizeRelayResolveComponents(&components)
+
+    var candidates: [URL] = []
+    let pathComponents = components.path.split(separator: "/").map(String.init)
+
+    if includePathPreservingRoute, !pathComponents.isEmpty {
+        var preservingComponents = components
+        preservingComponents.path = "/" + (pathComponents + route).joined(separator: "/")
+        appendUniqueURL(preservingComponents.url, to: &candidates)
     }
+
+    var proxyComponents = components
+    if pathComponents.last == "relay" {
+        let prefix = pathComponents.dropLast()
+        proxyComponents.path = "/" + (prefix + route).joined(separator: "/")
+    } else {
+        proxyComponents.path = "/" + route.joined(separator: "/")
+    }
+    appendUniqueURL(proxyComponents.url, to: &candidates)
+
+    var rootComponents = components
+    rootComponents.path = "/" + route.joined(separator: "/")
+    appendUniqueURL(rootComponents.url, to: &candidates)
+
+    return candidates
+}
+
+private func normalizeRelayResolveComponents(_ components: inout URLComponents) {
+    if components.scheme == "wss" {
+        components.scheme = "https"
+    } else if components.scheme == "ws" {
+        components.scheme = "http"
+    }
+    components.query = nil
+    components.fragment = nil
+}
+
+private func appendUniqueURL(_ url: URL?, to candidates: inout [URL]) {
+    guard let url,
+          !candidates.contains(where: { $0.absoluteString == url.absoluteString }) else {
+        return
+    }
+    candidates.append(url)
 }
 
 private extension CodexService {
@@ -1200,26 +1204,70 @@ private extension CodexService {
         return defaultRelayURL.isEmpty ? nil : defaultRelayURL
     }
 
-    private func pairingCodeResolveURL(from relayURL: String) -> URL? {
-        guard var components = URLComponents(string: relayURL) else {
-            return nil
+    private func sendPairingCodeResolveRequest(
+        code: String,
+        relayURL: String,
+        resolveURL: URL
+    ) async throws -> CodexPairingQRPayload {
+        var request = URLRequest(url: resolveURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["code": code])
+
+        let session = trustedSessionResolveURLSession(for: resolveURL)
+        defer { session.invalidateAndCancel() }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw CodexSecureTransportError.invalidQR("Could not reach the relay for this pairing code. Try again or scan the QR code.")
         }
 
-        if components.scheme == "wss" {
-            components.scheme = "https"
-        } else if components.scheme == "ws" {
-            components.scheme = "http"
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw CodexSecureTransportError.invalidQR("The relay returned an invalid response for this pairing code.")
         }
 
-        let pathComponents = components.path.split(separator: "/").map(String.init)
-        if pathComponents.last == "relay" {
-            let prefix = pathComponents.dropLast()
-            components.path = "/" + (prefix + ["v1", "pairing", "code", "resolve"]).joined(separator: "/")
-        } else {
-            components.path = "/v1/pairing/code/resolve"
+        if (200..<300).contains(httpResponse.statusCode),
+           let resolved = try? JSONDecoder().decode(CodexPairingCodeResolveResponse.self, from: data),
+           resolved.ok {
+            return CodexPairingQRPayload(
+                v: resolved.v,
+                relay: relayURL,
+                sessionId: resolved.sessionId,
+                macDeviceId: resolved.macDeviceId,
+                macIdentityPublicKey: resolved.macIdentityPublicKey,
+                expiresAt: resolved.expiresAt,
+                displayName: resolved.displayName
+            )
         }
 
-        return components.url
+        let errorResponse = try? JSONDecoder().decode(CodexRelayErrorResponse.self, from: data)
+        switch errorResponse?.code {
+        case "pairing_code_expired":
+            throw CodexSecureTransportError.invalidQR("This pairing code has expired. Generate a new one from the Mac bridge.")
+        case "pairing_code_unavailable":
+            throw CodexSecureTransportError.invalidQR("That pairing code is not available right now. Make sure your Mac bridge is running and try again.")
+        default:
+            if httpResponse.statusCode == 404 {
+                throw CodexSecureTransportError.invalidQR("This relay does not support pairing codes yet. Scan the QR code instead.")
+            }
+            throw CodexSecureTransportError.invalidQR(
+                errorResponse?.error ?? "The relay could not resolve that pairing code."
+            )
+        }
+    }
+
+    private func shouldTryNextPairingCodeResolveCandidate(after error: CodexSecureTransportError) -> Bool {
+        guard case .invalidQR(let message) = error else {
+            return false
+        }
+        return message == "This relay does not support pairing codes yet. Scan the QR code instead."
+            || message == "Could not reach the relay for this pairing code. Try again or scan the QR code."
     }
 
     // Uses a non-proxying URLSession for local/private-overlay relays so trusted reconnect

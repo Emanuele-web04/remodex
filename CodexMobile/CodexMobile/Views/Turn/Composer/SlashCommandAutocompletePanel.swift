@@ -22,7 +22,8 @@ struct SlashCommandAutocompletePanel: View {
     let onClose: () -> Void
 
     private static let rowHeight: CGFloat = 50
-    private static let maxVisibleRows = 6
+    // Keep the floating composer menu compact above the iOS keyboard.
+    private static let maxVisibleRows = 4
 
     private static func visibleListHeight(for count: Int) -> CGFloat {
         rowHeight * CGFloat(min(count, maxVisibleRows))

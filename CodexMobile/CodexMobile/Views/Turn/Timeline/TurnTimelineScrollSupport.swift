@@ -37,6 +37,8 @@ struct TurnTimelineRenderItemsCacheSignature: Equatable {
     let threadID: String
     let timelineChangeToken: Int
     let visibleTailCount: Int
+    let activeTurnID: String?
+    let isThreadRunning: Bool
     let messageCount: Int
     let firstMessageID: String?
     let lastMessageID: String?
@@ -53,6 +55,8 @@ final class TurnTimelineRenderItemsCache {
         for signature: TurnTimelineRenderItemsCacheSignature,
         messages: ArraySlice<CodexMessage>,
         completedTurnIDs: Set<String>,
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false,
         projector: (([CodexMessage], Set<String>) -> [TurnTimelineRenderItem])? = nil
     ) -> [TurnTimelineRenderItem] {
         if signature == cachedSignature {
@@ -63,7 +67,9 @@ final class TurnTimelineRenderItemsCache {
         let projectedItems = projector.map { $0(sourceMessages, completedTurnIDs) }
             ?? TurnTimelineRenderProjection.project(
                 messages: sourceMessages,
-                completedTurnIDs: completedTurnIDs
+                completedTurnIDs: completedTurnIDs,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning
             )
         cachedSignature = signature
         cachedItems = projectedItems

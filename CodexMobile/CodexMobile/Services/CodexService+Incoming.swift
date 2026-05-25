@@ -10,6 +10,10 @@ typealias IncomingParamsObject = [String: JSONValue]
 
 private let desktopIpcActionSource = "desktop-ipc-action-follower"
 
+private enum RolloutBootstrapReplayPolicy {
+    static let appliedBatchKeyLimit = 512
+}
+
 private struct CommandExecutionMessageContext {
     let threadId: String
     let turnId: String?
@@ -188,6 +192,9 @@ extension CodexService {
         }
 
         switch method {
+        case "remodex/rollout/bootstrapReplay":
+            handleRolloutBootstrapReplay(paramsObject)
+
         case "thread/started":
             handleThreadStarted(paramsObject)
 
@@ -318,6 +325,193 @@ extension CodexService {
                 return
             }
         }
+    }
+
+    // Applies desktop rollout catch-up as a batch so old activity stays visible
+    // without arriving as thousands of separate live transport frames.
+    private func handleRolloutBootstrapReplay(_ paramsObject: IncomingParamsObject?) {
+        let notifications = paramsObject?["notifications"]?.arrayValue ?? []
+        guard !notifications.isEmpty else {
+            return
+        }
+
+        guard let threadId = rolloutBootstrapReplayThreadId(
+            paramsObject: paramsObject,
+            notifications: notifications
+        ) else {
+            applyRolloutBootstrapReplayNotifications(
+                notifications,
+                flushDeferredWork: true
+            )
+            return
+        }
+
+        let flushDeferredWork = rolloutBootstrapReplayIsFinalBatch(paramsObject)
+        if let replayBatchKey = rolloutBootstrapReplayBatchKey(
+            paramsObject: paramsObject,
+            threadId: threadId
+        ) {
+            guard rememberAppliedRolloutBootstrapReplayBatchKey(replayBatchKey) else {
+                return
+            }
+        }
+
+        applyRolloutBootstrapReplayNotifications(
+            notifications,
+            flushDeferredWork: flushDeferredWork
+        )
+    }
+
+    private func rememberAppliedRolloutBootstrapReplayBatchKey(_ key: String) -> Bool {
+        guard !appliedRolloutBootstrapReplayBatchKeys.contains(key) else {
+            return false
+        }
+
+        appliedRolloutBootstrapReplayBatchKeys.insert(key)
+        appliedRolloutBootstrapReplayBatchKeyOrder.append(key)
+        while appliedRolloutBootstrapReplayBatchKeyOrder.count > RolloutBootstrapReplayPolicy.appliedBatchKeyLimit {
+            let oldestKey = appliedRolloutBootstrapReplayBatchKeyOrder.removeFirst()
+            appliedRolloutBootstrapReplayBatchKeys.remove(oldestKey)
+        }
+        return true
+    }
+
+    private func rolloutBootstrapReplayBatchKey(
+        paramsObject: IncomingParamsObject?,
+        threadId: String
+    ) -> String? {
+        guard let replayId = normalizedIdentifier(paramsObject?["replayId"]?.stringValue) else {
+            return nil
+        }
+
+        let batchIndex = paramsObject?["batchIndex"]?.intValue
+            ?? Int(paramsObject?["batchIndex"]?.stringValue ?? "")
+            ?? 0
+        return "\(threadId)|\(replayId)|\(batchIndex)"
+    }
+
+    private func rolloutBootstrapReplayIsFinalBatch(_ paramsObject: IncomingParamsObject?) -> Bool {
+        let batchIndex = paramsObject?["batchIndex"]?.intValue
+            ?? Int(paramsObject?["batchIndex"]?.stringValue ?? "")
+            ?? 0
+        guard let batchCount = paramsObject?["batchCount"]?.intValue
+            ?? Int(paramsObject?["batchCount"]?.stringValue ?? ""),
+              batchCount > 0 else {
+            return true
+        }
+
+        return batchIndex >= batchCount - 1
+    }
+
+    private func rolloutBootstrapReplayThreadId(
+        paramsObject: IncomingParamsObject?,
+        notifications: [JSONValue]
+    ) -> String? {
+        if let threadId = normalizedIdentifier(paramsObject?["threadId"]?.stringValue) {
+            return threadId
+        }
+
+        for notificationValue in notifications {
+            guard let notification = notificationValue.objectValue,
+                  let params = notification["params"]?.objectValue,
+                  let threadId = resolveThreadID(from: params) else {
+                continue
+            }
+            return threadId
+        }
+        return nil
+    }
+
+    private func applyRolloutBootstrapReplayNotifications(
+        _ notifications: [JSONValue],
+        flushDeferredWork: Bool
+    ) {
+        beginRolloutBootstrapReplayCoalescing()
+        defer {
+            endRolloutBootstrapReplayCoalescing(flushDeferredWork: flushDeferredWork)
+        }
+
+        for notificationValue in notifications {
+            guard let notification = notificationValue.objectValue,
+                  let method = notification["method"]?.stringValue,
+                  method != "remodex/rollout/bootstrapReplay" else {
+                continue
+            }
+            handleNotification(
+                method: normalizedIncomingMethodName(method),
+                params: notification["params"]
+            )
+        }
+    }
+
+    private func beginRolloutBootstrapReplayCoalescing() {
+        rolloutBootstrapReplayCoalescingDepth += 1
+    }
+
+    private func endRolloutBootstrapReplayCoalescing(flushDeferredWork: Bool) {
+        guard rolloutBootstrapReplayCoalescingDepth > 0 else {
+            return
+        }
+
+        rolloutBootstrapReplayCoalescingDepth -= 1
+        guard rolloutBootstrapReplayCoalescingDepth == 0 else {
+            return
+        }
+
+        let threadIDs = rolloutBootstrapReplayDeferredTimelineThreadIDs
+        let syncThreadIDs = rolloutBootstrapReplayDeferredSyncThreadIDs
+        let historyReconcileThreadIDs = rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs
+        let shouldPersistMessages = rolloutBootstrapReplayNeedsMessagePersist
+        rolloutBootstrapReplayDeferredTimelineThreadIDs.removeAll()
+        if flushDeferredWork {
+            rolloutBootstrapReplayDeferredSyncThreadIDs.removeAll()
+            rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs.removeAll()
+        }
+        rolloutBootstrapReplayNeedsMessagePersist = false
+
+        for threadId in threadIDs {
+            let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
+            refreshThreadTimelineState(for: threadId)
+            if activeThreadId == threadId {
+                currentOutput = latestAssistantText
+            }
+        }
+
+        if shouldPersistMessages {
+            persistMessages()
+        }
+        if flushDeferredWork {
+            for threadId in syncThreadIDs {
+                requestImmediateSync(threadId: threadId)
+            }
+            for threadId in historyReconcileThreadIDs {
+                requestThreadHistoryReconcile(threadId: threadId)
+            }
+        }
+    }
+
+    func cancelRolloutBootstrapReplayWork(for threadId: String) {
+        rolloutBootstrapReplayDeferredTimelineThreadIDs.remove(threadId)
+        rolloutBootstrapReplayDeferredSyncThreadIDs.remove(threadId)
+        rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs.remove(threadId)
+        let keyPrefix = "\(threadId)|"
+        appliedRolloutBootstrapReplayBatchKeyOrder.removeAll { key in
+            if key.hasPrefix(keyPrefix) {
+                appliedRolloutBootstrapReplayBatchKeys.remove(key)
+                return true
+            }
+            return false
+        }
+    }
+
+    func cancelAllRolloutBootstrapReplayWork() {
+        appliedRolloutBootstrapReplayBatchKeys.removeAll()
+        appliedRolloutBootstrapReplayBatchKeyOrder.removeAll()
+        rolloutBootstrapReplayCoalescingDepth = 0
+        rolloutBootstrapReplayNeedsMessagePersist = false
+        rolloutBootstrapReplayDeferredTimelineThreadIDs.removeAll()
+        rolloutBootstrapReplayDeferredSyncThreadIDs.removeAll()
+        rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs.removeAll()
     }
 
     private func noteDesktopMirroredActivityIfNeeded(

@@ -172,6 +172,7 @@ extension CodexService {
         assistantRevertStateRevision = 0
         workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }
         workspaceCheckpointCopyTaskByTurnID.removeAll()
+        cancelAllRolloutBootstrapReplayWork()
         supportsServiceTier = true
         hasPresentedServiceTierBridgeUpdatePrompt = false
         supportsBridgeVoiceTranscription = true

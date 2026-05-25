@@ -91,6 +91,11 @@ struct TurnView: View {
             || viewModel.isSkillAutocompleteVisible
             || viewModel.isPluginAutocompleteVisible
             || viewModel.slashCommandPanelState != .hidden
+        let activeFileChangeStatus = FileChangeStatusSnapshot.activeTurnSnapshot(
+            from: renderSnapshot.messages,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning
+        )
         let isWorktreeHandoffAvailable = isWorktreeHandoffAvailable(
             isThreadRunning: isThreadRunning,
             gitWorkingDirectory: gitWorkingDirectory
@@ -163,6 +168,7 @@ struct TurnView: View {
                     isThreadRunning: isThreadRunning,
                     isEmptyThread: isEmptyThread,
                     isWorktreeProject: isWorktreeProject,
+                    activeFileChangeStatus: activeFileChangeStatus,
                     showsGitControls: showsGitControls,
                     gitWorkingDirectory: gitWorkingDirectory
                 )),
@@ -762,6 +768,14 @@ struct TurnView: View {
 
     @ViewBuilder
     private func composerStructuredPromptReplacement(message: CodexMessage) -> some View {
+        let activeTurnID = codex.activeTurnID(for: thread.id)
+        let renderSnapshot = codex.timelineState(for: thread.id).renderSnapshot
+        let activeFileChangeStatus = FileChangeStatusSnapshot.activeTurnSnapshot(
+            from: renderSnapshot.messages,
+            activeTurnID: activeTurnID,
+            isThreadRunning: renderSnapshot.isThreadRunning
+        )
+
         if let request = message.structuredUserInputRequest {
             let isDismissed = viewModel.isStructuredPlanPromptDismissed(request.requestID, codex: codex)
             let isDismissing = viewModel.isStructuredPlanPromptDismissing(request.requestID, codex: codex)
@@ -782,10 +796,11 @@ struct TurnView: View {
             } else {
                 composerWithSubagentAccessory(
                     currentThread: currentResolvedThread,
-                    activeTurnID: codex.activeTurnID(for: thread.id),
-                    isThreadRunning: codex.timelineState(for: thread.id).renderSnapshot.isThreadRunning,
-                    isEmptyThread: codex.timelineState(for: thread.id).renderSnapshot.messages.isEmpty,
+                    activeTurnID: activeTurnID,
+                    isThreadRunning: renderSnapshot.isThreadRunning,
+                    isEmptyThread: renderSnapshot.messages.isEmpty,
                     isWorktreeProject: currentResolvedThread.isManagedWorktreeProject,
+                    activeFileChangeStatus: activeFileChangeStatus,
                     showsGitControls: codex.isConnected && currentResolvedThread.gitWorkingDirectory != nil,
                     gitWorkingDirectory: currentResolvedThread.gitWorkingDirectory
                 )
@@ -793,10 +808,11 @@ struct TurnView: View {
         } else {
             composerWithSubagentAccessory(
                 currentThread: currentResolvedThread,
-                activeTurnID: codex.activeTurnID(for: thread.id),
-                isThreadRunning: codex.timelineState(for: thread.id).renderSnapshot.isThreadRunning,
-                isEmptyThread: codex.timelineState(for: thread.id).renderSnapshot.messages.isEmpty,
+                activeTurnID: activeTurnID,
+                isThreadRunning: renderSnapshot.isThreadRunning,
+                isEmptyThread: renderSnapshot.messages.isEmpty,
                 isWorktreeProject: currentResolvedThread.isManagedWorktreeProject,
+                activeFileChangeStatus: activeFileChangeStatus,
                 showsGitControls: codex.isConnected && currentResolvedThread.gitWorkingDirectory != nil,
                 gitWorkingDirectory: currentResolvedThread.gitWorkingDirectory
             )
@@ -1325,6 +1341,7 @@ struct TurnView: View {
         isThreadRunning: Bool,
         isEmptyThread: Bool,
         isWorktreeProject: Bool,
+        activeFileChangeStatus: FileChangeStatusSnapshot?,
         showsGitControls: Bool,
         gitWorkingDirectory: String?
     ) -> some View {
@@ -1354,6 +1371,7 @@ struct TurnView: View {
                 isThreadRunning: isThreadRunning,
                 isEmptyThread: isEmptyThread,
                 isWorktreeProject: isWorktreeProject,
+                activeFileChangeStatus: activeFileChangeStatus,
                 canForkLocally: gitWorkingDirectory != nil && WorktreeFlowCoordinator.localForkProjectPath(
                     for: currentThread,
                     localCheckoutPath: viewModel.gitLocalCheckoutPath

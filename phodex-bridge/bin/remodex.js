@@ -158,7 +158,7 @@ async function main({
         ok: true,
         currentVersion: version,
         plistPath: result?.plistPath,
-        pairingSession: result?.pairingSession,
+        pairingSession: sanitizePairingSessionForOutput(result?.pairingSession),
       });
       return;
     }

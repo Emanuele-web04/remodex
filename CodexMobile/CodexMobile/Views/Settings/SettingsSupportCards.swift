@@ -8,25 +8,28 @@ import SwiftUI
 import UIKit
 
 struct SettingsAboutCard: View {
-    @State private var isShowingAbout = false
-
     var body: some View {
         SettingsCard(title: "About") {
             Text("Chats are End-to-end encrypted between your iPhone and paired device. The relay only sees ciphertext and connection metadata after the secure handshake completes.")
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)
 
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                isShowingAbout = true
+            // Keep About inside the Settings navigation stack so List row refreshes
+            // cannot dismiss a nested full-screen cover back to the app root.
+            NavigationLink {
+                AboutRemodexView()
             } label: {
                 settingsAccessoryRow(
                     title: "How Remodex Works",
+                    showsDisclosure: false,
                     leading: {
                         RemodexIcon.image(systemName: "info.circle")
                     }
                 )
             }
+            .simultaneousGesture(TapGesture().onEnded {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            })
 
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
@@ -70,15 +73,13 @@ struct SettingsAboutCard: View {
                 )
             }
         }
-        .fullScreenCover(isPresented: $isShowingAbout) {
-            AboutRemodexView()
-        }
     }
 
     // Mimics a native disclosure-style List row while supporting both
     // SF Symbols and custom asset icons in the leading slot.
     private func settingsAccessoryRow<Leading: View>(
         title: String,
+        showsDisclosure: Bool = true,
         @ViewBuilder leading: () -> Leading
     ) -> some View {
         HStack(spacing: 12) {
@@ -86,9 +87,11 @@ struct SettingsAboutCard: View {
                 .frame(width: 22, alignment: .center)
             Text(title)
             Spacer()
-            RemodexIcon.image(systemName: "chevron.right")
-                .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(.tertiary)
+            if showsDisclosure {
+                RemodexIcon.image(systemName: "chevron.right")
+                    .font(AppFont.caption(weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
         }
         .foregroundStyle(.primary)
         .contentShape(Rectangle())

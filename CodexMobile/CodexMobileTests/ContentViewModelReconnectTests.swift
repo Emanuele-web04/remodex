@@ -50,6 +50,35 @@ final class ContentViewModelReconnectTests: XCTestCase {
         )
     }
 
+    func testPairingCodeResolveURLCandidatesTryRelayMountedRouteBeforeRootRoute() {
+        let candidates = CodexPairingCodeResolveURLBuilder.candidates(
+            from: "wss://relay.example.com/relay?stale=1"
+        )
+
+        XCTAssertEqual(
+            candidates.map(\.absoluteString),
+            [
+                "https://relay.example.com/relay/v1/pairing/code/resolve",
+                "https://relay.example.com/v1/pairing/code/resolve",
+            ]
+        )
+    }
+
+    func testPairingCodeResolveURLCandidatesKeepProxyPrefixFallbacks() {
+        let candidates = CodexPairingCodeResolveURLBuilder.candidates(
+            from: "wss://relay.example.com/remodex/relay?stale=1#old"
+        )
+
+        XCTAssertEqual(
+            candidates.map(\.absoluteString),
+            [
+                "https://relay.example.com/remodex/relay/v1/pairing/code/resolve",
+                "https://relay.example.com/remodex/v1/pairing/code/resolve",
+                "https://relay.example.com/v1/pairing/code/resolve",
+            ]
+        )
+    }
+
     func testPreferredReconnectURLFallsBackToSavedSessionWhenTrustedResolveReportsOffline() async {
         let service = makeService()
         let viewModel = ContentViewModel()

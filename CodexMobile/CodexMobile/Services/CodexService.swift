@@ -542,6 +542,14 @@ final class CodexService {
     @ObservationIgnored var turnStateRefreshTaskByThreadID: [String: Task<Bool, Never>] = [:]
     // Coalesces the full running-thread catch-up pipeline so open/foreground/reconnect share one path.
     @ObservationIgnored var runningThreadCatchupTaskByThreadID: [String: Task<RunningThreadCatchupOutcome, Never>] = [:]
+    // Tracks rollout bootstrap batches so desktop catch-up can stay compact without duplicate replay.
+    @ObservationIgnored var appliedRolloutBootstrapReplayBatchKeys: Set<String> = []
+    @ObservationIgnored var appliedRolloutBootstrapReplayBatchKeyOrder: [String] = []
+    @ObservationIgnored var rolloutBootstrapReplayCoalescingDepth = 0
+    @ObservationIgnored var rolloutBootstrapReplayNeedsMessagePersist = false
+    @ObservationIgnored var rolloutBootstrapReplayDeferredTimelineThreadIDs: Set<String> = []
+    @ObservationIgnored var rolloutBootstrapReplayDeferredSyncThreadIDs: Set<String> = []
+    @ObservationIgnored var rolloutBootstrapReplayDeferredHistoryReconcileThreadIDs: Set<String> = []
     // Lets a late foreground/open caller upgrade an in-flight running catch-up into a forced resume.
     @ObservationIgnored var forcedRunningCatchupEscalationThreadIDs: Set<String> = []
     // Invalidates stale async completions after archive/delete/reconnect tears refresh work down.

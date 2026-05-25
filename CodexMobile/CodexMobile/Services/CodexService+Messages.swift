@@ -20,9 +20,9 @@ private enum StreamingDeltaCoalescingPolicy {
     // them readable without invalidating the timeline on every transport chunk.
     static let flushDelayNanoseconds: UInt64 = 50_000_000
     // Assistant prose gets one quick first paint, then a calmer cadence once text is visible.
-    static let assistantInitialFlushDelayNanoseconds: UInt64 = 50_000_000
-    static let assistantStreamingFlushDelayNanoseconds: UInt64 = 80_000_000
-    static let assistantLargeStreamingFlushDelayNanoseconds: UInt64 = 100_000_000
+    static let assistantInitialFlushDelayNanoseconds: UInt64 = 16_000_000
+    static let assistantStreamingFlushDelayNanoseconds: UInt64 = 40_000_000
+    static let assistantLargeStreamingFlushDelayNanoseconds: UInt64 = 60_000_000
     static let assistantLargePendingDeltaByteCount = 12_000
     static let assistantLargeVisibleTextByteCount = 32_000
 }
@@ -235,6 +235,10 @@ extension CodexService {
     // Refreshes the derived output cache and bumps the thread timeline revision.
     func updateCurrentOutput(for threadId: String) {
         noteMessagesChanged(for: threadId)
+        guard rolloutBootstrapReplayCoalescingDepth == 0 else {
+            rolloutBootstrapReplayDeferredTimelineThreadIDs.insert(threadId)
+            return
+        }
 
         let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
         refreshThreadTimelineState(for: threadId)
@@ -250,6 +254,10 @@ extension CodexService {
     // Falls back to the full projection path whenever the visible snapshot shape changed underneath us.
     func updateStreamingAssistantOutput(for threadId: String, messageId: String, rawMessageIndex: Int? = nil) {
         noteMessagesChanged(for: threadId)
+        guard rolloutBootstrapReplayCoalescingDepth == 0 else {
+            rolloutBootstrapReplayDeferredTimelineThreadIDs.insert(threadId)
+            return
+        }
 
         // Keep the visible output anchored to the latest assistant bubble, even if a late
         // delta updates an older item inside the same turn.
@@ -2989,6 +2997,16 @@ extension CodexService {
             return
         }
 
+        if adoptDuplicateAssistantDeltaIfNeeded(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: itemId,
+            assistantPhase: assistantPhase,
+            delta: delta
+        ) {
+            return
+        }
+
         let messageID = ensureStreamingAssistantMessage(
             threadId: threadId,
             turnId: turnId,
@@ -3027,6 +3045,69 @@ extension CodexService {
 
         persistMessages()
         updateStreamingAssistantOutput(for: threadId, messageId: messageID, rawMessageIndex: messageIndex)
+    }
+
+    // Desktop live state and rollout history can both publish the same commentary with different item IDs.
+    private func adoptDuplicateAssistantDeltaIfNeeded(
+        threadId: String,
+        turnId: String,
+        itemId: String?,
+        assistantPhase: String?,
+        delta: String
+    ) -> Bool {
+        guard normalizedAssistantPhase(assistantPhase) == "commentary",
+              delta.utf8.count <= MessageTextProcessingPolicy.largeTextByteLimit,
+              let threadMessages = messagesByThread[threadId] else {
+            return false
+        }
+
+        let normalizedDelta = Self.normalizedMessageText(delta)
+        guard Self.hasMeaningfulHistoryText(normalizedDelta) else {
+            return false
+        }
+
+        guard let duplicateIndex = threadMessages.indices.reversed().first(where: { index in
+            let candidate = threadMessages[index]
+            guard candidate.role == .assistant,
+                  candidate.turnId == turnId,
+                  candidate.text.utf8.count <= MessageTextProcessingPolicy.largeTextByteLimit,
+                  Self.normalizedMessageText(candidate.text) == normalizedDelta else {
+                return false
+            }
+
+            let candidatePhase = normalizedAssistantPhase(candidate.assistantPhase)
+            return candidatePhase == "commentary" || candidatePhase == nil
+        }) else {
+            return false
+        }
+
+        let messageID = threadMessages[duplicateIndex].id
+        var didMutate = false
+        if let normalizedItemId = normalizedStreamingItemID(itemId) {
+            let itemKey = assistantStreamingMessageKey(
+                threadId: threadId,
+                turnId: turnId,
+                itemId: normalizedItemId
+            )
+            streamingAssistantMessageByItemKey[itemKey] = messageID
+            if messagesByThread[threadId]?[duplicateIndex].itemId == nil {
+                messagesByThread[threadId]?[duplicateIndex].itemId = normalizedItemId
+                didMutate = true
+            }
+        }
+        if applyAssistantPhaseIfNeeded(
+            threadId: threadId,
+            messageIndex: duplicateIndex,
+            assistantPhase: assistantPhase
+        ) {
+            didMutate = true
+        }
+
+        if didMutate {
+            persistMessages()
+            updateStreamingAssistantOutput(for: threadId, messageId: messageID, rawMessageIndex: duplicateIndex)
+        }
+        return true
     }
 
     // Late replay deltas for a closed turn should patch the closed assistant row, not reopen streaming.
@@ -4226,6 +4307,11 @@ extension CodexService {
 
 extension CodexService {
     func persistMessages() {
+        guard rolloutBootstrapReplayCoalescingDepth == 0 else {
+            rolloutBootstrapReplayNeedsMessagePersist = true
+            return
+        }
+
         messagePersistenceDebounceTask?.cancel()
         messagePersistenceDebounceTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
@@ -4522,6 +4608,11 @@ extension CodexService {
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
     func refreshThreadTimelineState(for threadId: String) {
+        guard rolloutBootstrapReplayCoalescingDepth == 0 else {
+            rolloutBootstrapReplayDeferredTimelineThreadIDs.insert(threadId)
+            return
+        }
+
         let state = timelineState(for: threadId)
         let messages = messagesByThread[threadId] ?? []
         let revision = messageRevisionByThread[threadId] ?? 0

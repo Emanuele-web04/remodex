@@ -41,6 +41,7 @@ struct TurnComposerView: View {
     let isEmptyThread: Bool
     let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
+    var activeFileChangeStatus: FileChangeStatusSnapshot? = nil
 
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
@@ -134,6 +135,7 @@ struct TurnComposerView: View {
                         isEmptyThread: isEmptyThread,
                         hasWorkingDirectory: hasWorkingDirectory,
                         isWorktreeProject: isWorktreeProject,
+                        activeFileChangeStatus: activeFileChangeStatus,
                         showsGitBranchSelector: showsGitBranchSelector,
                         isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
                         availableGitBranchTargets: availableGitBranchTargets,
@@ -253,6 +255,7 @@ struct TurnComposerView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 26))
+                .clipShape(RoundedRectangle(cornerRadius: 26))
                 .overlay(alignment: .topLeading) {
                     Color.clear
                         .frame(maxWidth: .infinity, maxHeight: 0, alignment: .topLeading)

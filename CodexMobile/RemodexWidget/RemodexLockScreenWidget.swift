@@ -1,6 +1,6 @@
 // FILE: RemodexLockScreenWidget.swift
 // Purpose: Lock Screen / Always-On accessory widget that surfaces the Remodex
-//          outline logo. Tapping the widget launches Remodex on the host
+//          filled logo. Tapping the widget launches Remodex on the host
 //          device. Three accessory families are supported so the user can pick
 //          the layout that fits their Lock Screen.
 // Layer: Widget Extension
@@ -51,7 +51,7 @@ struct RemodexLockScreenWidgetView: View {
     private var circularBody: some View {
         // Keep the circular accessory as a bare glyph; the Lock Screen slot
         // already supplies the surrounding widget chrome.
-        Image("remodex-outline")
+        Image("remodex_symbol_medium")
             .resizable()
             .renderingMode(.template)
             .scaledToFit()
@@ -61,7 +61,7 @@ struct RemodexLockScreenWidgetView: View {
 
     private var rectangularBody: some View {
         HStack(spacing: 8) {
-            Image("remodex-outline")
+            Image("remodex_symbol_medium")
                 .resizable()
                 .renderingMode(.template)
                 .scaledToFit()
@@ -86,7 +86,7 @@ struct RemodexLockScreenWidgetView: View {
     private var inlineBody: some View {
         // Inline accessories collapse to a single line next to the clock; the
         // image is auto-tinted by the system.
-        Label("Remodex", image: "remodex-outline")
+        Label("Remodex", image: "remodex_symbol_medium")
     }
 }
 
