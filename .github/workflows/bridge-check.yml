@@ -14,8 +14,17 @@ on:
 
 jobs:
   bridge-check:
-    name: Bridge tests
-    runs-on: ubuntu-latest
+    name: Bridge tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
 
     steps:
       - name: Checkout repository
@@ -35,7 +44,7 @@ jobs:
       - name: Verify bridge entrypoints load
         working-directory: phodex-bridge
         run: |
-          node -e "const mod = require('./src'); const names = ['startBridge', 'openLastActiveThread', 'watchThreadRollout']; for (const name of names) { if (typeof mod[name] !== 'function') { throw new Error('Missing export: ' + name); } }"
+          node -e "const mod = require('./src'); const names = ['startBridge', 'openLastActiveThread', 'watchThreadRollout', 'startWindowsBridgeService']; for (const name of names) { if (typeof mod[name] !== 'function') { throw new Error('Missing export: ' + name); } }"
 
       - name: Run bridge tests
         working-directory: phodex-bridge

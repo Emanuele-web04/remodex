@@ -2,15 +2,15 @@
 // Purpose: Owns macOS-only launchd install/start/stop/status helpers for the background Remodex bridge.
 // Layer: CLI helper
 // Exports: start/stop/status helpers plus the launchd service runner used by `remodex up`.
-// Depends on: child_process, fs, os, path, ./bridge, ./daemon-state, ./codex-desktop-refresher, ./qr, ./secure-device-state
+// Depends on: child_process, fs, os, path, ./daemon-bridge-runner, ./daemon-state, ./codex-desktop-refresher, ./qr, ./secure-device-state
 
 const { execFileSync } = require("child_process");
 const { createHash } = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { startBridge } = require("./bridge");
 const { readBridgeConfig } = require("./codex-desktop-refresher");
+const { mergeBridgeStatusForDaemon, runDaemonBridgeService } = require("./daemon-bridge-runner");
 const { printQR } = require("./qr");
 const { readBridgeDeviceState, resetBridgeTrustState } = require("./secure-device-state");
 const {
@@ -24,9 +24,7 @@ const {
   resolveBridgeStderrLogPath,
   resolveBridgeStdoutLogPath,
   resolveRemodexStateDir,
-  writeBridgeStatus,
   writeDaemonConfig,
-  writePairingSession,
 } = require("./daemon-state");
 
 const SERVICE_LABEL = "com.remodex.bridge";
@@ -36,33 +34,9 @@ const DEFAULT_PAIRING_WAIT_INTERVAL_MS = 200;
 // Runs the bridge inside launchd while keeping QR rendering in the foreground CLI command.
 function runMacOSBridgeService({ env = process.env, platform = process.platform } = {}) {
   assertDarwinPlatform(platform);
-  const config = readDaemonConfig({ env });
-  if (!config?.relayUrl) {
-    const message = "No relay URL configured for the macOS bridge service.";
-    // Clear any stale QR so the CLI does not keep showing a pairing payload for a dead service.
-    clearPairingSession({ env });
-    writeBridgeStatus({
-      state: "error",
-      connectionStatus: "error",
-      pid: process.pid,
-      lastError: message,
-    }, { env });
-    console.error(`[remodex] ${message}`);
-    return;
-  }
-
-  startBridge({
-    config,
-    printPairingQr: false,
-    onPairingSession(pairingSession) {
-      writePairingSession(pairingSession, { env });
-    },
-    onBridgeStatus(status) {
-      writeBridgeStatus(
-        mergeBridgeStatusForDaemon(status, readBridgeStatus({ env })),
-        { env }
-      );
-    },
+  runDaemonBridgeService({
+    env,
+    missingRelayMessage: "No relay URL configured for the macOS bridge service.",
   });
 }
 
@@ -587,34 +561,6 @@ function escapeXml(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function mergeBridgeStatusForDaemon(nextStatus, persistedStatus) {
-  if (!nextStatus || typeof nextStatus !== "object") {
-    return nextStatus;
-  }
-
-  const lastError = normalizeNonEmptyString(nextStatus.lastError);
-  if (lastError || nextStatus.connectionStatus === "connected") {
-    return nextStatus;
-  }
-
-  if (
-    nextStatus.codexLaunchState !== "starting"
-    || (nextStatus.connectionStatus !== "starting" && nextStatus.connectionStatus !== "connecting")
-  ) {
-    return nextStatus;
-  }
-
-  const persistedError = normalizeNonEmptyString(persistedStatus?.lastError);
-  if (!persistedError) {
-    return nextStatus;
-  }
-
-  return {
-    ...nextStatus,
-    lastError: persistedError,
-  };
 }
 
 function normalizeNonEmptyString(value) {

@@ -363,3 +363,148 @@ test("remodex status --json exposes daemon metadata without relay URLs", async (
   assert.equal(writes.join("").includes("ws://127.0.0.1:9000/relay"), false);
   assert.equal(writes.join("").includes("session-json"), false);
 });
+
+test("remodex dispatches Windows background lifecycle commands", async () => {
+  const calls = [];
+  const messages = [];
+  const deps = {
+    async startWindowsBridgeService(options) {
+      calls.push(["start-windows", options || null]);
+      return {
+        taskName: "\\Remodex\\Bridge",
+        taskXmlPath: "C:\\Users\\Dom Test\\.remodex\\windows-bridge-task.xml",
+        runnerPath: "C:\\Users\\Dom Test\\.remodex\\windows-bridge-runner.cmd",
+        pairingSession: { pairingPayload: { sessionId: "session-win" } },
+      };
+    },
+    async restartWindowsBridgeService(options) {
+      calls.push(["restart-windows", options || null]);
+      return {
+        taskName: "\\Remodex\\Bridge",
+        pairingSession: null,
+      };
+    },
+    stopWindowsBridgeService() {
+      calls.push(["stop-windows"]);
+    },
+    printWindowsBridgePairingQr({ pairingSession }) {
+      calls.push(["print-windows-qr", pairingSession?.pairingPayload?.sessionId]);
+    },
+    printWindowsBridgeServiceStatus() {
+      calls.push(["print-windows-status"]);
+    },
+    runWindowsBridgeService() {
+      calls.push(["run-windows-service"]);
+    },
+    resetWindowsBridgePairing() {
+      calls.push(["reset-windows"]);
+    },
+  };
+  const consoleImpl = {
+    log(message) {
+      messages.push(message);
+    },
+    error(message) {
+      throw new Error(`unexpected error: ${message}`);
+    },
+  };
+  const exitImpl = (code) => {
+    throw new Error(`unexpected exit ${code}`);
+  };
+
+  for (const command of ["up", "start", "restart", "stop", "status", "pair", "reset-pairing", "run-service"]) {
+    await main({
+      argv: ["node", "remodex", command],
+      platform: "win32",
+      consoleImpl,
+      exitImpl,
+      deps,
+    });
+  }
+
+  assert.deepEqual(calls, [
+    ["start-windows", { waitForPairing: true }],
+    ["print-windows-qr", "session-win"],
+    ["start-windows", null],
+    ["restart-windows", null],
+    ["stop-windows"],
+    ["print-windows-status"],
+    ["start-windows", { waitForPairing: true }],
+    ["print-windows-qr", "session-win"],
+    ["reset-windows"],
+    ["run-windows-service"],
+  ]);
+  assert.deepEqual(messages, [
+    "[remodex] Starting Windows bridge task and pairing QR...",
+    "[remodex] Windows bridge task is running.",
+    "[remodex] Windows bridge task restarted.",
+    "[remodex] Windows bridge task stopped.",
+    "[remodex] Refreshing bridge pairing QR...",
+    "[remodex] Stopped the Windows bridge task and cleared the saved pairing state. Run `remodex up` to pair again.",
+  ]);
+});
+
+test("remodex Windows status --json redacts daemon config and pairing payload", async () => {
+  const writes = [];
+  const originalWrite = process.stdout.write;
+
+  process.stdout.write = (chunk, encoding, callback) => {
+    writes.push(String(chunk));
+    if (typeof callback === "function") {
+      callback();
+    }
+    return true;
+  };
+
+  try {
+    await main({
+      argv: ["node", "remodex", "status", "--json"],
+      platform: "win32",
+      consoleImpl: {
+        log() {},
+        error(message) {
+          throw new Error(`unexpected error: ${message}`);
+        },
+      },
+      exitImpl(code) {
+        throw new Error(`unexpected exit ${code}`);
+      },
+      deps: {
+        getWindowsBridgeServiceStatus() {
+          return {
+            taskName: "\\Remodex\\Bridge",
+            daemonConfig: {
+              relayUrl: "ws://127.0.0.1:9000/relay",
+              pushServiceUrl: "https://push.example",
+            },
+            pairingSession: {
+              pairingPayload: {
+                relay: "ws://127.0.0.1:9000/relay",
+                sessionId: "session-win-json",
+                macIdentityPublicKey: "pub-key-win-json",
+              },
+            },
+          };
+        },
+        printWindowsBridgeServiceStatus() {
+          throw new Error("status printer should not run for --json");
+        },
+      },
+    });
+  } finally {
+    process.stdout.write = originalWrite;
+  }
+
+  const output = writes.join("");
+  const payload = JSON.parse(output.trim());
+  assert.equal(payload.currentVersion, version);
+  assert.equal(payload.daemonConfig?.relayUrl, undefined);
+  assert.equal(payload.daemonConfig?.pushServiceUrl, undefined);
+  assert.equal(payload.daemonConfig?.relayConfigured, true);
+  assert.equal(payload.pairingSession?.pairingPayload?.sessionId, undefined);
+  assert.equal(payload.pairingSession?.pairingPayload?.macIdentityPublicKey, undefined);
+  assert.equal(payload.pairingSession?.pairingPayload?.hasSessionId, true);
+  assert.equal(output.includes("ws://127.0.0.1:9000/relay"), false);
+  assert.equal(output.includes("session-win-json"), false);
+  assert.equal(output.includes("pub-key-win-json"), false);
+});

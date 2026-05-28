@@ -159,7 +159,7 @@ After that first scan:
 - the app tries trusted reconnect automatically on later launches
 - the QR remains available as a recovery path if trust changes or the relay cannot resolve the live session
 
-For now, the daemon-backed trusted reconnect path is macOS-only. If you self-host on Linux or Windows, pairing still works, but the bridge runs in the foreground unless you set up your own OS-specific service wrapper.
+For now, the daemon-backed trusted reconnect path is built in for macOS and Windows. macOS uses `launchd`; Windows uses a per-user Scheduled Task so the bridge can survive terminal close and start again at login. Linux pairing works, but the bridge runs in the foreground unless you set up your own OS-specific service wrapper.
 
 ## Run Locally
 
@@ -246,7 +246,17 @@ On macOS, `remodex up` is the friendly entrypoint for the background bridge serv
 - Waits for a pairing payload and prints a QR for first-time trust or recovery
 - Keeps the bridge alive even if you close the terminal later
 
-On non-macOS platforms, `remodex up` runs the bridge in the foreground.
+On Windows, `remodex up` provides the same background lifecycle through a per-user Task Scheduler task:
+
+- Writes the daemon config used by the scheduled task
+- Registers or refreshes the `\Remodex\Bridge` task for the current user
+- Starts the task on demand and at login
+- Waits for a pairing payload and prints a QR for first-time trust or recovery
+- Keeps the bridge alive after the terminal closes
+
+This is not a true Windows SCM service. It intentionally runs in the current user's profile so Codex CLI auth, `%APPDATA%\npm`, user repos, and `%USERPROFILE%\.codex` keep working.
+
+On other non-macOS platforms, `remodex up` runs the bridge in the foreground.
 
 In both cases the bridge:
 
@@ -258,20 +268,24 @@ In both cases the bridge:
 
 ### `remodex start`
 
-macOS only. Starts the background bridge service without waiting for or printing a QR in the current terminal.
-If the service is already loaded, this path refreshes it in place.
+macOS and Windows. Starts the background bridge service without waiting for or printing a QR in the current terminal.
+On macOS this uses `launchd`; on Windows this uses a per-user Scheduled Task.
 
 ### `remodex restart`
 
-macOS only. Explicitly restarts the background bridge service without waiting for or printing a QR in the current terminal.
+macOS and Windows. Explicitly restarts the background bridge service without waiting for or printing a QR in the current terminal.
 
 ### `remodex stop`
 
-macOS only. Stops the background bridge service and clears its transient runtime status.
+macOS and Windows. Stops the background bridge service and clears its transient runtime status.
 
 ### `remodex status`
 
-macOS only. Prints the current `launchd` / bridge status, including whether the service is loaded and whether a recent pairing payload exists.
+macOS and Windows. Prints the current service/task status and bridge status, including whether a recent pairing payload exists.
+
+### `remodex run`
+
+Foreground/debug mode on every platform. Use this when you want logs in the current terminal or do not want an OS background launcher.
 
 ### `remodex run-service`
 
@@ -476,10 +490,10 @@ I'm not actively accepting contributions yet. See [CONTRIBUTING.md](CONTRIBUTING
 Not for Remodex itself. You need Codex CLI set up and working independently.
 
 **Does this work on Linux/Windows?**
-The core bridge client (Codex forwarding + git) works on any OS. Desktop refresh (AppleScript) is macOS-only, and the built-in daemon / trusted auto-reconnect service path is currently macOS-only too.
+The core bridge client (Codex forwarding + git) works on any OS. The built-in background lifecycle is currently macOS `launchd` plus Windows per-user Task Scheduler. Desktop refresh (AppleScript) is macOS-only; Remodex does not control Codex Desktop UI on Windows.
 
 **What happens if I close the terminal?**
-On macOS, the bridge can keep running in the background through `launchd`, so closing the terminal does not stop the trusted reconnect path. On other OSes, the foreground bridge stops when the terminal stops.
+On macOS, the bridge can keep running in the background through `launchd`. On Windows, it can keep running through the current user's Scheduled Task and start again at login. On other OSes, the foreground bridge stops when the terminal stops.
 
 **How do I force a fresh QR pairing?**
 Run `remodex reset-pairing`, then start the bridge again with `remodex up`. You should only need this when you intentionally want to replace the paired iPhone or wipe the remembered pairing.

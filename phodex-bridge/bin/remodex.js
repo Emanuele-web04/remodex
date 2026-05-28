@@ -1,21 +1,29 @@
 #!/usr/bin/env node
 // FILE: remodex.js
-// Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and macOS service control.
+// Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and OS service control.
 // Layer: CLI binary
 // Exports: none
 // Depends on: ../src
 
 const {
   getMacOSBridgeServiceStatus,
+  getWindowsBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
+  printWindowsBridgePairingQr,
+  printWindowsBridgeServiceStatus,
   readBridgeConfig,
   resetMacOSBridgePairing,
+  resetWindowsBridgePairing,
   restartMacOSBridgeService,
+  restartWindowsBridgeService,
   runMacOSBridgeService,
+  runWindowsBridgeService,
   startBridge,
   startMacOSBridgeService,
+  startWindowsBridgeService,
   stopMacOSBridgeService,
+  stopWindowsBridgeService,
   resetBridgePairing,
   openLastActiveThread,
   watchThreadRollout,
@@ -24,15 +32,23 @@ const { version } = require("../package.json");
 
 const defaultDeps = {
   getMacOSBridgeServiceStatus,
+  getWindowsBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
+  printWindowsBridgePairingQr,
+  printWindowsBridgeServiceStatus,
   readBridgeConfig,
   resetMacOSBridgePairing,
+  resetWindowsBridgePairing,
   restartMacOSBridgeService,
+  restartWindowsBridgeService,
   runMacOSBridgeService,
+  runWindowsBridgeService,
   startBridge,
   startMacOSBridgeService,
+  startWindowsBridgeService,
   stopMacOSBridgeService,
+  stopWindowsBridgeService,
   resetBridgePairing,
   openLastActiveThread,
   watchThreadRollout,
@@ -88,6 +104,17 @@ async function main({
       return;
     }
 
+    if (platform === "win32") {
+      consoleImpl.log("[remodex] Starting Windows bridge task and pairing QR...");
+      const result = await deps.startWindowsBridgeService({
+        waitForPairing: true,
+      });
+      deps.printWindowsBridgePairingQr({
+        pairingSession: result.pairingSession,
+      });
+      return;
+    }
+
     deps.startBridge();
     return;
   }
@@ -98,25 +125,30 @@ async function main({
   }
 
   if (command === "run-service") {
-    deps.runMacOSBridgeService();
+    if (platform === "darwin") {
+      deps.runMacOSBridgeService();
+      return;
+    }
+    if (platform === "win32") {
+      deps.runWindowsBridgeService();
+      return;
+    }
+    consoleImpl.error("[remodex] `run-service` is only available on macOS and Windows service backends. Use `remodex run` for the foreground bridge on this OS.");
+    exitImpl(1);
     return;
   }
 
   if (command === "start") {
-    assertMacOSCommand(command, {
-      platform,
-      consoleImpl,
-      exitImpl,
-    });
-    const result = await deps.startMacOSBridgeService();
+    const provider = getServiceProvider(command, { platform, deps, consoleImpl, exitImpl });
+    const result = await provider.startService();
     emitResult({
       payload: {
         ok: true,
         currentVersion: version,
-        plistPath: result?.plistPath,
+        ...serviceResultPayload(result),
         pairingSession: sanitizePairingSessionForOutput(result?.pairingSession),
       },
-      message: "[remodex] macOS bridge service is running.",
+      message: provider.startedMessage,
       jsonOutput,
       consoleImpl,
     });
@@ -124,20 +156,16 @@ async function main({
   }
 
   if (command === "restart") {
-    assertMacOSCommand(command, {
-      platform,
-      consoleImpl,
-      exitImpl,
-    });
-    const result = await deps.restartMacOSBridgeService();
+    const provider = getServiceProvider(command, { platform, deps, consoleImpl, exitImpl });
+    const result = await provider.restartService();
     emitResult({
       payload: {
         ok: true,
         currentVersion: version,
-        plistPath: result?.plistPath,
+        ...serviceResultPayload(result),
         pairingSession: sanitizePairingSessionForOutput(result?.pairingSession),
       },
-      message: "[remodex] macOS bridge service restarted.",
+      message: provider.restartedMessage,
       jsonOutput,
       consoleImpl,
     });
@@ -145,44 +173,36 @@ async function main({
   }
 
   if (command === "qr" || command === "pair") {
-    assertMacOSCommand(command, {
-      platform,
-      consoleImpl,
-      exitImpl,
-    });
-    const result = await deps.startMacOSBridgeService({
+    const provider = getServiceProvider(command, { platform, deps, consoleImpl, exitImpl });
+    const result = await provider.startService({
       waitForPairing: true,
     });
     if (jsonOutput) {
       emitJson({
         ok: true,
         currentVersion: version,
-        plistPath: result?.plistPath,
+        ...serviceResultPayload(result),
         pairingSession: result?.pairingSession,
       });
       return;
     }
 
     consoleImpl.log("[remodex] Refreshing bridge pairing QR...");
-    deps.printMacOSBridgePairingQr({
+    provider.printPairingQr({
       pairingSession: result.pairingSession,
     });
     return;
   }
 
   if (command === "stop") {
-    assertMacOSCommand(command, {
-      platform,
-      consoleImpl,
-      exitImpl,
-    });
-    deps.stopMacOSBridgeService();
+    const provider = getServiceProvider(command, { platform, deps, consoleImpl, exitImpl });
+    provider.stopService();
     emitResult({
       payload: {
         ok: true,
         currentVersion: version,
       },
-      message: "[remodex] macOS bridge service stopped.",
+      message: provider.stoppedMessage,
       jsonOutput,
       consoleImpl,
     });
@@ -190,19 +210,15 @@ async function main({
   }
 
   if (command === "status") {
-    assertMacOSCommand(command, {
-      platform,
-      consoleImpl,
-      exitImpl,
-    });
+    const provider = getServiceProvider(command, { platform, deps, consoleImpl, exitImpl });
     if (jsonOutput) {
       emitJson({
-        ...sanitizeBridgeServiceStatusForOutput(deps.getMacOSBridgeServiceStatus()),
+        ...sanitizeBridgeServiceStatusForOutput(provider.getStatus()),
         currentVersion: version,
       });
       return;
     }
-    deps.printMacOSBridgeServiceStatus();
+    provider.printStatus();
     return;
   }
 
@@ -217,6 +233,18 @@ async function main({
             platform: "darwin",
           },
           message: "[remodex] Stopped the macOS bridge service and cleared the saved pairing state. Run `remodex up` to pair again.",
+          jsonOutput,
+          consoleImpl,
+        });
+      } else if (platform === "win32") {
+        deps.resetWindowsBridgePairing();
+        emitResult({
+          payload: {
+            ok: true,
+            currentVersion: version,
+            platform: "win32",
+          },
+          message: "[remodex] Stopped the Windows bridge task and cleared the saved pairing state. Run `remodex up` to pair again.",
           jsonOutput,
           consoleImpl,
         });
@@ -373,17 +401,52 @@ function sanitizePairingSessionForOutput(pairingSession) {
   };
 }
 
-function assertMacOSCommand(name, {
+function getServiceProvider(name, {
   platform = process.platform,
+  deps = defaultDeps,
   consoleImpl = console,
   exitImpl = process.exit,
 } = {}) {
   if (platform === "darwin") {
-    return;
+    return {
+      startService: deps.startMacOSBridgeService,
+      restartService: deps.restartMacOSBridgeService,
+      stopService: deps.stopMacOSBridgeService,
+      getStatus: deps.getMacOSBridgeServiceStatus,
+      printStatus: deps.printMacOSBridgeServiceStatus,
+      printPairingQr: deps.printMacOSBridgePairingQr,
+      startedMessage: "[remodex] macOS bridge service is running.",
+      restartedMessage: "[remodex] macOS bridge service restarted.",
+      stoppedMessage: "[remodex] macOS bridge service stopped.",
+    };
   }
 
-  consoleImpl.error(`[remodex] \`${name}\` is only available on macOS. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
+  if (platform === "win32") {
+    return {
+      startService: deps.startWindowsBridgeService,
+      restartService: deps.restartWindowsBridgeService,
+      stopService: deps.stopWindowsBridgeService,
+      getStatus: deps.getWindowsBridgeServiceStatus,
+      printStatus: deps.printWindowsBridgeServiceStatus,
+      printPairingQr: deps.printWindowsBridgePairingQr,
+      startedMessage: "[remodex] Windows bridge task is running.",
+      restartedMessage: "[remodex] Windows bridge task restarted.",
+      stoppedMessage: "[remodex] Windows bridge task stopped.",
+    };
+  }
+
+  consoleImpl.error(`[remodex] \`${name}\` is only available on macOS or Windows background service backends. Use \`remodex up\` or \`remodex run\` for the foreground bridge on this OS.`);
   exitImpl(1);
+  return null;
+}
+
+function serviceResultPayload(result = {}) {
+  return {
+    plistPath: result?.plistPath,
+    taskName: result?.taskName,
+    taskXmlPath: result?.taskXmlPath,
+    runnerPath: result?.runnerPath,
+  };
 }
 
 function isVersionCommand(value) {
