@@ -212,6 +212,15 @@ extension View {
         modifier(AdaptiveToolbarItemModifier(shape: shape))
     }
 
+    @ViewBuilder
+    func adaptiveToolbarItem(if isEnabled: Bool, in shape: some Shape) -> some View {
+        if isEnabled {
+            adaptiveToolbarItem(in: shape)
+        } else {
+            self
+        }
+    }
+
     // Pairs with `safeAreaInset(edge:)` to give scrolled content the iOS 26
     // soft fade under a translucent bar. No-op on iOS 18 so the bar simply
     // sits above unfaded content (typically paired with an opaque fallback

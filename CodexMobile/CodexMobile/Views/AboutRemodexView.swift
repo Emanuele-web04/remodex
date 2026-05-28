@@ -6,44 +6,35 @@
 import SwiftUI
 
 struct AboutRemodexView: View {
-    @Environment(\.dismiss) private var dismiss
-
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 36) {
-                    header
-                    howItWorksSection
-                    Divider().opacity(0.3)
-                    architectureDiagram
-                    Divider().opacity(0.3)
-                    relaySection
-                    Divider().opacity(0.3)
-                    appServerSection
-                    Divider().opacity(0.3)
-                    pairingSection
-                    Divider().opacity(0.3)
-                    encryptionSection
-                    Divider().opacity(0.3)
-                    gitSection
-                    Divider().opacity(0.3)
-                    resilienceSection
-                    Divider().opacity(0.3)
-                    desktopSection
-                    footer
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 40)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 36) {
+                header
+                howItWorksSection
+                Divider().opacity(0.3)
+                architectureDiagram
+                Divider().opacity(0.3)
+                relaySection
+                Divider().opacity(0.3)
+                appServerSection
+                Divider().opacity(0.3)
+                pairingSection
+                Divider().opacity(0.3)
+                encryptionSection
+                Divider().opacity(0.3)
+                gitSection
+                Divider().opacity(0.3)
+                resilienceSection
+                Divider().opacity(0.3)
+                desktopSection
+                footer
             }
-            .font(AppFont.body())
-            .navigationTitle("About Remodex")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 40)
         }
+        .font(AppFont.body())
+        .navigationTitle("About Remodex")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - Header
@@ -405,5 +396,7 @@ struct AboutRemodexView: View {
 }
 
 #Preview {
-    AboutRemodexView()
+    NavigationStack {
+        AboutRemodexView()
+    }
 }

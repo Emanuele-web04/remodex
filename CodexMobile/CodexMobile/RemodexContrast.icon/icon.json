@@ -1,0 +1,82 @@
+{
+  "fill" : "system-light",
+  "groups" : [
+    {
+      "blend-mode" : "normal",
+      "blur-material" : null,
+      "hidden-specializations" : [
+        {
+          "idiom" : "square",
+          "value" : false
+        }
+      ],
+      "layers" : [
+        {
+          "image-name-specializations" : [
+            {
+              "value" : "Fixed-Rounding 2.svg"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "Fixed-Roundingwhite.svg"
+            },
+            {
+              "appearance" : "tinted",
+              "value" : "Fixed-Roundingwhite.svg"
+            }
+          ],
+          "name" : "Contrast Remodex",
+          "position-specializations" : [
+            {
+              "value" : {
+                "scale" : 1,
+                "translation-in-points" : [
+                  0.16799999999983584,
+                  0.019967733251746722
+                ]
+              }
+            },
+            {
+              "idiom" : "square",
+              "value" : {
+                "scale" : 0.94,
+                "translation-in-points" : [
+                  0.16799999999983584,
+                  0.019967733251746722
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "lighting" : "individual",
+      "position-specializations" : [
+        {
+          "idiom" : "square",
+          "value" : {
+            "scale" : 0.99,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.5
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.4
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

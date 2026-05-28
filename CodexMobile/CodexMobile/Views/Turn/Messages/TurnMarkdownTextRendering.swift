@@ -136,6 +136,7 @@ struct StreamingAssistantMarkdownTextView: View {
     // Lets the parent disable the typewriter reveal when the row isn't the active
     // follow-bottom row (off-screen / older streaming messages snap instead).
     var animatesReveal: Bool = true
+    var protectsPendingIndicatorAnchor: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -143,17 +144,20 @@ struct StreamingAssistantMarkdownTextView: View {
     @State private var displayedSegments: StreamingMarkdownBlockSegments
     @State private var targetText: String
     @State private var revealTask: Task<Void, Never>?
+    @State private var textAdoptionTask: Task<Void, Never>?
 
     init(
         text: String,
         enablesSelection: Bool = false,
         constrainsToAvailableWidth: Bool = false,
-        animatesReveal: Bool = true
+        animatesReveal: Bool = true,
+        protectsPendingIndicatorAnchor: Bool = false
     ) {
         self.text = text
         self.enablesSelection = enablesSelection
         self.constrainsToAvailableWidth = constrainsToAvailableWidth
         self.animatesReveal = animatesReveal
+        self.protectsPendingIndicatorAnchor = protectsPendingIndicatorAnchor
         let initialDisplayedText = animatesReveal ? "" : text
         _displayedText = State(initialValue: initialDisplayedText)
         _displayedSegments = State(initialValue: StreamingMarkdownBlockSplitter.split(initialDisplayedText))
@@ -170,15 +174,17 @@ struct StreamingAssistantMarkdownTextView: View {
             }
         }
         .onAppear {
-            // Snap on first appear so historical/recovered text doesn't drip in.
-            adoptText(text, animated: false)
+            // Large first chunks should reveal from the beginning; snapping them to full height lets
+            // bottom-follow briefly expose the tail before the thinking row settles underneath.
+            adoptText(text, animated: shouldAnimateInitialReveal(for: text))
         }
         .onChange(of: text) { _, nextText in
             let shouldSnapFirstVisibleChunk = displayedText
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .isEmpty
                 && !nextText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            adoptText(
+                && !shouldAnimateInitialReveal(for: nextText)
+            scheduleTextAdoption(
                 nextText,
                 animated: animatesReveal && !reduceMotion && !shouldSnapFirstVisibleChunk
             )
@@ -189,6 +195,8 @@ struct StreamingAssistantMarkdownTextView: View {
             }
         }
         .onDisappear {
+            textAdoptionTask?.cancel()
+            textAdoptionTask = nil
             cancelReveal()
         }
     }
@@ -218,7 +226,20 @@ struct StreamingAssistantMarkdownTextView: View {
     }
 
     // Smoothly reveals appended text instead of dropping in throttled bursts.
-    // Snaps for non-append updates (initial render, edits, prefix changes).
+    // Snaps for non-append updates and tiny first chunks that do not disturb layout.
+    private func scheduleTextAdoption(_ nextText: String, animated: Bool) {
+        textAdoptionTask?.cancel()
+        // Streaming text can change repeatedly in one SwiftUI frame. Coalescing the
+        // local @State writes keeps reveal state current without tripping onChange's
+        // per-frame mutation guard.
+        textAdoptionTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            adoptText(nextText, animated: animated)
+            textAdoptionTask = nil
+        }
+    }
+
     private func adoptText(_ nextText: String, animated: Bool) {
         targetText = nextText
 
@@ -265,6 +286,15 @@ struct StreamingAssistantMarkdownTextView: View {
         }
     }
 
+    private func shouldAnimateInitialReveal(for text: String) -> Bool {
+        animatesReveal
+            && !reduceMotion
+            && (
+                protectsPendingIndicatorAnchor
+                    || StreamingMarkdownRevealPolicy.shouldAnimateInitialReveal(text)
+            )
+    }
+
     // Ticks displayedText forward at a modest cadence, advancing more characters when the
     // backlog is large so bursts catch up quickly while trickle streams drip smoothly.
     private func runReveal() async {
@@ -301,22 +331,29 @@ struct StreamingAssistantMarkdownTextView: View {
 
 private enum StreamingMarkdownRevealPolicy {
     // MessageRow already coalesces assistant text, so this view only needs a light reveal.
-    // Avoid long catch-up tails that repeatedly reparse Markdown and look like line rewrites.
     static let frameIntervalNanoseconds: UInt64 = 45_000_000
-    private static let snapBacklogCharacterCount = 1_200
+    private static let largeInitialRevealCharacterCount = 512
     private static let minimumAdvanceCharacterCount = 14
     private static let maximumAdvanceCharacterCount = 96
+    private static let largeBacklogAdvanceCharacterCount = 256
+    private static let hugeBacklogAdvanceCharacterCount = 512
 
     static func shouldSnap(displayedText: String, targetText: String) -> Bool {
-        guard targetText.hasPrefix(displayedText) else {
-            return true
-        }
+        !targetText.hasPrefix(displayedText)
+    }
 
-        return targetText.count - displayedText.count >= snapBacklogCharacterCount
+    static func shouldAnimateInitialReveal(_ text: String) -> Bool {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).count > largeInitialRevealCharacterCount
     }
 
     static func advanceSize(forRemainingCharacters remaining: Int) -> Int {
-        max(
+        if remaining >= 4_000 {
+            return hugeBacklogAdvanceCharacterCount
+        }
+        if remaining >= 1_200 {
+            return largeBacklogAdvanceCharacterCount
+        }
+        return max(
             minimumAdvanceCharacterCount,
             min(remaining / 2, maximumAdvanceCharacterCount)
         )

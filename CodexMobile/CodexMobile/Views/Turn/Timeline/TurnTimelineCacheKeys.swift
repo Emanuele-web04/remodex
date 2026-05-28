@@ -12,6 +12,8 @@ enum TurnTimelineCacheKeyBuilder {
         timelineChangeToken: Int,
         visibleTailCount: Int,
         messages: ArraySlice<CodexMessage>,
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false,
         completedTurnIDs: Set<String>
     ) -> TurnTimelineRenderItemsCacheSignature {
         var hasher = Hasher()
@@ -20,6 +22,8 @@ enum TurnTimelineCacheKeyBuilder {
             threadID: threadID,
             timelineChangeToken: timelineChangeToken,
             visibleTailCount: visibleTailCount,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning,
             messageCount: messages.count,
             firstMessageID: messages.first?.id,
             lastMessageID: messages.last?.id,

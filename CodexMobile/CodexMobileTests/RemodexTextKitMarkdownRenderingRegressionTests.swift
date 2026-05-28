@@ -47,6 +47,7 @@ final class RemodexTextKitMarkdownRenderingRegressionTests: XCTestCase {
         XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: relativePathURL), "README.md")
         XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: nestedRelativePathURL), "Sources/App.swift")
         XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: extensionlessKnownFileURL), "Dockerfile")
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: try XCTUnwrap(URL(string: "assets/logo.svg"))), "assets/logo.svg")
         XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: lineSuffixURL), "Sources/App.swift")
         XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: fragmentURL), "Sources/App.swift")
         XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: queryURL), "Sources/App.swift")
@@ -62,6 +63,29 @@ final class RemodexTextKitMarkdownRenderingRegressionTests: XCTestCase {
         XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: bareWebHostURL))
         XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: schemeLessWebURL))
         XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: schemeLessWebFileURL))
+    }
+
+    func testWorkspaceSVGPreviewHTMLBlocksExternalReferences() {
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg">
+          <image href="https://example.com/leak.png" />
+          <use xlink:href='file:///tmp/local.svg#icon' />
+          <image href="data:image/png;base64,AAAA" />
+        </svg>
+        """
+
+        let html = WorkspaceSVGWebView.htmlDocument(svgSource: svg, isDark: false)
+
+        XCTAssertTrue(html.contains(WorkspaceSVGPreviewSecurity.contentSecurityPolicy))
+        XCTAssertFalse(html.contains("https://example.com/leak.png"))
+        XCTAssertFalse(html.contains("file:///tmp/local.svg#icon"))
+        XCTAssertTrue(html.contains("data:image/png;base64,AAAA"))
+    }
+
+    func testGhosttyDrawableViewportAllowsCompactTerminalSizes() {
+        XCTAssertFalse(GhosttyTerminalView.isDrawableViewportSize(CGSize(width: 12, height: 390)))
+        XCTAssertTrue(GhosttyTerminalView.isDrawableViewportSize(CGSize(width: 390, height: 120)))
+        XCTAssertTrue(GhosttyTerminalView.isDrawableViewportSize(CGSize(width: 240, height: 44)))
     }
 
     // Builds many adjacent inline markdown runs, matching the RemodexTextKit path that used to

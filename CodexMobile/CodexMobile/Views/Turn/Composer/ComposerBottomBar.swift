@@ -12,7 +12,6 @@ struct ComposerBottomBar: View {
     @State private var showsAllModelsSheet = false
 
     // Data
-    let hasWorkingDirectory: Bool
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
     let selectedModelTitle: String
@@ -52,8 +51,10 @@ struct ComposerBottomBar: View {
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
     private let composerIconSide: CGFloat = 22
-    private let rootlessAccessControlSize: CGFloat = 32
-    private let rootlessAccessControlIconSize: CGFloat = 20
+    private let composerCircleDiameter: CGFloat = 30
+    private let composerActionIconSize: CGFloat = 14
+    private let inlineAccessControlSize: CGFloat = 32
+    private let inlineAccessControlIconSize: CGFloat = 20
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
@@ -76,23 +77,21 @@ struct ComposerBottomBar: View {
         return sendButtonPaletteColor.bubbleBackground(for: colorScheme)
     }
 
+    private var showsStopButton: Bool {
+        isThreadRunning && !showsSendButton
+    }
+
     // MARK: - Body
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 8) {
             attachmentMenu
                 .padding(.leading, 8)
-            if !hasWorkingDirectory {
-                rootlessAccessMenuLabel
-            } else {
-                runtimeMenuControl
-            }
+            inlineAccessMenuLabel
             Spacer(minLength: 0)
 
-            if !hasWorkingDirectory {
-                rootlessStatusControl
-                runtimeMenuControl
-            }
+            inlineStatusControl
+            runtimeMenuControl
 
             if isQueuePaused && queuedCount > 0 {
                 Button {
@@ -109,7 +108,6 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
-            // Voice -> Stop/loading -> Send. New sends can look running before the turn id is interruptible.
             Button {
                 HapticFeedback.shared.triggerImpactFeedback()
                 onTapVoice()
@@ -119,12 +117,12 @@ struct ComposerBottomBar: View {
             .disabled(voiceButtonPresentation.isDisabled)
             .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
 
-            if isThreadRunning && isSending && activeTurnID == nil {
+            if showsStopButton && isSending && activeTurnID == nil {
                 ProgressView()
                     .tint(Color(.label))
-                    .frame(width: 32, height: 32)
+                    .frame(width: composerCircleDiameter, height: composerCircleDiameter)
                     .accessibilityLabel("Starting run")
-            } else if isThreadRunning {
+            } else if showsStopButton {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback()
                     onStopTurn(activeTurnID)
@@ -132,7 +130,9 @@ struct ComposerBottomBar: View {
                     RemodexCircleBadge(
                         systemName: "stop.fill",
                         foreground: sendButtonPaletteColor.bubbleForeground(for: colorScheme),
-                        background: sendButtonPaletteColor.bubbleBackground(for: colorScheme)
+                        background: sendButtonPaletteColor.bubbleBackground(for: colorScheme),
+                        diameter: composerCircleDiameter,
+                        iconSize: composerActionIconSize
                     )
                 }
                 .accessibilityLabel("Stop current run")
@@ -146,7 +146,9 @@ struct ComposerBottomBar: View {
                     RemodexCircleBadge(
                         systemName: "arrow.up",
                         foreground: sendButtonIconColor,
-                        background: sendButtonBackgroundColor
+                        background: sendButtonBackgroundColor,
+                        diameter: composerCircleDiameter,
+                        iconSize: composerActionIconSize
                     )
                 }
                 .overlay(alignment: .topTrailing) {
@@ -159,8 +161,8 @@ struct ComposerBottomBar: View {
             }
         }
         .padding(.horizontal, 8)
-        .padding(.bottom, 8)
-        .padding(.top, 2)
+        .padding(.bottom, 4)
+        .padding(.top, 0)
         .sheet(isPresented: $showsAllModelsSheet) {
             AllModelsSheet(
                 models: orderedModelOptions,
@@ -183,7 +185,8 @@ struct ComposerBottomBar: View {
             if voiceButtonPresentation.showsProgress {
                 CircularIconBadge(
                     foreground: voiceButtonPresentation.foregroundColor,
-                    background: voiceButtonPresentation.backgroundColor
+                    background: voiceButtonPresentation.backgroundColor,
+                    diameter: composerCircleDiameter
                 ) {
                     ProgressView()
                 }
@@ -193,7 +196,8 @@ struct ComposerBottomBar: View {
                 RemodexCircleBadge(
                     systemName: voiceButtonPresentation.systemImageName,
                     foreground: voiceButtonPresentation.foregroundColor,
-                    background: voiceButtonPresentation.backgroundColor
+                    background: voiceButtonPresentation.backgroundColor,
+                    diameter: composerCircleDiameter
                 )
             } else {
                 // Use explicit size so the Central mic artwork compensates for
@@ -212,9 +216,9 @@ struct ComposerBottomBar: View {
 
     // MARK: - Menus
 
-    // Rootless Quick Chat has no runtime/project capsule above the input, so
-    // access and usage controls live inline with the bottom composer controls.
-    private var rootlessAccessMenuLabel: some View {
+    // Access and usage stay inline with the bottom composer controls for every
+    // thread type so rootless and project-backed chats share the same layout.
+    private var inlineAccessMenuLabel: some View {
         Menu {
             ForEach(CodexAccessMode.allCases, id: \.rawValue) { mode in
                 Button {
@@ -231,9 +235,9 @@ struct ComposerBottomBar: View {
         } label: {
             RemodexIcon.image(
                 systemName: selectedAccessMode == .fullAccess ? "hand.thumbsup" : "hand.raised",
-                size: rootlessAccessControlIconSize
+                size: inlineAccessControlIconSize
             )
-            .frame(width: rootlessAccessControlSize, height: rootlessAccessControlSize)
+            .frame(width: inlineAccessControlSize, height: inlineAccessControlSize)
             .foregroundStyle(selectedAccessMode == .fullAccess ? .orange : metaLabelColor)
             .contentShape(Circle())
         }
@@ -256,7 +260,7 @@ struct ComposerBottomBar: View {
         .equatable()
     }
 
-    private var rootlessStatusControl: some View {
+    private var inlineStatusControl: some View {
         ContextWindowProgressRing(
             usage: contextWindowUsage,
             rateLimitBuckets: rateLimitBuckets,
@@ -370,6 +374,8 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.callout() }
     private var leadingIconFont: Font { AppFont.subheadline() }
+    private let maxInlineRuntimeControlWidth: CGFloat = 128
+    private let maxInlineRuntimeTextWidth: CGFloat = 104
 
     static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {
         lhs.orderedModelOptions == rhs.orderedModelOptions
@@ -411,9 +417,10 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 )
             )
         }
-        .fixedSize(horizontal: true, vertical: false)
-        .layoutPriority(1)
+        .frame(minWidth: 0, maxWidth: maxInlineRuntimeControlWidth, alignment: .trailing)
+        .layoutPriority(-1)
         .tint(metaLabelColor)
+        .accessibilityLabel(runtimeAccessibilityLabel)
     }
 
     // Split label parts so the model name and effort can carry different foreground styles.
@@ -426,18 +433,35 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
     private var effortLabelPart: String? {
         guard selectedModelID != nil else { return nil }
-        return runtimeState.selectedReasoningTitle
+        let trimmed = runtimeState.selectedReasoningTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "Select reasoning" else { return nil }
+        return trimmed
     }
 
-    // Keeps the family suffix visible while shortening the common GPT prefix.
     private var compactModelTitle: String {
-        let stripped: String
-        if selectedModelTitle.lowercased().hasPrefix("gpt-") {
-            stripped = String(selectedModelTitle.dropFirst("GPT-".count))
-        } else {
-            stripped = selectedModelTitle
+        let normalized = selectedModelTitle
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+            .split(separator: " ")
+            .map(String.init)
+
+        let words = normalized.filter { word in
+            let lowercased = word.lowercased()
+            return lowercased != "gpt" && lowercased != "codex"
         }
-        return stripped.replacingOccurrences(of: "-", with: " ")
+        let compact = words.isEmpty ? selectedModelTitle : words.joined(separator: " ")
+        return compact
+    }
+
+    private var runtimeAccessibilityLabel: String {
+        if selectedModelID == nil {
+            return modelLabelPart
+        }
+        let effort = runtimeState.selectedReasoningTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !effort.isEmpty {
+            return "\(selectedModelTitle), \(effort)"
+        }
+        return selectedModelTitle
     }
 
     // Identifiers pinned to the top of the model submenu; the rest are reachable
@@ -462,24 +486,33 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                     .foregroundStyle(Color.primary)
             }
 
-            titleText(modelPart: modelPart, effortPart: effortPart)
-                .font(metaTextFont)
-                .fontWeight(.regular)
-                .lineLimit(1)
+            HStack(spacing: 4) {
+                Text(modelPart)
+                    .font(metaTextFont)
+                    .fontWeight(.regular)
+                    .foregroundStyle(Color.primary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(1)
+
+                if let effortPart, !effortPart.isEmpty {
+                    Text(effortPart)
+                        .font(metaTextFont)
+                        .fontWeight(.regular)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(0)
+                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            // Grow left from the mic; truncate effort first when space is tight.
+            .frame(maxWidth: maxInlineRuntimeTextWidth, alignment: .trailing)
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
-        .fixedSize(horizontal: true, vertical: false)
+        .frame(minWidth: 0, maxWidth: maxInlineRuntimeControlWidth, alignment: .trailing)
         .contentShape(Rectangle())
-    }
-
-    // Concatenated Text lets each segment carry its own foreground style.
-    private func titleText(modelPart: String, effortPart: String?) -> Text {
-        let model = Text(modelPart).foregroundStyle(Color.primary)
-        guard let effortPart, !effortPart.isEmpty else { return model }
-        return model
-            + Text(" ")
-            + Text(effortPart).foregroundStyle(.tertiary)
     }
 }
 

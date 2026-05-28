@@ -77,7 +77,8 @@ struct CodexImageAttachment: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(sourceContentFingerprint, forKey: .sourceContentFingerprint)
     }
 
-    // History rows only need a thumbnail and, when available, a lightweight remote URL.
+    // History rows usually keep thumbnails; callers can preserve bounded inline payloads
+    // when the original file path is not previewable through the workspace bridge.
     func sanitizedForStorage(preservingPayloadDataURL: Bool) -> CodexImageAttachment {
         CodexImageAttachment(
             id: id,
@@ -99,6 +100,11 @@ struct CodexImageAttachment: Identifiable, Codable, Hashable, Sendable {
             return normalizedPayloadDataURL
         }
         return id
+    }
+
+    // Used by timeline renderers to avoid empty image placeholders from path-only history items.
+    nonisolated var hasPreviewPayload: Bool {
+        !thumbnailBase64JPEG.isEmpty || normalizedPayloadDataURL != nil
     }
 
     nonisolated private var normalizedPayloadDataURL: String? {

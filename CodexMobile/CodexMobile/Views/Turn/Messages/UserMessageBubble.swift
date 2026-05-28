@@ -11,7 +11,7 @@ struct UserMessageBubble: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     private static let bubbleCornerRadius: CGFloat = 22
-    private static let darkColoredBubbleOpacity = 0.75
+    private static let darkColoredBubbleOpacity = 0.7
 
     let message: CodexMessage
     let text: String
@@ -105,7 +105,7 @@ struct UserMessageBubble: View {
         case .failed:
             return "Failed"
         case .confirmed:
-            return message.createdAt.formatted(date: .omitted, time: .shortened)
+            return message.formattedTimelineTime()
         }
     }
 
@@ -248,42 +248,16 @@ private enum UserBubbleMentionExtractor {
             }
         }
 
-        // Missing selected chips are appended by identity, not by fuzzy text search.
-        let displayText = textByAppendingMissingChipLabels(
-            to: cleanedText(
-                replacing: replacements,
-                in: normalizedText
-            ),
-            chips: chips,
-            replacedChipIDs: replacedChipIDs
+        // Chips render in their own strip; keep the bubble text to the user's prose only.
+        let displayText = cleanedText(
+            replacing: replacements,
+            in: normalizedText
         )
         return UserBubbleRenderModel(
             text: displayText,
             textFingerprint: TurnTextCacheKey.stableFingerprint(for: displayText),
             chips: chips
         )
-    }
-
-    private static func textByAppendingMissingChipLabels(
-        to text: String,
-        chips: [TurnMentionChipRef],
-        replacedChipIDs: Set<String>
-    ) -> String {
-        let missingLabels = chips
-            .filter { !replacedChipIDs.contains($0.id) }
-            .map { $0.displayLabel.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        guard !missingLabels.isEmpty else {
-            return text
-        }
-
-        let suffix = missingLabels.joined(separator: " ")
-        guard !text.isEmpty else {
-            return suffix
-        }
-
-        return "\(text) \(suffix)"
     }
 
     private static func appendChip(

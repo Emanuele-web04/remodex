@@ -114,7 +114,7 @@ async function main({
         ok: true,
         currentVersion: version,
         plistPath: result?.plistPath,
-        pairingSession: result?.pairingSession,
+        pairingSession: sanitizePairingSessionForOutput(result?.pairingSession),
       },
       message: "[remodex] macOS bridge service is running.",
       jsonOutput,
@@ -135,7 +135,7 @@ async function main({
         ok: true,
         currentVersion: version,
         plistPath: result?.plistPath,
-        pairingSession: result?.pairingSession,
+        pairingSession: sanitizePairingSessionForOutput(result?.pairingSession),
       },
       message: "[remodex] macOS bridge service restarted.",
       jsonOutput,
@@ -150,10 +150,20 @@ async function main({
       consoleImpl,
       exitImpl,
     });
-    consoleImpl.log("[remodex] Refreshing bridge pairing QR...");
     const result = await deps.startMacOSBridgeService({
       waitForPairing: true,
     });
+    if (jsonOutput) {
+      emitJson({
+        ok: true,
+        currentVersion: version,
+        plistPath: result?.plistPath,
+        pairingSession: result?.pairingSession,
+      });
+      return;
+    }
+
+    consoleImpl.log("[remodex] Refreshing bridge pairing QR...");
     deps.printMacOSBridgePairingQr({
       pairingSession: result.pairingSession,
     });
@@ -187,7 +197,7 @@ async function main({
     });
     if (jsonOutput) {
       emitJson({
-        ...deps.getMacOSBridgeServiceStatus(),
+        ...sanitizeBridgeServiceStatusForOutput(deps.getMacOSBridgeServiceStatus()),
         currentVersion: version,
       });
       return;
@@ -265,7 +275,7 @@ async function main({
   consoleImpl.error(
     "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex status | "
     + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
-    + "append --json to start/restart/stop/status/reset-pairing/resume for machine-readable output"
+    + "append --json to start/restart/qr/pair/stop/status/reset-pairing/resume for machine-readable output"
   );
   exitImpl(1);
 }
@@ -320,6 +330,47 @@ function emitResult({
 
 function emitJson(payload) {
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+// Keeps machine-readable CLI output useful without exposing relay endpoints or live pairing payloads.
+function sanitizeBridgeServiceStatusForOutput(status = {}) {
+  const sanitized = {
+    ...status,
+    daemonConfig: sanitizeDaemonConfigForOutput(status.daemonConfig),
+    pairingSession: sanitizePairingSessionForOutput(status.pairingSession),
+  };
+  return sanitized;
+}
+
+function sanitizeDaemonConfigForOutput(config) {
+  if (!config || typeof config !== "object") {
+    return config || null;
+  }
+  const { relayUrl, pushServiceUrl, ...rest } = config;
+  return {
+    ...rest,
+    relayConfigured: Boolean(relayUrl),
+    pushServiceConfigured: Boolean(pushServiceUrl),
+  };
+}
+
+function sanitizePairingSessionForOutput(pairingSession) {
+  if (!pairingSession || typeof pairingSession !== "object") {
+    return pairingSession || null;
+  }
+  const payload = pairingSession.pairingPayload || {};
+  return {
+    createdAt: pairingSession.createdAt,
+    pairingCode: pairingSession.pairingCode,
+    pairingPayload: {
+      v: payload.v,
+      expiresAt: payload.expiresAt,
+      hasRelay: Boolean(payload.relay),
+      hasSessionId: Boolean(payload.sessionId),
+      hasMacIdentityPublicKey: Boolean(payload.macIdentityPublicKey),
+      displayName: payload.displayName,
+    },
+  };
 }
 
 function assertMacOSCommand(name, {

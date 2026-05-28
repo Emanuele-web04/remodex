@@ -1,5 +1,5 @@
 // FILE: TerminalOptionsMenu.swift
-// Purpose: Encapsulates terminal status, session, font-size, and connection actions.
+// Purpose: Encapsulates terminal status, clipboard, session, font-size, and connection actions.
 // Layer: View Component
 // Exports: TerminalOptionsMenu
 // Depends on: SwiftUI, TerminalUIModels
@@ -16,12 +16,14 @@ struct TerminalOptionsMenu: View {
     let activeTerminalId: String
     let isRunning: Bool
     let hasConnectionConfiguration: Bool
+    let canPaste: Bool
     let canClear: Bool
     let canResetKnownHost: Bool
     let onSelectSession: (String) -> Void
     let onOpenNewTerminal: () -> Void
     let onToggleConnection: () -> Void
     let onOpenConnectionEditor: () -> Void
+    let onPaste: () -> Void
     let onClear: () -> Void
     let onResetKnownHost: () -> Void
     let onAdjustFontSize: (Double) -> Void
@@ -31,26 +33,25 @@ struct TerminalOptionsMenu: View {
             statusSection
             textSizeSection
             sessionSection
+            clipboardSection
             connectionSection
         } label: {
+            // No fixed frame / background — the icon sits in the toolbar like
+            // a stock nav-bar button. A small status dot floats just above the
+            // glyph so we keep the running/error glance without a pill.
             RemodexIcon.image(systemName: "ellipsis")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(Color(hexString: theme.foreground))
-                .frame(width: 36, height: 36)
                 .overlay(alignment: .topTrailing) {
-                    // Tiny corner status badge: keeps a glanceable hint of
-                    // running/error state without restoring the wordy pill.
                     Circle()
                         .fill(Color(hexString: statusTone.tint))
-                        .frame(width: 8, height: 8)
+                        .frame(width: 7, height: 7)
                         .overlay(
                             Circle()
                                 .stroke(Color(hexString: theme.background).opacity(0.7), lineWidth: 1)
                         )
-                        .padding(5)
+                        .offset(x: 4, y: -4)
                 }
-                .adaptiveGlass(.regular, in: Circle())
-                .contentShape(Circle())
         }
         .accessibilityLabel("Terminal options")
         .accessibilityValue(statusLabel)
@@ -95,6 +96,15 @@ struct TerminalOptionsMenu: View {
             Button(action: onOpenNewTerminal) {
                 Label("Open new terminal", systemImage: "plus")
             }
+        }
+    }
+
+    private var clipboardSection: some View {
+        Section {
+            Button(action: onPaste) {
+                RemodexIcon.menuLabel("Paste", systemName: "doc.on.clipboard")
+            }
+            .disabled(!canPaste)
         }
     }
 

@@ -82,7 +82,7 @@ struct UsageStatusSummaryContent: View {
 
                     Spacer(minLength: 12)
 
-                    if isLoadingRateLimits {
+                    if isLoadingRateLimits && refreshControl?.isRefreshing != true {
                         ProgressView()
                             .controlSize(.small)
                     }

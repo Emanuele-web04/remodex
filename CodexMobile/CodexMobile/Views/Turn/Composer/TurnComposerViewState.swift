@@ -16,6 +16,7 @@ struct TurnComposerAutocompleteState {
     let isSkillAutocompleteVisible: Bool
     let isSkillAutocompleteLoading: Bool
     let skillAutocompleteQuery: String
+    let skillAutocompleteTrigger: String
     let pluginAutocompleteItems: [CodexPluginMetadata]
     let isPluginAutocompleteVisible: Bool
     let isPluginAutocompleteLoading: Bool

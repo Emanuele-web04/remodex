@@ -121,7 +121,8 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         var openedThreadID: String?
         var openedThreadMessageText: String?
         var didOpenBeforeTurnStart = false
-        service.requestTransportOverride = { method, _ in
+        let titleExpectation = expectation(description: "New thread automatic title generation completes")
+        service.requestTransportOverride = { method, params in
             recordedMethods.append(method)
             switch method {
             case "thread/start":
@@ -147,6 +148,8 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
                     includeJSONRPC: false
                 )
             case "thread/generateTitle":
+                XCTAssertEqual(params?.objectValue?["message"]?.stringValue, "First message")
+                titleExpectation.fulfill()
                 return RPCMessage(
                     id: .string(UUID().uuidString),
                     result: .object(["title": .string("First message")]),
@@ -172,6 +175,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         }
         let immediateDraftMessage = service.messages(for: "draft-thread").first
         await waitForSendCompletion(viewModel)
+        await fulfillment(of: [titleExpectation], timeout: 2.0)
 
         XCTAssertTrue(didStart)
         XCTAssertEqual(immediateDraftMessage?.text, "First message")
@@ -182,8 +186,10 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertTrue(service.messages(for: "draft-thread").isEmpty)
         XCTAssertEqual(recordedMethods.filter { $0 == "thread/start" }.count, 1)
         XCTAssertEqual(recordedMethods.filter { $0 == "turn/start" }.count, 1)
+        XCTAssertEqual(recordedMethods.filter { $0 == "thread/generateTitle" }.count, 1)
         XCTAssertEqual(service.messages(for: "thread-new").filter { $0.role == .user }.count, 1)
         XCTAssertEqual(service.messages(for: "thread-new").first?.turnId, "turn-new")
+        XCTAssertEqual(service.thread(for: "thread-new")?.displayTitle, "First message")
     }
 
     func testLocalDraftRestoresComposerStateForSameThread() {

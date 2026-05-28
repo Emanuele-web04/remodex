@@ -44,10 +44,12 @@ extension CodexService {
         rows: Int
     ) async throws {
         let normalizedProfile = profile.normalizedForSave
+        var profileForSave = normalizedProfile
+        profileForSave.cwd = ""
         let instanceId = UUID().uuidString
         let terminal = nativeTerminal(for: terminalId)
-        terminalProfile = normalizedProfile
-        RemodexTerminalProfileStore.save(normalizedProfile)
+        terminalProfile = profileForSave
+        RemodexTerminalProfileStore.save(profileForSave)
         setTerminalSnapshot(RemodexTerminalSnapshot(
             terminalId: terminalId,
             instanceId: instanceId,
@@ -165,8 +167,6 @@ extension CodexService {
         updateTerminalSnapshot(for: terminalId) { snapshot in
             snapshot.cwd = trimmedCWD
         }
-        terminalProfile.cwd = trimmedCWD
-        RemodexTerminalProfileStore.save(terminalProfile)
         guard terminalSnapshot(for: terminalId).status == .running else { return }
         try await writeTerminalInput(
             Data(shellChangeDirectoryCommand(for: trimmedCWD).utf8),
@@ -263,10 +263,6 @@ extension CodexService {
     }
 
     private func terminalErrorText(_ error: Error) -> String {
-        if let localizedError = error as? LocalizedError,
-           let description = localizedError.errorDescription {
-            return description
-        }
-        return error.localizedDescription
+        RemodexNativeSSHTerminalError.userFacingDescription(for: error)
     }
 }

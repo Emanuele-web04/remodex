@@ -16,6 +16,7 @@ struct BridgeSnapshot: Codable, Equatable {
     let daemonConfig: BridgeDaemonConfig?
     let bridgeStatus: BridgeRuntimeStatus?
     let pairingSession: BridgePairingSession?
+    let trustedDevice: BridgeTrustedDeviceSummary?
     let stdoutLogPath: String
     let stderrLogPath: String
 }
@@ -33,6 +34,8 @@ struct BridgeRuntimeStatus: Codable, Equatable {
     let pid: Int?
     let lastError: String?
     let updatedAt: String?
+    let activeDevice: BridgeActivePhoneSummary?
+    let activePhone: BridgeActivePhoneSummary?
 }
 
 struct BridgePairingSession: Codable, Equatable {
@@ -47,6 +50,23 @@ struct BridgePairingPayload: Codable, Equatable {
     let macDeviceId: String
     let macIdentityPublicKey: String
     let expiresAt: Int64
+}
+
+struct BridgeTrustedDeviceSummary: Codable, Equatable {
+    let macDeviceFingerprint: String?
+    let trustedPhoneCount: Int
+    let trustedPhoneFingerprint: String?
+    let lastSeenDeviceKind: String?
+    let lastSeenPhoneAppVersion: String?
+}
+
+struct BridgeActivePhoneSummary: Codable, Equatable {
+    let connected: Bool
+    let phoneFingerprint: String?
+    let deviceKind: String?
+    let handshakeMode: String?
+    let keyEpoch: Int?
+    let updatedAt: String?
 }
 
 struct BridgePackageUpdateState: Equatable {
@@ -173,6 +193,46 @@ extension BridgeSnapshot {
 
     var relayKindLabel: String {
         classifyRelay(effectiveRelayURL)
+    }
+
+    var trustedPhoneStatusLabel: String {
+        if let activeDevice = bridgeStatus?.activeDevice ?? bridgeStatus?.activePhone,
+           activeDevice.connected {
+            let deviceName = Self.displayDeviceName(activeDevice.deviceKind)
+            if let fingerprint = activeDevice.phoneFingerprint?.nonEmptyTrimmed {
+                return "Connected \(deviceName) · \(fingerprint)"
+            }
+
+            return "Connected \(deviceName)"
+        }
+
+        guard let trustedDevice else {
+            return "Unknown"
+        }
+
+        if trustedDevice.trustedPhoneCount <= 0 {
+            return "No device paired"
+        }
+
+        let deviceName = Self.displayDeviceName(trustedDevice.lastSeenDeviceKind)
+        if let appVersion = trustedDevice.lastSeenPhoneAppVersion?.nonEmptyTrimmed {
+            return "Trusted \(deviceName) · app \(appVersion)"
+        }
+
+        return "Trusted \(deviceName)"
+    }
+
+    private static func displayDeviceName(_ deviceKind: String?) -> String {
+        switch deviceKind?.nonEmptyTrimmed?.lowercased() {
+        case "iphone":
+            return "iPhone"
+        case "android":
+            return "Android"
+        case "mac":
+            return "Mac"
+        default:
+            return "device"
+        }
     }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {

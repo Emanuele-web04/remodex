@@ -39,12 +39,12 @@ struct ComposerAttachmentTile: View {
                 }
             }
             .frame(
-                width: TurnAttachmentPipeline.thumbnailSide,
-                height: TurnAttachmentPipeline.thumbnailSide
+                width: TurnAttachmentThumbnailMetrics.side,
+                height: TurnAttachmentThumbnailMetrics.side
             )
-            .clipShape(RoundedRectangle(cornerRadius: TurnAttachmentPipeline.thumbnailCornerRadius, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: TurnAttachmentThumbnailMetrics.cornerRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: TurnAttachmentPipeline.thumbnailCornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: TurnAttachmentThumbnailMetrics.cornerRadius, style: .continuous)
                     .stroke(borderColor(for: attachment), lineWidth: 1)
             )
 
@@ -52,11 +52,17 @@ struct ComposerAttachmentTile: View {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 onRemove(attachment.id)
             } label: {
-                RemodexIcon.image(systemName: "xmark.circle.fill")
-                    .font(AppFont.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white, .black.opacity(0.65))
+                ZStack {
+                    Circle()
+                        .fill(Color.black.opacity(0.72))
+                        .frame(width: 18, height: 18)
+
+                    RemodexIcon.image(systemName: "xmark")
+                        .font(AppFont.system(size: 8, weight: .bold))
+                        .foregroundStyle(.white)
+                }
             }
-            .offset(x: 8, y: -8)
+            .padding(5)
             .accessibilityLabel("Remove image")
         }
     }
@@ -64,7 +70,7 @@ struct ComposerAttachmentTile: View {
     // MARK: - Private
 
     private var placeholderTile: some View {
-        RoundedRectangle(cornerRadius: TurnAttachmentPipeline.thumbnailCornerRadius, style: .continuous)
+        RoundedRectangle(cornerRadius: TurnAttachmentThumbnailMetrics.cornerRadius, style: .continuous)
             .fill(Color(.secondarySystemFill))
             .overlay(
                 RemodexIcon.image(systemName: "photo")

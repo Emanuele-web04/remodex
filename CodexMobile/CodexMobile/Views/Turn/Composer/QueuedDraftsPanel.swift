@@ -1,5 +1,5 @@
 // FILE: QueuedDraftsPanel.swift
-// Purpose: Displays queued message drafts inside the composer card with steer/delete controls.
+// Purpose: Displays queued message drafts in a compact composer-adjacent card with steer/delete controls.
 // Layer: View Component
 // Exports: QueuedDraftsPanel
 // Depends on: SwiftUI, QueuedTurnDraft, AppFont, HapticFeedback
@@ -14,6 +14,7 @@ struct QueuedDraftsPanel: View {
     let onRestore: (String) -> Void
     let onSteer: (String) -> Void
     let onRemove: (String) -> Void
+    var rowHeight: CGFloat = 34
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -24,7 +25,7 @@ struct QueuedDraftsPanel: View {
                         .foregroundStyle(.tertiary)
 
                     Text(draft.text)
-                        .font(AppFont.caption())
+                        .font(AppFont.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -84,7 +85,7 @@ struct QueuedDraftsPanel: View {
                     .disabled(steeringDraftID == draft.id)
                 }
                 .padding(.horizontal, 10)
-                .padding(.vertical, 2.5)
+                .frame(height: rowHeight)
 
                 if draft.id != drafts.last?.id {
                     Divider()
@@ -92,7 +93,6 @@ struct QueuedDraftsPanel: View {
                 }
             }
         }
-        .padding(.top, 5)
     }
 }
 

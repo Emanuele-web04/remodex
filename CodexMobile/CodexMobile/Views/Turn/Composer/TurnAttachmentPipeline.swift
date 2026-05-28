@@ -19,12 +19,10 @@ enum TurnComposerImageAttachmentState: Codable, Equatable, Sendable {
 }
 
 enum TurnAttachmentPipeline {
-    static let thumbnailSide: CGFloat = 70
-    static let thumbnailCornerRadius: CGFloat = 12
-
     private static let maxPayloadDimension: CGFloat = 1600
-    private static let payloadCompressionQuality: CGFloat = 0.8
-    private static let thumbnailCompressionQuality: CGFloat = 0.8
+    private static let thumbnailSide = TurnAttachmentThumbnailMetrics.side
+    private static let payloadCompressionQuality: CGFloat = 0.6
+    private static let thumbnailCompressionQuality: CGFloat = 0.6
     private static let thumbnailCache = NSCache<NSString, UIImage>()
 
     // Builds both payload and preview formats from raw picker data.
@@ -87,7 +85,7 @@ enum TurnAttachmentPipeline {
         return rendered.jpegData(compressionQuality: payloadCompressionQuality)
     }
 
-    // Produces the exact 70x70 cover thumbnail shown in composer and user bubble.
+    // Produces the exact square cover thumbnail shown in composer and user bubble.
     private static func makeThumbnailBase64JPEG(from imageData: Data) -> String? {
         guard let image = UIImage(data: imageData) else {
             return nil

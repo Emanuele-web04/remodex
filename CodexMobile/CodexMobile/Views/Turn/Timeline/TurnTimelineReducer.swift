@@ -120,6 +120,17 @@ enum TurnTimelineReducer {
     // Detects steer-like flows where a later user prompt is appended inside the same turn.
     // In those cases the original event order is authoritative for rendering.
     private static func hasInterleavedUserFlow(_ turnMessages: [CodexMessage]) -> Bool {
+        let userCount = turnMessages.reduce(into: 0) { count, message in
+            if message.role == .user {
+                count += 1
+            }
+        }
+        guard userCount > 1 else {
+            // Desktop mirrors can deliver the only opening prompt after assistant output.
+            // A single user row is still the turn opener, not a steer.
+            return false
+        }
+
         let ordered = turnMessages.sorted { $0.orderIndex < $1.orderIndex }
         var seenNonUser = false
 
@@ -593,7 +604,7 @@ enum TurnTimelineReducer {
         guard previous.role == .user,
               incoming.role == .user,
               previous.threadId == incoming.threadId,
-              messageTextsMatchForDedupe(previous.text, incoming.text),
+              CodexService.userMessagesMatchForHistory(previous, incoming),
               userMessageMetadataLooksCompatible(previous: previous, incoming: incoming) else {
             return false
         }
@@ -601,6 +612,16 @@ enum TurnTimelineReducer {
         let previousTurnId = normalizedIdentifier(previous.turnId)
         let incomingTurnId = normalizedIdentifier(incoming.turnId)
         if let previousTurnId, let incomingTurnId {
+            // Some reopen/history fallbacks arrive with epoch timestamps (shown as 1:00).
+            // Treat those as stale echoes when identity and content already agree.
+            if previousTurnId == incomingTurnId,
+               hasFallbackHistoryTimestamp(previous.createdAt) || hasFallbackHistoryTimestamp(incoming.createdAt) {
+                return true
+            }
+            if previousTurnId == incomingTurnId,
+               shouldCollapseSemanticMentionEcho(previous: previous, incoming: incoming) {
+                return true
+            }
             return previousTurnId == incomingTurnId
                 && previous.deliveryState == .pending
                 && incoming.deliveryState == .confirmed
@@ -630,6 +651,10 @@ enum TurnTimelineReducer {
 
     private static func mergedUserMessage(previous: CodexMessage, incoming: CodexMessage) -> CodexMessage {
         var merged = previous
+        let shouldPreferIncomingPresentation = CodexService.shouldPreferIncomingUserPresentationText(
+            existing: previous,
+            incoming: incoming
+        )
 
         if merged.deliveryState == .pending || incoming.deliveryState == .confirmed {
             merged.deliveryState = incoming.deliveryState
@@ -643,15 +668,60 @@ enum TurnTimelineReducer {
         if merged.fileMentions.isEmpty && !incoming.fileMentions.isEmpty {
             merged.fileMentions = incoming.fileMentions
         }
+        if merged.skillMentions.isEmpty && !incoming.skillMentions.isEmpty {
+            merged.skillMentions = incoming.skillMentions
+        }
+        if merged.pluginMentions.isEmpty && !incoming.pluginMentions.isEmpty {
+            merged.pluginMentions = incoming.pluginMentions
+        }
         if merged.attachments.isEmpty && !incoming.attachments.isEmpty {
             merged.attachments = incoming.attachments
         }
 
-        if hasMeaningfulMessageText(incoming.text) {
+        let semanticUserMatch = CodexService.userMessagesMatchForHistory(merged, incoming)
+        if shouldPreferIncomingPresentation {
             merged.text = incoming.text
+        } else if hasMeaningfulMessageText(incoming.text),
+                  (!semanticUserMatch || (merged.skillMentions.isEmpty && merged.pluginMentions.isEmpty)) {
+            merged.text = incoming.text
+        }
+        if hasFallbackHistoryTimestamp(merged.createdAt),
+           !hasFallbackHistoryTimestamp(incoming.createdAt) {
+            merged.createdAt = incoming.createdAt
         }
 
         return merged
+    }
+
+    private static func shouldCollapseSemanticMentionEcho(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        let previousHasMentionMetadata = hasMentionMetadata(previous)
+        let incomingHasMentionMetadata = hasMentionMetadata(incoming)
+        guard previousHasMentionMetadata != incomingHasMentionMetadata else {
+            return false
+        }
+
+        return (previousHasMentionMetadata && containsInlineMentionToken(incoming.text))
+            || (incomingHasMentionMetadata && containsInlineMentionToken(previous.text))
+    }
+
+    private static func hasMentionMetadata(_ message: CodexMessage) -> Bool {
+        !message.skillMentions.isEmpty || !message.pluginMentions.isEmpty
+    }
+
+    private static func containsInlineMentionToken(_ text: String) -> Bool {
+        guard text.utf8.count <= largeTextDedupeByteLimit,
+              let regex = try? NSRegularExpression(
+                pattern: #"(?<!\S)([$/@])([A-Za-z0-9][A-Za-z0-9._-]*)(?=[\s,.;:!?)\]}>]|$)"#
+              ) else {
+            return false
+        }
+
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.firstMatch(in: text, range: range) != nil
+    }
+
+    private static func hasFallbackHistoryTimestamp(_ date: Date) -> Bool {
+        !CodexTimestampParser.isTrustworthyServerDate(date)
     }
 
     private static func normalizedSmallMessageText(_ text: String) -> String? {

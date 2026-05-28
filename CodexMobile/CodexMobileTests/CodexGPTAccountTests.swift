@@ -135,8 +135,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
+                    "bridgeVersion": .string("2.0.0"),
+                    "bridgeLatestVersion": .string("2.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -144,8 +144,8 @@ final class CodexGPTAccountTests: XCTestCase {
 
         await service.refreshBridgeVersionState(allowAvailableBridgeUpdatePrompt: true)
 
-        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.9")
-        XCTAssertEqual(service.latestBridgePackageVersion, "1.4.0")
+        XCTAssertEqual(service.bridgeInstalledVersion, "2.0.0")
+        XCTAssertEqual(service.latestBridgePackageVersion, "2.0.1")
         XCTAssertEqual(
             service.bridgeUpdatePrompt?.title,
             "A newer Remodex update is available on your Mac"
@@ -169,8 +169,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
+                    "bridgeVersion": .string("2.0.0"),
+                    "bridgeLatestVersion": .string("2.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -196,8 +196,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
+                    "bridgeVersion": .string("2.0.0"),
+                    "bridgeLatestVersion": .string("2.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -231,8 +231,8 @@ final class CodexGPTAccountTests: XCTestCase {
                     "loginInFlight": .bool(false),
                     "needsReauth": .bool(false),
                     "tokenReady": .bool(true),
-                    "bridgeVersion": .string("1.3.9"),
-                    "bridgeLatestVersion": .string("1.4.0"),
+                    "bridgeVersion": .string("2.0.0"),
+                    "bridgeLatestVersion": .string("2.0.1"),
                 ]),
                 includeJSONRPC: false
             )
@@ -241,8 +241,8 @@ final class CodexGPTAccountTests: XCTestCase {
         service.setForegroundState(true)
         await yieldMainActor(times: 3)
 
-        XCTAssertEqual(service.bridgeInstalledVersion, "1.3.9")
-        XCTAssertEqual(service.latestBridgePackageVersion, "1.4.0")
+        XCTAssertEqual(service.bridgeInstalledVersion, "2.0.0")
+        XCTAssertEqual(service.latestBridgePackageVersion, "2.0.1")
         XCTAssertEqual(
             service.bridgeUpdatePrompt?.title,
             "A newer Remodex update is available on your Mac"
@@ -599,14 +599,14 @@ final class CodexGPTAccountTests: XCTestCase {
         }
     }
 
-    func testVoiceTranscriptionPreflightRejectsClipsLongerThanTwoMinutes() {
+    func testVoiceTranscriptionPreflightRejectsClipsLongerThan150Seconds() {
         let preflight = CodexVoiceTranscriptionPreflight(
             byteCount: 2_048,
-            durationSeconds: 120.5
+            durationSeconds: 150.5
         )
 
         XCTAssertThrowsError(try preflight.validate()) { error in
-            XCTAssertEqual(error.localizedDescription, "Voice clips must be 120 seconds or less.")
+            XCTAssertEqual(error.localizedDescription, "Voice clips must be 150 seconds or less.")
         }
     }
 

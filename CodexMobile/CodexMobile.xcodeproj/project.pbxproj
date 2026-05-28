@@ -27,6 +27,7 @@
 		6F8E129A7BC34A12D45E6F70 /* CodexThreadStartProjectBindingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */; };
 		7750A4973549580C7DBA5792 /* RemodexLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA83C07BD6661A63FFD1400F /* RemodexLaunchIntent.swift */; };
 		7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */; };
+		7D4F2A91C8E64B3DA5F67001 /* CodexThreadGitControlScopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D4F2A91C8E64B3DA5F67002 /* CodexThreadGitControlScopeTests.swift */; };
 		7EFA3E8309EF41CA902C7A67 /* AssistantTurnEndActionVisibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02C96CD0916A43F38184398D /* AssistantTurnEndActionVisibilityTests.swift */; };
 		86E3342F83DA4ED868E87BF2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1C818F3EC0291EF8B6E5B541 /* Assets.xcassets */; };
 		87DEFF39A5119F5BD0E7B071 /* RemodexControlCenterWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D5C5F38BB3C121F29CA8A40 /* RemodexControlCenterWidget.swift */; };
@@ -49,6 +50,7 @@
 		A4B0C1D2E3F4051627384A0C /* libc++.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0B /* libc++.tbd */; };
 		A4B0C1D2E3F4051627384A0E /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0D /* libz.tbd */; };
 		A4B0C1D2E3F4051627384A10 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0F /* UIKit.framework */; };
+		A7D1C9E4B6F84321ABCD1201 /* TerminalPasteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D1C9E4B6F84321ABCD1202 /* TerminalPasteTests.swift */; };
 		A9F1B2C3D4E5F60718293A40 /* TurnSkillAutocompleteTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */; };
 		A9F1B2C3D4E5F60718293A42 /* CodexSkillsListDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */; };
 		A9F1B2C3D4E5F60718293A44 /* CodexTurnInputPayloadSkillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A45 /* CodexTurnInputPayloadSkillTests.swift */; };
@@ -150,6 +152,7 @@
 		6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadStartProjectBindingTests.swift; sourceTree = "<group>"; };
 		74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnComposerSendAvailabilityTests.swift; sourceTree = "<group>"; };
 		7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadRuntimeOverrideTests.swift; sourceTree = "<group>"; };
+		7D4F2A91C8E64B3DA5F67002 /* CodexThreadGitControlScopeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadGitControlScopeTests.swift; sourceTree = "<group>"; };
 		821C46F274E62AA48DE694F4 /* RemodexWidgetBundle.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexWidgetBundle.swift; sourceTree = "<group>"; };
 		8B4A2F5E7D1C4B9AA1234568 /* TurnComposerAttachmentIntakePlanTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnComposerAttachmentIntakePlanTests.swift; sourceTree = "<group>"; };
 		8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarRunBadgePerformanceTests.swift; sourceTree = "<group>"; };
@@ -171,6 +174,7 @@
 		A4B0C1D2E3F4051627384A0B /* libc++.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = "libc++.tbd"; path = "usr/lib/libc++.tbd"; sourceTree = SDKROOT; };
 		A4B0C1D2E3F4051627384A0D /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
 		A4B0C1D2E3F4051627384A0F /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		A7D1C9E4B6F84321ABCD1202 /* TerminalPasteTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TerminalPasteTests.swift; sourceTree = "<group>"; };
 		A932BE773A84EFEA525DF684 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = CodexMobile/Assets.xcassets; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnSkillAutocompleteTokenTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexSkillsListDecodeTests.swift; sourceTree = "<group>"; };
@@ -308,7 +312,9 @@
 				6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */,
 				F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */,
 				7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */,
+				7D4F2A91C8E64B3DA5F67002 /* CodexThreadGitControlScopeTests.swift */,
 				B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */,
+				A7D1C9E4B6F84321ABCD1202 /* TerminalPasteTests.swift */,
 				8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */,
 				8B4A2F5E7D1C4B9AA1234568 /* TurnComposerAttachmentIntakePlanTests.swift */,
 				74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */,
@@ -719,7 +725,9 @@
 				6F8E129A7BC34A12D45E6F70 /* CodexThreadStartProjectBindingTests.swift in Sources */,
 				F1B2C3D4E5F60718293A4B10 /* CodexGPTAccountTests.swift in Sources */,
 				7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */,
+				7D4F2A91C8E64B3DA5F67001 /* CodexThreadGitControlScopeTests.swift in Sources */,
 				B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */,
+				A7D1C9E4B6F84321ABCD1201 /* TerminalPasteTests.swift in Sources */,
 				8CE11223A4B5C6D7E8F90123 /* SidebarRunBadgePerformanceTests.swift in Sources */,
 				8B4A2F5E7D1C4B9AA1234567 /* TurnComposerAttachmentIntakePlanTests.swift in Sources */,
 				4C0F0D55A5051D8301463C69 /* TurnComposerSendAvailabilityTests.swift in Sources */,
@@ -1037,6 +1045,7 @@
 			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
 				APS_ENVIRONMENT = development;
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = RemodexContrast;
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
@@ -1062,7 +1071,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6;
+				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1084,6 +1093,7 @@
 			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
 				APS_ENVIRONMENT = production;
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = RemodexContrast;
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
@@ -1109,7 +1119,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6;
+				MARKETING_VERSION = 2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";

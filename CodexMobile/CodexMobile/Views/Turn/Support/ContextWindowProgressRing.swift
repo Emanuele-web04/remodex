@@ -18,9 +18,9 @@ struct ContextWindowProgressRing: View {
     @State private var isShowingPopover = false
     @State private var isRefreshing = false
 
-    private let ringSize: CGFloat = 18
+    private let ringSize: CGFloat = 16
     private let lineWidth: CGFloat = 2.75
-    private let tapTargetSize: CGFloat = 36
+    private let tapTargetSize: CGFloat = 34
 
     var body: some View {
         let displayUsage = usage ?? .zero

@@ -7,8 +7,10 @@
 import Foundation
 
 struct CodexVoiceTranscriptionPreflight: Equatable, Sendable {
-    static let maxDurationSeconds: TimeInterval = 120
+    static let maxDurationSeconds: TimeInterval = 150
     static let maxByteCount: Int = 10 * 1024 * 1024
+    static let requestTimeoutNanoseconds: UInt64 = 180_000_000_000
+    private static let maxDurationDisplaySeconds = Int(maxDurationSeconds)
 
     let byteCount: Int
     let durationSeconds: TimeInterval
@@ -19,7 +21,7 @@ struct CodexVoiceTranscriptionPreflight: Equatable, Sendable {
         }
 
         if durationSeconds > Self.maxDurationSeconds {
-            return "Voice clips must be 120 seconds or less."
+            return "Voice clips must be \(Self.maxDurationDisplaySeconds) seconds or less."
         }
 
         if byteCount > Self.maxByteCount {
@@ -78,7 +80,9 @@ extension CodexService {
                 "audioBase64": .string(audioData.base64EncodedString()),
                 "sampleRateHz": .integer(24_000),
                 "durationMs": .integer(Int((durationSeconds * 1_000).rounded())),
-            ])
+            ]),
+            timeoutNanoseconds: CodexVoiceTranscriptionPreflight.requestTimeoutNanoseconds,
+            timeoutMessage: "Voice transcription timed out. Try a shorter clip or retry when the connection is stable."
         )
 
         guard let text = response.result?.objectValue?["text"]?.stringValue?

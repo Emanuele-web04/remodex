@@ -170,9 +170,15 @@ function createThreadRolloutLiveMirror({
           return;
         }
 
-        const combined = `${partialLine}${chunk}`;
-        const lines = combined.split("\n");
-        partialLine = lines.pop() || "";
+        const combined = partialLine ? `${partialLine}${chunk}` : chunk;
+        let searchStart = 0;
+        let nlIndex;
+        const lines = [];
+        while ((nlIndex = combined.indexOf("\n", searchStart)) !== -1) {
+          lines.push(combined.substring(searchStart, nlIndex));
+          searchStart = nlIndex + 1;
+        }
+        partialLine = searchStart < combined.length ? combined.substring(searchStart) : "";
         processRolloutLines(lines, state, sendApplicationResponse);
         return;
       }
@@ -372,6 +378,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
         state.pendingUserMessages.push({
           id: readString(payload.id),
           message,
+          timestamp: readUserMessageTimestamp(entry, payload),
         });
         return [];
       }
@@ -380,6 +387,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
         threadId: state.threadId,
         turnId,
         message,
+        ...timestampParams(readUserMessageTimestamp(entry, payload)),
       }));
       return notifications;
     }
@@ -992,7 +1000,25 @@ function flushPendingUserMessageNotifications(state, turnId) {
     turnId: turnId || state.activeTurnId || "",
     message: pending.message,
     ...(pending.id ? { id: pending.id } : {}),
+    ...timestampParams(pending.timestamp),
   }));
+}
+
+function readUserMessageTimestamp(entry, payload = {}) {
+  return firstNonEmptyString([
+    readString(payload.createdAt),
+    readString(payload.created_at),
+    readString(payload.timestamp),
+    readString(payload.time),
+    readString(entry?.timestamp),
+  ]);
+}
+
+function timestampParams(timestamp) {
+  const normalizedTimestamp = readString(timestamp);
+  return normalizedTimestamp
+    ? { createdAt: normalizedTimestamp, timestamp: normalizedTimestamp }
+    : {};
 }
 
 function buildSyntheticItemId(kind, threadId, turnId, suffix = "") {

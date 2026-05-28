@@ -11,8 +11,65 @@ DESTINATION="${DESTINATION:-platform=iOS Simulator,name=iPhone 17}"
 BASELINE_PATH="${BASELINE_PATH:-$ROOT_DIR/Docs/Sidebar-RunBadge-Performance-Baseline.json}"
 MAX_REGRESSION_PERCENT="${MAX_REGRESSION_PERCENT:-}"
 
+print_usage() {
+  cat <<EOF
+Usage: BASELINE_PATH=/path/to/sidebar-baseline.json $0
+
+Runs SidebarRunBadgePerformanceTests and compares xcresult metrics with a JSON baseline.
+
+Environment:
+  SCHEME                   Xcode scheme. Default: CodexMobile
+  DESTINATION              xcodebuild destination. Default: platform=iOS Simulator,name=iPhone 17
+  BASELINE_PATH            Required baseline JSON path. Default: $ROOT_DIR/Docs/Sidebar-RunBadge-Performance-Baseline.json
+  MAX_REGRESSION_PERCENT   Optional override for the baseline max_regression_percent value.
+
+Helpers:
+  $0 --print-baseline-template
+  $0 --help
+EOF
+}
+
+print_baseline_template() {
+  cat <<'EOF'
+{
+  "max_regression_percent": 12.0,
+  "metrics": {
+    "snapshot_clock_s": 0.0,
+    "snapshot_cpu_time_s": 0.0,
+    "large_timeline_clock_s": 0.0,
+    "large_timeline_cpu_time_s": 0.0
+  }
+}
+EOF
+}
+
+case "${1:-}" in
+  "" ) ;;
+  "-h"|"--help" )
+    print_usage
+    exit 0
+    ;;
+  "--print-baseline-template" )
+    print_baseline_template
+    exit 0
+    ;;
+  * )
+    echo "Unknown argument: $1" >&2
+    print_usage >&2
+    exit 2
+    ;;
+esac
+
 if [[ ! -f "$BASELINE_PATH" ]]; then
-  echo "Baseline file not found: $BASELINE_PATH"
+  cat >&2 <<EOF
+Baseline file not found: $BASELINE_PATH
+
+Provide an explicit baseline file before running the performance check:
+  BASELINE_PATH=/path/to/sidebar-baseline.json $0
+
+To see the required JSON shape:
+  $0 --print-baseline-template
+EOF
   exit 1
 fi
 

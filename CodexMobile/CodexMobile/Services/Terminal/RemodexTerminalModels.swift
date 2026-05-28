@@ -115,14 +115,6 @@ struct RemodexTerminalProfile: Codable, Equatable, Sendable {
         )
     }
 
-    mutating func applyPreferredWorkingDirectoryOverride(_ workingDirectory: String?) {
-        guard let workingDirectory = workingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !workingDirectory.isEmpty else {
-            return
-        }
-        cwd = workingDirectory
-    }
-
     mutating func applyConnectionString(_ value: String) {
         var rawValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
         if rawValue.hasPrefix("ssh ") {
@@ -160,6 +152,7 @@ struct RemodexTerminalSnapshot: Equatable, Sendable {
     var rows: Int
     var errorMessage: String?
     var resizeSupported: Bool
+    var bracketedPasteEnabled: Bool
 
     static let idle = RemodexTerminalSnapshot(
         terminalId: remodexDefaultTerminalId,
@@ -171,7 +164,8 @@ struct RemodexTerminalSnapshot: Equatable, Sendable {
         cols: 80,
         rows: 24,
         errorMessage: nil,
-        resizeSupported: false
+        resizeSupported: false,
+        bracketedPasteEnabled: false
     )
 
     static func idleSnapshot(terminalId: String) -> RemodexTerminalSnapshot {
@@ -190,7 +184,8 @@ struct RemodexTerminalSnapshot: Equatable, Sendable {
         cols: Int,
         rows: Int,
         errorMessage: String?,
-        resizeSupported: Bool
+        resizeSupported: Bool,
+        bracketedPasteEnabled: Bool = false
     ) {
         self.terminalId = terminalId
         self.instanceId = instanceId
@@ -202,6 +197,7 @@ struct RemodexTerminalSnapshot: Equatable, Sendable {
         self.rows = rows
         self.errorMessage = errorMessage
         self.resizeSupported = resizeSupported
+        self.bracketedPasteEnabled = bracketedPasteEnabled
     }
 
     init(resultObject: [String: JSONValue]) {
@@ -210,17 +206,19 @@ struct RemodexTerminalSnapshot: Equatable, Sendable {
         let historyData = Self.dataFromBase64(resultObject["historyBase64"]?.stringValue ?? resultObject["history_base64"]?.stringValue)
             ?? Self.dataFromBase64(resultObject["dataBase64"]?.stringValue ?? resultObject["data_base64"]?.stringValue)
             ?? Data(historyText.utf8)
+        let decodedHistoryText = historyText.isEmpty ? String(decoding: historyData, as: UTF8.self) : historyText
         self.init(
             terminalId: resultObject["terminalId"]?.stringValue ?? resultObject["terminal_id"]?.stringValue ?? remodexDefaultTerminalId,
             instanceId: Self.instanceId(in: resultObject),
             status: RemodexTerminalStatus(rawValue: rawStatus) ?? .idle,
-            buffer: Self.trimmedBuffer(historyText.isEmpty ? String(decoding: historyData, as: UTF8.self) : historyText),
+            buffer: Self.trimmedBuffer(decodedHistoryText),
             bufferData: Self.trimmedBufferData(historyData),
             cwd: resultObject["cwd"]?.stringValue ?? "",
             cols: resultObject["cols"]?.intValue ?? 80,
             rows: resultObject["rows"]?.intValue ?? 24,
             errorMessage: resultObject["error"]?.stringValue,
-            resizeSupported: resultObject["resizeSupported"]?.boolValue ?? false
+            resizeSupported: resultObject["resizeSupported"]?.boolValue ?? false,
+            bracketedPasteEnabled: Self.bracketedPasteMode(afterScanning: decodedHistoryText, current: false)
         )
     }
 
@@ -243,16 +241,21 @@ struct RemodexTerminalSnapshot: Equatable, Sendable {
             bufferData = Self.trimmedBufferData(Self.dataFromBase64(
                 paramsObject["historyBase64"]?.stringValue ?? paramsObject["history_base64"]?.stringValue
             ) ?? Data(history.utf8))
+            bracketedPasteEnabled = Self.bracketedPasteMode(afterScanning: history, current: false)
         } else if let historyBase64 = paramsObject["historyBase64"]?.stringValue ?? paramsObject["history_base64"]?.stringValue,
                   let historyData = Self.dataFromBase64(historyBase64) {
+            let historyText = String(decoding: historyData, as: UTF8.self)
             bufferData = Self.trimmedBufferData(historyData)
-            buffer = Self.trimmedBuffer(String(decoding: historyData, as: UTF8.self))
+            buffer = Self.trimmedBuffer(historyText)
+            bracketedPasteEnabled = Self.bracketedPasteMode(afterScanning: historyText, current: false)
         } else if let dataBase64 = paramsObject["dataBase64"]?.stringValue ?? paramsObject["data_base64"]?.stringValue,
                   let data = Self.dataFromBase64(dataBase64) {
-            bufferData = Self.appendingBufferData(bufferData, data)
             let text = paramsObject["data"]?.stringValue ?? String(decoding: data, as: UTF8.self)
+            bracketedPasteEnabled = Self.bracketedPasteMode(afterScanning: String(buffer.suffix(16)) + text, current: bracketedPasteEnabled)
+            bufferData = Self.appendingBufferData(bufferData, data)
             buffer = Self.trimmedBuffer(buffer + text)
         } else if let data = paramsObject["data"]?.stringValue {
+            bracketedPasteEnabled = Self.bracketedPasteMode(afterScanning: String(buffer.suffix(16)) + data, current: bracketedPasteEnabled)
             buffer = Self.trimmedBuffer(buffer + data)
             bufferData = Self.appendingBufferData(bufferData, Data(data.utf8))
         }
@@ -275,8 +278,33 @@ struct RemodexTerminalSnapshot: Equatable, Sendable {
 
     mutating func appendOutput(_ data: Data) {
         guard !data.isEmpty else { return }
+        let text = String(decoding: data, as: UTF8.self)
+        // Output chunks can split the terminal's bracketed-paste mode toggles.
+        // Scan with a short previous suffix so pasted multiline text is wrapped only
+        // after the remote shell/editor explicitly enables that protocol.
+        bracketedPasteEnabled = Self.bracketedPasteMode(afterScanning: String(buffer.suffix(16)) + text, current: bracketedPasteEnabled)
         bufferData = Self.appendingBufferData(bufferData, data)
-        buffer = Self.trimmedBuffer(buffer + String(decoding: data, as: UTF8.self))
+        buffer = Self.trimmedBuffer(buffer + text)
+    }
+
+    static func bracketedPasteMode(afterScanning text: String, current: Bool) -> Bool {
+        let marker = "\u{1B}[?2004"
+        var state = current
+        var searchStart = text.startIndex
+
+        while searchStart < text.endIndex,
+              let markerRange = text[searchStart...].range(of: marker),
+              markerRange.upperBound < text.endIndex {
+            let final = text[markerRange.upperBound]
+            if final == "h" {
+                state = true
+            } else if final == "l" {
+                state = false
+            }
+            searchStart = text.index(after: markerRange.upperBound)
+        }
+
+        return state
     }
 
     static func instanceId(in object: [String: JSONValue]) -> String? {

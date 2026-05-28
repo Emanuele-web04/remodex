@@ -75,12 +75,14 @@ extension CodexService {
             paramsObject["text"]?.stringValue,
         ])
         guard let text else { return }
+        let createdAt = decodeHistoryTimestamp(from: paramsObject)
 
         markMirroredRunningCatchupNeeded(for: threadId)
         appendConfirmedMirroredUserMessage(
             threadId: threadId,
             turnId: turnId,
-            text: text
+            text: text,
+            createdAt: createdAt
         )
     }
 

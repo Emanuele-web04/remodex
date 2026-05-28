@@ -78,53 +78,57 @@ struct QRScannerView: View {
 
     // Blocks repeated scans when the camera spots a bridge QR from an incompatible npm release.
     private func bridgeUpdateView(prompt: CodexBridgeUpdatePrompt) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Spacer()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text(prompt.title)
+                        .font(AppFont.title3(weight: .semibold))
+                        .foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
 
-            VStack(alignment: .leading, spacing: 12) {
-                Text(prompt.title)
-                    .font(AppFont.title3(weight: .semibold))
-                    .foregroundStyle(.white)
-
-                Text(prompt.message)
-                    .font(AppFont.body())
-                    .foregroundStyle(.white.opacity(0.82))
-            }
-
-            VStack(alignment: .leading, spacing: 14) {
-                if let command = prompt.command, !command.isEmpty {
-                    Text("Do these steps on your device")
-                        .font(AppFont.caption(weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
-
-                    bridgeUpdateStep(number: "1", title: "Update Remodex", detail: command, showsCopyButton: true)
-                    bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
-                    bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
-                    bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
-                } else {
-                    Text("Do these steps on your iPhone")
-                        .font(AppFont.caption(weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.7))
-
-                    bridgeUpdateStep(number: "1", title: "Update Remodex", detail: "Install the latest Remodex build on this iPhone.")
-                    bridgeUpdateStep(number: "2", title: "Come back here", detail: "Then retry the connection or scan a fresh QR code.")
+                    Text(prompt.message)
+                        .font(AppFont.body())
+                        .foregroundStyle(.white.opacity(0.82))
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            }
 
-            Button("I Updated It") {
-                bridgeUpdatePrompt = nil
-                didCopyBridgeUpdateCommand = false
-            }
-            .font(AppFont.body(weight: .semibold))
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .foregroundStyle(.black)
-            .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .buttonStyle(.plain)
+                VStack(alignment: .leading, spacing: 14) {
+                    if let command = prompt.command, !command.isEmpty {
+                        Text("Do these steps on your device")
+                            .font(AppFont.caption(weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.7))
 
-            Spacer()
+                        bridgeUpdateStep(number: "1", title: "Update Remodex", detail: command, showsCopyButton: true)
+                        bridgeUpdateStep(number: "2", title: "Start it again", detail: "Run remodex up")
+                        bridgeUpdateStep(number: "3", title: "Make a new QR code", detail: "Use the new QR shown in the terminal")
+                        bridgeUpdateStep(number: "4", title: "Come back here", detail: "Then scan the new QR code from the iPhone")
+                    } else {
+                        Text("Do these steps on your iPhone")
+                            .font(AppFont.caption(weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.7))
+
+                        bridgeUpdateStep(number: "1", title: "Update Remodex", detail: "Install the latest Remodex build on this iPhone.")
+                        bridgeUpdateStep(number: "2", title: "Come back here", detail: "Then retry the connection or scan a fresh QR code.")
+                    }
+                }
+
+                Button("I Updated It") {
+                    bridgeUpdatePrompt = nil
+                    didCopyBridgeUpdateCommand = false
+                }
+                .font(AppFont.body(weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .foregroundStyle(.black)
+                .background(.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .buttonStyle(.plain)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.top, 96)
+            .padding(.bottom, 36)
         }
-        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func bridgeUpdateStep(
@@ -145,11 +149,13 @@ struct QRScannerView: View {
                 Text(title)
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.white)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Text(detail)
                     .font(showsCopyButton ? AppFont.mono(.caption) : AppFont.caption())
                     .foregroundStyle(.white.opacity(0.82))
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                     .background(
@@ -279,8 +285,8 @@ struct QRScannerView: View {
 
 private extension CodexBridgeUpdatePrompt {
     static let previewScannerMismatch = CodexBridgeUpdatePrompt(
-        title: "Update Remodex on your device before scanning",
-        message: "This QR code was generated by a different Remodex npm version. Update the package on your device to the latest release before scanning a new QR code.",
+        title: "Update Remodex on your Mac before scanning",
+        message: "This QR code was generated by a different Remodex npm version. Update the package on your Mac to the latest release before scanning a new QR code.",
         command: "npm install -g remodex@latest"
     )
 }

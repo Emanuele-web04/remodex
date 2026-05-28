@@ -60,7 +60,7 @@ struct SidebarProjectSectionHeader: View {
         // the button itself.
         HapticButton(hapticStyle: .medium, action: onCreate) {
             RemodexIcon.image(systemName: "square.and.pencil", size: 20, weight: .medium)
-                .foregroundStyle(.secondary.opacity(0.6))
+                .foregroundStyle(.secondary)
                 .frame(
                     width: SidebarSectionHeaderTrailingSlotSize.length,
                     height: SidebarSectionHeaderTrailingSlotSize.length

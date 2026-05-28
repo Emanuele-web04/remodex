@@ -102,14 +102,15 @@ enum PerFileDiffParser {
             let code = extractFencedCode(from: lines)
 
             let resolvedPath = path ?? (index < entries.count ? entries[index].path : "file-\(index)")
-            let entry = entries.first { $0.path == resolvedPath }
+            let entry = entries.first { FileChangePathIdentity.representsSameFile($0.path, resolvedPath) }
+            let totals = preferredTotals(diffCode: code, fallbackEntry: entry)
 
             chunks.append(PerFileDiffChunk(
                 id: "\(index)-\(resolvedPath)",
                 path: resolvedPath,
                 action: entry?.action ?? .edited,
-                additions: entry?.additions ?? 0,
-                deletions: entry?.deletions ?? 0,
+                additions: totals.additions,
+                deletions: totals.deletions,
                 diffCode: code ?? ""
             ))
         }
@@ -141,7 +142,10 @@ enum PerFileDiffParser {
                 i += 1
                 var codeLines: [String] = []
                 while i < lines.count {
-                    let candidate = lines[i].trimmingCharacters(in: .whitespacesAndNewlines)
+                    // Match the closing fence on the raw line so context rows like ` ```` (a
+                    // backtick fence inside a diffed source file) do not terminate the block
+                    // prematurely. Strip only trailing whitespace to stay forgiving.
+                    let candidate = lines[i].trimmingTrailingWhitespace()
                     if candidate == "```" { break }
                     codeLines.append(lines[i])
                     i += 1
@@ -151,13 +155,14 @@ enum PerFileDiffParser {
                 let code = codeLines.joined(separator: "\n")
                 if TurnDiffLineKind.detectVerifiedPatch(in: code) {
                     let resolvedPath = currentPath ?? (chunks.count < entries.count ? entries[chunks.count].path : "file-\(chunks.count)")
-                    let entry = entries.first { $0.path == resolvedPath }
+                    let entry = entries.first { FileChangePathIdentity.representsSameFile($0.path, resolvedPath) }
+                    let totals = preferredTotals(diffCode: code, fallbackEntry: entry)
                     chunks.append(PerFileDiffChunk(
                         id: "\(chunks.count)-\(resolvedPath)",
                         path: resolvedPath,
                         action: entry?.action ?? .edited,
-                        additions: entry?.additions ?? 0,
-                        deletions: entry?.deletions ?? 0,
+                        additions: totals.additions,
+                        deletions: totals.deletions,
                         diffCode: code
                     ))
                     currentPath = nil
@@ -172,17 +177,52 @@ enum PerFileDiffParser {
             // Ultimate fallback: one chunk per entry with the whole body.
             let allCode = extractFencedCode(from: lines) ?? bodyText
             let first = entries[0]
+            let totals = preferredTotals(diffCode: allCode, fallbackEntry: first)
             chunks.append(PerFileDiffChunk(
                 id: "0-\(first.path)",
                 path: first.path,
                 action: first.action ?? .edited,
-                additions: first.additions,
-                deletions: first.deletions,
+                additions: totals.additions,
+                deletions: totals.deletions,
                 diffCode: allCode
             ))
         }
 
         return consolidate(chunks: chunks)
+    }
+
+    // Diff cards must show counts for the diff block being rendered, not whatever
+    // aggregate totals the surrounding recap text happened to report.
+    private static func preferredTotals(
+        diffCode: String?,
+        fallbackEntry: TurnFileChangeSummaryEntry?
+    ) -> TurnDiffLineTotals {
+        guard let diffCode, !diffCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return TurnDiffLineTotals(
+                additions: fallbackEntry?.additions ?? 0,
+                deletions: fallbackEntry?.deletions ?? 0
+            )
+        }
+
+        let diffTotals = countDiffLines(in: diffCode.components(separatedBy: "\n"))
+        if diffTotals.additions > 0 || diffTotals.deletions > 0 || fallbackEntry == nil {
+            return diffTotals
+        }
+
+        return TurnDiffLineTotals(
+            additions: fallbackEntry?.additions ?? 0,
+            deletions: fallbackEntry?.deletions ?? 0
+        )
+    }
+
+    private static func countDiffLines(in lines: [String]) -> TurnDiffLineTotals {
+        lines.reduce(into: TurnDiffLineTotals()) { totals, line in
+            if line.hasPrefix("+"), !line.hasPrefix("+++") {
+                totals.additions += 1
+            } else if line.hasPrefix("-"), !line.hasPrefix("---") {
+                totals.deletions += 1
+            }
+        }
     }
 
     // Collapses repeated snapshots for the same file into one card and appends
@@ -264,19 +304,37 @@ enum PerFileDiffParser {
         var inFence = false
         var codeLines: [String] = []
         for line in lines {
-            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if t.hasPrefix("```") {
-                if inFence {
-                    return codeLines.joined(separator: "\n")
-                } else {
-                    inFence = true
-                    codeLines = []
-                }
+            // Use the raw line (only trailing whitespace stripped) so context rows starting
+            // with a single leading space don't accidentally close the fence.
+            let trailingTrimmed = line.trimmingTrailingWhitespace()
+            if !inFence, trailingTrimmed.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inFence = true
+                codeLines = []
                 continue
+            }
+            if inFence, trailingTrimmed == "```" {
+                return codeLines.joined(separator: "\n")
             }
             if inFence { codeLines.append(line) }
         }
         return inFence ? codeLines.joined(separator: "\n") : nil
+    }
+}
+
+private extension String {
+    // Trims only trailing whitespace/newlines while keeping any leading whitespace intact,
+    // so diff context rows (which always start with a single space) survive the trim.
+    func trimmingTrailingWhitespace() -> String {
+        var end = endIndex
+        while end > startIndex {
+            let previous = index(before: end)
+            if self[previous].isWhitespace || self[previous].isNewline {
+                end = previous
+            } else {
+                break
+            }
+        }
+        return String(self[startIndex..<end])
     }
 }
 

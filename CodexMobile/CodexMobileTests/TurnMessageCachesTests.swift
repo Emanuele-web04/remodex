@@ -299,6 +299,31 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(references.first?.displayTitle, "wing")
     }
 
+    func testAssistantMarkdownImageReferencePreviewRequiresWorkspaceBoundPath() {
+        let cwd = "/Users/example/project"
+
+        XCTAssertTrue(AssistantMarkdownImageReference(
+            path: "assets/../out/mockup.png",
+            altText: "inside",
+            occurrenceIndex: 0
+        ).canPreview(currentWorkingDirectory: cwd))
+        XCTAssertTrue(AssistantMarkdownImageReference(
+            path: "/Users/example/project/out/mockup.png",
+            altText: "inside",
+            occurrenceIndex: 1
+        ).canPreview(currentWorkingDirectory: cwd))
+        XCTAssertFalse(AssistantMarkdownImageReference(
+            path: "../outside.png",
+            altText: "escape",
+            occurrenceIndex: 2
+        ).canPreview(currentWorkingDirectory: cwd))
+        XCTAssertFalse(AssistantMarkdownImageReference(
+            path: "subdir/../../outside.png",
+            altText: "escape",
+            occurrenceIndex: 3
+        ).canPreview(currentWorkingDirectory: cwd))
+    }
+
     func testAssistantMarkdownImageReferenceParserKeepsDuplicatePathsDistinct() {
         let references = AssistantMarkdownImageReferenceParser.references(
             in: """

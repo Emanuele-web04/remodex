@@ -8,7 +8,8 @@ const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcription
 const CHATGPT_TRANSCRIPTIONS_URL = "https://chatgpt.com/backend-api/transcribe";
 const DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
-const MAX_DURATION_MS = 120_000;
+const MAX_DURATION_SECONDS = 150;
+const MAX_DURATION_MS = MAX_DURATION_SECONDS * 1_000;
 
 function createVoiceHandler({
   sendCodexRequest,
@@ -95,7 +96,7 @@ async function transcribeVoice(
     throw voiceError("invalid_duration", "Voice messages must include a positive duration.");
   }
   if (durationMs > MAX_DURATION_MS) {
-    throw voiceError("duration_too_long", "Voice messages are limited to 120 seconds.");
+    throw voiceError("duration_too_long", `Voice messages are limited to ${MAX_DURATION_SECONDS} seconds.`);
   }
 
   const audioBuffer = decodeAudioBase64(params.audioBase64);
@@ -283,7 +284,36 @@ function normalizeBase64(value) {
 }
 
 function isLikelyBase64(value) {
-  return /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value);
+  if (typeof value !== "string" || value.length === 0 || value.length % 4 !== 0) {
+    return false;
+  }
+
+  const paddingStart = value.indexOf("=");
+  if (paddingStart !== -1) {
+    const paddingLength = value.length - paddingStart;
+    if (paddingLength > 2) {
+      return false;
+    }
+    for (let i = paddingStart; i < value.length; i += 1) {
+      if (value[i] !== "=") {
+        return false;
+      }
+    }
+  }
+
+  // Avoid one giant regex: V8 can overflow its stack on multi-MB voice clips.
+  const dataEnd = paddingStart === -1 ? value.length : paddingStart;
+  for (let i = 0; i < dataEnd; i += 1) {
+    const code = value.charCodeAt(i);
+    const isUppercase = code >= 65 && code <= 90;
+    const isLowercase = code >= 97 && code <= 122;
+    const isDigit = code >= 48 && code <= 57;
+    if (!isUppercase && !isLowercase && !isDigit && value[i] !== "+" && value[i] !== "/") {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function hasRiffWaveHeader(buffer) {

@@ -48,12 +48,7 @@ struct GitDiffTotals: Equatable, Sendable {
         let additions = json["additions"]?.intValue ?? 0
         let deletions = json["deletions"]?.intValue ?? 0
         let binaryFiles = json["binaryFiles"]?.intValue ?? 0
-        let totals = GitDiffTotals(additions: additions, deletions: deletions, binaryFiles: binaryFiles)
-        guard totals.hasChanges else {
-            return nil
-        }
-
-        self = totals
+        self = GitDiffTotals(additions: additions, deletions: deletions, binaryFiles: binaryFiles)
     }
 }
 

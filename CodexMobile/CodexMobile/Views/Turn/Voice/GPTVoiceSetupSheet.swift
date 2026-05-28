@@ -9,61 +9,66 @@ import SwiftUI
 struct GPTVoiceSetupSheet: View {
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 12) {
-                    RemodexIcon.image(systemName: "mic.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .frame(width: 40, height: 40)
-                        .background(
-                            Circle()
-                                .fill(Color.primary.opacity(0.08))
-                        )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .top, spacing: 12) {
+                        RemodexIcon.image(systemName: "mic.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 40, height: 40)
+                            .background(
+                                Circle()
+                                    .fill(Color.primary.opacity(0.08))
+                            )
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("GPT voice uses OpenAI auth on your device")
-                            .font(AppFont.subheadline(weight: .semibold))
-                        Text("Remodex does not keep a separate GPT voice secret on the iPhone. It uses the ChatGPT session or OpenAI API key already active on your paired device.")
-                            .font(AppFont.caption())
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("GPT voice uses OpenAI auth on your device")
+                                .font(AppFont.subheadline(weight: .semibold))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text("Remodex does not keep a separate GPT voice secret on the iPhone. It uses the ChatGPT session or OpenAI API key already active on your paired device.")
+                                .font(AppFont.caption())
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        infoStep(
+                            number: "1",
+                            title: "You speak on the iPhone",
+                            detail: "Remodex records the voice clip locally on the phone when you hold to talk."
+                        )
+                        infoStep(
+                            number: "2",
+                            title: "The phone checks your paired device",
+                            detail: "Remodex asks the paired device bridge for the active ChatGPT session or OpenAI API key available there."
+                        )
+                        infoStep(
+                            number: "3",
+                            title: "GPT transcribes the clip",
+                            detail: "The voice clip is sent through the paired device bridge so OpenAI can turn it into text."
+                        )
+                        infoStep(
+                            number: "4",
+                            title: "The text comes back to Remodex",
+                            detail: "The transcript returns to the app and gets dropped into your message composer."
+                        )
+                    }
+
+                    Text("In short: iPhone voice in, device OpenAI auth for transcription, transcript back to the iPhone.")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    infoStep(
-                        number: "1",
-                        title: "You speak on the iPhone",
-                        detail: "Remodex records the voice clip locally on the phone when you hold to talk."
-                    )
-                    infoStep(
-                        number: "2",
-                        title: "The phone checks your paired device",
-                        detail: "Remodex asks the paired device bridge for the active ChatGPT session or OpenAI API key available there."
-                    )
-                    infoStep(
-                        number: "3",
-                        title: "GPT transcribes the clip",
-                        detail: "The voice clip is sent through the paired device bridge so OpenAI can turn it into text."
-                    )
-                    infoStep(
-                        number: "4",
-                        title: "The text comes back to Remodex",
-                        detail: "The transcript returns to the app and gets dropped into your message composer."
-                    )
-                }
-
-                Text("In short: iPhone voice in, device OpenAI auth for transcription, transcript back to the iPhone.")
-                    .font(AppFont.caption())
-                    .foregroundStyle(.secondary)
-
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(20)
             }
-            .padding(20)
-            .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
             .navigationTitle("How GPT Voice Works")
             .navigationBarTitleDisplayMode(.inline)
         }
+        .presentationDetents([.medium, .large])
     }
 
     // Keeps the voice flow easy to scan in a compact informational sheet.
@@ -78,10 +83,13 @@ struct GPTVoiceSetupSheet: View {
                 Text(title)
                     .font(AppFont.subheadline(weight: .semibold))
                     .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(detail)
                     .font(AppFont.caption())
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

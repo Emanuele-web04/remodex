@@ -6,6 +6,7 @@
 
 import Foundation
 import SwiftUI
+import UIKit
 
 struct TerminalScreen: View {
     @Environment(CodexService.self) private var codex
@@ -18,12 +19,12 @@ struct TerminalScreen: View {
     @State private var activeTerminalId = CodexService.defaultTerminalId
     @State private var bootstrappedTerminalIds = Set<String>()
     @State private var userClosedTerminalIds = Set<String>()
+    @State private var initialWorkingDirectoryByTerminalId: [String: String] = [:]
     @State private var isNativeTerminalAvailable = true
     @State private var actionErrorMessage: String?
     @State private var didApplyPreferredWorkingDirectory = false
     @State private var pendingModifier: TerminalPendingModifier?
     @State private var selectedModifier: TerminalPendingModifier = .ctrl
-    @Environment(\.dismiss) private var dismissRoute
     @AppStorage("codex.terminal.fontSize") private var terminalFontSize = remodexTerminalDefaultFontSize
 
     let preferredWorkingDirectory: String?
@@ -69,11 +70,15 @@ struct TerminalScreen: View {
         codex.terminalSnapshot(for: activeTerminalId)
     }
 
+    private var routeInitialWorkingDirectory: String? {
+        let trimmed = preferredWorkingDirectory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     private var currentWorkingDirectory: String {
         firstNonEmpty([
             activeSnapshot.cwd,
-            profileResolvedFromConnection.cwd,
-            preferredWorkingDirectory,
+            initialWorkingDirectoryByTerminalId[activeTerminalId],
         ]) ?? ""
     }
 
@@ -186,6 +191,10 @@ struct TerminalScreen: View {
         }
     }
 
+    private var canPasteIntoActiveTerminal: Bool {
+        activeSnapshot.status == .running && UIPasteboard.general.hasStrings
+    }
+
     var body: some View {
         ZStack {
             Color(hexString: theme.background)
@@ -194,17 +203,11 @@ struct TerminalScreen: View {
             terminalRouteBody
         }
         .navigationBarTitleDisplayMode(.inline)
-        .navigationBarBackButtonHidden(true)
         // Use the system bar (translucent over the black terminal background) instead
-        // of an opaque tinted bar — the glass back button and status pill float on top.
+        // of an opaque tinted bar so the native back button and status pill float on top.
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbarColorScheme(colorScheme, for: .navigationBar)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                TerminalGlassBackButton(theme: theme) {
-                    dismissRoute()
-                }
-            }
             ToolbarItem(placement: .principal) {
                 TerminalRouteTitle(
                     topLine: navigationTopLine,
@@ -223,12 +226,14 @@ struct TerminalScreen: View {
                     activeTerminalId: activeTerminalId,
                     isRunning: isRunning,
                     hasConnectionConfiguration: hasConnectionConfiguration,
+                    canPaste: canPasteIntoActiveTerminal,
                     canClear: !activeSnapshot.bufferData.isEmpty,
                     canResetKnownHost: !profileResolvedFromConnection.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                     onSelectSession: selectTerminalSession,
                     onOpenNewTerminal: openNewTerminalFromMenu,
                     onToggleConnection: toggleTerminalConnection,
                     onOpenConnectionEditor: showConnectionEditor,
+                    onPaste: pasteIntoActiveTerminal,
                     onClear: clearTerminal,
                     onResetKnownHost: resetKnownHost,
                     onAdjustFontSize: adjustFontSize
@@ -337,6 +342,7 @@ struct TerminalScreen: View {
         }
 
         bootstrappedTerminalIds.insert(activeTerminalId)
+        rememberRouteInitialWorkingDirectoryIfNeeded(for: activeTerminalId)
         await openTerminal()
     }
 
@@ -383,39 +389,40 @@ struct TerminalScreen: View {
         isShowingConnectionEditor = false
         userClosedTerminalIds.remove(activeTerminalId)
         bootstrappedTerminalIds.insert(activeTerminalId)
+        rememberRouteInitialWorkingDirectoryIfNeeded(for: activeTerminalId)
         await openTerminal()
     }
 
     private func openNewTerminal() async {
         let nextTerminalId = nextOpenTerminalId()
-        draftProfile.applyPreferredWorkingDirectoryOverride(currentWorkingDirectory)
         activeTerminalId = nextTerminalId
         userClosedTerminalIds.remove(nextTerminalId)
         bootstrappedTerminalIds.insert(nextTerminalId)
+        rememberRouteInitialWorkingDirectoryIfNeeded(for: nextTerminalId)
         actionErrorMessage = nil
         await openTerminal()
     }
 
     private func openTerminal() async {
-        draftProfile = profileResolvedFromConnection
-        let selectedCWD = activeSnapshot.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !selectedCWD.isEmpty {
-            draftProfile.cwd = selectedCWD
-        }
+        var connectionProfile = profileResolvedFromConnection
+        connectionProfile.cwd = ""
+        draftProfile = connectionProfile
         guard hasConnectionConfiguration else {
             isShowingConnectionEditor = true
             return
         }
 
         actionErrorMessage = nil
-        RemodexTerminalProfileStore.save(draftProfile)
+        RemodexTerminalProfileStore.save(connectionProfile)
         RemodexTerminalPrivateKeyStore.savePrivateKey(privateKeyDraft)
         RemodexTerminalPrivateKeyStore.savePassphrase(passphraseDraft)
 
+        var sessionProfile = connectionProfile
+        sessionProfile.cwd = initialWorkingDirectoryByTerminalId[activeTerminalId] ?? ""
         do {
             try await codex.openTerminal(
                 terminalId: activeTerminalId,
-                profile: draftProfile,
+                profile: sessionProfile,
                 cols: activeSnapshot.cols,
                 rows: activeSnapshot.rows
             )
@@ -454,16 +461,27 @@ struct TerminalScreen: View {
         }
     }
 
+    private func pasteIntoActiveTerminal() {
+        guard activeSnapshot.status == .running,
+              let pasteText = UIPasteboard.general.string,
+              !pasteText.isEmpty else { return }
+
+        pendingModifier = nil
+        writeInputChunks(Self.terminalPasteInputChunks(
+            for: pasteText,
+            bracketedPasteEnabled: activeSnapshot.bracketedPasteEnabled
+        ))
+    }
+
     private func applyPreferredWorkingDirectoryIfNeeded() {
         guard !didApplyPreferredWorkingDirectory else { return }
         didApplyPreferredWorkingDirectory = true
-        draftProfile.applyPreferredWorkingDirectoryOverride(preferredWorkingDirectory)
-        let trimmedCWD = draftProfile.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedCWD.isEmpty,
+        guard let trimmedCWD = routeInitialWorkingDirectory,
               activeSnapshot.status == .running,
               activeSnapshot.cwd != trimmedCWD else {
             return
         }
+        initialWorkingDirectoryByTerminalId[activeTerminalId] = trimmedCWD
         Task { @MainActor in
             do {
                 try await codex.changeTerminalWorkingDirectory(trimmedCWD, terminalId: activeTerminalId)
@@ -471,6 +489,14 @@ struct TerminalScreen: View {
                 actionErrorMessage = terminalErrorText(error)
             }
         }
+    }
+
+    private func rememberRouteInitialWorkingDirectoryIfNeeded(for terminalId: String) {
+        guard let routeInitialWorkingDirectory,
+              initialWorkingDirectoryByTerminalId[terminalId] == nil else {
+            return
+        }
+        initialWorkingDirectoryByTerminalId[terminalId] = routeInitialWorkingDirectory
     }
 
     private func handleTerminalDataInput(_ data: Data) {
@@ -544,8 +570,19 @@ struct TerminalScreen: View {
 
     private func writeInput(_ data: Data) {
         guard activeSnapshot.status == .running else { return }
+        let terminalId = activeTerminalId
         Task { @MainActor in
-            try? await codex.writeTerminalInput(data, terminalId: activeTerminalId)
+            try? await codex.writeTerminalInput(data, terminalId: terminalId)
+        }
+    }
+
+    private func writeInputChunks(_ chunks: [Data]) {
+        guard activeSnapshot.status == .running, !chunks.isEmpty else { return }
+        let terminalId = activeTerminalId
+        Task { @MainActor in
+            for chunk in chunks where !chunk.isEmpty {
+                try? await codex.writeTerminalInput(chunk, terminalId: terminalId)
+            }
         }
     }
 
@@ -570,7 +607,7 @@ struct TerminalScreen: View {
            let description = localizedError.errorDescription {
             return description
         }
-        return error.localizedDescription
+        return RemodexNativeSSHTerminalError.userFacingDescription(for: error)
     }
 
     private func firstNonEmpty(_ values: [String?]) -> String? {
@@ -646,5 +683,49 @@ struct TerminalScreen: View {
         guard input.hasPrefix("\u{1B}[") else { return nil }
         guard let final = input.last, ["A", "B", "C", "D"].contains(final) else { return nil }
         return "\u{1B}[1;\(modifier.csiModifierParameter)\(final)"
+    }
+
+    static func terminalPasteInputChunks(
+        for text: String,
+        bracketedPasteEnabled: Bool,
+        maxChunkBytes: Int = 8_192
+    ) -> [Data] {
+        let normalizedText = normalizedTerminalPasteText(text)
+        let wrappedText = bracketedPasteEnabled
+            ? "\u{1B}[200~\(normalizedText)\u{1B}[201~"
+            : normalizedText
+
+        return Data(wrappedText.utf8).terminalPasteChunks(maxChunkBytes: maxChunkBytes)
+    }
+
+    private static func normalizedTerminalPasteText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: "\r")
+            .replacingOccurrences(of: "\n", with: "\r")
+            .replacingOccurrences(of: "\u{0}", with: "")
+            // Strip embedded bracketed-paste delimiters so clipboard content cannot
+            // prematurely close the wrapper and turn the rest into typed commands.
+            .replacingOccurrences(of: "\u{1B}[200~", with: "")
+            .replacingOccurrences(of: "\u{1B}[201~", with: "")
+    }
+}
+
+private extension Data {
+    func terminalPasteChunks(maxChunkBytes: Int) -> [Data] {
+        guard !isEmpty else { return [] }
+        let safeChunkSize = Swift.max(1, maxChunkBytes)
+        guard count > safeChunkSize else { return [self] }
+
+        var chunks: [Data] = []
+        chunks.reserveCapacity((count + safeChunkSize - 1) / safeChunkSize)
+
+        var offset = 0
+        while offset < count {
+            let end = Swift.min(offset + safeChunkSize, count)
+            chunks.append(subdata(in: offset..<end))
+            offset = end
+        }
+
+        return chunks
     }
 }

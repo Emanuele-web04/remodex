@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 const {
   loadOrCreateBridgeDeviceState,
   readBridgeDeviceState,
+  rememberLastSeenClientDeviceKind,
   rememberLastSeenPhoneAppVersion,
   rememberTrustedPhone,
   resetBridgeDeviceState,
@@ -79,6 +80,32 @@ test("rememberLastSeenPhoneAppVersion stores the latest App Store version", () =
   );
 
   assert.equal(nextState.lastSeenPhoneAppVersion, "1.0");
+});
+
+test("rememberLastSeenClientDeviceKind stores a normalized companion platform", () => {
+  const state = makeDeviceState();
+
+  const nextState = rememberLastSeenClientDeviceKind(
+    state,
+    "android",
+    { persist: false }
+  );
+
+  assert.equal(nextState.lastSeenDeviceKind, "android");
+});
+
+test("normalizeBridgeDeviceState treats legacy app-version state as iPhone", () => {
+  withTempDeviceStateEnv(() => {
+    const legacyState = makeDeviceState({
+      lastSeenDeviceKind: undefined,
+      lastSeenPhoneAppVersion: "1.6",
+    });
+    writeStateToDisk(legacyState);
+
+    const state = readBridgeDeviceState();
+
+    assert.equal(state.lastSeenDeviceKind, "iphone");
+  });
 });
 
 test("loadOrCreateBridgeDeviceState writes and reloads the canonical file state", () => {
@@ -260,6 +287,7 @@ function makeDeviceState(overrides = {}) {
     macIdentityPublicKey: "mac-public-key",
     macIdentityPrivateKey: "mac-private-key",
     trustedPhones: {},
+    lastSeenDeviceKind: null,
     lastSeenPhoneAppVersion: null,
     ...overrides,
   };

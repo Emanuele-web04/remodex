@@ -21,21 +21,19 @@ struct TerminalConnectionEditorSheet: View {
     @State private var isShowingAdvanced = false
     @State private var isShowingKeyEditor = false
     @State private var isConfirmingKnownHostReset = false
+    @State private var isShowingConnectionHelp = false
 
     private var keyLabel: String {
         RemodexTerminalPrivateKeyStore.hasPrivateKey(privateKey) ? "Imported" : "Import"
     }
 
     private var advancedLabel: String {
-        profile.port == 22 && profile.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Default"
-            : "Custom"
+        profile.port == 22 ? "Default" : "Custom"
     }
 
     private var isAdvancedVisible: Bool {
         isShowingAdvanced
             || profile.port != 22
-            || !profile.cwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var portBinding: Binding<String> {
@@ -91,11 +89,25 @@ struct TerminalConnectionEditorSheet: View {
                         dismiss()
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button {
+                        HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                        isShowingConnectionHelp = true
+                    } label: {
+                        RemodexIcon.image(systemName: "questionmark.circle")
+                            .font(.system(size: 17, weight: .medium))
+                    }
+                    .accessibilityLabel("SSH setup guide")
+
                     Button("Connect", action: onSave)
                         .font(.system(size: 15, weight: .bold))
                         .disabled(!canSave)
                 }
+            }
+            .sheet(isPresented: $isShowingConnectionHelp) {
+                TerminalConnectionHelpSheet()
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
             }
             .confirmationDialog(
                 "Reset saved SSH host key?",
@@ -170,19 +182,12 @@ private struct TerminalSSHSection: View {
 
                 if isAdvancedVisible {
                     Divider()
-                    HStack(spacing: 12) {
-                        TerminalTextField(
-                            title: "Port",
-                            text: portBinding,
-                            placeholder: "22",
-                            keyboardType: .numberPad
-                        )
-                        TerminalTextField(
-                            title: "Working directory",
-                            text: $profile.cwd,
-                            placeholder: "/Users/name"
-                        )
-                    }
+                    TerminalTextField(
+                        title: "Port",
+                        text: portBinding,
+                        placeholder: "22",
+                        keyboardType: .numberPad
+                    )
                     .padding(.top, 14)
                 }
 

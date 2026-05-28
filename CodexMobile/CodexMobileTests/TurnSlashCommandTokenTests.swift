@@ -19,6 +19,22 @@ final class TurnSlashCommandTokenTests: XCTestCase {
         XCTAssertEqual(token?.query, "rev")
     }
 
+    func testSlashCommandPanelIgnoresNonCommandSlashSkillQueries() {
+        let viewModel = TurnViewModel()
+
+        viewModel.onInputChangedForSlashCommandAutocomplete("run /check-code", activeTurnID: nil)
+
+        XCTAssertEqual(viewModel.slashCommandPanelState, .hidden)
+    }
+
+    func testSlashCommandPanelStillOpensForMatchingCommands() {
+        let viewModel = TurnViewModel()
+
+        viewModel.onInputChangedForSlashCommandAutocomplete("run /rev", activeTurnID: nil)
+
+        XCTAssertEqual(viewModel.slashCommandPanelState, .commands(query: "rev"))
+    }
+
     func testTrailingTokenDoesNotParseWhenSlashTokenIsNotFinal() {
         XCTAssertNil(TurnViewModel.trailingSlashCommandToken(in: "/review later"))
     }

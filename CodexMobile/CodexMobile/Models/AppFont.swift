@@ -158,12 +158,18 @@ enum AppFont {
         let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
         let metrics = UIFontMetrics(forTextStyle: fallbackTextStyle)
 
+        if selectedStyle == .system {
+            let systemFont = UIFont.systemFont(ofSize: adjustedSize, weight: uiKitWeight(for: weight))
+            return metrics.scaledFont(for: systemFont)
+        }
+
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize),
            let font = UIFont(name: faceName, size: adjustedSize) {
             return metrics.scaledFont(for: font)
         }
 
-        return UIFont.preferredFont(forTextStyle: fallbackTextStyle)
+        let fallback = UIFont.systemFont(ofSize: adjustedSize, weight: uiKitWeight(for: weight))
+        return metrics.scaledFont(for: fallback)
     }
 
     // Keeps code surfaces on the selected mono family when the user picks a mono UI font.
@@ -266,16 +272,56 @@ enum AppFont {
         systemDesign: Font.Design = .default
     ) -> Font {
         let selectedStyle = currentStyle
+        let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
+
         if selectedStyle == .system {
-            return .system(style, design: systemDesign, weight: weight)
+            return scaledSystemFont(size: adjustedSize, weight: weight, relativeTo: style)
         }
 
-        let adjustedSize = max(size + fontSizeAdjustment(for: selectedStyle), 1)
         if let faceName = resolvedCustomFaceName(for: weight, style: selectedStyle, size: adjustedSize) {
             return .custom(faceName, size: adjustedSize, relativeTo: style)
         }
 
         return .system(style, design: systemDesign, weight: weight)
+    }
+
+    private static func scaledSystemFont(
+        size: CGFloat,
+        weight: Font.Weight,
+        relativeTo style: Font.TextStyle
+    ) -> Font {
+        let base = UIFont.systemFont(ofSize: size, weight: uiKitWeight(for: weight))
+        let metrics = UIFontMetrics(forTextStyle: uiKitTextStyle(for: style))
+        return Font(metrics.scaledFont(for: base))
+    }
+
+    private static func uiKitTextStyle(for style: Font.TextStyle) -> UIFont.TextStyle {
+        switch style {
+        case .largeTitle:
+            return .largeTitle
+        case .title:
+            return .title1
+        case .title2:
+            return .title2
+        case .title3:
+            return .title3
+        case .headline:
+            return .headline
+        case .subheadline:
+            return .subheadline
+        case .body:
+            return .body
+        case .callout:
+            return .callout
+        case .footnote:
+            return .footnote
+        case .caption:
+            return .caption1
+        case .caption2:
+            return .caption2
+        @unknown default:
+            return .body
+        }
     }
 
     static func uiFont(size: CGFloat, weight: Font.Weight = .regular, textStyle: UIFont.TextStyle = .body) -> UIFont {

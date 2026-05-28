@@ -60,10 +60,13 @@ extension TurnTimelineView {
             }
 
             let isLatestBlock = latestBlockEnd == blockEnd
+            let hasTrailingUserMessage = blockEnd < messages.index(before: messages.endIndex)
             let copyAllowed = shouldShowCopyButton(
                 blockTurnID: blockTurnID,
+                activeTurnID: activeTurnID,
                 isCopySuppressedByRunState: isCopySuppressedByRunState ?? isThreadRunning,
                 isLatestBlock: isLatestBlock,
+                hasTrailingUserMessage: hasTrailingUserMessage,
                 latestTurnTerminalState: latestTurnTerminalState,
                 stoppedTurnIDs: stoppedTurnIDs
             )
@@ -304,8 +307,10 @@ extension TurnTimelineView {
     // Mirrors the composer Stop visibility so Copy never appears while the run is still active.
     private static func shouldShowCopyButton(
         blockTurnID: String?,
+        activeTurnID: String?,
         isCopySuppressedByRunState: Bool,
         isLatestBlock: Bool,
+        hasTrailingUserMessage: Bool,
         latestTurnTerminalState: CodexTurnTerminalState?,
         stoppedTurnIDs: Set<String>
     ) -> Bool {
@@ -317,7 +322,17 @@ extension TurnTimelineView {
             return false
         }
 
-        return !isCopySuppressedByRunState
+        guard isCopySuppressedByRunState else {
+            return true
+        }
+
+        if let blockTurnID, let activeTurnID {
+            return blockTurnID != activeTurnID
+        }
+
+        // Starting turns may not have a usable turn id yet. In that fallback window,
+        // only hide copy on the unresolved live tail, not settled blocks above a new user row.
+        return !isLatestBlock || hasTrailingUserMessage
     }
 
     // Keeps the terminal loader attached to the block that still belongs to the active run.

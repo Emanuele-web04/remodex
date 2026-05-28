@@ -283,7 +283,7 @@ Prints the installed Remodex CLI version.
 
 ```sh
 remodex --version
-# => 1.5.0
+# => 2.0.0
 ```
 
 ### `remodex reset-pairing`
@@ -387,6 +387,14 @@ Privacy notes:
 - The transport layer does not see decrypted application payloads after the secure handshake succeeds.
 - A fresh QR scan can replace the previously trusted iPhone automatically. Use `remodex reset-pairing` only when you intentionally want to wipe the remembered pairing state yourself.
 - On-device message history is also encrypted at rest on iPhone using a Keychain-backed AES key.
+
+## SSH Terminal
+
+Remodex can open a native SSH terminal session from your iPhone to a Mac or Windows PC, without going through the bridge. The connection runs directly from the phone over SSH.
+
+Private key material and the optional passphrase are stored in the iOS Keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. This means they are protected by iOS Keychain data protection, accessible only while the device is unlocked, never included in iCloud or iTunes backups, and never migrated to another device. If you switch phones you need to re-import the key.
+
+The in-app setup guide walks you through enabling SSH on the target machine (Remote Login on macOS, OpenSSH Server on Windows), creating a dedicated key pair, and entering the connection details. A ready-made Codex prompt is available in the guide so the AI can walk you through the full setup interactively.
 
 ## Git Integration
 

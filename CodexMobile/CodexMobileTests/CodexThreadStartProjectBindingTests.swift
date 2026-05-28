@@ -64,14 +64,14 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         XCTAssertEqual(patched.cwd, "/Users/me/work/project")
     }
 
-    func testApplyFallbackDoesNotOverrideExistingCwd() {
+    func testApplyFallbackOverridesMismatchedCwd() {
         let responseThread = CodexThread(id: "thread-1", cwd: "/server/path")
         let patched = CodexThreadStartProjectBinding.applyPreferredProjectFallback(
             to: responseThread,
             preferredProjectPath: "/Users/me/work/project"
         )
 
-        XCTAssertEqual(patched.cwd, "/server/path")
+        XCTAssertEqual(patched.cwd, "/Users/me/work/project")
     }
 
     func testApplyFallbackOverridesPseudoProjectBucketCwd() {

@@ -6,6 +6,20 @@
 
 import SwiftUI
 
+// Single sheet presentation source so we don't stack two `.sheet(...)` on the same view,
+// which in SwiftUI can silently swap which sheet is rendered when state flips quickly.
+private enum FileChangeSummaryDiffPresentation: Identifiable, Equatable {
+    case singleEntry(TurnFileChangeSummaryEntry)
+    case allEntries
+
+    var id: String {
+        switch self {
+        case .singleEntry(let entry): return "single-\(entry.path)"
+        case .allEntries: return "all"
+        }
+    }
+}
+
 // MARK: - FileChangeInlineActionRow
 // Keeps live file-change deltas as lightweight status rows while a turn is still streaming.
 struct FileChangeInlineActionRow: View {
@@ -27,7 +41,7 @@ struct FileChangeInlineActionRow: View {
                     .truncationMode(.middle)
 
                 DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
-                    .font(AppFont.mono(.caption))
+                    .font(AppFont.subheadline())
             }
             .font(AppFont.body())
         }
@@ -43,11 +57,12 @@ struct FileChangeSummaryBox: View {
     let detailBodyText: String
     let messageID: String
 
+    @Environment(\.colorScheme) private var colorScheme
+
     // Default to expanded so the recap stays informative without an extra tap;
     // collapse remains available for long lists or visual decluttering.
     @State private var isExpanded: Bool = true
-    @State private var selectedEntry: TurnFileChangeSummaryEntry?
-    @State private var isShowingAllChangesDiff = false
+    @State private var activeDiffPresentation: FileChangeSummaryDiffPresentation?
 
     private var canCollapse: Bool {
         !entries.isEmpty || !fallbackText.isEmpty
@@ -66,7 +81,7 @@ struct FileChangeSummaryBox: View {
                         let isLastEntry = index == entries.index(before: entries.endIndex)
 
                         Button {
-                            selectedEntry = entry
+                            activeDiffPresentation = .singleEntry(entry)
                         } label: {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Text(entry.compactPath)
@@ -79,7 +94,7 @@ struct FileChangeSummaryBox: View {
 
                                 if entry.additions > 0 || entry.deletions > 0 {
                                     DiffCountsLabel(additions: entry.additions, deletions: entry.deletions)
-                                        .font(AppFont.mono(.caption))
+                                        .font(AppFont.subheadline())
                                 }
                             }
                             .padding(.horizontal, 12)
@@ -103,31 +118,42 @@ struct FileChangeSummaryBox: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
+        .background { cardBackground }
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(softDividerColor, lineWidth: 0.5)
         }
         .padding(2)
-        .sheet(item: $selectedEntry) { entry in
-            TurnDiffSheet(
-                title: entry.compactPath,
-                entries: [entry],
-                bodyText: detailBodyText,
-                messageID: messageID,
-                restrictToPath: entry.path
-            )
+        .sheet(item: $activeDiffPresentation) { presentation in
+            switch presentation {
+            case .singleEntry(let entry):
+                TurnDiffSheet(
+                    title: entry.compactPath,
+                    entries: [entry],
+                    bodyText: detailBodyText,
+                    messageID: messageID,
+                    restrictToPath: entry.path
+                )
+            case .allEntries:
+                TurnDiffSheet(
+                    title: "Changes",
+                    entries: entries,
+                    bodyText: detailBodyText,
+                    messageID: messageID
+                )
+            }
         }
-        .sheet(isPresented: $isShowingAllChangesDiff) {
-            TurnDiffSheet(
-                title: "Changes",
-                entries: entries,
-                bodyText: detailBodyText,
-                messageID: messageID
-            )
+    }
+
+    @ViewBuilder
+    private var cardBackground: some View {
+        if colorScheme == .dark {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.regularMaterial)
+                .opacity(0.5)
+        } else {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(.systemBackground))
         }
     }
 
@@ -142,12 +168,12 @@ struct FileChangeSummaryBox: View {
                 .foregroundStyle(.secondary)
 
             Text("File changes")
-                .font(AppFont.footnote(weight: .medium))
+                .font(AppFont.subheadline(weight: .regular))
                 .foregroundStyle(.secondary)
 
             if totalAdditions > 0 || totalDeletions > 0 {
                 DiffCountsLabel(additions: totalAdditions, deletions: totalDeletions)
-                    .font(AppFont.mono(.caption))
+                    .font(AppFont.subheadline())
             }
 
             Spacer(minLength: 8)
@@ -155,7 +181,7 @@ struct FileChangeSummaryBox: View {
             if !entries.isEmpty {
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    isShowingAllChangesDiff = true
+                    activeDiffPresentation = .allEntries
                 } label: {
                     RemodexIcon.image(systemName: "arrow.up.right")
                         .font(AppFont.system(size: 11, weight: .semibold))
@@ -205,6 +231,6 @@ struct FileChangeSummaryBox: View {
     }
 
     private var softDividerColor: Color {
-        Color(.separator).opacity(0.6)
+        Color(.separator).opacity(colorScheme == .dark ? 0.8 : 1.0)
     }
 }

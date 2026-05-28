@@ -19,6 +19,12 @@ private enum StreamingDeltaCoalescingPolicy {
     // System rows often parse markdown/tool summaries; a slightly slower cadence keeps
     // them readable without invalidating the timeline on every transport chunk.
     static let flushDelayNanoseconds: UInt64 = 50_000_000
+    // Assistant prose gets one quick first paint, then a calmer cadence once text is visible.
+    static let assistantInitialFlushDelayNanoseconds: UInt64 = 50_000_000
+    static let assistantStreamingFlushDelayNanoseconds: UInt64 = 80_000_000
+    static let assistantLargeStreamingFlushDelayNanoseconds: UInt64 = 100_000_000
+    static let assistantLargePendingDeltaByteCount = 12_000
+    static let assistantLargeVisibleTextByteCount = 32_000
 }
 
 private enum MessageTextProcessingPolicy {
@@ -1312,17 +1318,17 @@ extension CodexService {
         threadId: String,
         turnId: String?,
         text: String,
-        fileMentions: [String] = []
+        fileMentions: [String] = [],
+        createdAt: Date? = nil
     ) {
         let trimmedText = Self.normalizedMessageText(text)
-        let normalizedIncomingText = Self.normalizedMessageText(trimmedText)
         guard Self.hasMeaningfulHistoryText(trimmedText) else {
             return
         }
 
         if let existingIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
             candidate.role == .user
-                && Self.normalizedMessageText(candidate.text) == normalizedIncomingText
+                && Self.userMessageMatchesTextForHistory(candidate, text: trimmedText)
                 && (
                     (turnId != nil && (candidate.turnId == nil || candidate.turnId == turnId))
                         || (turnId == nil && candidate.turnId == nil)
@@ -1341,24 +1347,120 @@ extension CodexService {
                 messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
                 didMutate = true
             }
+            if let createdAt,
+               CodexTimestampParser.isTrustworthyServerDate(createdAt),
+               let existingCreatedAt = messagesByThread[threadId]?[existingIndex].createdAt,
+               (!CodexTimestampParser.isTrustworthyServerDate(existingCreatedAt)
+                    || abs(existingCreatedAt.timeIntervalSince(createdAt)) > 0.5) {
+                messagesByThread[threadId]?[existingIndex].createdAt = createdAt
+                didMutate = true
+            }
+            if moveMirroredOpeningUserBeforeTurnOutputIfNeeded(
+                threadId: threadId,
+                turnId: turnId,
+                messageIndex: existingIndex
+            ) {
+                didMutate = true
+            }
             guard didMutate else {
                 return
             }
+            messagesByThread[threadId]?.sort(by: { $0.orderIndex < $1.orderIndex })
             persistMessages()
             updateCurrentOutput(for: threadId)
             return
         }
 
+        let orderIndex = reserveMirroredOpeningUserOrderIndex(threadId: threadId, turnId: turnId)
         appendMessage(
             CodexMessage(
                 threadId: threadId,
                 role: .user,
                 text: trimmedText,
                 fileMentions: fileMentions,
+                createdAt: createdAt ?? Date(),
                 turnId: turnId,
-                deliveryState: .confirmed
+                deliveryState: .confirmed,
+                orderIndex: orderIndex
             )
         )
+    }
+
+    // Desktop rollout mirrors can deliver assistant output before the opening user event.
+    // Reserve the first same-turn slot so the phone timeline matches the Mac transcript.
+    private func reserveMirroredOpeningUserOrderIndex(threadId: String, turnId: String?) -> Int? {
+        guard let turnAnchor = mirroredOpeningUserAnchor(threadId: threadId, turnId: turnId) else {
+            return nil
+        }
+
+        guard let indices = messagesByThread[threadId]?.indices else {
+            return turnAnchor
+        }
+
+        for index in indices {
+            guard let currentOrder = messagesByThread[threadId]?[index].orderIndex,
+                  currentOrder >= turnAnchor else {
+                continue
+            }
+            messagesByThread[threadId]?[index].orderIndex = currentOrder + 1
+        }
+        CodexMessageOrderCounter.seed(from: messagesByThread)
+        return turnAnchor
+    }
+
+    // Repositions an already-created mirrored opener without moving real steer prompts.
+    private func moveMirroredOpeningUserBeforeTurnOutputIfNeeded(
+        threadId: String,
+        turnId: String?,
+        messageIndex: Int
+    ) -> Bool {
+        guard let threadMessages = messagesByThread[threadId],
+              threadMessages.indices.contains(messageIndex),
+              let turnAnchor = mirroredOpeningUserAnchor(
+                threadId: threadId,
+                turnId: turnId,
+                existingMessageID: threadMessages[messageIndex].id
+              ),
+              threadMessages[messageIndex].orderIndex > turnAnchor else {
+            return false
+        }
+
+        let previousOrder = threadMessages[messageIndex].orderIndex
+        for index in threadMessages.indices where index != messageIndex {
+            guard let currentOrder = messagesByThread[threadId]?[index].orderIndex,
+                  currentOrder >= turnAnchor,
+                  currentOrder < previousOrder else {
+                continue
+            }
+            messagesByThread[threadId]?[index].orderIndex = currentOrder + 1
+        }
+        messagesByThread[threadId]?[messageIndex].orderIndex = turnAnchor
+        return true
+    }
+
+    // Returns the first output slot only when this turn has no other user row.
+    // Multiple user rows mean an in-turn steer, where chronological order is intentional.
+    private func mirroredOpeningUserAnchor(
+        threadId: String,
+        turnId: String?,
+        existingMessageID: String? = nil
+    ) -> Int? {
+        guard let turnId, !turnId.isEmpty,
+              let threadMessages = messagesByThread[threadId] else {
+            return nil
+        }
+
+        var firstOutputOrder: Int?
+        for message in threadMessages where message.turnId == turnId {
+            if message.id == existingMessageID {
+                continue
+            }
+            if message.role == .user {
+                return nil
+            }
+            firstOutputOrder = min(firstOutputOrder ?? message.orderIndex, message.orderIndex)
+        }
+        return firstOutputOrder
     }
 
     // Appends a system message in the current thread timeline.
@@ -4320,12 +4422,63 @@ extension CodexService {
     private func schedulePendingAssistantDeltaFlushIfNeeded() {
         guard pendingAssistantDeltaFlushTask == nil else { return }
 
+        let flushDelayNanoseconds = pendingAssistantDeltaFlushDelayNanoseconds()
         pendingAssistantDeltaFlushTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: assistantDeltaBatchIntervalNanoseconds)
+            try? await Task.sleep(nanoseconds: flushDelayNanoseconds)
             guard !Task.isCancelled else { return }
             self.flushPendingAssistantDeltas()
         }
+    }
+
+    private func pendingAssistantDeltaFlushDelayNanoseconds() -> UInt64 {
+        var largestVisibleByteCount = 0
+        for streamID in pendingAssistantDeltaStreamOrder {
+            guard let visibleByteCount = visibleAssistantTextByteCount(forPendingAssistantStreamID: streamID) else {
+                return StreamingDeltaCoalescingPolicy.assistantInitialFlushDelayNanoseconds
+            }
+            largestVisibleByteCount = max(largestVisibleByteCount, visibleByteCount)
+        }
+
+        let pendingDeltaByteCount = pendingAssistantDeltaByStreamID.values.reduce(0) { total, delta in
+            total + delta.utf8.count
+        }
+        let isLargeStream = pendingDeltaByteCount >= StreamingDeltaCoalescingPolicy.assistantLargePendingDeltaByteCount
+            || largestVisibleByteCount >= StreamingDeltaCoalescingPolicy.assistantLargeVisibleTextByteCount
+
+        return isLargeStream
+            ? StreamingDeltaCoalescingPolicy.assistantLargeStreamingFlushDelayNanoseconds
+            : StreamingDeltaCoalescingPolicy.assistantStreamingFlushDelayNanoseconds
+    }
+
+    // Treat streams with no painted text as first-block work so sends still feel immediate.
+    private func visibleAssistantTextByteCount(forPendingAssistantStreamID streamID: String) -> Int? {
+        guard let context = pendingAssistantDeltaContextByStreamID[streamID],
+              let messageID = streamingAssistantMessageID(
+                threadId: context.threadId,
+                turnId: context.turnId,
+                itemId: context.itemId
+              ),
+              let messageIndex = findMessageIndex(threadId: context.threadId, messageId: messageID),
+              let message = messagesByThread[context.threadId]?[messageIndex],
+              hasRenderableAssistantOutputText(message.text) else {
+            return nil
+        }
+
+        return message.text.utf8.count
+    }
+
+    private func streamingAssistantMessageID(threadId: String, turnId: String, itemId: String?) -> String? {
+        if let itemId,
+           let messageID = streamingAssistantMessageByItemKey[
+            assistantStreamingMessageKey(threadId: threadId, turnId: turnId, itemId: itemId)
+           ] {
+            return messageID
+        }
+
+        return streamingAssistantFallbackMessageByTurnID[
+            streamingMessageKey(threadId: threadId, turnId: turnId)
+        ]
     }
 
     func flushPendingAssistantDeltas(
@@ -4350,26 +4503,28 @@ extension CodexService {
             }
             return true
         }
+        if !streamIDsToFlush.isEmpty {
+            let flushedStreamIDs = Set(streamIDsToFlush)
 
-        for streamID in streamIDsToFlush {
-            guard let context = pendingAssistantDeltaContextByStreamID[streamID],
-                  let delta = pendingAssistantDeltaByStreamID[streamID] else {
+            for streamID in streamIDsToFlush {
+                guard let context = pendingAssistantDeltaContextByStreamID[streamID],
+                      let delta = pendingAssistantDeltaByStreamID[streamID] else {
+                    pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
+                    pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
+                    continue
+                }
+
                 pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
                 pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
-                pendingAssistantDeltaStreamOrder.removeAll { $0 == streamID }
-                continue
+                applyAssistantDeltaBatch(
+                    threadId: context.threadId,
+                    turnId: context.turnId,
+                    itemId: context.itemId,
+                    assistantPhase: context.assistantPhase,
+                    delta: delta
+                )
             }
-
-            pendingAssistantDeltaByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaContextByStreamID.removeValue(forKey: streamID)
-            pendingAssistantDeltaStreamOrder.removeAll { $0 == streamID }
-            applyAssistantDeltaBatch(
-                threadId: context.threadId,
-                turnId: context.turnId,
-                itemId: context.itemId,
-                assistantPhase: context.assistantPhase,
-                delta: delta
-            )
+            pendingAssistantDeltaStreamOrder.removeAll { flushedStreamIDs.contains($0) }
         }
 
         if pendingAssistantDeltaByStreamID.isEmpty {

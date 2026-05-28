@@ -20,9 +20,11 @@ const GITHUB_CLI_TIMEOUT_MS = 120_000;
 const GIT_DRAFT_PATCH_MAX_BYTES = 80_000;
 const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const DEFAULT_GIT_WRITER_MODEL = "gpt-5.4-mini";
+const STATUS_UPSTREAM_FETCH_TTL_MS = 15_000;
 
 let runStructuredCodexJsonImpl = runStructuredCodexJson;
 let runGitHubCliImpl = runGitHubCli;
+const statusUpstreamFetchCache = new Map();
 
 function resolveGitWriterModel(rawModel) {
   const trimmed = typeof rawModel === "string" ? rawModel.trim() : "";
@@ -172,43 +174,26 @@ async function gitStatus(cwd) {
     return nonRepositoryStatus(cwd);
   }
 
-  const [porcelain, branchInfo, repoRoot] = await Promise.all([
-    git(cwd, "status", "--porcelain=v1", "-b"),
-    revListCounts(cwd).catch(() => ({ ahead: 0, behind: 0 })),
-    resolveRepoRoot(cwd).catch(() => null),
-  ]);
-
-  const lines = porcelain.trim().split("\n").filter(Boolean);
-  const branchLine = lines[0] || "";
-  const fileLines = lines.slice(1);
-
-  const branch = parseBranchFromStatus(branchLine);
-  const tracking = parseTrackingFromStatus(branchLine);
-  const files = fileLines.map((line) => ({
-    path: line.substring(3).trim(),
-    status: line.substring(0, 2).trim(),
-  }));
-
-  const dirty = files.length > 0;
-  const { ahead, behind } = branchInfo;
-  const detached = branchLine.includes("HEAD detached") || branchLine.includes("no branch");
-  const noUpstream = tracking === null && !detached;
+  const snapshot = await readGitStatusSnapshot(cwd);
+  const { ahead, behind } = await freshBranchInfoForStatus(cwd, snapshot);
+  const dirty = snapshot.files.length > 0;
+  const noUpstream = snapshot.tracking === null && !snapshot.detached;
   const hasHeadCommit = await refExists(cwd, "HEAD").catch(() => false);
-  const hasPushRemote = await pushRemoteAvailable(cwd, tracking).catch(() => false);
-  const publishedToRemote = !detached && !!branch && await remoteBranchExists(cwd, branch).catch(() => false);
-  const localOnlyCommitCount = await countLocalOnlyCommits(cwd, { detached }).catch(() => 0);
-  const state = computeState(dirty, ahead, behind, detached, noUpstream);
-  const canPush = hasPushRemote && hasHeadCommit && (ahead > 0 || noUpstream) && !detached;
+  const hasPushRemote = await pushRemoteAvailable(cwd, snapshot.tracking).catch(() => false);
+  const publishedToRemote = !snapshot.detached && !!snapshot.branch && await remoteBranchExists(cwd, snapshot.branch).catch(() => false);
+  const localOnlyCommitCount = await countLocalOnlyCommits(cwd, { detached: snapshot.detached }).catch(() => 0);
+  const state = computeState(dirty, ahead, behind, snapshot.detached, noUpstream);
+  const canPush = hasPushRemote && hasHeadCommit && (ahead > 0 || noUpstream) && !snapshot.detached;
   const diff = await repoDiffTotals(cwd, {
-    tracking,
-    fileLines,
+    tracking: snapshot.tracking,
+    fileLines: snapshot.fileLines,
   }).catch(() => ({ additions: 0, deletions: 0, binaryFiles: 0 }));
 
   return {
     isRepo: true,
-    repoRoot,
-    branch,
-    tracking,
+    repoRoot: snapshot.repoRoot,
+    branch: snapshot.branch,
+    tracking: snapshot.tracking,
     dirty,
     hasHeadCommit,
     hasPushRemote,
@@ -218,9 +203,42 @@ async function gitStatus(cwd) {
     state,
     canPush,
     publishedToRemote,
-    files,
+    files: snapshot.files,
     diff,
   };
+}
+
+async function readGitStatusSnapshot(cwd) {
+  const [porcelain, repoRoot] = await Promise.all([
+    git(cwd, "status", "--porcelain=v1", "-b"),
+    resolveRepoRoot(cwd).catch(() => null),
+  ]);
+
+  const lines = porcelain.trim().split("\n").filter(Boolean);
+  const branchLine = lines[0] || "";
+  const fileLines = lines.slice(1);
+
+  const branch = parseBranchFromStatus(branchLine);
+  const tracking = parseTrackingFromStatus(branchLine);
+  const detached = branchLine.includes("HEAD detached") || branchLine.includes("no branch");
+  const files = fileLines.map((line) => ({
+    path: line.substring(3).trim(),
+    status: line.substring(0, 2).trim(),
+  }));
+
+  return {
+    repoRoot,
+    branch,
+    tracking,
+    detached,
+    fileLines,
+    files,
+  };
+}
+
+async function freshBranchInfoForStatus(cwd, snapshot) {
+  await refreshStatusUpstreamIfNeeded(cwd, snapshot.tracking, snapshot.repoRoot).catch(() => false);
+  return await revListCounts(cwd).catch(() => ({ ahead: 0, behind: 0 }));
 }
 
 async function gitInit(cwd) {
@@ -2503,6 +2521,52 @@ async function revListCounts(cwd) {
   return {
     ahead: parseInt(parts[0], 10) || 0,
     behind: parseInt(parts[1], 10) || 0,
+  };
+}
+
+// Keeps Update eligibility based on the current upstream ref, not stale local fetch data.
+async function refreshStatusUpstreamIfNeeded(cwd, tracking, repoRoot) {
+  const parsedTracking = parseTrackingRef(tracking);
+  if (!parsedTracking) {
+    return false;
+  }
+
+  const cacheKey = `${repoRoot || cwd}\0${parsedTracking.remote}\0${parsedTracking.branch}`;
+  const now = Date.now();
+  const lastFetchAt = statusUpstreamFetchCache.get(cacheKey) || 0;
+  if (now - lastFetchAt < STATUS_UPSTREAM_FETCH_TTL_MS) {
+    return false;
+  }
+
+  statusUpstreamFetchCache.set(cacheKey, now);
+  if (statusUpstreamFetchCache.size > 200) {
+    statusUpstreamFetchCache.clear();
+    statusUpstreamFetchCache.set(cacheKey, now);
+  }
+
+  await git(
+    cwd,
+    "fetch",
+    "--quiet",
+    parsedTracking.remote,
+    `+refs/heads/${parsedTracking.branch}:refs/remotes/${parsedTracking.remote}/${parsedTracking.branch}`
+  );
+  return true;
+}
+
+function parseTrackingRef(tracking) {
+  if (typeof tracking !== "string") {
+    return null;
+  }
+
+  const separatorIndex = tracking.indexOf("/");
+  if (separatorIndex <= 0 || separatorIndex === tracking.length - 1) {
+    return null;
+  }
+
+  return {
+    remote: tracking.slice(0, separatorIndex),
+    branch: tracking.slice(separatorIndex + 1),
   };
 }
 

@@ -2,13 +2,15 @@
 // Purpose: Owns the phone-side SSH client and bridges raw TTY bytes to Ghostty.
 // Layer: Service
 // Exports: RemodexNativeSSHTerminal, RemodexNativeSSHTerminalError
-// Depends on: Citadel, Crypto, Foundation, NIOCore
+// Depends on: Citadel, Crypto, Darwin, Foundation, NIOCore, NIOPosix
 
 import Citadel
 import Crypto
+import Darwin
 import Foundation
 import NIO
 import NIOCore
+import NIOPosix
 import NIOSSH
 
 enum RemodexNativeSSHTerminalError: LocalizedError {
@@ -27,6 +29,99 @@ enum RemodexNativeSSHTerminalError: LocalizedError {
             return "This SSH key type is not supported yet: \(keyType). Use an Ed25519 or RSA private key."
         case .sessionNotRunning:
             return "The SSH terminal is not running."
+        }
+    }
+
+    // Converts low-level SSH/NIO failures into copy that tells the user what to check next.
+    static func userFacingDescription(for error: Error) -> String {
+        if let terminalError = error as? RemodexNativeSSHTerminalError,
+           let description = terminalError.errorDescription {
+            return description
+        }
+        if let sshError = error as? SSHClientError {
+            return userFacingDescription(for: sshError)
+        }
+        if let channelError = error as? ChannelError {
+            return userFacingDescription(for: channelError)
+        }
+        if let connectionError = error as? NIOConnectionError {
+            return userFacingDescription(for: connectionError)
+        }
+        if let ioError = error as? IOError {
+            return userFacingDescription(for: ioError)
+        }
+        if let localizedError = error as? LocalizedError,
+           let description = localizedError.errorDescription {
+            return description
+        }
+
+        let fallback = error.localizedDescription
+        if fallback.contains("NIOCore.ChannelError") {
+            return "SSH connection closed before the terminal was ready. Check that Remote Login is enabled on the Mac, the saved host/IP is still current, and the Mac is reachable from this network."
+        }
+        if fallback.contains("NIOPosix.NIOConnectionError") {
+            return "SSH could not reach the Mac. Check that Remote Login is enabled, the saved host/IP and port are correct, and both devices are on a network that allows local SSH."
+        }
+        return fallback
+    }
+
+    private static func userFacingDescription(for error: SSHClientError) -> String {
+        switch error {
+        case .allAuthenticationOptionsFailed:
+            return "SSH authentication failed. Check the username, private key, passphrase, and that the public key is still in ~/.ssh/authorized_keys on the Mac."
+        case .unsupportedPrivateKeyAuthentication:
+            return "This SSH server is not accepting private-key authentication for that user."
+        case .unsupportedPasswordAuthentication:
+            return "This SSH server is asking for password authentication, but Remodex terminal currently uses a private key."
+        case .unsupportedHostBasedAuthentication:
+            return "This SSH server requires host-based authentication, which Remodex terminal does not support."
+        case .channelCreationFailed:
+            return "SSH connected, but the terminal channel could not be opened. Check whether the Mac allows interactive login for this user."
+        }
+    }
+
+    private static func userFacingDescription(for error: ChannelError) -> String {
+        switch error {
+        case .connectTimeout(_):
+            return "SSH connection timed out. Check that the Mac is awake, Remote Login is enabled, and the saved host/IP and port are reachable from this network."
+        case .eof, .inputClosed, .outputClosed, .ioOnClosedChannel, .alreadyClosed:
+            return "SSH connection closed before the terminal was ready. Check that Remote Login is enabled on the Mac and retry. If this Mac was restored or reinstalled, reset the terminal host key first."
+        case .connectPending:
+            return "SSH is already connecting. Wait a moment and try again."
+        default:
+            return "SSH channel failed before the terminal was ready. Check the saved host/IP, port, Remote Login setting, and network reachability."
+        }
+    }
+
+    private static func userFacingDescription(for error: NIOConnectionError) -> String {
+        if error.dnsAError != nil || error.dnsAAAAError != nil {
+            return "SSH could not resolve \(error.host). Check the saved hostname or use the Mac's current local IP address."
+        }
+
+        if let failedConnection = error.connectionErrors.first {
+            if let ioError = failedConnection.error as? IOError {
+                return userFacingDescription(for: ioError)
+            }
+            if let channelError = failedConnection.error as? ChannelError {
+                return userFacingDescription(for: channelError)
+            }
+        }
+
+        return "SSH could not reach \(error.host):\(error.port). Check that the Mac is awake, Remote Login is enabled, the saved host/IP is current, and the network allows local SSH."
+    }
+
+    private static func userFacingDescription(for error: IOError) -> String {
+        switch error.errnoCode {
+        case ECONNREFUSED:
+            return "The Mac refused the SSH connection. Enable Remote Login on the Mac and confirm the terminal port is correct."
+        case EHOSTUNREACH, ENETUNREACH:
+            return "The Mac is not reachable from this network. Check that the iPhone and Mac are on the same network and that the saved host/IP is still current."
+        case ETIMEDOUT:
+            return "SSH connection timed out. Check that the Mac is awake, Remote Login is enabled, and the saved host/IP is still current."
+        case ECONNRESET, ECONNABORTED, EPIPE:
+            return "SSH connection was closed by the Mac or the network. Reopen the terminal after checking Remote Login and network reachability."
+        default:
+            return "SSH network error: \(error.localizedDescription)"
         }
     }
 }

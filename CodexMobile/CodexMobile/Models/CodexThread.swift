@@ -443,6 +443,24 @@ extension CodexThread {
         normalizeProjectPath(value)
     }
 
+    // Git writes are repo-scoped, so every live root chat bound to a real cwd can expose them.
+    // Do not tie this to sidebar/thread-list hydration; background refreshes would make
+    // the toolbar disappear even though the active repo has not changed.
+    static func gitControlsVisible(
+        for thread: CodexThread,
+        workingDirectory rawWorkingDirectory: String?,
+        isConnected: Bool
+    ) -> Bool {
+        guard isConnected,
+              thread.syncState == .live,
+              thread.parentThreadId == nil,
+              normalizedFilesystemProjectPath(rawWorkingDirectory) != nil else {
+            return false
+        }
+
+        return true
+    }
+
     // --- Date parsing ---------------------------------------------------------
 
     private static func decodeDateIfPresent(

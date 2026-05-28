@@ -99,6 +99,23 @@ final class BridgeMenuBarStore: ObservableObject {
         }
     }
 
+    func restartBridge() {
+        runAction(successMessage: "Bridge riavviato.") {
+            try await self.requireCLIAvailability()
+            try await self.service.restartBridge(relayOverride: self.effectiveRelayOverride)
+            try await self.refreshAfterAction()
+        }
+    }
+
+    func refreshPairing() {
+        let previousPairingDate = snapshot?.pairingSession?.createdDate
+        runAction(successMessage: "QR pairing aggiornato.") {
+            try await self.requireCLIAvailability()
+            try await self.service.refreshPairing(relayOverride: self.effectiveRelayOverride)
+            try await self.waitForFreshPairing(after: previousPairingDate)
+        }
+    }
+
     func resumeLastThread() {
         runAction(successMessage: "Ultimo thread riaperto in Codex.") {
             try await self.requireCLIAvailability()

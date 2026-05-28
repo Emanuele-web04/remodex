@@ -1,17 +1,20 @@
-name: Bridge Check
+name: Node Package Tests
 
 on:
   push:
     paths:
       - ".github/workflows/bridge-check.yml"
       - "phodex-bridge/**"
+      - "relay/**"
   pull_request:
     paths:
       - ".github/workflows/bridge-check.yml"
       - "phodex-bridge/**"
+      - "relay/**"
 
 jobs:
   bridge-check:
+    name: Bridge tests
     runs-on: ubuntu-latest
 
     steps:
@@ -27,9 +30,36 @@ jobs:
 
       - name: Install bridge dependencies
         working-directory: phodex-bridge
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Verify bridge entrypoints load
         working-directory: phodex-bridge
         run: |
           node -e "const mod = require('./src'); const names = ['startBridge', 'openLastActiveThread', 'watchThreadRollout']; for (const name of names) { if (typeof mod[name] !== 'function') { throw new Error('Missing export: ' + name); } }"
+
+      - name: Run bridge tests
+        working-directory: phodex-bridge
+        run: npm test
+
+  relay-check:
+    name: Relay tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+
+      - name: Install relay dependencies
+        working-directory: relay
+        run: npm ci --ignore-scripts
+
+      - name: Run relay tests
+        working-directory: relay
+        run: npm test

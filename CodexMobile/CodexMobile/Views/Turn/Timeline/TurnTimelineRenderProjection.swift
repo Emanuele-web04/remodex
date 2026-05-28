@@ -73,7 +73,12 @@ enum TurnTimelineRenderProjection {
     private static let smallWhitespaceScanByteLimit = 512
 
     // Groups tool runs and completed-turn preamble rows so the visible timeline stays compact.
-    static func project(messages: [CodexMessage], completedTurnIDs: Set<String> = []) -> [TurnTimelineRenderItem] {
+    static func project(
+        messages: [CodexMessage],
+        completedTurnIDs: Set<String> = [],
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
+    ) -> [TurnTimelineRenderItem] {
         var items: [TurnTimelineRenderItem] = []
         var bufferedToolMessages: [CodexMessage] = []
         let fileChangePlan = fileChangeCollapsePlan(in: messages)
@@ -115,7 +120,11 @@ enum TurnTimelineRenderProjection {
             }
 
             let renderedMessage = previousReplacementByIndex[index] ?? fileChangePlan.replacementByIndex[index] ?? message
-            if shouldSkipVisualRow(renderedMessage) {
+            if shouldSkipVisualRow(
+                renderedMessage,
+                activeTurnID: activeTurnID,
+                isThreadRunning: isThreadRunning
+            ) {
                 continue
             }
             guard isToolBurstCandidate(message) else {
@@ -329,6 +338,7 @@ enum TurnTimelineRenderProjection {
         var preferredFinalIndexByTurn: [String: Int] = [:]
         var phasedFinalIndexByTurn: [String: Int] = [:]
         var fallbackFinalIndexByTurn: [String: Int] = [:]
+        var turnsWithExplicitAssistantPhase = Set<String>()
 
         for index in messages.indices {
             let message = messages[index]
@@ -341,6 +351,9 @@ enum TurnTimelineRenderProjection {
             }
 
             fallbackFinalIndexByTurn[turnID] = index
+            if message.assistantPhase != nil {
+                turnsWithExplicitAssistantPhase.insert(turnID)
+            }
             if isFinalAnswerAssistantPhase(message.assistantPhase) {
                 phasedFinalIndexByTurn[turnID] = index
             }
@@ -349,9 +362,19 @@ enum TurnTimelineRenderProjection {
             }
         }
 
-        return phasedFinalIndexByTurn
-            .merging(preferredFinalIndexByTurn) { phased, _ in phased }
-            .merging(fallbackFinalIndexByTurn) { preferred, _ in preferred }
+        var resolved = phasedFinalIndexByTurn
+        for (turnID, index) in preferredFinalIndexByTurn where resolved[turnID] == nil {
+            // If the stream carries explicit assistant phases, only a final_answer
+            // phase is allowed to own the previous-message disclosure. Commentary
+            // updates are live progress, not a final answer to collapse around.
+            guard !turnsWithExplicitAssistantPhase.contains(turnID) else { continue }
+            resolved[turnID] = index
+        }
+        for (turnID, index) in fallbackFinalIndexByTurn where resolved[turnID] == nil {
+            guard !turnsWithExplicitAssistantPhase.contains(turnID) else { continue }
+            resolved[turnID] = index
+        }
+        return resolved
     }
 
     private struct PreviousMessageSelection {
@@ -671,10 +694,21 @@ enum TurnTimelineRenderProjection {
     }
 
     // Drops placeholder-only rows before SwiftUI can reserve timeline spacing for them.
-    private static func shouldSkipVisualRow(_ message: CodexMessage) -> Bool {
+    private static func shouldSkipVisualRow(
+        _ message: CodexMessage,
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
+    ) -> Bool {
         if message.role == .assistant,
            message.isStreaming,
            isEmptyStreamingPlaceholderText(message.text) {
+            return true
+        }
+
+        if isThreadRunning,
+           message.role == .system,
+           message.kind == .fileChange,
+           normalizedIdentifier(message.turnId) == normalizedIdentifier(activeTurnID) {
             return true
         }
 

@@ -67,6 +67,85 @@ nonisolated struct AssistantMarkdownImageReference: Identifiable, Equatable {
     var isCodexGeneratedImage: Bool {
         AssistantMarkdownImageReferenceParser.isCodexGeneratedImagePath(path)
     }
+
+    // Mirrors the bridge allowlist so timeline image cards do not advertise previews
+    // that `workspace/readImage` will reject on tap.
+    func canPreview(currentWorkingDirectory: String?) -> Bool {
+        if isTemporaryScreenshotImage || isCodexGeneratedImage {
+            return true
+        }
+
+        let normalizedPath = Self.normalizedLocalPath(path)
+        guard !normalizedPath.isEmpty else {
+            return false
+        }
+
+        guard let currentWorkingDirectory = currentWorkingDirectory,
+              let resolvedPath = Self.workspaceResolvedPath(
+                normalizedPath,
+                currentWorkingDirectory: currentWorkingDirectory
+              ) else {
+            return false
+        }
+
+        return Self.isPath(resolvedPath, inside: currentWorkingDirectory)
+    }
+
+    private static func normalizedLocalPath(_ value: String) -> String {
+        value
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\", with: "/")
+    }
+
+    private static func workspaceResolvedPath(_ path: String, currentWorkingDirectory: String) -> String? {
+        let normalizedRoot = normalizedPathComponentsPath(currentWorkingDirectory)
+        guard normalizedRoot.hasPrefix("/") else {
+            return nil
+        }
+
+        if path.hasPrefix("/") {
+            return normalizedPathComponentsPath(path)
+        }
+
+        return normalizedPathComponentsPath("\(normalizedRoot)/\(path)")
+    }
+
+    private static func isPath(_ path: String, inside root: String) -> Bool {
+        let normalizedPath = normalizedPathComponentsPath(path)
+        var normalizedRoot = normalizedPathComponentsPath(root)
+        while normalizedRoot.count > 1, normalizedRoot.hasSuffix("/") {
+            normalizedRoot.removeLast()
+        }
+        guard normalizedRoot != "/" else {
+            return normalizedPath.hasPrefix("/")
+        }
+        return normalizedPath == normalizedRoot || normalizedPath.hasPrefix("\(normalizedRoot)/")
+    }
+
+    // Resolves "." and ".." lexically; the Mac bridge still does the authoritative realpath check.
+    private static func normalizedPathComponentsPath(_ value: String) -> String {
+        let normalized = normalizedLocalPath(value)
+        let isAbsolute = normalized.hasPrefix("/")
+        var components: [String] = []
+
+        for component in normalized.split(separator: "/", omittingEmptySubsequences: true) {
+            switch component {
+            case ".":
+                continue
+            case "..":
+                if !components.isEmpty {
+                    components.removeLast()
+                } else if !isAbsolute {
+                    components.append(String(component))
+                }
+            default:
+                components.append(String(component))
+            }
+        }
+
+        let joined = components.joined(separator: "/")
+        return isAbsolute ? "/\(joined)" : joined
+    }
 }
 
 enum AssistantMarkdownContentSegment: Identifiable, Equatable {

@@ -4,6 +4,7 @@
 // Exports: BridgeControlService, ShellCommandRunner
 // Depends on: Foundation, BridgeControlModels
 
+import CryptoKit
 import Foundation
 
 struct BridgeCLIInvocation {
@@ -134,7 +135,8 @@ final class BridgeControlService {
         }
 
         do {
-            return try decoder.decode(BridgeSnapshot.self, from: data)
+            let snapshot = try decoder.decode(BridgeSnapshot.self, from: data)
+            return snapshotWithLocalTrustFallback(snapshot)
         } catch {
             return try await loadFallbackSnapshot(from: result.stdout, invocation: invocation)
         }
@@ -148,10 +150,26 @@ final class BridgeControlService {
         )
     }
 
+    func restartBridge(relayOverride: String?) async throws {
+        let invocation = try await resolveCLIInvocation()
+        _ = try await runner.run(
+            command: invocation.command(["restart"]),
+            environment: commandEnvironment(relayOverride: relayOverride)
+        )
+    }
+
     func stopBridge(relayOverride: String?) async throws {
         let invocation = try await resolveCLIInvocation()
         _ = try await runner.run(
             command: invocation.command(["stop"]),
+            environment: commandEnvironment(relayOverride: relayOverride)
+        )
+    }
+
+    func refreshPairing(relayOverride: String?) async throws {
+        let invocation = try await resolveCLIInvocation()
+        _ = try await runner.run(
+            command: invocation.command(["pair", "--json"]),
             environment: commandEnvironment(relayOverride: relayOverride)
         )
     }
@@ -226,6 +244,7 @@ final class BridgeControlService {
         let daemonConfig: BridgeDaemonConfig? = readStateFile(named: "daemon-config.json", in: stateDirectory)
         let bridgeStatus: BridgeRuntimeStatus? = readStateFile(named: "bridge-status.json", in: stateDirectory)
         let pairingSession: BridgePairingSession? = readStateFile(named: "pairing-session.json", in: stateDirectory)
+        let trustedDevice: BridgeTrustedDeviceSummary? = readDeviceTrustSummary(in: stateDirectory)
         let stdoutLogPath = statusLines["stdout log"] ?? stateDirectory.appendingPathComponent("logs/bridge.stdout.log").path
         let stderrLogPath = statusLines["stderr log"] ?? stateDirectory.appendingPathComponent("logs/bridge.stderr.log").path
         let launchdPid = parsePid(statusLines["pid"])
@@ -242,8 +261,35 @@ final class BridgeControlService {
             daemonConfig: daemonConfig,
             bridgeStatus: bridgeStatus,
             pairingSession: pairingSession,
+            trustedDevice: trustedDevice,
             stdoutLogPath: stdoutLogPath,
             stderrLogPath: stderrLogPath
+        )
+    }
+
+    private func snapshotWithLocalTrustFallback(_ snapshot: BridgeSnapshot) -> BridgeSnapshot {
+        guard snapshot.trustedDevice == nil else {
+            return snapshot
+        }
+
+        let stateDirectory = URL(fileURLWithPath: snapshot.stateDirectoryPath)
+        guard let trustedDevice = readDeviceTrustSummary(in: stateDirectory) else {
+            return snapshot
+        }
+
+        return BridgeSnapshot(
+            currentVersion: snapshot.currentVersion,
+            label: snapshot.label,
+            platform: snapshot.platform,
+            installed: snapshot.installed,
+            launchdLoaded: snapshot.launchdLoaded,
+            launchdPid: snapshot.launchdPid,
+            daemonConfig: snapshot.daemonConfig,
+            bridgeStatus: snapshot.bridgeStatus,
+            pairingSession: snapshot.pairingSession,
+            trustedDevice: trustedDevice,
+            stdoutLogPath: snapshot.stdoutLogPath,
+            stderrLogPath: snapshot.stderrLogPath
         )
     }
 
@@ -306,6 +352,26 @@ final class BridgeControlService {
         }
 
         return try? decoder.decode(T.self, from: data)
+    }
+
+    private func readDeviceTrustSummary(in stateDirectory: URL) -> BridgeTrustedDeviceSummary? {
+        guard let state: LegacyBridgeDeviceState = readStateFile(named: "device-state.json", in: stateDirectory) else {
+            return nil
+        }
+
+        let trustedPhones = state.trustedPhones.filter { key, value in
+            !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let firstTrustedPhoneId = trustedPhones.keys.sorted().first
+        let lastSeenPhoneAppVersion = normalizeNonEmptyString(state.lastSeenPhoneAppVersion)
+        return BridgeTrustedDeviceSummary(
+            macDeviceFingerprint: shortFingerprint(state.macDeviceId),
+            trustedPhoneCount: trustedPhones.count,
+            trustedPhoneFingerprint: shortFingerprint(firstTrustedPhoneId),
+            lastSeenDeviceKind: normalizeDeviceKind(state.lastSeenDeviceKind) ?? (lastSeenPhoneAppVersion == nil ? nil : "iphone"),
+            lastSeenPhoneAppVersion: lastSeenPhoneAppVersion
+        )
     }
 
     // Prefers the Node runtime sitting next to the resolved CLI binary so mixed installs stay compatible.
@@ -519,4 +585,61 @@ final class BridgeControlService {
 
 private func shellQuoted(_ value: String) -> String {
     "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
+}
+
+private struct LegacyBridgeDeviceState: Decodable {
+    let macDeviceId: String?
+    let trustedPhones: [String: String]
+    let lastSeenDeviceKind: String?
+    let lastSeenPhoneAppVersion: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case macDeviceId
+        case trustedPhones
+        case lastSeenDeviceKind
+        case lastSeenPhoneAppVersion
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        macDeviceId = try container.decodeIfPresent(String.self, forKey: .macDeviceId)
+        trustedPhones = try container.decodeIfPresent([String: String].self, forKey: .trustedPhones) ?? [:]
+        lastSeenDeviceKind = try container.decodeIfPresent(String.self, forKey: .lastSeenDeviceKind)
+        lastSeenPhoneAppVersion = try container.decodeIfPresent(String.self, forKey: .lastSeenPhoneAppVersion)
+    }
+}
+
+private func normalizeDeviceKind(_ value: String?) -> String? {
+    guard let normalized = normalizeNonEmptyFingerprintInput(value)?.lowercased() else {
+        return nil
+    }
+
+    switch normalized {
+    case "ios", "iphone":
+        return "iphone"
+    case "android":
+        return "android"
+    case "mac", "macos", "darwin":
+        return "mac"
+    default:
+        return normalized
+    }
+}
+
+private func shortFingerprint(_ value: String?) -> String? {
+    guard let normalized = normalizeNonEmptyFingerprintInput(value) else {
+        return nil
+    }
+
+    let digest = SHA256.hash(data: Data(normalized.utf8))
+    return digest.prefix(4).map { String(format: "%02x", $0) }.joined()
+}
+
+private func normalizeNonEmptyFingerprintInput(_ value: String?) -> String? {
+    guard let value else {
+        return nil
+    }
+
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
 }

@@ -155,13 +155,12 @@ function createSpawnTransport({ env, appPath, platform, spawnImpl = spawn }) {
         return;
       }
       stdoutBuffer += chunk.toString("utf8");
-      const lines = stdoutBuffer.split("\n");
-      stdoutBuffer = lines.pop() || "";
-
-      for (const line of lines) {
-        const trimmedLine = line.trim();
-        if (trimmedLine) {
-          listeners.emitMessage(trimmedLine);
+      let newlineIndex;
+      while ((newlineIndex = stdoutBuffer.indexOf("\n")) !== -1) {
+        const line = stdoutBuffer.substring(0, newlineIndex).trim();
+        stdoutBuffer = stdoutBuffer.substring(newlineIndex + 1);
+        if (line) {
+          listeners.emitMessage(line);
         }
       }
     });

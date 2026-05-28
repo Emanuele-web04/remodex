@@ -64,7 +64,7 @@ struct OnboardingView: View {
         .preferredColorScheme(.dark)
         .alert("Install Codex CLI First", isPresented: $isShowingCodexInstallReminder) {
             Button("Stay Here", role: .cancel) {}
-            Button("Continue Anyway") {
+            Button("Understood") {
                 advanceToNextPage()
             }
         } message: {

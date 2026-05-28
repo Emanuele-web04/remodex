@@ -29,6 +29,7 @@ import TreeSitterTSXRunestone
 import TreeSitterTypeScriptRunestone
 import TreeSitterYAMLRunestone
 import UIKit
+import WebKit
 
 struct AssistantWorkspaceImagePreviewRequest: Identifiable {
     let id = UUID()
@@ -59,7 +60,7 @@ enum WorkspaceFileLinkResolver {
         "yml", "zsh"
     ]
     private static let imageFileExtensions: Set<String> = [
-        "gif", "heic", "heif", "jpeg", "jpg", "png", "webp"
+        "gif", "heic", "heif", "jpeg", "jpg", "png", "svg", "webp"
     ]
     private static let extensionlessFileNames: Set<String> = [
         "dockerfile", "gemfile", "makefile", "podfile"
@@ -340,6 +341,7 @@ struct AssistantMarkdownImagePreviewButton: View {
 
 private enum WorkspaceLinkedFilePreviewPayload {
     case image(PreviewImagePayload)
+    case svg(WorkspaceSVGFilePreviewPayload)
     case text(WorkspaceTextFileReadResult)
 }
 
@@ -357,6 +359,10 @@ struct WorkspaceLinkedFilePreviewScreen: View {
             switch payload {
             case .image(let imagePayload):
                 ZoomableImagePreviewScreen(payload: imagePayload, onDismiss: onDismiss)
+            case .svg(let svgPayload):
+                WorkspaceSVGFilePreviewScreen(payload: svgPayload, onDismiss: onDismiss, onReload: {
+                    Task { await loadPreview(force: true) }
+                })
             case .text(let file):
                 WorkspaceTextFileViewerScreen(file: file, onDismiss: onDismiss, onReload: {
                     Task { await loadPreview(force: true) }
@@ -454,7 +460,7 @@ struct WorkspaceLinkedFilePreviewScreen: View {
     @MainActor
     private func loadImageThenText(force: Bool) async {
         do {
-            payload = .image(try await loadImagePayload(force: force))
+            payload = try await loadVisualPayload(force: force)
             return
         } catch {
             let imageError = error
@@ -474,11 +480,19 @@ struct WorkspaceLinkedFilePreviewScreen: View {
         } catch {
             let textError = error
             do {
-                payload = .image(try await loadImagePayload(force: force))
+                payload = try await loadVisualPayload(force: force)
             } catch {
                 errorMessage = combinedPreviewError(primary: textError, fallback: error)
             }
         }
+    }
+
+    @MainActor
+    private func loadVisualPayload(force: Bool) async throws -> WorkspaceLinkedFilePreviewPayload {
+        if WorkspaceSVGFilePreviewPayload.isSVGPath(request.path) {
+            return .svg(try await loadSVGPayload())
+        }
+        return .image(try await loadImagePayload(force: force))
     }
 
     @MainActor
@@ -493,6 +507,23 @@ struct WorkspaceLinkedFilePreviewScreen: View {
             currentWorkingDirectory: request.currentWorkingDirectory,
             codex: codex,
             force: force
+        )
+    }
+
+    @MainActor
+    private func loadSVGPayload() async throws -> WorkspaceSVGFilePreviewPayload {
+        let result = try await codex.readWorkspaceImage(
+            path: request.path,
+            cwd: request.currentWorkingDirectory
+        )
+        guard let data = result.data,
+              let source = String(data: data, encoding: .utf8) else {
+            throw CodexServiceError.invalidResponse("SVG preview response did not include readable SVG data.")
+        }
+        return WorkspaceSVGFilePreviewPayload(
+            source: source,
+            title: result.fileName.isEmpty ? fileName : result.fileName,
+            path: result.path
         )
     }
 
@@ -590,6 +621,155 @@ private struct WorkspaceTextFileViewerScreen: View {
                 isShowingCopiedConfirmation = false
             }
         }
+    }
+}
+
+private struct WorkspaceSVGFilePreviewPayload: Equatable {
+    let source: String
+    let title: String
+    let path: String
+
+    static func isSVGPath(_ path: String) -> Bool {
+        (path as NSString).pathExtension.lowercased() == "svg"
+    }
+}
+
+private struct WorkspaceSVGFilePreviewScreen: View {
+    let payload: WorkspaceSVGFilePreviewPayload
+    let onDismiss: () -> Void
+    let onReload: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            Color(.systemBackground)
+                .ignoresSafeArea()
+
+            WorkspaceSVGWebView(source: payload.source, colorScheme: colorScheme)
+                .ignoresSafeArea()
+
+            topBar
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .zIndex(2)
+        }
+        .background(Color(.systemBackground))
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 14) {
+            WorkspacePreviewChromeButton(systemName: "xmark", accessibilityLabel: "Close SVG preview") {
+                onDismiss()
+            }
+
+            WorkspacePreviewTitlePill(title: payload.title.isEmpty ? "SVG" : payload.title)
+
+            Spacer(minLength: 0)
+
+            WorkspacePreviewChromeButton(systemName: "arrow.clockwise", accessibilityLabel: "Reload SVG preview") {
+                onReload()
+            }
+        }
+    }
+}
+
+// Hosts raw SVG markup in an isolated page so vector files preview as artwork, not source text.
+struct WorkspaceSVGWebView: UIViewRepresentable {
+    let source: String
+    let colorScheme: ColorScheme
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        webView.scrollView.minimumZoomScale = 1
+        webView.scrollView.maximumZoomScale = 8
+        webView.scrollView.bouncesZoom = true
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        let html = Self.htmlDocument(svgSource: source, isDark: colorScheme == .dark)
+        guard context.coordinator.loadedHTML != html else { return }
+        context.coordinator.loadedHTML = html
+        context.coordinator.prepareForHTMLLoad()
+        webView.loadHTMLString(html, baseURL: nil)
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var loadedHTML: String?
+        private var didAllowInitialNavigation = false
+
+        func prepareForHTMLLoad() {
+            didAllowInitialNavigation = false
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            if WorkspaceSVGPreviewSecurity.isExternalNavigationURL(navigationAction.request.url) {
+                decisionHandler(.cancel)
+                return
+            }
+
+            guard !didAllowInitialNavigation, navigationAction.navigationType == .other else {
+                decisionHandler(.cancel)
+                return
+            }
+
+            didAllowInitialNavigation = true
+            decisionHandler(.allow)
+        }
+    }
+
+    static func htmlDocument(svgSource: String, isDark: Bool) -> String {
+        let background = isDark ? "#111114" : "#f7f7f8"
+        let foreground = isDark ? "#f5f5f7" : "#111114"
+        let sanitizedSVG = WorkspaceSVGPreviewSecurity.sanitizedSVGSource(svgSource)
+        return """
+        <!doctype html>
+        <html>
+        <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=8">
+        <meta http-equiv="Content-Security-Policy" content="\(WorkspaceSVGPreviewSecurity.contentSecurityPolicy)">
+        <style>
+        html, body {
+          width: 100%;
+          height: 100%;
+          margin: 0;
+          background: \(background);
+          color: \(foreground);
+        }
+        body {
+          display: grid;
+          place-items: center;
+          box-sizing: border-box;
+          padding: 88px 20px 28px;
+        }
+        svg {
+          max-width: 100%;
+          max-height: 100%;
+          width: auto;
+          height: auto;
+        }
+        </style>
+        </head>
+        <body>
+        \(sanitizedSVG)
+        </body>
+        </html>
+        """
     }
 }
 

@@ -96,6 +96,8 @@ struct BridgeMenuBarContentView: View {
             } else {
                 LabelValueRow(label: "Relay URL", value: "Not configured yet")
             }
+
+            LabelValueRow(label: "Device", value: store.snapshot?.trustedPhoneStatusLabel ?? "Unknown")
         }
         .padding(12)
         .background(cardFill, in: cardShape)
@@ -117,10 +119,10 @@ struct BridgeMenuBarContentView: View {
                 .font(.system(size: 12, weight: .regular, design: .monospaced))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(Color(nsColor: .textBackgroundColor).opacity(0.82), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .background(Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.primary.opacity(0.10), lineWidth: 1)
                 )
 
             HStack(spacing: 6) {
@@ -148,18 +150,27 @@ struct BridgeMenuBarContentView: View {
                 CompactActionButton("Start", style: .primary) {
                     store.startBridge()
                 }
+                CompactActionButton("Restart", style: .secondary) {
+                    store.restartBridge()
+                }
                 CompactActionButton("Stop", style: .destructive) {
                     store.stopBridge()
-                }
-                CompactActionButton("Resume", style: .secondary) {
-                    store.resumeLastThread()
                 }
             }
 
             HStack(spacing: 6) {
+                CompactActionButton("Pair QR", style: .primary) {
+                    store.refreshPairing()
+                }
+                CompactActionButton("Resume", style: .secondary) {
+                    store.resumeLastThread()
+                }
                 CompactActionButton("Refresh", style: .secondary) {
                     Task { await store.refresh(showSpinner: true) }
                 }
+            }
+
+            HStack(spacing: 6) {
                 CompactActionButton("Reset Pair", style: .destructive) {
                     store.resetPairing()
                 }
@@ -318,15 +329,15 @@ struct BridgeMenuBarContentView: View {
 
     // MARK: - Shared primitives
 
-    private let cardShape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+    private let cardShape = RoundedRectangle(cornerRadius: 8, style: .continuous)
 
     private var cardFill: Color {
-        Color(nsColor: .controlBackgroundColor).opacity(colorScheme == .dark ? 0.45 : 0.6)
+        Color.clear
     }
 
     private var cardBorder: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .stroke(Color.primary.opacity(colorScheme == .dark ? 0.14 : 0.10), lineWidth: 1)
     }
 
     private var statusTint: Color {
@@ -383,10 +394,10 @@ struct BridgeMenuBarContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
     }
 
@@ -401,10 +412,10 @@ struct BridgeMenuBarContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color.clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
         )
     }
 
@@ -431,8 +442,11 @@ struct BridgeMenuBarLabel: View {
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
-            Image(systemName: "terminal")
-                .font(.system(size: 15, weight: .semibold))
+            Image("remodex_control_symbol")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 17, height: 17)
                 .foregroundStyle(isBusy ? Color.primary.opacity(0.7) : Color.primary)
             if updateState.isUpdateAvailable {
                 Circle()
@@ -499,15 +513,13 @@ private struct CompactActionButton: View {
 
     private var backgroundColor: Color {
         switch style {
-        case .primary: return .primary
-        case .secondary: return Color(nsColor: .textBackgroundColor).opacity(0.5)
-        case .destructive: return Color(nsColor: .textBackgroundColor).opacity(0.5)
+        case .primary, .secondary, .destructive: return .clear
         }
     }
 
     private var foregroundColor: Color {
         switch style {
-        case .primary: return Color(nsColor: .windowBackgroundColor)
+        case .primary: return .primary
         case .secondary: return .primary
         case .destructive: return .red
         }
@@ -515,8 +527,8 @@ private struct CompactActionButton: View {
 
     private var borderColor: Color {
         switch style {
-        case .primary: return .clear
-        case .secondary: return .primary.opacity(0.06)
+        case .primary: return .primary.opacity(0.18)
+        case .secondary: return .primary.opacity(0.08)
         case .destructive: return .red.opacity(0.15)
         }
     }

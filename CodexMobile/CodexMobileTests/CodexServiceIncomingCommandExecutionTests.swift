@@ -199,6 +199,110 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(history[0].turnId, turnID)
     }
 
+    func testHistoryCompletedAtAliasAndTimezoneRestoreMessageTimestamp() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let expectedDate = ISO8601DateFormatter().date(from: "2026-05-19T00:14:00Z")
+
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string("2026-03-12T10:00:00Z"),
+                "timezone": .string("America/New_York"),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "completedAt": .string("2026-05-19T00:14:00Z"),
+                        "items": .array([
+                            .object([
+                                "id": .string("assistant-item"),
+                                "type": .string("message"),
+                                "role": .string("assistant"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("output_text"),
+                                        "text": .string("Done."),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(history.count, 1)
+        XCTAssertNotNil(expectedDate)
+        XCTAssertEqual(
+            history[0].createdAt.timeIntervalSince1970,
+            expectedDate!.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(history[0].timeZoneIdentifier, "America/New_York")
+    }
+
+    func testHistoryRawExecCommandToolCallRestoresCommandRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string("2026-03-12T10:00:00Z"),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("call-command"),
+                                "type": .string("toolCall"),
+                                "name": .string("exec_command"),
+                                "arguments": .string(#"{"cmd":"git status --short --branch","workdir":"/repo"}"#),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history[0].kind, .commandExecution)
+        XCTAssertEqual(history[0].text, "completed git status --short --branch")
+        XCTAssertEqual(history[0].turnId, turnID)
+    }
+
+    func testHistoryToolCallAcceptsExpandedReadableActivityVerbs() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string("2026-03-12T10:00:00Z"),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("tool-item"),
+                                "type": .string("toolCall"),
+                                "name": .string("view_image"),
+                                "message": .string("Capture screenshot\nCheck weather Rome"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history[0].kind, .toolActivity)
+        XCTAssertEqual(history[0].text, "Capture screenshot\nCheck weather Rome")
+    }
+
     func testHistoryRestoresGeneratedImageEndAndImageViewItems() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -233,6 +337,47 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
             "![Generated image](</Users/example/generated end.png>)",
             "![Generated image](</Users/example/viewed image.png>)",
         ])
+    }
+
+    func testHistoryDecodesInputImageContentAsAttachment() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let history = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "createdAt": .string("2026-03-12T10:00:00Z"),
+                "turns": .array([
+                    .object([
+                        "id": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("user-image"),
+                                "type": .string("user_message"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("input_text"),
+                                        "text": .string("Look at this"),
+                                    ]),
+                                    .object([
+                                        "type": .string("input_image"),
+                                        "image_url": .object([
+                                            "url": .string("remodex://history-image-elided"),
+                                        ]),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history[0].role, .user)
+        XCTAssertEqual(history[0].text, "Look at this")
+        XCTAssertEqual(history[0].attachments.count, 1)
+        XCTAssertEqual(history[0].attachments[0].sourceURL, "remodex://history-image-elided")
     }
 
     func testHistoryDecodesNumericStringMicrosecondTimestamps() {
@@ -1026,6 +1171,395 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(userRows.filter { $0.deliveryState == .pending }.count, 2)
         XCTAssertEqual(userRows.filter { $0.deliveryState == .confirmed }.count, 1)
         XCTAssertEqual(userRows.last?.turnId, turnID)
+    }
+
+    func testHistoryUserMessageRebindsFallbackTimestampEchoToRealDatedRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+
+        let existing = [
+            CodexMessage(
+                id: "user-real",
+                threadId: threadID,
+                role: .user,
+                text: "Can you review this flow?",
+                createdAt: now,
+                turnId: turnID,
+                itemId: "user-real-item",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+            CodexMessage(
+                id: "user-epoch-echo",
+                threadId: threadID,
+                role: .user,
+                text: "Can you review this flow?",
+                createdAt: Date(timeIntervalSince1970: 0),
+                turnId: turnID,
+                itemId: nil,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "user-history",
+                threadId: threadID,
+                role: .user,
+                text: "Can you review this flow?",
+                createdAt: now.addingTimeInterval(2),
+                turnId: turnID,
+                itemId: "user-history-item",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let userRows = merged.filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 2)
+        XCTAssertEqual(userRows[0].id, "user-real")
+        XCTAssertEqual(userRows[0].itemId, "user-real-item")
+    }
+
+    func testHistoryUserMessageWithoutTurnIdDoesNotAppendFallbackTimestampEcho() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+
+        let existing = [
+            CodexMessage(
+                id: "user-local",
+                threadId: threadID,
+                role: .user,
+                text: "/check-code one last time",
+                createdAt: now,
+                turnId: turnID,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "user-history-epoch",
+                threadId: threadID,
+                role: .user,
+                text: "/check-code one last time",
+                createdAt: Date(timeIntervalSince1970: 0),
+                turnId: nil,
+                itemId: nil,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let userRows = merged.filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].id, "user-local")
+        XCTAssertEqual(userRows[0].turnId, turnID)
+        XCTAssertEqual(userRows[0].createdAt, now)
+    }
+
+    func testHistoryUserMessageWithoutTurnIdReusesCloseLocalRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+
+        let existing = [
+            CodexMessage(
+                id: "user-local",
+                threadId: threadID,
+                role: .user,
+                text: "run this again",
+                createdAt: now,
+                turnId: turnID,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "user-history-no-id",
+                threadId: threadID,
+                role: .user,
+                text: "run this again",
+                createdAt: now.addingTimeInterval(0.25),
+                turnId: nil,
+                itemId: nil,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let userRows = merged.filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].id, "user-local")
+        XCTAssertEqual(userRows[0].turnId, turnID)
+    }
+
+    func testThreadReadFallbackTimestampUsesExistingLocalAnchor() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let existingDate = Date(timeIntervalSince1970: 1_779_654_720)
+        service.messagesByThread[threadID] = [
+            CodexMessage(
+                id: "local-anchor",
+                threadId: threadID,
+                role: .user,
+                text: "local anchor",
+                createdAt: existingDate,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "id": .string(threadID),
+                "turns": .array([
+                    .object([
+                        "items": .array([
+                            .object([
+                                "id": .string("user-history"),
+                                "type": .string("user_message"),
+                                "message": .string("history without server time"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0].createdAt, existingDate)
+    }
+
+    func testHistoryUserMessageMergesRawSkillCommandIntoRichLocalBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+
+        let existing = [
+            CodexMessage(
+                id: "user-rich",
+                threadId: threadID,
+                role: .user,
+                text: "one last time",
+                skillMentions: ["check-code"],
+                createdAt: now,
+                turnId: turnID,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "user-raw-history",
+                threadId: threadID,
+                role: .user,
+                text: "$check-code one last time",
+                createdAt: now.addingTimeInterval(0.1),
+                turnId: turnID,
+                itemId: "raw-user-item",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let userRows = merged.filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].id, "user-rich")
+        XCTAssertEqual(userRows[0].text, "one last time")
+        XCTAssertEqual(userRows[0].skillMentions, ["check-code"])
+        XCTAssertEqual(userRows[0].itemId, "raw-user-item")
+    }
+
+    func testMirroredRawSkillUserMessageReusesRichLocalBubble() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.messagesByThread[threadID] = [
+            CodexMessage(
+                id: "user-rich",
+                threadId: threadID,
+                role: .user,
+                text: "one last time",
+                skillMentions: ["check-code"],
+                turnId: turnID,
+                isStreaming: false,
+                deliveryState: .pending
+            ),
+        ]
+
+        service.handleNotification(
+            method: "codex/event/user_message",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "message": .string("$check-code one last time"),
+                "timestamp": .string("2026-05-24T21:52:51.133Z"),
+            ])
+        )
+
+        let userRows = service.messages(for: threadID).filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].id, "user-rich")
+        XCTAssertEqual(userRows[0].deliveryState, .confirmed)
+        XCTAssertEqual(userRows[0].text, "one last time")
+        XCTAssertEqual(userRows[0].skillMentions, ["check-code"])
+    }
+
+    func testMirroredOpeningUserMessageAnchorsBeforeExistingTurnOutput() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.appendMessage(
+            CodexMessage(
+                id: "assistant-first",
+                threadId: threadID,
+                role: .assistant,
+                text: "Already streaming from desktop",
+                turnId: turnID,
+                itemId: "assistant-item",
+                isStreaming: true,
+                orderIndex: 10
+            )
+        )
+
+        service.appendConfirmedMirroredUserMessage(
+            threadId: threadID,
+            turnId: turnID,
+            text: "let's hope now it will"
+        )
+
+        let messages = service.messages(for: threadID)
+
+        XCTAssertEqual(messages.map(\.role), [.user, .assistant])
+        XCTAssertLessThan(messages[0].orderIndex, messages[1].orderIndex)
+        XCTAssertEqual(messages[0].text, "let's hope now it will")
+    }
+
+    func testThreadReadDecodesTurnIdAliasAndRejectsEpochHistoryTimestamp() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "id": .string(threadID),
+                "turns": .array([
+                    .object([
+                        "turnId": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("user-history"),
+                                "type": .string("user_message"),
+                                "message": .string("/check-code one last time"),
+                                "timestamp": .integer(0),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0].turnId, turnID)
+        XCTAssertTrue(CodexTimestampParser.isTrustworthyServerDate(messages[0].createdAt))
+    }
+
+    func testThreadReadDecodesStructuredAtMentionOnlyUserMessage() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "id": .string(threadID),
+                "createdAt": .string("2026-05-24T21:52:51.000Z"),
+                "turns": .array([
+                    .object([
+                        "turnId": .string(turnID),
+                        "items": .array([
+                            .object([
+                                "id": .string("user-history"),
+                                "type": .string("message"),
+                                "role": .string("user"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("mention"),
+                                        "name": .string("linear"),
+                                        "path": .string("mcp://linear"),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0].text, "@linear")
+        XCTAssertEqual(messages[0].pluginMentions, ["linear"])
+    }
+
+    func testThreadReadDecodesStructuredAtMentionMetadataWithText() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "id": .string(threadID),
+                "createdAt": .string("2026-05-24T21:52:51.000Z"),
+                "turns": .array([
+                    .object([
+                        "id": .string("turn-history"),
+                        "items": .array([
+                            .object([
+                                "id": .string("user-history"),
+                                "type": .string("message"),
+                                "role": .string("user"),
+                                "content": .array([
+                                    .object([
+                                        "type": .string("input_text"),
+                                        "text": .string("summarize this"),
+                                    ]),
+                                    .object([
+                                        "type": .string("mention"),
+                                        "name": .string("linear"),
+                                        "path": .string("mcp://linear"),
+                                    ]),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages[0].text, "summarize this\n@linear")
+        XCTAssertEqual(messages[0].pluginMentions, ["linear"])
     }
 
     func testLateTerminalInteractionDoesNotRegressCompletedCommandRow() {

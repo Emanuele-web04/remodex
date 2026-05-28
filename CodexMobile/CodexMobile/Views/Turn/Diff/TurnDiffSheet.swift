@@ -2,8 +2,9 @@
 // Purpose: Shared diff sheet UI and repo-patch presentation helpers for turn-level change inspection.
 // Layer: View Component
 // Exports: TurnDiffSheet, TurnDiffPresentation, TurnDiffPresentationBuilder
-// Depends on: SwiftUI, MarkdownTextView, TurnMessageCaches, TurnFileChangeSummaryParser
+// Depends on: Foundation, SwiftUI, UnifiedDiffView, TurnMessageCaches, TurnFileChangeSummaryParser
 
+import Foundation
 import SwiftUI
 
 struct TurnDiffPresentation: Identifiable, Equatable {
@@ -56,7 +57,7 @@ enum TurnDiffPresentationBuilder {
     }
 
     private static func splitUnifiedDiffByFile(_ diff: String) -> [UnifiedDiffChunk] {
-        let lines = diff.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let lines = diff.components(separatedBy: "\n")
         guard !lines.isEmpty else { return [] }
 
         var chunks: [UnifiedDiffChunk] = []
@@ -178,10 +179,25 @@ struct TurnDiffSheet: View {
     let entries: [TurnFileChangeSummaryEntry]
     let bodyText: String
     let messageID: String
-    var restrictToPath: String? = nil
+    var restrictToPath: String?
 
     @Environment(\.dismiss) private var dismiss
-    @State private var expandedFileIDs: Set<String> = []
+    @State private var allHunksCollapsed = false
+    @State private var presentationDetent: PresentationDetent = .large
+
+    init(
+        title: String,
+        entries: [TurnFileChangeSummaryEntry],
+        bodyText: String,
+        messageID: String,
+        restrictToPath: String? = nil
+    ) {
+        self.title = title
+        self.entries = entries
+        self.bodyText = bodyText
+        self.messageID = messageID
+        self.restrictToPath = restrictToPath
+    }
 
     private var chunks: [PerFileDiffChunk] {
         let all = PerFileDiffChunkCache.chunks(messageID: messageID, bodyText: bodyText, entries: entries)
@@ -189,59 +205,32 @@ struct TurnDiffSheet: View {
         return all.filter { FileChangePathIdentity.representsSameFile($0.path, restrictToPath) }
     }
 
+    private var totals: (additions: Int, deletions: Int) {
+        chunks.reduce(into: (0, 0)) { totals, chunk in
+            totals.0 += chunk.additions
+            totals.1 += chunk.deletions
+        }
+    }
+
     private var allExpanded: Bool {
-        let ids = Set(chunks.map(\.id))
-        return !ids.isEmpty && ids.isSubset(of: expandedFileIDs)
+        !allHunksCollapsed
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("\(chunks.count) file\(chunks.count == 1 ? "" : "s") changed")
-                            .font(AppFont.mono(.subheadline))
-                            .foregroundStyle(.secondary)
+                    summaryHeader
 
-                        Spacer()
-
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.18)) {
-                                if allExpanded {
-                                    expandedFileIDs.removeAll()
-                                } else {
-                                    expandedFileIDs = Set(chunks.map(\.id))
-                                }
-                            }
-                        } label: {
-                            Text(allExpanded ? "Collapse All" : "Expand All")
-                                .font(AppFont.mono(.caption))
-                                .foregroundStyle(.blue)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .padding(.horizontal, 4)
-
-                    LazyVStack(spacing: 12) {
-                        ForEach(chunks) { chunk in
-                            TurnDiffFileCard(
-                                chunk: chunk,
-                                isExpanded: Binding(
-                                    get: { expandedFileIDs.contains(chunk.id) },
-                                    set: { newValue in
-                                        if newValue {
-                                            expandedFileIDs.insert(chunk.id)
-                                        } else {
-                                            expandedFileIDs.remove(chunk.id)
-                                        }
-                                    }
-                                )
-                            )
-                        }
+                    ForEach(chunks) { chunk in
+                        TurnDiffFileCard(
+                            chunk: chunk,
+                            collapseAllHunks: allHunksCollapsed
+                        )
                     }
                 }
                 .padding(.vertical)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 12)
             }
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
@@ -252,60 +241,54 @@ struct TurnDiffSheet: View {
                 }
             }
         }
-        .presentationDetents([.medium, .large])
-        .onAppear {
-            expandedFileIDs = Set(chunks.map(\.id))
+        .presentationDetents([.medium, .large], selection: $presentationDetent)
+    }
+
+    private var summaryHeader: some View {
+        let totals = totals
+        return HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(chunks.count) file\(chunks.count == 1 ? "" : "s") changed")
+                    .font(AppFont.subheadline(weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                if totals.additions > 0 || totals.deletions > 0 {
+                    DiffCountsLabel(additions: totals.additions, deletions: totals.deletions)
+                        .font(AppFont.mono(.caption))
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            if !chunks.isEmpty {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        allHunksCollapsed.toggle()
+                    }
+                } label: {
+                    Text(allExpanded ? "Collapse All" : "Expand All")
+                        .font(AppFont.mono(.caption))
+                        .foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 }
 
 private struct TurnDiffFileCard: View {
     let chunk: PerFileDiffChunk
-    @Binding var isExpanded: Bool
+    let collapseAllHunks: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isExpanded.toggle()
-                }
-            } label: {
+            HStack(alignment: .center, spacing: 10) {
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        RemodexIcon.image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(AppFont.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 10)
-
-                        Text(chunk.compactPath)
-                            .font(AppFont.mono(.subheadline))
-                            .fontWeight(.medium)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .foregroundStyle(.primary)
-
-                        Spacer(minLength: 4)
-
-                        Text(chunk.action.rawValue)
-                            .font(AppFont.mono(.caption2))
-                            .foregroundStyle(actionColor)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(actionColor.opacity(0.12), in: Capsule())
-
-                        HStack(spacing: 4) {
-                            if chunk.additions > 0 {
-                                Text("+\(chunk.additions)")
-                                    .font(AppFont.mono(.caption))
-                                    .foregroundStyle(Color(red: 0.13, green: 0.77, blue: 0.37))
-                            }
-                            if chunk.deletions > 0 {
-                                Text("-\(chunk.deletions)")
-                                    .font(AppFont.mono(.caption))
-                                    .foregroundStyle(Color(red: 0.94, green: 0.27, blue: 0.27))
-                            }
-                        }
-                    }
+                    Text(chunk.compactPath)
+                        .font(AppFont.subheadline(weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(.primary)
 
                     if let dir = chunk.fullDirectoryPath, dir != chunk.compactPath {
                         Text(dir)
@@ -313,109 +296,33 @@ private struct TurnDiffFileCard: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.head)
-                            .padding(.leading, 30)
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .contentShape(Rectangle())
+
+                Spacer(minLength: 8)
+
+                if chunk.additions > 0 || chunk.deletions > 0 {
+                    DiffCountsLabel(additions: chunk.additions, deletions: chunk.deletions)
+                        .font(AppFont.mono(.caption))
+                }
+
+                RemodexIcon.image(systemName: "arrow.up.right")
+                    .font(AppFont.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
 
-            if isExpanded, MarkdownUnifiedDiffBlockView.canRender(diffCode: chunk.diffCode) {
-                Divider()
-
-                MarkdownUnifiedDiffBlockView(diffCode: chunk.diffCode)
-                    .padding(.vertical, 4)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+            if UnifiedDiffView.canRender(diffCode: chunk.diffCode) {
+                UnifiedDiffView(diffCode: chunk.diffCode, collapseAllHunks: collapseAllHunks)
             }
         }
-        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(Color(.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-    }
-
-    private var actionColor: Color {
-        switch chunk.action {
-        case .edited: return .orange
-        case .added: return Color(red: 0.13, green: 0.77, blue: 0.37)
-        case .deleted: return Color(red: 0.94, green: 0.27, blue: 0.27)
-        case .renamed: return .blue
-        }
-    }
-}
-
-private struct MarkdownUnifiedDiffBlockView: View {
-    let diffCode: String
-
-    var body: some View {
-        MarkdownTextView(
-            text: renderableDiff,
-            profile: .assistantProse,
-            enablesSelection: true,
-            constrainsToAvailableWidth: true,
-            usesCaches: false,
-            usesScrollableCodeBlocks: true
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color(.separator).opacity(0.35), lineWidth: 0.5)
         )
-        .padding(.vertical, 8)
-    }
-
-    private var renderableDiff: String {
-        let body = Self.renderableBody(from: diffCode)
-        let fence = Self.markdownFence(for: body)
-        return "\(fence)diff\n\(body)\n\(fence)"
-    }
-
-    private var renderableBody: String {
-        Self.renderableBody(from: diffCode)
-    }
-
-    static func canRender(diffCode: String) -> Bool {
-        !renderableBody(from: diffCode).isEmpty
-    }
-
-    private static func renderableBody(from diffCode: String) -> String {
-        let originalBody = diffCode.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !originalBody.isEmpty else { return "" }
-
-        // Metadata-only patches (rename/mode changes) have no code rows, so keep
-        // the original patch instead of rendering an empty expanded diff card.
-        let strippedBody = strippedMetadataPreamble(from: originalBody)
-        return strippedBody.isEmpty ? originalBody : strippedBody
-    }
-
-    private static func strippedMetadataPreamble(from diffCode: String) -> String {
-        diffCode
-            .components(separatedBy: "\n")
-            .filter { line in
-                !TurnDiffLineKind.classify(line).isMetadataPreamble
-            }
-            .joined(separator: "\n")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func markdownFence(for body: String) -> String {
-        let longestFence = body
-            .components(separatedBy: "\n")
-            .map { line in
-                line
-                    .drop(while: { $0 == " " || $0 == "\t" })
-                    .prefix(while: { $0 == "`" })
-                    .count
-            }
-            .max() ?? 0
-
-        return String(repeating: "`", count: max(3, longestFence + 1))
-    }
-
-}
-
-private extension TurnDiffLineKind {
-    var isMetadataPreamble: Bool {
-        switch self {
-        case .meta:
-            true
-        case .addition, .deletion, .hunk, .neutral:
-            false
-        }
     }
 }

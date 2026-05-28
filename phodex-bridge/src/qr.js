@@ -9,7 +9,6 @@ const qrcode = require("qrcode-terminal");
 
 const SHORT_PAIRING_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const SHORT_PAIRING_CODE_LENGTH = 10;
-
 // Generates a short-lived human-friendly pairing token for reconnect flows.
 function createShortPairingCode({
   length = SHORT_PAIRING_CODE_LENGTH,
@@ -50,7 +49,7 @@ function printQR(pairingSessionOrPayload, options = {}) {
   console.log("\nScan this QR with the iPhone:\n");
   qrcode.generate(payload, { small: true });
   if (pairingCode) {
-    console.log("Or paste this pairing code in the iPhone app:\n");
+    console.log("Or enter this pairing code in the iPhone app:\n");
     console.log(pairingCode);
   }
   console.log(`\nSession ID: ${sessionIdShort || "(none)"}`);
@@ -58,9 +57,7 @@ function printQR(pairingSessionOrPayload, options = {}) {
   console.log(`Expires: ${new Date(pairingPayload.expiresAt).toISOString()}\n`);
 
   if (shouldPrintPairingJson({ env, explicitValue: options.printPairingJson })) {
-    // Opt-in only: this is the same bearer-like payload as the QR scan target.
-    console.log("Pairing JSON (debug only; same sensitive bytes as the QR):\n");
-    console.log(`${payload}\n`);
+    console.log("Pairing JSON debug output is disabled because the payload contains private relay metadata.\n");
   }
 }
 

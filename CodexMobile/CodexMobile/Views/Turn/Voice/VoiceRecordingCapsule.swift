@@ -92,9 +92,11 @@ struct VoiceRecordingCapsule: View {
                 systemName: "xmark",
                 foreground: Color.secondary,
                 background: Color.primary.opacity(0.08),
-                diameter: 14,
-                iconSize: 8
+                diameter: 22,
+                iconSize: 10
             )
+            .frame(width: 28, height: 28)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Cancel voice recording")

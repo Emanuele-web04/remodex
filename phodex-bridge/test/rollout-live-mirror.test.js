@@ -166,6 +166,8 @@ test("desktop-origin bootstrap replays the pending user message and final assist
   assert.equal(outbound[0].params.remodexRolloutLiveMirror, true);
   assert.equal(outbound[1].params.message, "Please review this diff");
   assert.equal(outbound[1].params.turnId, "turn-chat");
+  assert.equal(outbound[1].params.createdAt, "2026-03-15T19:47:36.500Z");
+  assert.equal(outbound[1].params.timestamp, "2026-03-15T19:47:36.500Z");
   assert.equal(outbound[3].params.message, "Review complete");
   assert.equal(
     outbound[3].params.itemId,
@@ -222,6 +224,8 @@ test("desktop-origin live tail attaches pre-task user messages to the next turn"
   );
   assert.equal(outbound[1].params.message, "Start from Mac");
   assert.equal(outbound[1].params.turnId, "turn-live-prelude");
+  assert.equal(outbound[1].params.createdAt, "2026-03-15T19:47:36.500Z");
+  assert.equal(outbound[1].params.timestamp, "2026-03-15T19:47:36.500Z");
 });
 
 test("desktop-origin update_plan calls mirror as structured activity plan updates", async (t) => {

@@ -6,31 +6,6 @@
 
 import SwiftUI
 
-// MARK: - Glass back button
-
-/// Replacement for the system back chevron, rendered as a glass circle so it
-/// reads against the now-transparent terminal nav bar.
-struct TerminalGlassBackButton: View {
-    let theme: RemodexTerminalTheme
-    let action: () -> Void
-
-    var body: some View {
-        Button {
-            HapticFeedback.shared.triggerImpactFeedback(style: .light)
-            action()
-        } label: {
-            RemodexIcon.image(systemName: "chevron.backward")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(Color(hexString: theme.foreground))
-                .frame(width: 36, height: 36)
-                .adaptiveGlass(.regular, in: Circle())
-        }
-        .buttonStyle(.plain)
-        .contentShape(Circle())
-        .accessibilityLabel("Back")
-    }
-}
-
 // MARK: - Navigation title
 
 struct TerminalRouteTitle: View {
@@ -59,9 +34,10 @@ struct TerminalRouteTitle: View {
 
 /// Bottom accessory rail above the keyboard.
 ///
-/// Layout: `[ compact scrollable clusters ]  [ keyboard-dismiss circle ]  [ DPad controller ]`
+/// Layout: horizontally scrollable key clusters with fixed keyboard and D-pad controls overlaid.
 /// The bar background is transparent — the terminal background reads through, and each cluster /
 /// circle has its own native Liquid Glass material (with `.thinMaterial` fallback on iOS < 26).
+/// The scroll view spans under the fixed controls so narrow phones keep all command keys reachable.
 struct TerminalRouteAccessoryBar: View {
     let clusters: [TerminalToolbarCluster]
     let pendingModifier: TerminalPendingModifier?
@@ -73,7 +49,7 @@ struct TerminalRouteAccessoryBar: View {
     let onDirectionalInput: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        ZStack(alignment: .trailing) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(clusters) { cluster in
@@ -88,40 +64,29 @@ struct TerminalRouteAccessoryBar: View {
                         .id(cluster.id)
                     }
                 }
-                .padding(.horizontal, 1)
-                .padding(.vertical, 3)
+                .padding(.leading, 10)
+                .padding(.trailing, 116)
+                .frame(minHeight: remodexTerminalAccessoryHeight, alignment: .leading)
             }
-            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-            // Soft fade on both edges so any future overflow reads as
-            // "more to scroll" instead of the hard clip we had before.
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear,        location: 0.0),
-                        .init(color: .black,        location: 0.025),
-                        .init(color: .black,        location: 0.94),
-                        .init(color: .clear,        location: 1.0),
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
+            .scrollClipDisabled(true)
+
+            HStack(spacing: 6) {
+                TerminalRouteCircleAction(
+                    systemImage: "keyboard.chevron.compact.down",
+                    accessibilityLabel: "Dismiss keyboard",
+                    theme: theme,
+                    isEnabled: true,
+                    action: onDismissKeyboard
                 )
-            )
 
-            TerminalRouteCircleAction(
-                systemImage: "keyboard.chevron.compact.down",
-                accessibilityLabel: "Dismiss keyboard",
-                theme: theme,
-                isEnabled: true,
-                action: onDismissKeyboard
-            )
-
-            TerminalRouteDPadControl(
-                theme: theme,
-                isEnabled: isEnabled,
-                onInput: onDirectionalInput
-            )
+                TerminalRouteDPadControl(
+                    theme: theme,
+                    isEnabled: isEnabled,
+                    onInput: onDirectionalInput
+                )
+            }
+            .padding(.trailing, 10)
         }
-        .padding(.horizontal, 10)
         .padding(.vertical, 4)
         .frame(minHeight: remodexTerminalAccessoryHeight)
         .background(Color.clear)

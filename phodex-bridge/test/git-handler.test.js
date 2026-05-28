@@ -386,6 +386,37 @@ test("gitStatus does not mark commits pushable when origin is missing", async ()
   }
 });
 
+test("gitStatus fetches current upstream before computing update availability", async () => {
+  const repoDir = makeTempRepo();
+  const remoteDir = makeBareRemote();
+  const cloneDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-clone-"));
+
+  try {
+    git(remoteDir, "init", "--bare");
+    git(repoDir, "remote", "add", "origin", remoteDir);
+    git(repoDir, "push", "-u", "origin", "main");
+    git(remoteDir, "symbolic-ref", "HEAD", "refs/heads/main");
+    git(path.dirname(cloneDir), "clone", remoteDir, cloneDir);
+    git(cloneDir, "config", "user.name", "Remodex Tests");
+    git(cloneDir, "config", "user.email", "tests@example.com");
+
+    fs.writeFileSync(path.join(cloneDir, "README.md"), "# Test\n\nremote\n");
+    git(cloneDir, "add", "README.md");
+    git(cloneDir, "commit", "-m", "Remote commit");
+    git(cloneDir, "push", "origin", "main");
+
+    const result = await gitStatus(repoDir);
+
+    assert.equal(result.tracking, "origin/main");
+    assert.equal(result.behind, 1);
+    assert.equal(result.state, "behind_only");
+  } finally {
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(remoteDir, { recursive: true, force: true });
+    fs.rmSync(cloneDir, { recursive: true, force: true });
+  }
+});
+
 test("gitStatus keeps branches pushable when their upstream remote is not origin", async () => {
   const repoDir = makeTempRepo();
   const remoteDir = makeBareRemote();

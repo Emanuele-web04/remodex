@@ -1326,6 +1326,49 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(messageIDs, ["status", "final"])
     }
 
+    func testTimelineRenderProjectionDoesNotCollapseCommentaryOnlyTurn() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Check this",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "commentary-1",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "I am checking the files.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "commentary-2",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "commentary",
+                text: "The dirty set is small.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"],
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "commentary-1", "commentary-2"])
+    }
+
     func testRemoveDuplicateAssistantMessagesByTurnAndText() {
         let now = Date()
         let messages = [
@@ -1438,6 +1481,63 @@ final class TurnTimelineReducerTests: XCTestCase {
 
         let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: messages)
         XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2"])
+    }
+
+    func testRemoveDuplicateUserMessagesCollapsesFallbackTimestampHistoryEcho() {
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+        let live = makeMessage(
+            id: "user-live",
+            threadID: "thread",
+            role: .user,
+            text: "Can you review this flow?",
+            createdAt: now,
+            turnID: "turn-1"
+        )
+        let historyEcho = makeMessage(
+            id: "user-history-echo",
+            threadID: "thread",
+            role: .user,
+            text: "Can you review this flow?",
+            createdAt: Date(timeIntervalSince1970: 10),
+            turnID: "turn-1"
+        )
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [live, historyEcho])
+
+        XCTAssertEqual(deduped.map(\.id), ["user-live"])
+        XCTAssertEqual(deduped[0].createdAt.timeIntervalSince1970, now.timeIntervalSince1970, accuracy: 0.001)
+
+        let reverseDeduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [historyEcho, live])
+        XCTAssertEqual(reverseDeduped.count, 1)
+        XCTAssertEqual(reverseDeduped[0].createdAt.timeIntervalSince1970, now.timeIntervalSince1970, accuracy: 0.001)
+    }
+
+    func testRemoveDuplicateUserMessagesCollapsesRawSkillCommandEcho() {
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+        var rich = makeMessage(
+            id: "user-rich",
+            threadID: "thread",
+            role: .user,
+            text: "one last time",
+            createdAt: now,
+            turnID: "turn-1"
+        )
+        rich.skillMentions = ["check-code"]
+        let rawEcho = makeMessage(
+            id: "user-raw",
+            threadID: "thread",
+            role: .user,
+            text: "$check-code one last time",
+            createdAt: now.addingTimeInterval(1),
+            turnID: "turn-1"
+        )
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [rich, rawEcho])
+
+        XCTAssertEqual(deduped.count, 1)
+        XCTAssertEqual(deduped[0].id, "user-rich")
+        XCTAssertEqual(deduped[0].text, "one last time")
+        XCTAssertEqual(deduped[0].skillMentions, ["check-code"])
     }
 
     func testRemoveDuplicateUserMessagesKeepsPromptsWithDifferentFileMentions() {
@@ -2562,6 +2662,55 @@ final class TurnTimelineReducerTests: XCTestCase {
         ])
     }
 
+    func testEnforceIntraTurnOrderFloatsLateSingleMirroredUserToTurnStart() {
+        let now = Date()
+        var order = 0
+        func nextOrder() -> Int { order += 1; return order }
+
+        let messages = [
+            makeMessage(
+                id: "thinking-1",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reasoning started",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "thinking-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Assistant output already arrived",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "assistant-1",
+                orderIndex: nextOrder()
+            ),
+            makeMessage(
+                id: "user-1",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "let's hope now it will",
+                createdAt: now.addingTimeInterval(-1),
+                turnID: "turn-1",
+                orderIndex: nextOrder()
+            ),
+        ]
+
+        let reordered = TurnTimelineReducer.enforceIntraTurnOrder(in: messages)
+
+        XCTAssertEqual(reordered.map(\.id), [
+            "user-1",
+            "thinking-1",
+            "assistant-1",
+        ])
+    }
+
     func testEnforceIntraTurnOrderKeepsFileChangeAfterFinalAssistantWhenStatusTextPrecedesIt() {
         let now = Date()
         var order = 0
@@ -3442,6 +3591,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
 
         XCTAssertNil(blockInfo[0]?.copyText)
+        XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
         XCTAssertNil(blockInfo[2]?.copyText)
         XCTAssertEqual(blockInfo[2]?.allowsCopy, false)
         XCTAssertEqual(blockInfo[2]?.showsRunningIndicator, true)
@@ -3475,6 +3625,43 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
 
         XCTAssertEqual(blockInfo, [nil])
+    }
+
+    func testAssistantBlockInfoKeepsPreviousCopyWhileNextRunIsStarting() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "assistant-1",
+                threadID: "thread",
+                role: .assistant,
+                kind: .chat,
+                text: "Previous settled response",
+                createdAt: now,
+                turnID: "turn-1"
+            ),
+            makeMessage(
+                id: "user-2",
+                threadID: "thread",
+                role: .user,
+                kind: .chat,
+                text: "Next request",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2"
+            ),
+        ]
+
+        let blockInfo = TurnTimelineView<EmptyView, EmptyView>.assistantBlockInfo(
+            for: messages,
+            activeTurnID: nil,
+            isThreadRunning: false,
+            isCopySuppressedByRunState: true,
+            latestTurnTerminalState: nil,
+            stoppedTurnIDs: []
+        )
+
+        XCTAssertNil(blockInfo[0]?.copyText)
+        XCTAssertEqual(blockInfo[0]?.allowsCopy, true)
+        XCTAssertNil(blockInfo[1])
     }
 
     func testRunningAccessoryRehomesFromSkippedThinkingPlaceholder() {

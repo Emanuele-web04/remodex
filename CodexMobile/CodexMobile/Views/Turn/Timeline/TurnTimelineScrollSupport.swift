@@ -37,6 +37,8 @@ struct TurnTimelineRenderItemsCacheSignature: Equatable {
     let threadID: String
     let timelineChangeToken: Int
     let visibleTailCount: Int
+    let activeTurnID: String?
+    let isThreadRunning: Bool
     let messageCount: Int
     let firstMessageID: String?
     let lastMessageID: String?

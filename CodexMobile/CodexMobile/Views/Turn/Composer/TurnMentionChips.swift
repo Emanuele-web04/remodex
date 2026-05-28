@@ -48,7 +48,7 @@ struct TurnMentionChipStyle: Equatable {
     )
 
     static let skill = TurnMentionChipStyle(
-        symbolName: "square.stack.3d.up",
+        symbolName: "remodex.skill",
         tintColor: .indigo
     )
 

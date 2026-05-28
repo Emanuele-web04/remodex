@@ -17,6 +17,7 @@ let codexWebSocketMaximumMessageSizeBytes = 16 * 1024 * 1024
 private enum CodexWebSocketKeepAlivePolicy {
     static let intervalNanoseconds: UInt64 = 25_000_000_000
     static let foregroundProbeTimeoutNanoseconds: UInt64 = 1_500_000_000
+    static let constrainedIntervalNanoseconds: UInt64 = 35_000_000_000
 }
 
 private final class CodexForegroundProbeWaiter: @unchecked Sendable {
@@ -164,7 +165,7 @@ nonisolated private func codexLogPairingTransport(_ message: String) {
 extension CodexService {
     // Rejects oversized relay frames before Network.framework turns them into a raw EMSGSIZE failure.
     func validateOutgoingWebSocketMessageSize(_ text: String) throws {
-        let payloadSize = Data(text.utf8).count
+        let payloadSize = text.utf8.count
         guard payloadSize <= codexWebSocketMaximumMessageSizeBytes else {
             throw CodexServiceError.invalidInput(
                 "This payload is too large for the relay connection. Try fewer or smaller images and retry."
@@ -369,8 +370,11 @@ extension CodexService {
 
         webSocketKeepAliveTask = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled {
+                let defaultInterval = self.isConstrainedNetwork
+                    ? CodexWebSocketKeepAlivePolicy.constrainedIntervalNanoseconds
+                    : CodexWebSocketKeepAlivePolicy.intervalNanoseconds
                 let interval = self.webSocketKeepAliveIntervalOverrideNanoseconds
-                    ?? CodexWebSocketKeepAlivePolicy.intervalNanoseconds
+                    ?? defaultInterval
                 try? await Task.sleep(nanoseconds: interval)
                 guard !Task.isCancelled else {
                     return

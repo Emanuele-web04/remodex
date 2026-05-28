@@ -27,6 +27,13 @@ enum ContentNavigationRoute: Hashable {
     case thread(id: String)
     case settings
     case terminal(preferredWorkingDirectory: String?)
+
+    var isTerminalRoute: Bool {
+        if case .terminal = self {
+            return true
+        }
+        return false
+    }
 }
 
 private struct MacContextTransitionSnapshot {
@@ -260,7 +267,7 @@ struct ContentView: View {
                     manualPairingCode = ""
                 }
             } message: {
-                Text("Paste the pairing code shown in the terminal on your device or in your phone shell.")
+                Text("Paste the pairing code shown in the terminal on your Mac.")
             }
             // Settings rides on a full-screen cover instead of `navigationPath`
             // so the gear tap inside the iOS 26 `safeAreaBar` header always
@@ -1092,6 +1099,17 @@ struct ContentView: View {
         navigationPath.append(route)
     }
 
+    // Terminal can be opened from several surfaces with different cwd payloads;
+    // replace the active terminal route instead of stacking near-identical pages.
+    private func appendTerminalNavigationRoute(preferredWorkingDirectory: String?) {
+        let route = ContentNavigationRoute.terminal(preferredWorkingDirectory: preferredWorkingDirectory)
+        if navigationPath.last?.isTerminalRoute == true {
+            navigationPath[navigationPath.count - 1] = route
+        } else {
+            appendNavigationRoute(route)
+        }
+    }
+
     // Keeps the native route and drawer presentations on the same fresh-thread sync path.
     private func requestSidebarFreshSyncIfNeeded() {
         if !isSidebarPrewarmed,
@@ -1189,16 +1207,15 @@ struct ContentView: View {
     }
 
     private func openTerminal(preferredWorkingDirectory: String?) {
-        appendNavigationRoute(.terminal(preferredWorkingDirectory: preferredWorkingDirectory))
+        appendTerminalNavigationRoute(preferredWorkingDirectory: preferredWorkingDirectory)
     }
 
     private func openTerminalFromSidebar(preferredWorkingDirectory: String?) {
-        let route = ContentNavigationRoute.terminal(preferredWorkingDirectory: preferredWorkingDirectory)
         if shouldPresentSidebarAsNavigation {
-            appendNavigationRoute(route)
+            appendTerminalNavigationRoute(preferredWorkingDirectory: preferredWorkingDirectory)
         } else {
             closeSidebar()
-            appendNavigationRoute(route)
+            appendTerminalNavigationRoute(preferredWorkingDirectory: preferredWorkingDirectory)
         }
     }
 
@@ -1807,7 +1824,19 @@ struct ContentView: View {
             await viewModel.stopAutoReconnectForManualScan(codex: codex)
 
             do {
-                let pairingPayload = try await codex.resolvePairingCode(pendingCode)
+                let pairingPayload: CodexPairingQRPayload
+                switch validatePairingQRCode(pendingCode) {
+                case .success(let payload):
+                    pairingPayload = payload
+                case .shortCode(let code):
+                    pairingPayload = try await codex.resolvePairingCode(code)
+                case .scanError(let message):
+                    throw CodexSecureTransportError.invalidQR(message)
+                case .bridgeUpdateRequired(let prompt):
+                    codex.bridgeUpdatePrompt = prompt
+                    return
+                }
+
                 isShowingManualPairingEntry = false
                 manualPairingCode = ""
                 withAnimation {

@@ -52,7 +52,10 @@ function createRelayServer({
       trustProxy,
     });
   });
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({
+    noServer: true,
+    perMessageDeflate: true,
+  });
   setupRelay(wss, relayOptions);
 
   server.on("upgrade", (req, socket, head) => {

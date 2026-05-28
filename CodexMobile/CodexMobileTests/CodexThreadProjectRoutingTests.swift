@@ -46,6 +46,49 @@ final class CodexThreadProjectRoutingTests: XCTestCase {
         XCTAssertEqual(service.activeThreadId, "thread-new")
     }
 
+    func testRootlessStartUsesDocumentsCodexPathWhenRuntimeReturnsHomeCwd() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        let rootlessPath = "/Users/me/Documents/Codex/2026-05-25/i-just-created-this"
+        var requestedMethods: [String] = []
+
+        service.requestTransportOverride = { method, params in
+            requestedMethods.append(method)
+            switch method {
+            case "project/createRootlessChatRoot":
+                XCTAssertEqual(params?.objectValue?["promptHint"]?.stringValue, "i just created this")
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["path": .string(rootlessPath)]),
+                    includeJSONRPC: false
+                )
+            case "thread/start":
+                XCTAssertEqual(params?.objectValue?["cwd"]?.stringValue, rootlessPath)
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string("thread-rootless"),
+                            "cwd": .string("/Users/me"),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                throw CodexServiceError.invalidResponse("Unexpected method \(method)")
+            }
+        }
+
+        let thread = try await service.startThreadIfReady(rootlessChatPromptHint: "i just created this")
+
+        XCTAssertEqual(requestedMethods, ["project/createRootlessChatRoot", "thread/start"])
+        XCTAssertEqual(thread.cwd, rootlessPath)
+        XCTAssertEqual(service.thread(for: "thread-rootless")?.cwd, rootlessPath)
+        XCTAssertEqual(service.currentAuthoritativeProjectPath(for: "thread-rootless"), rootlessPath)
+    }
+
     func testMoveThreadToProjectPathKeepsRebindWhenResumeFailsOnlyBecauseRolloutIsMissing() async throws {
         let service = makeService()
         let originalThread = CodexThread(

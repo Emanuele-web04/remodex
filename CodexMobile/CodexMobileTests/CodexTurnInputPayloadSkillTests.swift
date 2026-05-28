@@ -36,6 +36,70 @@ final class CodexTurnInputPayloadSkillTests: XCTestCase {
         XCTAssertEqual(skillItem?["path"]?.stringValue, "/Users/me/work/repo/.agents/skills/review/SKILL.md")
     }
 
+    func testMakeTurnInputPayloadKeepsStructuredSkillTokenInTextItemForDesktopFallback() {
+        let service = makeService()
+        let payload = service.makeTurnInputPayload(
+            userInput: "$check-code one last time",
+            attachments: [],
+            imageURLKey: "url",
+            skillMentions: [
+                CodexTurnSkillMention(id: "check-code", name: "check-code", path: nil),
+            ],
+            includeStructuredSkillItems: true
+        )
+
+        let textItem = payload
+            .compactMap(\.objectValue)
+            .first(where: { $0["type"]?.stringValue == "text" })
+
+        XCTAssertEqual(textItem?["text"]?.stringValue, "$check-code one last time")
+    }
+
+    func testMakeTurnInputPayloadAppendsMissingStructuredSkillFallbackToTextItem() {
+        let service = makeService()
+        let payload = service.makeTurnInputPayload(
+            userInput: "pls",
+            attachments: [],
+            imageURLKey: "url",
+            skillMentions: [
+                CodexTurnSkillMention(id: "check-code", name: "check-code", path: nil),
+            ],
+            includeStructuredSkillItems: true
+        )
+
+        let textItem = payload
+            .compactMap(\.objectValue)
+            .first(where: { $0["type"]?.stringValue == "text" })
+
+        XCTAssertEqual(textItem?["text"]?.stringValue, "pls\n\n$check-code")
+    }
+
+    func testMakeTurnInputPayloadKeepsSlashSkillTokenInTextItem() {
+        let service = makeService()
+        let payload = service.makeTurnInputPayload(
+            userInput: "/recap pls",
+            attachments: [],
+            imageURLKey: "url",
+            skillMentions: [
+                CodexTurnSkillMention(id: "recap", name: "recap", path: nil),
+            ],
+            includeStructuredSkillItems: true
+        )
+
+        let textItem = payload
+            .compactMap(\.objectValue)
+            .first(where: { $0["type"]?.stringValue == "text" })
+
+        XCTAssertEqual(textItem?["text"]?.stringValue, "/recap pls")
+    }
+
+    func testRemoveBoundedMentionTokenDoesNotStripInsidePath() {
+        XCTAssertEqual(
+            CodexService.removeBoundedMentionToken("/check-code", from: "docs/check-code now"),
+            "docs/check-code now"
+        )
+    }
+
     func testMakeTurnInputPayloadSkipsStructuredSkillItemsWhenDisabled() {
         let service = makeService()
         let payload = service.makeTurnInputPayload(
@@ -141,7 +205,7 @@ final class CodexTurnInputPayloadSkillTests: XCTestCase {
         }
     }
 
-    func testStartTurnOptimisticMessageIncludesMissingSkillToken() async throws {
+    func testStartTurnOptimisticMessageKeepsTextSeparateFromSkillChip() async throws {
         let service = makeService()
         service.isConnected = true
         service.resumedThreadIDs.insert("thread-skill-display")
@@ -162,10 +226,61 @@ final class CodexTurnInputPayloadSkillTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(
-            service.messagesByThread["thread-skill-display"]?.last?.text,
-            "Review these changes\n\n$check-code"
+        let message = service.messagesByThread["thread-skill-display"]?.last
+        XCTAssertEqual(message?.text, "Review these changes")
+        XCTAssertEqual(message?.skillMentions, ["check-code"])
+    }
+
+    func testStartTurnOptimisticMessageShowsOnlySkillChipForMentionOnlySend() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.resumedThreadIDs.insert("thread-skill-only-display")
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-skill-only-display")]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.startTurn(
+            userInput: "/recap",
+            threadId: "thread-skill-only-display",
+            skillMentions: [
+                CodexTurnSkillMention(id: "recap", name: "recap", path: nil),
+            ]
         )
+
+        let message = service.messagesByThread["thread-skill-only-display"]?.last
+        XCTAssertEqual(message?.text, "")
+        XCTAssertEqual(message?.skillMentions, ["recap"])
+    }
+
+    func testStartTurnOptimisticMessageKeepsSkillLabelInLocalTextWhenThereIsProse() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.resumedThreadIDs.insert("thread-skill-text-display")
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-skill-text-display")]),
+                includeJSONRPC: false
+            )
+        }
+
+        try await service.startTurn(
+            userInput: "/recap pls",
+            threadId: "thread-skill-text-display",
+            skillMentions: [
+                CodexTurnSkillMention(id: "recap", name: "recap", path: nil),
+            ]
+        )
+
+        let message = service.messagesByThread["thread-skill-text-display"]?.last
+        XCTAssertEqual(message?.text, "Recap pls")
+        XCTAssertEqual(message?.skillMentions, ["recap"])
     }
 
     func testMakeTurnInputPayloadIncludesPluginMentionItemsWhenEnabled() {

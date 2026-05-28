@@ -8,24 +8,20 @@ import SwiftUI
 import UIKit
 
 struct SettingsAboutCard: View {
-    @State private var isShowingAbout = false
+    let onShowHowItWorks: () -> Void
 
     var body: some View {
-        SettingsCard(title: "About") {
-            Text("Chats are End-to-end encrypted between your iPhone and paired device. The relay only sees ciphertext and connection metadata after the secure handshake completes.")
-                .font(AppFont.caption())
-                .foregroundStyle(.secondary)
-
+        SettingsCard(
+            title: "About",
+            footer: "Chats are end-to-end encrypted between your iPhone and paired device."
+        ) {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                isShowingAbout = true
+                onShowHowItWorks()
             } label: {
-                settingsAccessoryRow(
-                    title: "How Remodex Works",
-                    leading: {
-                        RemodexIcon.image(systemName: "info.circle")
-                    }
-                )
+                SettingsLinkRow(title: "How Remodex Works") {
+                    RemodexIcon.image(systemName: "info.circle")
+                }
             }
 
             Button {
@@ -34,64 +30,33 @@ struct SettingsAboutCard: View {
                     UIApplication.shared.open(url)
                 }
             } label: {
-                settingsAccessoryRow(
-                    title: "Chat & Support",
-                    leading: {
-                        Image("x-icon")
-                            .renderingMode(.template)
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 16, height: 16)
-                    }
-                )
+                SettingsLinkRow(title: "Chat & Support") {
+                    Image("x-icon")
+                        .renderingMode(.template)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                }
             }
 
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIApplication.shared.open(AppEnvironment.privacyPolicyURL)
             } label: {
-                settingsAccessoryRow(
-                    title: "Privacy Policy",
-                    leading: {
-                        RemodexIcon.image(systemName: "hand.raised")
-                    }
-                )
+                SettingsLinkRow(title: "Privacy Policy") {
+                    RemodexIcon.image(systemName: "hand.raised")
+                }
             }
 
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 UIApplication.shared.open(AppEnvironment.termsOfUseURL)
             } label: {
-                settingsAccessoryRow(
-                    title: "Terms of Use",
-                    leading: {
-                        RemodexIcon.image(systemName: "doc.text")
-                    }
-                )
+                SettingsLinkRow(title: "Terms of Use") {
+                    RemodexIcon.image(systemName: "doc.text")
+                }
             }
         }
-        .fullScreenCover(isPresented: $isShowingAbout) {
-            AboutRemodexView()
-        }
-    }
-
-    // Mimics a native disclosure-style List row while supporting both
-    // SF Symbols and custom asset icons in the leading slot.
-    private func settingsAccessoryRow<Leading: View>(
-        title: String,
-        @ViewBuilder leading: () -> Leading
-    ) -> some View {
-        HStack(spacing: 12) {
-            leading()
-                .frame(width: 22, alignment: .center)
-            Text(title)
-            Spacer()
-            RemodexIcon.image(systemName: "chevron.right")
-                .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .foregroundStyle(.primary)
-        .contentShape(Rectangle())
     }
 }
 
@@ -101,27 +66,27 @@ struct SettingsTrustedComputerCard: View {
     let onEditName: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                HStack(spacing: 10) {
-                    RemodexIcon.image(systemName: "laptopcomputer", size: 16, weight: .semibold)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            Circle()
-                                .fill(Color.primary.opacity(0.06))
-                        )
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                RemodexIcon.image(systemName: "laptopcomputer", size: 18, weight: .semibold)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 36, height: 36)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.primary.opacity(0.06))
+                    )
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Device")
-                            .font(AppFont.caption(weight: .semibold))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(presentation.name)
+                        .font(AppFont.body(weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+
+                    if let systemName = presentation.systemName, !systemName.isEmpty {
+                        Text(systemName)
+                            .font(AppFont.footnote())
                             .foregroundStyle(.secondary)
-
-                        Text(presentation.name)
-                            .font(AppFont.subheadline(weight: .semibold))
-                            .foregroundStyle(.primary)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.85)
                     }
                 }
 
@@ -142,45 +107,28 @@ struct SettingsTrustedComputerCard: View {
             }
 
             HStack(spacing: 8) {
-                SettingsStatusPill(label: connectionStatusLabel.capitalized)
+                SettingsStatusPill(
+                    label: connectionStatusLabel,
+                    tint: connectionStatusLabel == "Connected" ? .green : .secondary
+                )
 
                 if let title = compactTitle {
                     SettingsStatusPill(label: title)
                 }
             }
 
-            if let systemName = presentation.systemName,
-               !systemName.isEmpty {
-                labeledRow("System", value: systemName)
-            }
-
-            if let detail = presentation.detail,
-               !detail.isEmpty {
-                labeledRow("Status", value: detail)
+            if let detail = presentation.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(AppFont.footnote())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
-        .padding(.vertical, 4)
     }
 
     private var compactTitle: String? {
         let trimmed = presentation.title.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
-    }
-
-    @ViewBuilder
-    private func labeledRow(_ label: String, value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label)
-                .font(AppFont.caption(weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 48, alignment: .leading)
-
-            Text(value)
-                .font(AppFont.subheadline())
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 }
 

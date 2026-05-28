@@ -43,10 +43,10 @@ struct TurnToolbarContent: ToolbarContent {
     var body: some ToolbarContent {
         let isThreadActionLoading = isHandingOffToMac || isStartingNewChat
         let canTapMacHandoff = onTapMacHandoff != nil && !isThreadActionLoading
+        // Worktree handoff has its own Git/worktree gates; keep it aligned with the composer Local menu.
         let canTapWorktreeHandoff = onTapWorktreeHandoff != nil
             && canHandOffToWorktree
             && !isCreatingGitWorktree
-            && !isThreadActionLoading
         let canTapNewChat = onTapNewChat != nil && !isThreadActionLoading
         let canTapTerminal = onTapTerminal != nil
         let threadActions = threadActionItems(
@@ -70,9 +70,58 @@ struct TurnToolbarContent: ToolbarContent {
         }
 
         // Order: git actions sit closest to the title, the ellipsis thread-
-        // actions menu trails after them. Spacer goes between when both are
-        // shown so the system glass capsules don't merge into one shape.
-        if showsGitActions {
+        // actions menu trails after them.
+        //
+        // iOS 26: emit two adjacent ToolbarItems with no ToolbarSpacer so the
+        // system merges them into a single shared glass capsule. Wrapping both
+        // buttons inside ONE ToolbarItem (e.g. via TurnToolbarActionCluster)
+        // breaks the inner UIKit ellipsis button — iOS 26 treats the HStack
+        // as a single control and the UIButton's menu/hit-testing regresses.
+        //
+        // iOS < 26: the system does not auto-merge adjacent ToolbarItems, so
+        // TurnToolbarActionCluster renders both buttons inside a single shared
+        // material capsule.
+        if showsGitActions, showsThreadActions {
+            if #available(iOS 26.0, *) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    TurnGitActionsToolbarButton(
+                        isEnabled: isGitActionEnabled,
+                        disabledActions: disabledGitActions,
+                        isRunningAction: isRunningGitAction,
+                        loadingTitle: gitActionLoadingTitle,
+                        showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+                        gitSyncState: gitSyncState,
+                        repoDiffTotals: repoDiffTotals,
+                        isLoadingRepoDiff: isLoadingRepoDiff,
+                        onTapRepoDiff: onTapRepoDiff,
+                        onSelect: onGitAction
+                    )
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    TurnThreadActionsMenuButton(
+                        isLoading: isThreadActionLoading,
+                        actions: threadActions
+                    )
+                }
+            } else {
+                ToolbarItem(placement: .topBarTrailing) {
+                    TurnToolbarActionCluster(
+                        isEnabled: isGitActionEnabled,
+                        disabledActions: disabledGitActions,
+                        isRunningAction: isRunningGitAction,
+                        loadingTitle: gitActionLoadingTitle,
+                        showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+                        gitSyncState: gitSyncState,
+                        repoDiffTotals: repoDiffTotals,
+                        isLoadingRepoDiff: isLoadingRepoDiff,
+                        onTapRepoDiff: onTapRepoDiff,
+                        onGitAction: onGitAction,
+                        isThreadActionLoading: isThreadActionLoading,
+                        threadActions: threadActions
+                    )
+                }
+            }
+        } else if showsGitActions {
             ToolbarItem(placement: .topBarTrailing) {
                 TurnGitActionsToolbarButton(
                     isEnabled: isGitActionEnabled,
@@ -87,15 +136,7 @@ struct TurnToolbarContent: ToolbarContent {
                     onSelect: onGitAction
                 )
             }
-        }
-
-        if showsGitActions, showsThreadActions {
-            if #available(iOS 26.0, *) {
-                ToolbarSpacer(.fixed, placement: .topBarTrailing)
-            }
-        }
-
-        if showsThreadActions {
+        } else if showsThreadActions {
             ToolbarItem(placement: .topBarTrailing) {
                 TurnThreadActionsMenuButton(
                     isLoading: isThreadActionLoading,
@@ -165,8 +206,57 @@ struct TurnToolbarContent: ToolbarContent {
     }
 }
 
+struct TurnToolbarActionCluster: View {
+    let isEnabled: Bool
+    let disabledActions: Set<TurnGitActionKind>
+    let isRunningAction: Bool
+    let loadingTitle: String?
+    let showsDiscardRuntimeChangesAndSync: Bool
+    let gitSyncState: String?
+    let repoDiffTotals: GitDiffTotals?
+    let isLoadingRepoDiff: Bool
+    let onTapRepoDiff: (() -> Void)?
+    let onGitAction: (TurnGitActionKind) -> Void
+    let isThreadActionLoading: Bool
+    let threadActions: [TurnThreadActionMenuItem]
+
+    var body: some View {
+        HStack(spacing: Self.iconGap) {
+            TurnGitActionsToolbarButton(
+                isEnabled: isEnabled,
+                disabledActions: disabledActions,
+                isRunningAction: isRunningAction,
+                loadingTitle: loadingTitle,
+                showsDiscardRuntimeChangesAndSync: showsDiscardRuntimeChangesAndSync,
+                gitSyncState: gitSyncState,
+                repoDiffTotals: repoDiffTotals,
+                isLoadingRepoDiff: isLoadingRepoDiff,
+                onTapRepoDiff: onTapRepoDiff,
+                onSelect: onGitAction,
+                usesToolbarChrome: false
+            )
+
+            TurnThreadActionsMenuButton(
+                isLoading: isThreadActionLoading,
+                actions: threadActions,
+                usesToolbarChrome: false
+            )
+        }
+        .padding(.horizontal, Self.horizontalInset)
+        .frame(minHeight: Self.minHeight)
+        .contentShape(Capsule())
+        .adaptiveToolbarItem(in: Capsule())
+        .accessibilityElement(children: .contain)
+    }
+
+    private static let iconGap: CGFloat = 28
+    private static let horizontalInset: CGFloat = 12
+    private static let minHeight: CGFloat = 36
+}
+
 struct TurnMacHandoffToolbarLabel: View {
     let isLoading: Bool
+    var usesToolbarChrome: Bool = true
 
     var body: some View {
         Group {
@@ -182,7 +272,7 @@ struct TurnMacHandoffToolbarLabel: View {
             }
         }
         .contentShape(Circle())
-        .adaptiveToolbarItem(in: Circle())
+        .adaptiveToolbarItem(if: usesToolbarChrome, in: Circle())
     }
 }
 
@@ -190,11 +280,12 @@ struct TurnThreadActionsMenuButton: View {
     let isLoading: Bool
     var isEnabled: Bool = true
     let actions: [TurnThreadActionMenuItem]
+    var usesToolbarChrome: Bool = true
 
     var body: some View {
         Group {
             if isLoading {
-                TurnMacHandoffToolbarLabel(isLoading: true)
+                TurnMacHandoffToolbarLabel(isLoading: true, usesToolbarChrome: usesToolbarChrome)
             } else {
                 UIKitThreadActionsToolbarButton(
                     isEnabled: isEnabled,
@@ -205,7 +296,7 @@ struct TurnThreadActionsMenuButton: View {
                 .padding(.vertical, 4)
                 .frame(minWidth: Self.minToolbarButtonSize, minHeight: Self.minToolbarButtonSize)
                 .contentShape(Circle())
-                .adaptiveToolbarItem(in: Circle())
+                .adaptiveToolbarItem(if: usesToolbarChrome, in: Circle())
             }
         }
         .opacity(isEnabled ? 1 : 0.45)

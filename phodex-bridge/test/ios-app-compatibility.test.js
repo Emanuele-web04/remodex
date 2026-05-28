@@ -19,30 +19,30 @@ test("compareNumericVersions compares dotted versions numerically", () => {
   assert.equal(compareNumericVersions("1.5", "1.5.0"), 0);
 });
 
-test("shouldEnforceIOSAppCompatibility only turns on from bridge 1.3.9", () => {
-  assert.equal(shouldEnforceIOSAppCompatibility("1.3.8"), false);
-  assert.equal(shouldEnforceIOSAppCompatibility("1.3.9"), true);
-  assert.equal(shouldEnforceIOSAppCompatibility("1.4.0"), true);
+test("shouldEnforceIOSAppCompatibility only turns on from bridge 2.0.0", () => {
+  assert.equal(shouldEnforceIOSAppCompatibility("1.5.9"), false);
+  assert.equal(shouldEnforceIOSAppCompatibility("2.0.0"), true);
+  assert.equal(shouldEnforceIOSAppCompatibility("2.0.1"), true);
 });
 
-test("buildIOSAppCompatibilitySnapshot blocks iPhone 1.1 on bridge 1.3.9", () => {
+test("buildIOSAppCompatibilitySnapshot blocks iPhone 1.x on bridge 2.0.0", () => {
   const snapshot = buildIOSAppCompatibilitySnapshot({
-    bridgeVersion: "1.3.9",
-    iosAppVersion: "1.1",
+    bridgeVersion: "2.0.0",
+    iosAppVersion: "1.5",
   });
 
   assert.equal(snapshot.requiresAppUpdate, true);
-  assert.equal(snapshot.minimumSupportedIOSAppVersion, "1.5");
-  assert.equal(snapshot.legacyBridgeVersion, "1.3.7");
-  assert.equal(snapshot.downgradeCommand, "npm install -g remodex@1.3.7");
-  assert.match(snapshot.message, /requires Remodex iPhone 1\.5 or later/i);
-  assert.match(snapshot.message, /install Remodex bridge 1\.3\.7 to keep using iPhone 1\.1/i);
+  assert.equal(snapshot.minimumSupportedIOSAppVersion, "2.0");
+  assert.equal(snapshot.legacyBridgeVersion, "1.5.1");
+  assert.equal(snapshot.downgradeCommand, "npm install -g remodex@1.5.1");
+  assert.match(snapshot.message, /requires Remodex iPhone 2\.0 or later/i);
+  assert.match(snapshot.message, /install Remodex bridge 1\.5\.1 to keep using iPhone 1\.5/i);
 });
 
-test("buildIOSAppCompatibilitySnapshot allows iPhone 1.5 on bridge 1.3.9", () => {
+test("buildIOSAppCompatibilitySnapshot allows iPhone 2.0 on bridge 2.0.0", () => {
   const snapshot = buildIOSAppCompatibilitySnapshot({
-    bridgeVersion: "1.3.9",
-    iosAppVersion: "1.5",
+    bridgeVersion: "2.0.0",
+    iosAppVersion: "2.0",
   });
 
   assert.equal(snapshot.requiresAppUpdate, false);
@@ -51,7 +51,7 @@ test("buildIOSAppCompatibilitySnapshot allows iPhone 1.5 on bridge 1.3.9", () =>
 
 test("buildIOSAppCompatibilitySnapshot stays permissive when the iPhone version is unknown", () => {
   const snapshot = buildIOSAppCompatibilitySnapshot({
-    bridgeVersion: "1.3.9",
+    bridgeVersion: "2.0.0",
     iosAppVersion: "",
   });
 
@@ -59,14 +59,14 @@ test("buildIOSAppCompatibilitySnapshot stays permissive when the iPhone version 
   assert.equal(snapshot.isKnownIOSAppVersion, false);
 });
 
-test("buildCachedIOSAppCompatibilityWarning warns when the last seen iPhone app is 1.1", () => {
+test("buildCachedIOSAppCompatibilityWarning warns when the last seen iPhone app is 1.x", () => {
   const warning = buildCachedIOSAppCompatibilityWarning({
-    bridgeVersion: "1.3.9",
-    iosAppVersion: "1.1",
+    bridgeVersion: "2.0.0",
+    iosAppVersion: "1.5",
   });
 
   assert.match(warning, /!!! WARNING !!!/i);
-  assert.match(warning, /requires Remodex iPhone 1\.5 or later/i);
+  assert.match(warning, /requires Remodex iPhone 2\.0 or later/i);
   assert.match(warning, /Update the iPhone app from the App Store first/i);
-  assert.match(warning, /npm install -g remodex@1\.3\.7/i);
+  assert.match(warning, /npm install -g remodex@1\.5\.1/i);
 });

@@ -339,7 +339,7 @@ struct AssistantRevertStateCacheEntry {
 @MainActor
 @Observable
 final class CodexService {
-    static let minimumSupportedBridgePackageVersion = "1.3.9"
+    static let minimumSupportedBridgePackageVersion = "2.0.0"
 
     // --- Public state ---------------------------------------------------------
 
@@ -458,6 +458,8 @@ final class CodexService {
     var threadCompletionBanner: CodexThreadCompletionBanner?
     // Explains why a push-opened chat could not be restored and offers a recovery path.
     var missingNotificationThreadPrompt: CodexMissingNotificationThreadPrompt?
+    // Owns the scarce App Store review prompt budget for successful in-app runs.
+    @ObservationIgnored let appReviewPromptCoordinator = AppReviewPromptCoordinator()
     // Interactive SSH terminal state is owned on-device so it can bootstrap a Mac before the bridge runs.
     var terminalSnapshot: RemodexTerminalSnapshot = .idle
     var terminalSnapshotsById: [String: RemodexTerminalSnapshot] = [:]
@@ -501,7 +503,6 @@ final class CodexService {
     @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?)] = [:]
     @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
     @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
-    let assistantDeltaBatchIntervalNanoseconds: UInt64 = 50_000_000
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -560,6 +561,10 @@ final class CodexService {
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true
+    // Network quality flag: when true, sync and keepalive intervals are stretched to reduce
+    // bandwidth usage on constrained connections (Low Data Mode, hotspot tethering).
+    var isConstrainedNetwork = false
+    @ObservationIgnored var networkPathMonitor: NWPathMonitor?
     var threadListSyncTask: Task<Void, Never>?
     var activeThreadSyncTask: Task<Void, Never>?
     var runningThreadWatchSyncTask: Task<Void, Never>?
@@ -813,6 +818,26 @@ final class CodexService {
             self.secureMacFingerprint = codexSecureFingerprint(for: trustedMac.macIdentityPublicKey)
         }
         rebuildThreadLookupCaches()
+        startNetworkPathMonitor()
+    }
+
+    func startNetworkPathMonitor() {
+        networkPathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        networkPathMonitor = monitor
+        monitor.pathUpdateHandler = { [weak self] path in
+            let constrained = path.isConstrained
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if self.isConstrainedNetwork != constrained {
+                    self.isConstrainedNetwork = constrained
+                    if self.isConnected, self.isInitialized {
+                        self.startSyncLoop()
+                    }
+                }
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "CodexMobile.NetworkPathMonitor", qos: .utility))
     }
 
     // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.
@@ -1034,6 +1059,7 @@ final class CodexService {
 
     deinit {
         MainActor.assumeIsolated {
+            networkPathMonitor?.cancel()
             trustedSessionResolveTask?.cancel()
             messagePersistenceDebounceTask?.cancel()
             coalescedRevertRefreshTask?.cancel()
