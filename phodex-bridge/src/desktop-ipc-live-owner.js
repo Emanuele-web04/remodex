@@ -118,6 +118,7 @@ function createDesktopIpcLiveOwner({
   const ownedThreadIds = new Set();
   const pendingThreadStartRequestIds = new Set();
   const pendingThreadReadRequestIds = new Set();
+  const pendingThreadHydrationsByThreadId = new Map();
   const cachedThreadsByThreadId = new Map();
   const lastBroadcastStatesByThreadId = new Map();
   const dirtyThreadIds = new Set();
@@ -176,10 +177,15 @@ function createDesktopIpcLiveOwner({
       return;
     }
 
+    const hadConversation = conversations.has(threadId);
+    const hadCachedThread = cachedThreadsByThreadId.has(threadId);
     markOwnedThread(threadId);
     seedOwnedConversation(threadId, {
       cwd: readString(message?.params?.cwd),
     });
+    if (!hadConversation && !hadCachedThread) {
+      hydrateOwnedThreadFromRead(threadId);
+    }
     scheduleSnapshot(threadId);
   }
 
@@ -236,6 +242,7 @@ function createDesktopIpcLiveOwner({
     dirtyThreadIds.clear();
     pendingThreadStartRequestIds.clear();
     pendingThreadReadRequestIds.clear();
+    pendingThreadHydrationsByThreadId.clear();
     cachedThreadsByThreadId.clear();
     lastBroadcastStatesByThreadId.clear();
     ownedThreadIds.clear();
@@ -260,6 +267,7 @@ function createDesktopIpcLiveOwner({
     ownedThreadIds.delete(normalizedThreadId);
     conversations.delete(normalizedThreadId);
     cachedThreadsByThreadId.delete(normalizedThreadId);
+    pendingThreadHydrationsByThreadId.delete(normalizedThreadId);
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
     dirtyThreadIds.delete(normalizedThreadId);
   }
@@ -326,12 +334,49 @@ function createDesktopIpcLiveOwner({
     const pendingThreadIds = Array.from(dirtyThreadIds);
     dirtyThreadIds.clear();
     for (const threadId of pendingThreadIds) {
+      if (pendingThreadHydrationsByThreadId.has(threadId)) {
+        dirtyThreadIds.add(threadId);
+        continue;
+      }
       broadcastConversationState(threadId);
     }
   }
 
+  function hydrateOwnedThreadFromRead(threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId || pendingThreadHydrationsByThreadId.has(normalizedThreadId)) {
+      return;
+    }
+    const hydration = Promise.resolve()
+      .then(() => sendCodexRequest("thread/read", { threadId: normalizedThreadId }))
+      .then((result) => {
+        const thread = readThreadFromPayload(result);
+        if (!thread?.id) {
+          return;
+        }
+        cachedThreadsByThreadId.set(thread.id, cloneJSON(thread));
+        if (ownedThreadIds.has(thread.id)) {
+          upsertConversationFromThread(thread);
+        }
+      })
+      .catch((error) => {
+        console.warn(`${logPrefix} desktop IPC live owner thread/read hydration failed for ${normalizedThreadId}: ${error?.message || "unknown error"}`);
+      })
+      .finally(() => {
+        pendingThreadHydrationsByThreadId.delete(normalizedThreadId);
+        if (dirtyThreadIds.has(normalizedThreadId) && ownedThreadIds.has(normalizedThreadId)) {
+          scheduleSnapshot(normalizedThreadId);
+        }
+      });
+    pendingThreadHydrationsByThreadId.set(normalizedThreadId, hydration);
+  }
+
   function broadcastAllOwnedSnapshots() {
     for (const threadId of ownedThreadIds) {
+      if (pendingThreadHydrationsByThreadId.has(threadId)) {
+        dirtyThreadIds.add(threadId);
+        continue;
+      }
       broadcastConversationState(threadId, { forceSnapshot: true });
     }
   }
@@ -782,16 +827,12 @@ function buildConversationStateFromThread(thread, {
   const updatedAtMs = timestampSecondsToMs(thread?.updatedAt) || now();
   const cwd = readString(thread?.cwd) || previous?.cwd || "";
   const latestModel = readString(thread?.model) || readString(thread?.modelProvider) || previous?.latestModel || "";
-  const turns = Array.isArray(thread?.turns) && thread.turns.length > 0
-    ? thread.turns.map((turn) => buildConversationTurn(turn, {
-      threadId,
-      cwd,
-      now,
-      previousTurn: previous?.turns?.find((candidate) => (
-        readString(candidate?.turnId) || readString(candidate?.id)
-      ) === readString(turn?.id)),
-    }))
-    : cloneJSON(previous?.turns || []);
+  const turns = mergeConversationTurnsFromThread(thread?.turns, {
+    previousTurns: previous?.turns,
+    threadId,
+    cwd,
+    now,
+  });
 
   return {
     id: threadId,
@@ -827,6 +868,61 @@ function buildConversationStateFromThread(thread, {
     projectlessOutputDirectory: previous?.projectlessOutputDirectory || null,
     currentPermissions: cloneJSON(previous?.currentPermissions || null),
   };
+}
+
+function mergeConversationTurnsFromThread(threadTurns, {
+  previousTurns = [],
+  threadId = "",
+  cwd = "",
+  now = () => Date.now(),
+} = {}) {
+  const previousList = Array.isArray(previousTurns) ? previousTurns : [];
+  if (!Array.isArray(threadTurns) || threadTurns.length === 0) {
+    return cloneJSON(previousList);
+  }
+
+  const mergedById = new Map();
+  previousList.forEach((turn, index) => {
+    const turnId = readString(turn?.turnId) || readString(turn?.id);
+    if (!turnId) {
+      return;
+    }
+    mergedById.set(turnId, {
+      turn: cloneJSON(turn),
+      order: index,
+    });
+  });
+
+  threadTurns.forEach((turn, index) => {
+    const turnId = readString(turn?.id) || readString(turn?.turnId) || readString(turn?.turn_id);
+    if (!turnId) {
+      return;
+    }
+    const previous = mergedById.get(turnId);
+    const previousTurn = previous?.turn || null;
+    mergedById.set(turnId, {
+      turn: buildConversationTurn(turn, {
+        threadId,
+        cwd,
+        previousTurn,
+        now,
+      }),
+      order: previous?.order ?? previousList.length + index,
+    });
+  });
+
+  return Array.from(mergedById.values())
+    .sort((left, right) => {
+      const leftStartedAt = Number(left.turn?.turnStartedAtMs);
+      const rightStartedAt = Number(right.turn?.turnStartedAtMs);
+      if (Number.isFinite(leftStartedAt)
+        && Number.isFinite(rightStartedAt)
+        && leftStartedAt !== rightStartedAt) {
+        return leftStartedAt - rightStartedAt;
+      }
+      return left.order - right.order;
+    })
+    .map((entry) => entry.turn);
 }
 
 function createEmptyConversationState(threadId, {
@@ -1952,6 +2048,13 @@ function sanitizeTurnStartParams(params) {
 
 function readThreadFromResponse(message) {
   const result = message?.result || message?.payload || {};
+  return readThreadFromPayload(result);
+}
+
+function readThreadFromPayload(result) {
+  if (!result || typeof result !== "object") {
+    return null;
+  }
   return result.thread && typeof result.thread === "object"
     ? result.thread
     : result;
