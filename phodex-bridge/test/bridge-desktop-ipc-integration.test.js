@@ -93,6 +93,7 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
       codexBundleId: "",
       codexAppPath: "",
       desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
     },
   });
 
@@ -254,6 +255,7 @@ test("bridge recovers desktop IPC state when the first live update is patch-only
       codexBundleId: "",
       codexAppPath: "",
       desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
     },
   });
 
@@ -361,6 +363,7 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
       codexBundleId: "",
       codexAppPath: "",
       desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
     },
   });
 

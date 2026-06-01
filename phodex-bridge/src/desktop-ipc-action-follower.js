@@ -13,6 +13,12 @@ const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
+const DESKTOP_FOLLOWER_REQUEST_METHODS = new Set([
+  "turn/start",
+  "turn/steer",
+  "turn/interrupt",
+  "thread/compact/start",
+]);
 const ACTION_METHODS = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -29,6 +35,10 @@ const REPLY_METHOD_BY_ACTION_METHOD = new Map([
 ]);
 const METHOD_VERSION_BY_NAME = new Map([
   ["initialize", 1],
+  ["thread-follower-start-turn", 1],
+  ["thread-follower-compact-thread", 1],
+  ["thread-follower-steer-turn", 1],
+  ["thread-follower-interrupt-turn", 1],
   ["thread-follower-command-approval-decision", 1],
   ["thread-follower-file-approval-decision", 1],
   ["thread-follower-submit-user-input", 1],
@@ -70,6 +80,14 @@ function createDesktopIpcActionFollower({
     }
 
     const method = readString(message?.method);
+    if (DESKTOP_FOLLOWER_REQUEST_METHODS.has(method)) {
+      const route = desktopFollowerRouteForRequest(message);
+      if (route) {
+        submitDesktopFollowerRequest(route, message);
+        return true;
+      }
+    }
+
     if (!DESKTOP_RESUME_METHODS.has(method)) {
       return false;
     }
@@ -222,6 +240,80 @@ function createDesktopIpcActionFollower({
           error: {
             code: -32000,
             message: "Could not send this action to Codex on the Mac.",
+          },
+        }));
+      });
+  }
+
+  function desktopFollowerRouteForRequest(message) {
+    const requestId = requestIdKey(message?.id);
+    if (!requestId) {
+      return null;
+    }
+    const method = readString(message?.method);
+    const params = message?.params && typeof message.params === "object" && !Array.isArray(message.params)
+      ? message.params
+      : {};
+    const threadId = readThreadId(params);
+    if (!threadId || !rawStatesByThreadId.has(threadId)) {
+      return null;
+    }
+
+    if (method === "turn/start") {
+      return {
+        method: "thread-follower-start-turn",
+        params: {
+          conversationId: threadId,
+          turnStartParams: params,
+        },
+      };
+    }
+    if (method === "turn/steer") {
+      return {
+        method: "thread-follower-steer-turn",
+        params: {
+          conversationId: threadId,
+          input: Array.isArray(params.input) ? params.input : [],
+          expectedTurnId: readString(params.expectedTurnId) || readString(params.expected_turn_id),
+        },
+      };
+    }
+    if (method === "turn/interrupt") {
+      return {
+        method: "thread-follower-interrupt-turn",
+        params: {
+          conversationId: threadId,
+          turnId: readString(params.turnId) || readString(params.turn_id),
+        },
+      };
+    }
+    if (method === "thread/compact/start") {
+      return {
+        method: "thread-follower-compact-thread",
+        params: {
+          conversationId: threadId,
+        },
+      };
+    }
+
+    return null;
+  }
+
+  function submitDesktopFollowerRequest(route, originalMessage) {
+    ipc.sendRequest(route.method, route.params)
+      .then((result) => {
+        sendApplicationResponse(JSON.stringify({
+          id: originalMessage.id,
+          result: result ?? null,
+        }));
+      })
+      .catch((error) => {
+        console.warn(`${logPrefix} desktop follower request failed: ${error.message}`);
+        sendApplicationResponse(JSON.stringify({
+          id: originalMessage.id,
+          error: {
+            code: -32000,
+            message: "Could not continue this Codex Desktop-owned thread from the phone.",
           },
         }));
       });

@@ -56,6 +56,7 @@ const {
   createDesktopIpcActionFollower,
   seedConversationStateFromThreadRead,
 } = require("./desktop-ipc-action-follower");
+const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -258,6 +259,15 @@ function startBridge({
       socketPath: config.desktopIpcSocketPath || undefined,
     })
     : null;
+  const desktopIpcLiveOwner = !config.codexEndpoint
+    ? createDesktopIpcLiveOwner({
+      enabled: config.desktopIpcLiveSyncEnabled !== false,
+      sendCodexRequest,
+      sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
+      socketPath: config.desktopIpcSocketPath || undefined,
+      snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
+    })
+    : null;
   let contextUsageWatcher = null;
   let watchedContextUsageKey = null;
 
@@ -347,6 +357,7 @@ function startBridge({
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
+    desktopIpcLiveOwner?.stopAll();
   }
 
   function stopBridge() {
@@ -539,6 +550,7 @@ function startBridge({
     updatePendingAuthLoginFromCodexMessage(message);
     trackCodexHandshakeState(message);
     desktopRefresher.handleOutbound(message);
+    desktopIpcLiveOwner?.observeOutbound(message);
     pushNotificationTracker.handleOutbound(message);
     rememberThreadFromMessage("codex", message);
     secureTransport.queueOutboundApplicationMessage(
@@ -623,6 +635,7 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
       return;
     }
+    desktopIpcLiveOwner?.observeInbound(rawMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }

@@ -1,0 +1,2039 @@
+// FILE: desktop-ipc-live-owner.js
+// Purpose: Exposes bridge-owned Codex app-server streams to Codex Desktop/VSCode over the local IPC bus.
+// Layer: CLI helper
+// Exports: createDesktopIpcLiveOwner, buildConversationStateFromThread, applyAppServerMessageToConversationState
+// Depends on: crypto, net, os, path
+
+const { randomUUID } = require("crypto");
+const fs = require("fs");
+const net = require("net");
+const os = require("os");
+const path = require("path");
+
+const FRAME_HEADER_BYTES = 4;
+const MAX_FRAME_BYTES = 256 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const DEFAULT_RECONNECT_MS = 1_500;
+const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 75;
+const DEFAULT_MAX_PATCH_COUNT = 2_000;
+const DEFAULT_MAX_PATCH_BYTES = 512 * 1024;
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_000;
+const THREAD_STREAM_STATE_CHANGED = "thread-stream-state-changed";
+const CLIENT_STATUS_CHANGED = "client-status-changed";
+const LOCAL_HOST_ID = "local";
+
+const METHOD_VERSION_BY_NAME = new Map([
+  ["initialize", 1],
+  [CLIENT_STATUS_CHANGED, 1],
+  [THREAD_STREAM_STATE_CHANGED, 6],
+  ["thread-follower-start-turn", 1],
+  ["thread-follower-compact-thread", 1],
+  ["thread-follower-steer-turn", 1],
+  ["thread-follower-interrupt-turn", 1],
+  ["thread-follower-set-model-and-reasoning", 1],
+  ["thread-follower-set-collaboration-mode", 1],
+  ["thread-follower-edit-last-user-turn", 1],
+  ["thread-follower-command-approval-decision", 1],
+  ["thread-follower-file-approval-decision", 1],
+  ["thread-follower-permissions-request-approval-response", 1],
+  ["thread-follower-submit-user-input", 1],
+  ["thread-follower-submit-mcp-server-elicitation-response", 1],
+  ["thread-follower-set-queued-follow-ups-state", 1],
+  ["thread-queued-followups-changed", 1],
+]);
+
+const SUPPORTED_FOLLOWER_REQUEST_METHODS = new Set([
+  "thread-follower-start-turn",
+  "thread-follower-compact-thread",
+  "thread-follower-steer-turn",
+  "thread-follower-interrupt-turn",
+  "thread-follower-set-model-and-reasoning",
+  "thread-follower-set-collaboration-mode",
+  "thread-follower-command-approval-decision",
+  "thread-follower-file-approval-decision",
+  "thread-follower-permissions-request-approval-response",
+  "thread-follower-submit-user-input",
+  "thread-follower-submit-mcp-server-elicitation-response",
+  "thread-follower-set-queued-follow-ups-state",
+]);
+
+const OWNER_INBOUND_METHODS = new Set([
+  "thread/start",
+  "turn/start",
+  "turn/steer",
+  "turn/interrupt",
+  "thread/compact/start",
+  "thread/archive",
+  "thread/unsubscribe",
+]);
+
+const THREAD_READ_METHODS = new Set(["thread/read", "thread/resume"]);
+
+const REQUEST_METHODS_WITH_THREAD = new Set([
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/fileRead/requestApproval",
+  "item/permissions/requestApproval",
+  "item/tool/requestUserInput",
+  "mcpServer/elicitation/request",
+  "item/tool/call",
+]);
+
+const ALLOWED_TURN_START_PARAM_KEYS = new Set([
+  "threadId",
+  "input",
+  "cwd",
+  "approvalPolicy",
+  "approvalsReviewer",
+  "sandboxPolicy",
+  "model",
+  "serviceTier",
+  "effort",
+  "summary",
+  "personality",
+  "outputSchema",
+  "collaborationMode",
+]);
+
+function createDesktopIpcLiveOwner({
+  enabled = true,
+  hostId = LOCAL_HOST_ID,
+  sendCodexRequest,
+  sendRawCodexMessage,
+  socketPath = resolveDefaultIpcSocketPath(),
+  snapshotDebounceMs = DEFAULT_SNAPSHOT_DEBOUNCE_MS,
+  maxPatchCount = DEFAULT_MAX_PATCH_COUNT,
+  maxPatchBytes = DEFAULT_MAX_PATCH_BYTES,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  reconnectMs = DEFAULT_RECONNECT_MS,
+  netModule = net,
+  now = () => Date.now(),
+  logPrefix = "[remodex]",
+} = {}) {
+  if (!enabled || typeof sendCodexRequest !== "function" || typeof sendRawCodexMessage !== "function") {
+    return createDisabledDesktopIpcLiveOwner();
+  }
+
+  const conversations = new Map();
+  const ownedThreadIds = new Set();
+  const pendingThreadStartRequestIds = new Set();
+  const pendingThreadReadRequestIds = new Set();
+  const cachedThreadsByThreadId = new Map();
+  const lastBroadcastStatesByThreadId = new Map();
+  const dirtyThreadIds = new Set();
+  let snapshotTimer = null;
+
+  const ipc = createDesktopOwnerIpcClient({
+    socketPath,
+    netModule,
+    now,
+    requestTimeoutMs,
+    reconnectMs,
+    logPrefix,
+    onConnected() {
+      broadcastAllOwnedSnapshots();
+    },
+    onBroadcast(envelope) {
+      handlePeerBroadcast(envelope);
+    },
+    canHandleRequest(envelope) {
+      return canHandleFollowerRequest(envelope);
+    },
+    handleRequest(envelope) {
+      return handleFollowerRequest(envelope);
+    },
+  });
+
+  function observeInbound(rawMessage) {
+    const message = safeParseJSON(rawMessage);
+    const method = readString(message?.method);
+    if (THREAD_READ_METHODS.has(method)) {
+      if (message?.id != null) {
+        pendingThreadReadRequestIds.add(String(message.id));
+      }
+      return;
+    }
+
+    if (!method || !OWNER_INBOUND_METHODS.has(method)) {
+      return;
+    }
+
+    if (method === "thread/start") {
+      if (message?.id != null) {
+        pendingThreadStartRequestIds.add(String(message.id));
+      }
+      ipc.ensureConnected();
+      return;
+    }
+
+    const threadId = readThreadIdFromParams(message?.params);
+    if (!threadId) {
+      return;
+    }
+
+    if (method === "thread/archive" || method === "thread/unsubscribe") {
+      removeOwnedThread(threadId);
+      return;
+    }
+
+    markOwnedThread(threadId);
+    seedOwnedConversation(threadId, {
+      cwd: readString(message?.params?.cwd),
+    });
+    scheduleSnapshot(threadId);
+  }
+
+  function observeOutbound(rawMessage) {
+    const message = safeParseJSON(rawMessage);
+    if (!message || typeof message !== "object") {
+      return;
+    }
+
+    const responseId = message.id == null ? "" : String(message.id);
+    if (responseId && pendingThreadReadRequestIds.has(responseId)) {
+      pendingThreadReadRequestIds.delete(responseId);
+      const thread = readThreadFromResponse(message);
+      if (thread?.id) {
+        cachedThreadsByThreadId.set(thread.id, cloneJSON(thread));
+        if (ownedThreadIds.has(thread.id)) {
+          upsertConversationFromThread(thread);
+          scheduleSnapshot(thread.id);
+        }
+      }
+    }
+
+    if (responseId && pendingThreadStartRequestIds.has(responseId)) {
+      pendingThreadStartRequestIds.delete(responseId);
+      const thread = readThreadFromResponse(message);
+      if (thread?.id) {
+        markOwnedThread(thread.id);
+        upsertConversationFromThread(thread);
+        scheduleSnapshot(thread.id);
+      }
+    }
+
+    const update = applyAppServerMessageToConversationState({
+      conversations,
+      message,
+      hostId,
+      now,
+      shouldOwnThread(threadId) {
+        return ownedThreadIds.has(threadId);
+      },
+      markOwnedThread,
+    });
+
+    if (update?.threadId && update.changed) {
+      scheduleSnapshot(update.threadId);
+    }
+  }
+
+  function stopAll() {
+    if (snapshotTimer) {
+      clearTimeout(snapshotTimer);
+      snapshotTimer = null;
+    }
+    dirtyThreadIds.clear();
+    pendingThreadStartRequestIds.clear();
+    pendingThreadReadRequestIds.clear();
+    cachedThreadsByThreadId.clear();
+    lastBroadcastStatesByThreadId.clear();
+    ownedThreadIds.clear();
+    conversations.clear();
+    ipc.close();
+  }
+
+  function markOwnedThread(threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId) {
+      return;
+    }
+    ownedThreadIds.add(normalizedThreadId);
+    ipc.ensureConnected();
+  }
+
+  function removeOwnedThread(threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId) {
+      return;
+    }
+    ownedThreadIds.delete(normalizedThreadId);
+    conversations.delete(normalizedThreadId);
+    cachedThreadsByThreadId.delete(normalizedThreadId);
+    lastBroadcastStatesByThreadId.delete(normalizedThreadId);
+    dirtyThreadIds.delete(normalizedThreadId);
+  }
+
+  function upsertConversationFromThread(thread) {
+    const threadId = readString(thread?.id);
+    if (!threadId) {
+      return null;
+    }
+    const previous = conversations.get(threadId) || null;
+    const next = buildConversationStateFromThread(thread, {
+      previous,
+      hostId,
+      now,
+    });
+    conversations.set(threadId, next);
+    return next;
+  }
+
+  function ensureConversation(threadId, seed = {}) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId) {
+      return null;
+    }
+    let conversation = conversations.get(normalizedThreadId);
+    if (!conversation) {
+      conversation = createEmptyConversationState(normalizedThreadId, {
+        hostId,
+        now,
+        cwd: seed.cwd,
+      });
+      conversations.set(normalizedThreadId, conversation);
+    }
+    return conversation;
+  }
+
+  function seedOwnedConversation(threadId, seed = {}) {
+    const normalizedThreadId = readString(threadId);
+    const cachedThread = normalizedThreadId ? cachedThreadsByThreadId.get(normalizedThreadId) : null;
+    if (cachedThread) {
+      return upsertConversationFromThread(cachedThread);
+    }
+    return ensureConversation(normalizedThreadId, seed);
+  }
+
+  function scheduleSnapshot(threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId || !ownedThreadIds.has(normalizedThreadId)) {
+      return;
+    }
+    dirtyThreadIds.add(normalizedThreadId);
+    ipc.ensureConnected();
+    if (snapshotTimer) {
+      return;
+    }
+    snapshotTimer = setTimeout(() => {
+      snapshotTimer = null;
+      flushSnapshots();
+    }, Math.max(0, snapshotDebounceMs));
+    snapshotTimer.unref?.();
+  }
+
+  function flushSnapshots() {
+    const pendingThreadIds = Array.from(dirtyThreadIds);
+    dirtyThreadIds.clear();
+    for (const threadId of pendingThreadIds) {
+      broadcastConversationState(threadId);
+    }
+  }
+
+  function broadcastAllOwnedSnapshots() {
+    for (const threadId of ownedThreadIds) {
+      broadcastConversationState(threadId, { forceSnapshot: true });
+    }
+  }
+
+  function broadcastConversationState(threadId, { forceSnapshot = false } = {}) {
+    const conversationState = conversations.get(threadId);
+    if (!conversationState || !ownedThreadIds.has(threadId)) {
+      return;
+    }
+    const currentState = cloneJSON(conversationState);
+    const previousState = lastBroadcastStatesByThreadId.get(threadId) || null;
+    if (!forceSnapshot && previousState) {
+      const patches = buildConversationStatePatches(previousState, currentState, {
+        maxPatchCount,
+        maxPatchBytes,
+      });
+      if (patches && patches.length === 0) {
+        return;
+      }
+      if (patches && ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
+        hostId,
+        conversationId: threadId,
+        change: {
+          type: "patches",
+          patches,
+        },
+      })) {
+        lastBroadcastStatesByThreadId.set(threadId, currentState);
+        return;
+      }
+    }
+
+    if (ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
+      hostId,
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: currentState,
+      },
+    })) {
+      lastBroadcastStatesByThreadId.set(threadId, currentState);
+    }
+  }
+
+  function handlePeerBroadcast(envelope) {
+    if (envelope?.method === CLIENT_STATUS_CHANGED) {
+      broadcastAllOwnedSnapshots();
+      return;
+    }
+    if (envelope?.method !== THREAD_STREAM_STATE_CHANGED) {
+      return;
+    }
+    const params = envelope.params || {};
+    const threadId = readString(params.conversationId) || readString(params.conversation_id);
+    if (!threadId || !ownedThreadIds.has(threadId)) {
+      return;
+    }
+    if (envelope.sourceClientId && envelope.sourceClientId === ipc.clientId) {
+      return;
+    }
+
+    // Another Codex frontend is actively owning this stream. Drop bridge ownership
+    // so two owners do not fight over the same Desktop conversation state.
+    ownedThreadIds.delete(threadId);
+    dirtyThreadIds.delete(threadId);
+    lastBroadcastStatesByThreadId.delete(threadId);
+  }
+
+  function canHandleFollowerRequest(envelope) {
+    const method = readString(envelope?.request?.method || envelope?.method);
+    const params = envelope?.request?.params || envelope?.params || {};
+    if (!SUPPORTED_FOLLOWER_REQUEST_METHODS.has(method)) {
+      return false;
+    }
+    const threadId = readConversationIdFromFollowerParams(params);
+    return Boolean(threadId && ownedThreadIds.has(threadId));
+  }
+
+  async function handleFollowerRequest(envelope) {
+    const method = readString(envelope?.method);
+    const params = envelope?.params && typeof envelope.params === "object" ? envelope.params : {};
+    const conversationId = readConversationIdFromFollowerParams(params);
+    if (!conversationId || !ownedThreadIds.has(conversationId)) {
+      throw new Error("conversation-not-owned");
+    }
+
+    switch (method) {
+      case "thread-follower-start-turn":
+        return await handleFollowerStartTurn(conversationId, params);
+      case "thread-follower-compact-thread":
+        return await sendCodexRequest("thread/compact/start", { threadId: conversationId });
+      case "thread-follower-steer-turn":
+        return await handleFollowerSteerTurn(conversationId, params);
+      case "thread-follower-interrupt-turn":
+        return await handleFollowerInterruptTurn(conversationId, params);
+      case "thread-follower-command-approval-decision":
+        return sendServerRequestResponse(params.requestId, { decision: params.decision });
+      case "thread-follower-file-approval-decision":
+        return sendServerRequestResponse(params.requestId, { decision: params.decision });
+      case "thread-follower-permissions-request-approval-response":
+        return sendServerRequestResponse(params.requestId, params.response);
+      case "thread-follower-submit-user-input":
+        return sendServerRequestResponse(params.requestId, params.response);
+      case "thread-follower-submit-mcp-server-elicitation-response":
+        return sendServerRequestResponse(params.requestId, params.response);
+      case "thread-follower-set-model-and-reasoning":
+        return applyFollowerModelAndReasoning(conversationId, params);
+      case "thread-follower-set-collaboration-mode":
+        return applyFollowerCollaborationMode(conversationId, params);
+      case "thread-follower-set-queued-follow-ups-state":
+        return { ok: true };
+      case "thread-follower-edit-last-user-turn":
+        throw new Error("thread-follower-edit-last-user-turn is not supported by Remodex yet.");
+      default:
+        throw new Error(`Unsupported follower request: ${method}`);
+    }
+  }
+
+  async function handleFollowerStartTurn(conversationId, params) {
+    const rawTurnStartParams = params.turnStartParams
+      || params.turn_start_params
+      || params.turnStart
+      || params;
+    const codexParams = sanitizeTurnStartParams({
+      ...rawTurnStartParams,
+      threadId: conversationId,
+    });
+    markOwnedThread(conversationId);
+    return await sendCodexRequest("turn/start", codexParams);
+  }
+
+  async function handleFollowerSteerTurn(conversationId, params) {
+    const rawSteerParams = params.turnSteerParams
+      || params.turn_steer_params
+      || params;
+    const expectedTurnId = readString(rawSteerParams.expectedTurnId)
+      || readString(rawSteerParams.expected_turn_id)
+      || activeTurnIdForConversation(conversationId);
+    if (!expectedTurnId) {
+      throw new Error("Missing expectedTurnId for follower steer request.");
+    }
+    return await sendCodexRequest("turn/steer", {
+      threadId: conversationId,
+      input: Array.isArray(rawSteerParams.input) ? rawSteerParams.input : [],
+      expectedTurnId,
+    });
+  }
+
+  async function handleFollowerInterruptTurn(conversationId, params) {
+    const turnId = readString(params.turnId)
+      || readString(params.turn_id)
+      || activeTurnIdForConversation(conversationId);
+    if (!turnId) {
+      throw new Error("Missing turnId for follower interrupt request.");
+    }
+    return await sendCodexRequest("turn/interrupt", {
+      threadId: conversationId,
+      turnId,
+    });
+  }
+
+  function sendServerRequestResponse(requestId, result) {
+    const normalizedRequestId = requestIdKey(requestId);
+    if (!normalizedRequestId) {
+      throw new Error("Missing requestId for follower server response.");
+    }
+    sendRawCodexMessage(JSON.stringify({
+      id: requestId,
+      result: result || {},
+    }));
+    return { ok: true };
+  }
+
+  function applyFollowerModelAndReasoning(conversationId, params) {
+    const conversation = conversations.get(conversationId);
+    if (conversation) {
+      if (Object.prototype.hasOwnProperty.call(params, "model")) {
+        conversation.latestModel = params.model || "";
+      }
+      if (Object.prototype.hasOwnProperty.call(params, "reasoningEffort")) {
+        conversation.latestReasoningEffort = params.reasoningEffort || null;
+      }
+      scheduleSnapshot(conversationId);
+    }
+    return { ok: true };
+  }
+
+  function applyFollowerCollaborationMode(conversationId, params) {
+    const conversation = conversations.get(conversationId);
+    if (conversation && params.collaborationMode) {
+      conversation.latestCollaborationMode = params.collaborationMode;
+      scheduleSnapshot(conversationId);
+    }
+    return { ok: true };
+  }
+
+  function activeTurnIdForConversation(conversationId) {
+    const turns = conversations.get(conversationId)?.turns || [];
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      const status = normalizeToken(turn?.status);
+      const turnId = readString(turn?.turnId) || readString(turn?.id);
+      if (turnId && (!status || status === "inprogress" || status === "running" || status === "active")) {
+        return turnId;
+      }
+    }
+    const latestTurn = turns[turns.length - 1];
+    return readString(latestTurn?.turnId) || readString(latestTurn?.id);
+  }
+
+  return {
+    observeInbound,
+    observeOutbound,
+    stopAll,
+    _debugSnapshot(threadId) {
+      return cloneJSON(conversations.get(threadId) || null);
+    },
+  };
+}
+
+function createDisabledDesktopIpcLiveOwner() {
+  return {
+    observeInbound() {},
+    observeOutbound() {},
+    stopAll() {},
+  };
+}
+
+function applyAppServerMessageToConversationState({
+  conversations,
+  message,
+  hostId = LOCAL_HOST_ID,
+  now = () => Date.now(),
+  shouldOwnThread = () => false,
+  markOwnedThread = () => {},
+} = {}) {
+  const method = readString(message?.method);
+  if (!method) {
+    return null;
+  }
+
+  if (REQUEST_METHODS_WITH_THREAD.has(method) && message.id != null) {
+    const threadId = readThreadIdFromParams(message.params);
+    if (!threadId || !shouldOwnThread(threadId)) {
+      return null;
+    }
+    const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+    upsertRequest(conversation, {
+      id: message.id,
+      method,
+      params: cloneJSON(message.params || {}),
+    });
+    conversation.hasUnreadTurn = true;
+    conversation.updatedAt = now();
+    return { threadId, changed: true };
+  }
+
+  switch (method) {
+    case "thread/started": {
+      const thread = message.params?.thread;
+      const threadId = readString(thread?.id);
+      if (!threadId) {
+        return null;
+      }
+      markOwnedThread(threadId);
+      const previous = conversations.get(threadId) || null;
+      conversations.set(threadId, buildConversationStateFromThread(thread, {
+        previous,
+        hostId,
+        now,
+      }));
+      return { threadId, changed: true };
+    }
+    case "thread/name/updated": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      conversation.title = readString(message.params?.threadName)
+        || readString(message.params?.thread_name)
+        || conversation.title;
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "thread/status/changed": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      conversation.threadRuntimeStatus = cloneJSON(message.params?.status || null);
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "thread/tokenUsage/updated": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      conversation.latestTokenUsageInfo = cloneJSON(
+        message.params?.tokenUsage || message.params?.usage || null
+      );
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "turn/started":
+    case "turn/completed": {
+      const threadId = readThreadIdFromParams(message.params);
+      const turn = message.params?.turn;
+      if (!threadId || !shouldOwnThread(threadId) || !turn) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      upsertTurn(conversation, turn, { now });
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "turn/diff/updated": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      if (turn) {
+        turn.diff = readString(message.params?.diff) || "";
+      }
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "turn/plan/updated": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      if (turn) {
+        upsertItem(turn, {
+          id: `todo-list-${message.params?.turnId || now()}`,
+          type: "todo-list",
+          explanation: message.params?.explanation ?? null,
+          plan: Array.isArray(message.params?.plan) ? cloneJSON(message.params.plan) : [],
+        });
+      }
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "item/started":
+    case "item/completed": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      if (turn && message.params?.item) {
+        upsertItem(turn, cloneJSON(message.params.item));
+        if (message.params.item.type === "agentMessage" && method === "item/started") {
+          turn.finalAssistantStartedAtMs = turn.finalAssistantStartedAtMs || now();
+        }
+        if (message.params.item.type && message.params.item.type !== "userMessage") {
+          turn.firstTurnWorkItemStartedAtMs = turn.firstTurnWorkItemStartedAtMs || now();
+        }
+      }
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "item/agentMessage/delta":
+    case "item/plan/delta":
+    case "item/reasoning/summaryTextDelta":
+    case "item/reasoning/textDelta":
+    case "item/commandExecution/outputDelta":
+    case "command/exec/outputDelta": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      applyDeltaNotification(conversation, method, message.params || {}, { now });
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "item/fileChange/patchUpdated": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      if (turn) {
+        upsertItem(turn, {
+          type: "fileChange",
+          id: readString(message.params?.itemId) || `file-change-${now()}`,
+          changes: Array.isArray(message.params?.changes) ? cloneJSON(message.params.changes) : [],
+          status: "inProgress",
+        });
+      }
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "serverRequest/resolved": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const requestId = requestIdKey(message.params?.requestId || message.params?.request_id);
+      conversation.requests = conversation.requests.filter((request) => requestIdKey(request.id) !== requestId);
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    case "error": {
+      const threadId = readThreadIdFromParams(message.params);
+      if (!threadId || !shouldOwnThread(threadId)) {
+        return null;
+      }
+      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      if (turn) {
+        turn.items.push({
+          id: `error-${now()}`,
+          type: "error",
+          message: readString(message.params?.error?.message) || "Codex error",
+          willRetry: Boolean(message.params?.willRetry),
+          errorInfo: message.params?.error?.codexErrorInfo || null,
+          additionalDetails: message.params?.error?.additionalDetails || null,
+        });
+        turn.error = cloneJSON(message.params?.error || null);
+      }
+      conversation.updatedAt = now();
+      return { threadId, changed: true };
+    }
+    default:
+      return null;
+  }
+}
+
+function buildConversationStateFromThread(thread, {
+  previous = null,
+  hostId = LOCAL_HOST_ID,
+  now = () => Date.now(),
+} = {}) {
+  const threadId = readString(thread?.id);
+  const createdAtMs = timestampSecondsToMs(thread?.createdAt) || previous?.createdAt || now();
+  const updatedAtMs = timestampSecondsToMs(thread?.updatedAt) || now();
+  const cwd = readString(thread?.cwd) || previous?.cwd || "";
+  const latestModel = readString(thread?.model) || readString(thread?.modelProvider) || previous?.latestModel || "";
+  const turns = Array.isArray(thread?.turns) && thread.turns.length > 0
+    ? thread.turns.map((turn) => buildConversationTurn(turn, {
+      threadId,
+      cwd,
+      now,
+      previousTurn: previous?.turns?.find((candidate) => (
+        readString(candidate?.turnId) || readString(candidate?.id)
+      ) === readString(turn?.id)),
+    }))
+    : cloneJSON(previous?.turns || []);
+
+  return {
+    id: threadId,
+    hostId,
+    turns,
+    requests: cloneJSON(previous?.requests || []),
+    createdAt: createdAtMs,
+    updatedAt: updatedAtMs,
+    title: readString(thread?.name) || previous?.title || null,
+    latestModel,
+    latestReasoningEffort: previous?.latestReasoningEffort || null,
+    previousTurnModel: previous?.previousTurnModel || null,
+    latestCollaborationMode: previous?.latestCollaborationMode || {
+      mode: "default",
+      settings: {
+        reasoning_effort: null,
+        model: latestModel,
+        developer_instructions: null,
+      },
+    },
+    hasUnreadTurn: Boolean(previous?.hasUnreadTurn),
+    unreadMessageCount: Number.isFinite(previous?.unreadMessageCount) ? previous.unreadMessageCount : 0,
+    threadGoal: previous?.threadGoal || null,
+    completedThreadGoal: previous?.completedThreadGoal || null,
+    threadRuntimeStatus: cloneJSON(thread?.status || previous?.threadRuntimeStatus || null),
+    rolloutPath: readString(thread?.path) || previous?.rolloutPath || "",
+    cwd,
+    gitInfo: cloneJSON(thread?.gitInfo || previous?.gitInfo || null),
+    resumeState: "resumed",
+    latestTokenUsageInfo: cloneJSON(previous?.latestTokenUsageInfo || null),
+    workspaceKind: previous?.workspaceKind || "project",
+    workspaceBrowserRoot: previous?.workspaceBrowserRoot || null,
+    projectlessOutputDirectory: previous?.projectlessOutputDirectory || null,
+    currentPermissions: cloneJSON(previous?.currentPermissions || null),
+  };
+}
+
+function createEmptyConversationState(threadId, {
+  hostId = LOCAL_HOST_ID,
+  now = () => Date.now(),
+  cwd = "",
+} = {}) {
+  const timestamp = now();
+  return {
+    id: threadId,
+    hostId,
+    turns: [],
+    requests: [],
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    title: null,
+    latestModel: "",
+    latestReasoningEffort: null,
+    previousTurnModel: null,
+    latestCollaborationMode: {
+      mode: "default",
+      settings: {
+        reasoning_effort: null,
+        model: "",
+        developer_instructions: null,
+      },
+    },
+    hasUnreadTurn: false,
+    unreadMessageCount: 0,
+    threadGoal: null,
+    completedThreadGoal: null,
+    threadRuntimeStatus: null,
+    rolloutPath: "",
+    cwd: readString(cwd) || "",
+    gitInfo: null,
+    resumeState: "resumed",
+    latestTokenUsageInfo: null,
+    workspaceKind: "project",
+    workspaceBrowserRoot: null,
+    projectlessOutputDirectory: null,
+    currentPermissions: null,
+  };
+}
+
+function buildConversationTurn(turn, {
+  threadId = "",
+  cwd = "",
+  previousTurn = null,
+  now = () => Date.now(),
+} = {}) {
+  const turnId = readString(turn?.id) || readString(turn?.turnId) || readString(turn?.turn_id);
+  const params = cloneJSON(previousTurn?.params || {
+    threadId,
+    input: [],
+    cwd: cwd || null,
+    approvalPolicy: null,
+    approvalsReviewer: null,
+    sandboxPolicy: null,
+    model: null,
+    serviceTier: null,
+    effort: null,
+    summary: "none",
+    personality: null,
+    outputSchema: null,
+    collaborationMode: null,
+    attachments: [],
+  });
+  return {
+    id: turnId,
+    turnId,
+    params,
+    turnStartedAtMs: timestampSecondsToMs(turn?.startedAt) || previousTurn?.turnStartedAtMs || now(),
+    durationMs: turn?.durationMs ?? previousTurn?.durationMs ?? null,
+    firstTurnWorkItemStartedAtMs: previousTurn?.firstTurnWorkItemStartedAtMs || null,
+    finalAssistantStartedAtMs: previousTurn?.finalAssistantStartedAtMs || null,
+    status: turn?.status || previousTurn?.status || "inProgress",
+    error: cloneJSON(turn?.error || previousTurn?.error || null),
+    diff: previousTurn?.diff || null,
+    hookRuns: cloneJSON(previousTurn?.hookRuns || []),
+    commandExecutionStartedAtMsById: cloneJSON(previousTurn?.commandExecutionStartedAtMsById || {}),
+    items: Array.isArray(turn?.items) && turn.items.length > 0
+      ? cloneJSON(turn.items)
+      : cloneJSON(previousTurn?.items || []),
+  };
+}
+
+function ensureConversationInMap(conversations, threadId, options = {}) {
+  let conversation = conversations.get(threadId);
+  if (!conversation) {
+    conversation = createEmptyConversationState(threadId, options);
+    conversations.set(threadId, conversation);
+  }
+  return conversation;
+}
+
+function upsertTurn(conversation, turn, { now = () => Date.now() } = {}) {
+  const turnId = readString(turn?.id) || readString(turn?.turnId) || readString(turn?.turn_id);
+  if (!turnId) {
+    return null;
+  }
+  const index = conversation.turns.findIndex((candidate) => (
+    readString(candidate?.turnId) || readString(candidate?.id)
+  ) === turnId);
+  const previousTurn = index >= 0 ? conversation.turns[index] : null;
+  const nextTurn = buildConversationTurn(turn, {
+    threadId: conversation.id,
+    cwd: conversation.cwd,
+    previousTurn,
+    now,
+  });
+  if (index >= 0) {
+    conversation.turns[index] = nextTurn;
+  } else {
+    conversation.turns.push(nextTurn);
+  }
+  return nextTurn;
+}
+
+function ensureTurn(conversation, turnId, { now = () => Date.now() } = {}) {
+  const normalizedTurnId = readString(turnId);
+  if (!normalizedTurnId) {
+    return conversation.turns[conversation.turns.length - 1] || null;
+  }
+  let turn = conversation.turns.find((candidate) => (
+    readString(candidate?.turnId) || readString(candidate?.id)
+  ) === normalizedTurnId);
+  if (!turn) {
+    turn = buildConversationTurn({
+      id: normalizedTurnId,
+      status: "inProgress",
+      items: [],
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+      error: null,
+    }, {
+      threadId: conversation.id,
+      cwd: conversation.cwd,
+      now,
+    });
+    conversation.turns.push(turn);
+  }
+  return turn;
+}
+
+function upsertItem(turn, item) {
+  const itemId = readString(item?.id);
+  if (!itemId) {
+    return;
+  }
+  const index = turn.items.findIndex((candidate) => readString(candidate?.id) === itemId);
+  if (index >= 0) {
+    turn.items[index] = {
+      ...turn.items[index],
+      ...cloneJSON(item),
+    };
+    return;
+  }
+  turn.items.push(cloneJSON(item));
+}
+
+function upsertRequest(conversation, request) {
+  const requestId = requestIdKey(request?.id);
+  if (!requestId) {
+    return;
+  }
+  const index = conversation.requests.findIndex((candidate) => requestIdKey(candidate?.id) === requestId);
+  const nextRequest = cloneJSON({
+    id: request.id,
+    method: request.method,
+    params: request.params || {},
+  });
+  if (index >= 0) {
+    conversation.requests[index] = nextRequest;
+  } else {
+    conversation.requests.push(nextRequest);
+  }
+}
+
+function applyDeltaNotification(conversation, method, params, { now = () => Date.now() } = {}) {
+  const turn = ensureTurn(conversation, params.turnId || params.turn_id, { now });
+  if (!turn) {
+    return;
+  }
+  const itemId = readString(params.itemId) || readString(params.item_id);
+  if (!itemId) {
+    return;
+  }
+  const delta = typeof params.delta === "string" ? params.delta : "";
+  if (!delta) {
+    return;
+  }
+
+  if (method === "item/agentMessage/delta") {
+    const item = ensureItemOfType(turn, itemId, () => ({
+      type: "agentMessage",
+      id: itemId,
+      text: "",
+      phase: null,
+      memoryCitation: null,
+    }));
+    item.text = `${item.text || ""}${delta}`;
+    turn.finalAssistantStartedAtMs = turn.finalAssistantStartedAtMs || now();
+    return;
+  }
+
+  if (method === "item/plan/delta") {
+    const item = ensureItemOfType(turn, itemId, () => ({
+      type: "plan",
+      id: itemId,
+      text: "",
+    }));
+    item.text = `${item.text || ""}${delta}`;
+    return;
+  }
+
+  if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
+    const item = ensureItemOfType(turn, itemId, () => ({
+      type: "reasoning",
+      id: itemId,
+      summary: [],
+      content: [],
+    }));
+    if (method === "item/reasoning/summaryTextDelta") {
+      const index = Number.isInteger(params.summaryIndex) ? params.summaryIndex : 0;
+      item.summary = growArray(item.summary, index, "");
+      item.summary[index] = `${item.summary[index] || ""}${delta}`;
+    } else {
+      const index = Number.isInteger(params.contentIndex) ? params.contentIndex : 0;
+      item.content = growArray(item.content, index, "");
+      item.content[index] = `${item.content[index] || ""}${delta}`;
+    }
+    return;
+  }
+
+  const item = ensureItemOfType(turn, itemId, () => ({
+    type: "commandExecution",
+    id: itemId,
+    command: "",
+    cwd: conversation.cwd || "/",
+    processId: null,
+    source: "exec",
+    status: "inProgress",
+    commandActions: [],
+    aggregatedOutput: "",
+    exitCode: null,
+    durationMs: null,
+  }));
+  item.aggregatedOutput = `${item.aggregatedOutput || ""}${delta}`;
+}
+
+function ensureItemOfType(turn, itemId, createItem) {
+  let item = turn.items.find((candidate) => readString(candidate?.id) === itemId);
+  if (!item) {
+    item = createItem();
+    turn.items.push(item);
+  }
+  return item;
+}
+
+function growArray(value, index, fillValue) {
+  const next = Array.isArray(value) ? value : [];
+  while (next.length <= index) {
+    next.push(fillValue);
+  }
+  return next;
+}
+
+function buildConversationStatePatches(previousState, currentState, {
+  maxPatchCount = DEFAULT_MAX_PATCH_COUNT,
+  maxPatchBytes = DEFAULT_MAX_PATCH_BYTES,
+} = {}) {
+  if (!previousState || typeof previousState !== "object" || !currentState || typeof currentState !== "object") {
+    return null;
+  }
+  const patches = [];
+  const ok = collectJSONPatches(previousState, currentState, [], patches, maxPatchCount);
+  if (!ok) {
+    return null;
+  }
+  if (patches.length === 0) {
+    return patches;
+  }
+  const patchBytes = Buffer.byteLength(JSON.stringify(patches), "utf8");
+  if (patchBytes > maxPatchBytes) {
+    return null;
+  }
+  return patches;
+}
+
+function collectJSONPatches(previousValue, currentValue, pathParts, patches, maxPatchCount) {
+  if (jsonValuesEqual(previousValue, currentValue)) {
+    return true;
+  }
+  if (patches.length > maxPatchCount) {
+    return false;
+  }
+
+  if (Array.isArray(previousValue) || Array.isArray(currentValue)) {
+    if (!Array.isArray(previousValue) || !Array.isArray(currentValue)) {
+      return pushPatch(patches, maxPatchCount, {
+        op: "replace",
+        path: pathParts,
+        value: cloneJSON(currentValue),
+      });
+    }
+    return collectArrayPatches(previousValue, currentValue, pathParts, patches, maxPatchCount);
+  }
+
+  if (isPlainJSONObject(previousValue) || isPlainJSONObject(currentValue)) {
+    if (!isPlainJSONObject(previousValue) || !isPlainJSONObject(currentValue)) {
+      return pushPatch(patches, maxPatchCount, {
+        op: "replace",
+        path: pathParts,
+        value: cloneJSON(currentValue),
+      });
+    }
+    return collectObjectPatches(previousValue, currentValue, pathParts, patches, maxPatchCount);
+  }
+
+  return pushPatch(patches, maxPatchCount, {
+    op: "replace",
+    path: pathParts,
+    value: cloneJSON(currentValue),
+  });
+}
+
+function collectArrayPatches(previousArray, currentArray, pathParts, patches, maxPatchCount) {
+  const sharedLength = Math.min(previousArray.length, currentArray.length);
+  for (let index = 0; index < sharedLength; index += 1) {
+    if (!collectJSONPatches(previousArray[index], currentArray[index], [...pathParts, index], patches, maxPatchCount)) {
+      return false;
+    }
+  }
+  for (let index = previousArray.length - 1; index >= currentArray.length; index -= 1) {
+    if (!pushPatch(patches, maxPatchCount, {
+      op: "remove",
+      path: [...pathParts, index],
+    })) {
+      return false;
+    }
+  }
+  for (let index = sharedLength; index < currentArray.length; index += 1) {
+    if (!pushPatch(patches, maxPatchCount, {
+      op: "add",
+      path: [...pathParts, index],
+      value: cloneJSON(currentArray[index]),
+    })) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function collectObjectPatches(previousObject, currentObject, pathParts, patches, maxPatchCount) {
+  for (const key of Object.keys(previousObject)) {
+    if (Object.prototype.hasOwnProperty.call(currentObject, key)) {
+      continue;
+    }
+    if (!pushPatch(patches, maxPatchCount, {
+      op: "remove",
+      path: [...pathParts, key],
+    })) {
+      return false;
+    }
+  }
+
+  for (const key of Object.keys(currentObject)) {
+    if (!Object.prototype.hasOwnProperty.call(previousObject, key)) {
+      if (!pushPatch(patches, maxPatchCount, {
+        op: "add",
+        path: [...pathParts, key],
+        value: cloneJSON(currentObject[key]),
+      })) {
+        return false;
+      }
+      continue;
+    }
+    if (!collectJSONPatches(previousObject[key], currentObject[key], [...pathParts, key], patches, maxPatchCount)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function pushPatch(patches, maxPatchCount, patch) {
+  if (patch.path.length === 0) {
+    return false;
+  }
+  patches.push(patch);
+  return patches.length <= maxPatchCount;
+}
+
+function isPlainJSONObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function jsonValuesEqual(left, right) {
+  if (left === right) {
+    return true;
+  }
+  if (left == null || right == null) {
+    return left === right;
+  }
+  if (typeof left !== "object" || typeof right !== "object") {
+    return false;
+  }
+  return false;
+}
+
+function createDesktopOwnerIpcClient({
+  socketPath,
+  netModule,
+  now,
+  requestTimeoutMs,
+  reconnectMs,
+  logPrefix,
+  startRouterWhenMissing = true,
+  onConnected,
+  onBroadcast,
+  canHandleRequest,
+  handleRequest,
+}) {
+  let socket = null;
+  let isConnecting = false;
+  let isInitialized = false;
+  let clientId = "";
+  let readBuffer = Buffer.alloc(0);
+  let reconnectTimer = null;
+  let shouldReconnect = false;
+  const localRouter = startRouterWhenMissing
+    ? createDesktopIpcRouterServer({
+      socketPath,
+      netModule,
+      now,
+      requestTimeoutMs,
+      discoveryTimeoutMs: Math.min(requestTimeoutMs, DEFAULT_DISCOVERY_TIMEOUT_MS),
+      logPrefix,
+    })
+    : null;
+  const pendingResponses = new Map();
+
+  function ensureConnected() {
+    shouldReconnect = true;
+    if (socket || isConnecting) {
+      return;
+    }
+    clearReconnectTimer();
+    isConnecting = true;
+    const nextSocket = netModule.createConnection(socketPath);
+    socket = nextSocket;
+
+    nextSocket.on("connect", () => {
+      isConnecting = false;
+      sendRequest("initialize", { clientType: "remodex-bridge" }, { initializing: true })
+        .then((result) => {
+          clientId = readString(result?.clientId) || clientId;
+          isInitialized = true;
+          onConnected?.(clientId);
+        })
+        .catch((error) => {
+          console.warn(`${logPrefix} desktop IPC live owner initialize failed: ${error.message}`);
+          closeSocket();
+        });
+    });
+    nextSocket.on("data", handleData);
+    nextSocket.on("close", () => handleClose(nextSocket));
+    nextSocket.on("error", (error) => {
+      if (error?.code === "ENOENT" || error?.code === "ECONNREFUSED") {
+        startLocalRouterAfterMissingSocket(error.code);
+        return;
+      }
+      if (error?.code !== "ENOENT" && error?.code !== "ECONNREFUSED") {
+        console.warn(`${logPrefix} desktop IPC live owner connection failed: ${error.message}`);
+      }
+    });
+  }
+
+  function startLocalRouterAfterMissingSocket(reasonCode) {
+    if (!localRouter || localRouter.isStarted) {
+      return;
+    }
+    localRouter.start({ removeStaleSocket: reasonCode === "ECONNREFUSED" })
+      .then(() => {
+        if (!shouldReconnect) {
+          return;
+        }
+        closeSocket();
+        isConnecting = false;
+        clearReconnectTimer();
+        ensureConnected();
+      })
+      .catch((error) => {
+        if (error?.code !== "EADDRINUSE") {
+          console.warn(`${logPrefix} desktop IPC router fallback failed: ${error.message}`);
+        }
+      });
+  }
+
+  function sendBroadcast(method, params) {
+    ensureConnected();
+    if (!socket || socket.destroyed || !isInitialized) {
+      return false;
+    }
+    const envelope = {
+      type: "broadcast",
+      method,
+      sourceClientId: clientId,
+      params: params || {},
+      version: METHOD_VERSION_BY_NAME.get(method) || 1,
+    };
+    return writeEnvelope(envelope);
+  }
+
+  function sendRequest(method, params, { initializing = false } = {}) {
+    ensureConnected();
+    if (!socket || socket.destroyed) {
+      return Promise.reject(new Error("Desktop IPC is not connected."));
+    }
+    const requestId = `remodex-owner-${now().toString(36)}-${randomUUID()}`;
+    const envelope = {
+      type: "request",
+      requestId,
+      sourceClientId: initializing ? "initializing-client" : clientId || "remodex-bridge",
+      version: METHOD_VERSION_BY_NAME.get(method) || 1,
+      method,
+      params: params || {},
+    };
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pendingResponses.delete(requestId);
+        reject(new Error(`Desktop IPC request timed out: ${method}`));
+      }, requestTimeoutMs);
+      timeout.unref?.();
+      pendingResponses.set(requestId, {
+        method,
+        resolve,
+        reject,
+        timeout,
+      });
+      if (!writeEnvelope(envelope)) {
+        clearTimeout(timeout);
+        pendingResponses.delete(requestId);
+        reject(new Error("Desktop IPC write failed."));
+      }
+    });
+  }
+
+  function handleData(chunk) {
+    readBuffer = Buffer.concat([readBuffer, chunk]);
+    while (readBuffer.length >= FRAME_HEADER_BYTES) {
+      const frameLength = readBuffer.readUInt32LE(0);
+      if (frameLength > MAX_FRAME_BYTES) {
+        closeSocket();
+        return;
+      }
+      if (readBuffer.length < FRAME_HEADER_BYTES + frameLength) {
+        return;
+      }
+
+      const payload = readBuffer.slice(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + frameLength).toString("utf8");
+      readBuffer = readBuffer.slice(FRAME_HEADER_BYTES + frameLength);
+      const envelope = safeParseJSON(payload);
+      if (envelope) {
+        dispatchEnvelope(envelope);
+      }
+    }
+  }
+
+  function dispatchEnvelope(envelope) {
+    if (envelope.type === "response") {
+      handleResponse(envelope);
+      return;
+    }
+    if (envelope.type === "broadcast") {
+      onBroadcast?.(envelope);
+      return;
+    }
+    if (envelope.type === "client-discovery-request") {
+      const canHandle = Boolean(canHandleRequest?.(envelope));
+      writeEnvelope({
+        type: "client-discovery-response",
+        requestId: envelope.requestId,
+        response: { canHandle },
+      });
+      return;
+    }
+    if (envelope.type === "request") {
+      handleIncomingRequest(envelope);
+    }
+  }
+
+  function handleResponse(envelope) {
+    const requestId = requestIdKey(envelope.requestId);
+    const waiter = requestId ? pendingResponses.get(requestId) : null;
+    if (!waiter) {
+      return;
+    }
+    pendingResponses.delete(requestId);
+    clearTimeout(waiter.timeout);
+    if (envelope.resultType === "error") {
+      waiter.reject(new Error(envelope.error || `Desktop IPC request failed: ${waiter.method}`));
+      return;
+    }
+    waiter.resolve(envelope.result ?? null);
+  }
+
+  function handleIncomingRequest(envelope) {
+    Promise.resolve()
+      .then(() => handleRequest(envelope))
+      .then((result) => {
+        writeEnvelope({
+          type: "response",
+          requestId: envelope.requestId,
+          resultType: "success",
+          method: envelope.method,
+          handledByClientId: clientId,
+          result: result ?? null,
+        });
+      })
+      .catch((error) => {
+        writeEnvelope({
+          type: "response",
+          requestId: envelope.requestId,
+          resultType: "error",
+          method: envelope.method,
+          handledByClientId: clientId,
+          error: error?.message || "Remodex IPC owner request failed.",
+        });
+      });
+  }
+
+  function handleClose(closedSocket) {
+    if (socket && socket !== closedSocket) {
+      return;
+    }
+    socket = null;
+    isConnecting = false;
+    isInitialized = false;
+    clientId = "";
+    readBuffer = Buffer.alloc(0);
+    for (const waiter of pendingResponses.values()) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(new Error("Desktop IPC connection closed."));
+    }
+    pendingResponses.clear();
+    scheduleReconnect();
+  }
+
+  function scheduleReconnect() {
+    if (!shouldReconnect || reconnectTimer) {
+      return;
+    }
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      ensureConnected();
+    }, reconnectMs);
+    reconnectTimer.unref?.();
+  }
+
+  function clearReconnectTimer() {
+    if (!reconnectTimer) {
+      return;
+    }
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  function closeSocket() {
+    if (!socket) {
+      return;
+    }
+    const closingSocket = socket;
+    socket = null;
+    closingSocket.destroy();
+  }
+
+  function close() {
+    shouldReconnect = false;
+    clearReconnectTimer();
+    closeSocket();
+    localRouter?.close();
+    for (const waiter of pendingResponses.values()) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(new Error("Desktop IPC live owner stopped."));
+    }
+    pendingResponses.clear();
+  }
+
+  function writeEnvelope(envelope) {
+    if (!socket || socket.destroyed) {
+      return false;
+    }
+    try {
+      writeFrame(socket, JSON.stringify(envelope));
+      return true;
+    } catch {
+      closeSocket();
+      return false;
+    }
+  }
+
+  return {
+    ensureConnected,
+    sendBroadcast,
+    close,
+    get clientId() {
+      return clientId;
+    },
+  };
+}
+
+function createDesktopIpcRouterServer({
+  socketPath,
+  netModule,
+  now,
+  requestTimeoutMs,
+  discoveryTimeoutMs,
+  logPrefix,
+}) {
+  let server = null;
+  let started = false;
+  let starting = null;
+  let closed = false;
+  let nextClientSeq = 1;
+  const clientsById = new Map();
+  const pendingDiscoveryResponses = new Map();
+  const pendingRoutedResponses = new Map();
+
+  function start({ removeStaleSocket = false } = {}) {
+    if (started) {
+      return Promise.resolve();
+    }
+    if (starting) {
+      return starting;
+    }
+    closed = false;
+    starting = new Promise((resolve, reject) => {
+      try {
+        prepareSocketPathForListen(socketPath, { removeStaleSocket });
+      } catch (error) {
+        starting = null;
+        reject(error);
+        return;
+      }
+
+      const nextServer = netModule.createServer((socket) => attachClient(socket));
+      server = nextServer;
+      nextServer.on("error", (error) => {
+        starting = null;
+        server = null;
+        reject(error);
+      });
+      nextServer.listen(socketPath, () => {
+        started = true;
+        starting = null;
+        nextServer.removeAllListeners("error");
+        nextServer.on("error", (error) => {
+          console.warn(`${logPrefix} desktop IPC router fallback error: ${error.message}`);
+        });
+        resolve();
+      });
+      nextServer.unref?.();
+    });
+    return starting;
+  }
+
+  function attachClient(socket) {
+    const client = {
+      id: "",
+      type: "",
+      socket,
+      buffer: Buffer.alloc(0),
+      initialized: false,
+    };
+    socket.on("data", (chunk) => handleClientData(client, chunk));
+    socket.on("close", () => removeClient(client));
+    socket.on("error", () => removeClient(client));
+  }
+
+  function handleClientData(client, chunk) {
+    client.buffer = Buffer.concat([client.buffer, chunk]);
+    while (client.buffer.length >= FRAME_HEADER_BYTES) {
+      const frameLength = client.buffer.readUInt32LE(0);
+      if (frameLength > MAX_FRAME_BYTES) {
+        client.socket.destroy();
+        return;
+      }
+      if (client.buffer.length < FRAME_HEADER_BYTES + frameLength) {
+        return;
+      }
+
+      const payload = client.buffer.slice(FRAME_HEADER_BYTES, FRAME_HEADER_BYTES + frameLength).toString("utf8");
+      client.buffer = client.buffer.slice(FRAME_HEADER_BYTES + frameLength);
+      const envelope = safeParseJSON(payload);
+      if (envelope) {
+        dispatchClientEnvelope(client, envelope);
+      }
+    }
+  }
+
+  function dispatchClientEnvelope(client, envelope) {
+    if (envelope.type === "request" && envelope.method === "initialize") {
+      initializeClient(client, envelope);
+      return;
+    }
+    if (envelope.type === "broadcast") {
+      relayBroadcast(client, envelope);
+      return;
+    }
+    if (envelope.type === "request") {
+      routeClientRequest(client, envelope);
+      return;
+    }
+    if (envelope.type === "response") {
+      routeClientResponse(client, envelope);
+      return;
+    }
+    if (envelope.type === "client-discovery-request") {
+      answerClientDiscoveryRequest(client, envelope);
+      return;
+    }
+    if (envelope.type === "client-discovery-response") {
+      resolveDiscoveryResponse(envelope);
+    }
+  }
+
+  function initializeClient(client, envelope) {
+    if (!client.id) {
+      client.id = `remodex-router-${now().toString(36)}-${nextClientSeq}`;
+      nextClientSeq += 1;
+      clientsById.set(client.id, client);
+    }
+    client.initialized = true;
+    client.type = readString(envelope.params?.clientType) || readString(envelope.params?.client_type);
+    writeEnvelopeToClient(client, {
+      type: "response",
+      requestId: envelope.requestId,
+      resultType: "success",
+      method: "initialize",
+      handledByClientId: "remodex-ipc-router",
+      result: { clientId: client.id },
+    });
+    relayBroadcast(client, {
+      type: "broadcast",
+      method: CLIENT_STATUS_CHANGED,
+      sourceClientId: client.id,
+      version: METHOD_VERSION_BY_NAME.get(CLIENT_STATUS_CHANGED) || 1,
+      params: {
+        clientId: client.id,
+        clientType: client.type,
+        status: "connected",
+      },
+    });
+  }
+
+  function relayBroadcast(sender, envelope) {
+    const normalizedEnvelope = {
+      ...envelope,
+      sourceClientId: readString(envelope.sourceClientId) || sender.id,
+      version: envelope.version || METHOD_VERSION_BY_NAME.get(envelope.method) || 1,
+    };
+    for (const client of clientsById.values()) {
+      if (!client.initialized || client === sender) {
+        continue;
+      }
+      writeEnvelopeToClient(client, normalizedEnvelope);
+    }
+  }
+
+  async function routeClientRequest(sender, envelope) {
+    const target = await discoverTargetForRequest(sender, envelope);
+    if (!target) {
+      writeEnvelopeToClient(sender, {
+        type: "response",
+        requestId: envelope.requestId,
+        resultType: "error",
+        method: envelope.method,
+        handledByClientId: "",
+        error: `No Codex IPC client can handle ${envelope.method}.`,
+      });
+      return;
+    }
+    const requestId = requestIdKey(envelope.requestId);
+    if (!requestId) {
+      writeEnvelopeToClient(sender, {
+        type: "response",
+        requestId: envelope.requestId,
+        resultType: "error",
+        method: envelope.method,
+        handledByClientId: target.id,
+        error: "Missing requestId.",
+      });
+      return;
+    }
+
+    const routeKey = routedResponseKey(target.id, requestId);
+    const timeout = setTimeout(() => {
+      pendingRoutedResponses.delete(routeKey);
+      writeEnvelopeToClient(sender, {
+        type: "response",
+        requestId: envelope.requestId,
+        resultType: "error",
+        method: envelope.method,
+        handledByClientId: target.id,
+        error: `Codex IPC routed request timed out: ${envelope.method}`,
+      });
+    }, requestTimeoutMs);
+    timeout.unref?.();
+    pendingRoutedResponses.set(routeKey, {
+      sender,
+      timeout,
+    });
+    if (!writeEnvelopeToClient(target, {
+      ...envelope,
+      sourceClientId: sender.id,
+    })) {
+      clearTimeout(timeout);
+      pendingRoutedResponses.delete(routeKey);
+      writeEnvelopeToClient(sender, {
+        type: "response",
+        requestId: envelope.requestId,
+        resultType: "error",
+        method: envelope.method,
+        handledByClientId: target.id,
+        error: "Codex IPC routed request write failed.",
+      });
+    }
+  }
+
+  function routeClientResponse(client, envelope) {
+    const routeKey = routedResponseKey(client.id, requestIdKey(envelope.requestId));
+    const route = pendingRoutedResponses.get(routeKey);
+    if (!route) {
+      return;
+    }
+    pendingRoutedResponses.delete(routeKey);
+    clearTimeout(route.timeout);
+    writeEnvelopeToClient(route.sender, envelope);
+  }
+
+  async function answerClientDiscoveryRequest(sender, envelope) {
+    const target = await discoverTargetForRequest(sender, envelope.request || envelope);
+    writeEnvelopeToClient(sender, {
+      type: "client-discovery-response",
+      requestId: envelope.requestId,
+      response: {
+        canHandle: Boolean(target),
+      },
+    });
+  }
+
+  async function discoverTargetForRequest(sender, request) {
+    const candidates = Array.from(clientsById.values()).filter((client) => (
+      client.initialized && client !== sender && !client.socket.destroyed
+    ));
+    const results = await Promise.all(candidates.map(async (candidate) => {
+      const canHandle = await askClientCanHandle(candidate, request);
+      return canHandle ? candidate : null;
+    }));
+    return results.find(Boolean) || null;
+  }
+
+  function askClientCanHandle(client, request) {
+    const requestId = `remodex-router-discovery-${now().toString(36)}-${randomUUID()}`;
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        pendingDiscoveryResponses.delete(requestId);
+        resolve(false);
+      }, discoveryTimeoutMs);
+      timeout.unref?.();
+      pendingDiscoveryResponses.set(requestId, {
+        resolve,
+        timeout,
+      });
+      if (!writeEnvelopeToClient(client, {
+        type: "client-discovery-request",
+        requestId,
+        request,
+      })) {
+        clearTimeout(timeout);
+        pendingDiscoveryResponses.delete(requestId);
+        resolve(false);
+      }
+    });
+  }
+
+  function resolveDiscoveryResponse(envelope) {
+    const requestId = requestIdKey(envelope.requestId);
+    const pending = requestId ? pendingDiscoveryResponses.get(requestId) : null;
+    if (!pending) {
+      return;
+    }
+    pendingDiscoveryResponses.delete(requestId);
+    clearTimeout(pending.timeout);
+    pending.resolve(Boolean(envelope.response?.canHandle));
+  }
+
+  function removeClient(client) {
+    if (client.id) {
+      clientsById.delete(client.id);
+      relayBroadcast(client, {
+        type: "broadcast",
+        method: CLIENT_STATUS_CHANGED,
+        sourceClientId: client.id,
+        version: METHOD_VERSION_BY_NAME.get(CLIENT_STATUS_CHANGED) || 1,
+        params: {
+          clientId: client.id,
+          clientType: client.type,
+          status: "disconnected",
+        },
+      });
+    }
+    for (const [routeKey, route] of Array.from(pendingRoutedResponses.entries())) {
+      if (!routeKey.startsWith(`${client.id}:`)) {
+        continue;
+      }
+      pendingRoutedResponses.delete(routeKey);
+      clearTimeout(route.timeout);
+      writeEnvelopeToClient(route.sender, {
+        type: "response",
+        requestId: routeKey.slice(client.id.length + 1),
+        resultType: "error",
+        method: "",
+        handledByClientId: client.id,
+        error: "Codex IPC target disconnected.",
+      });
+    }
+  }
+
+  function close() {
+    const shouldRemoveSocketPath = started || server;
+    closed = true;
+    started = false;
+    starting = null;
+    for (const pending of pendingDiscoveryResponses.values()) {
+      clearTimeout(pending.timeout);
+      pending.resolve(false);
+    }
+    pendingDiscoveryResponses.clear();
+    for (const route of pendingRoutedResponses.values()) {
+      clearTimeout(route.timeout);
+    }
+    pendingRoutedResponses.clear();
+    for (const client of clientsById.values()) {
+      client.socket.destroy();
+    }
+    clientsById.clear();
+    if (server) {
+      server.close();
+      server = null;
+    }
+    if (shouldRemoveSocketPath) {
+      removeSocketPathAfterClose(socketPath);
+    }
+  }
+
+  function writeEnvelopeToClient(client, envelope) {
+    if (!client?.socket || client.socket.destroyed) {
+      return false;
+    }
+    try {
+      writeFrame(client.socket, JSON.stringify(envelope));
+      return true;
+    } catch {
+      client.socket.destroy();
+      return false;
+    }
+  }
+
+  return {
+    start,
+    close,
+    get isStarted() {
+      return started && !closed;
+    },
+  };
+}
+
+function routedResponseKey(clientId, requestId) {
+  return `${clientId}:${requestId}`;
+}
+
+function prepareSocketPathForListen(socketPath, { removeStaleSocket = false } = {}) {
+  if (process.platform === "win32") {
+    return;
+  }
+  fs.mkdirSync(path.dirname(socketPath), { recursive: true });
+  if (removeStaleSocket && fs.existsSync(socketPath)) {
+    const socketStat = fs.lstatSync(socketPath);
+    if (!socketStat.isSocket()) {
+      throw new Error(`Refusing to replace non-socket Codex IPC path: ${socketPath}`);
+    }
+    fs.unlinkSync(socketPath);
+  }
+}
+
+function removeSocketPathAfterClose(socketPath) {
+  if (process.platform === "win32") {
+    return;
+  }
+  try {
+    if (fs.existsSync(socketPath)) {
+      fs.unlinkSync(socketPath);
+    }
+  } catch {
+    // Best-effort cleanup only; the next fallback start can remove stale sockets.
+  }
+}
+
+function sanitizeTurnStartParams(params) {
+  const sanitized = {};
+  for (const [key, value] of Object.entries(params || {})) {
+    if (ALLOWED_TURN_START_PARAM_KEYS.has(key)) {
+      sanitized[key] = value;
+    }
+  }
+  if (!Array.isArray(sanitized.input)) {
+    sanitized.input = [];
+  }
+  return sanitized;
+}
+
+function readThreadFromResponse(message) {
+  const result = message?.result || message?.payload || {};
+  return result.thread && typeof result.thread === "object"
+    ? result.thread
+    : result;
+}
+
+function readThreadIdFromParams(params) {
+  return readString(params?.threadId)
+    || readString(params?.thread_id)
+    || readString(params?.conversationId)
+    || readString(params?.conversation_id)
+    || readString(params?.turn?.threadId)
+    || readString(params?.turn?.thread_id)
+    || readString(params?.thread?.id);
+}
+
+function readConversationIdFromFollowerParams(params) {
+  return readString(params?.conversationId)
+    || readString(params?.conversation_id)
+    || readString(params?.threadId)
+    || readString(params?.thread_id)
+    || readString(params?.turnStartParams?.threadId)
+    || readString(params?.turn_start_params?.threadId);
+}
+
+function timestampSecondsToMs(value) {
+  return Number.isFinite(value) && value > 0 ? Math.round(value * 1000) : 0;
+}
+
+function requestIdKey(value) {
+  if (typeof value === "string" && value) {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return "";
+}
+
+function readString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function normalizeToken(value) {
+  return typeof value === "string"
+    ? value.toLowerCase().replace(/[_-\s]+/g, "")
+    : "";
+}
+
+function cloneJSON(value) {
+  if (value == null) {
+    return value;
+  }
+  return JSON.parse(JSON.stringify(value));
+}
+
+function safeParseJSON(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function writeFrame(socket, payload) {
+  const body = Buffer.from(payload, "utf8");
+  const header = Buffer.alloc(FRAME_HEADER_BYTES);
+  header.writeUInt32LE(body.length, 0);
+  socket.write(Buffer.concat([header, body]));
+}
+
+function resolveDefaultIpcSocketPath() {
+  if (process.platform === "win32") {
+    return "\\\\.\\pipe\\codex-ipc";
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
+}
+
+module.exports = {
+  applyAppServerMessageToConversationState,
+  buildConversationStatePatches,
+  buildConversationStateFromThread,
+  createDesktopIpcLiveOwner,
+  resolveDefaultIpcSocketPath,
+};

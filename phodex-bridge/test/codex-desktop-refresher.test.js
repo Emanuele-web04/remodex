@@ -114,6 +114,8 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
     env: {
       REMODEX_REFRESH_COMMAND: "echo refresh",
       REMODEX_REFRESH_ENABLED: "false",
+      REMODEX_DESKTOP_IPC_LIVE_SYNC: "false",
+      REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS: "25",
       REMODEX_KEEP_MAC_AWAKE: "false",
     },
     platform: "darwin",
@@ -129,6 +131,8 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(macConfig.keepMacAwakeEnabled, false);
   assert.equal(macConfig.relayUrl, "");
   assert.equal(macConfig.pushServiceUrl, "");
+  assert.equal(macConfig.desktopIpcLiveSyncEnabled, true);
+  assert.equal(macConfig.desktopIpcSnapshotDebounceMs, 75);
   assert.equal(persistedKeepAwakeConfig.keepMacAwakeEnabled, false);
   assert.equal(macEndpointConfig.refreshEnabled, false);
   assert.equal(linuxConfig.refreshEnabled, false);
@@ -136,6 +140,8 @@ test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   assert.equal(explicitOnConfig.refreshEnabled, true);
   assert.equal(explicitOnConfig.desktopIpcSocketPath, "/tmp/remodex-ipc.sock");
   assert.equal(explicitOffConfig.refreshEnabled, false);
+  assert.equal(explicitOffConfig.desktopIpcLiveSyncEnabled, false);
+  assert.equal(explicitOffConfig.desktopIpcSnapshotDebounceMs, 25);
   assert.equal(explicitOffConfig.keepMacAwakeEnabled, false);
 });
 
