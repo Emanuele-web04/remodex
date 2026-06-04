@@ -16,7 +16,11 @@ const {
   applyConversationStateChange,
   createDesktopIpcActionFollower,
   desktopFollowerPayloadForResponse,
+  hasActiveDesktopActivityForTurn,
+  projectDesktopActivityNotifications,
   projectDesktopAssistantDeltaNotifications,
+  projectDesktopTurnCompletedNotifications,
+  projectDesktopUserMessageNotifications,
   projectPendingDesktopActions,
   resolveDefaultIpcSocketPath,
   seedConversationStateFromThreadRead,
@@ -454,6 +458,270 @@ test("does not replay unchanged or rewritten assistant text as live deltas", () 
     projectDesktopAssistantDeltaNotifications("thread-1", previousState, nextState),
     []
   );
+});
+
+test("projects desktop user prelude notifications once for active assistant turns", () => {
+  const mirroredKeys = new Set();
+  const state = {
+    turns: [{
+      id: "turn-1",
+      items: [{
+        id: "user-1",
+        type: "user_message",
+        text: "Fix the ordering",
+        createdAt: "2026-05-26T20:01:42.000Z",
+      }, {
+        id: "assistant-1",
+        type: "assistant_message",
+        text: "Working",
+      }],
+    }, {
+      id: "turn-old",
+      items: [{
+        id: "user-old",
+        type: "user_message",
+        text: "Old prompt",
+      }],
+    }],
+  };
+
+  const first = projectDesktopUserMessageNotifications(
+    "thread-1",
+    state,
+    mirroredKeys,
+    new Set(["turn-1"])
+  );
+  const second = projectDesktopUserMessageNotifications(
+    "thread-1",
+    state,
+    mirroredKeys,
+    new Set(["turn-1"])
+  );
+
+  assert.deepEqual(first, [{
+    method: "codex/event/user_message",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      message: "Fix the ordering",
+      id: "user-1",
+      timestamp: "2026-05-26T20:01:42.000Z",
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
+    },
+  }]);
+  assert.deepEqual(second, []);
+});
+
+test("projects desktop turn completion notifications from terminal state", () => {
+  const state = {
+    turns: [{
+      id: "turn-1",
+      status: "completed",
+      items: [{
+        id: "assistant-1",
+        type: "assistant_message",
+        text: "Done",
+      }],
+    }, {
+      id: "turn-running",
+      status: "running",
+      items: [{
+        id: "assistant-running",
+        type: "assistant_message",
+        text: "Still going",
+      }],
+    }, {
+      id: "turn-terminal-active-tool",
+      status: "completed",
+      items: [{
+        id: "tool-running",
+        type: "tool_call",
+        status: "running",
+      }],
+    }, {
+      id: "turn-terminal-active-function-call",
+      status: "completed",
+      items: [{
+        id: "call-active",
+        type: "function_call",
+        call_id: "call-active",
+        name: "exec_command",
+      }],
+    }],
+  };
+
+  assert.deepEqual(
+    projectDesktopTurnCompletedNotifications(
+      "thread-1",
+      state,
+      new Set([
+        "turn-1",
+        "turn-running",
+        "turn-terminal-active-tool",
+        "turn-terminal-active-function-call",
+      ])
+    ),
+    [{
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        id: "turn-1",
+        status: "completed",
+        remodexDesktopMirror: true,
+        remodexDesktopIpcMirror: true,
+      },
+    }]
+  );
+});
+
+test("detects active desktop activity before idle turn completion", () => {
+  const state = {
+    turns: [{
+      id: "turn-running-tool",
+      items: [{
+        id: "tool-1",
+        type: "tool_call",
+        status: "running",
+      }],
+    }, {
+      id: "turn-running-function-call",
+      items: [{
+        id: "call-active",
+        type: "function_call",
+        call_id: "call-active",
+        name: "exec_command",
+      }],
+    }, {
+      id: "turn-finished-function-call",
+      items: [{
+        id: "call-finished",
+        type: "function_call",
+        call_id: "call-finished",
+        name: "exec_command",
+      }, {
+        type: "function_call_output",
+        call_id: "call-finished",
+        output: "done",
+      }],
+    }, {
+      id: "turn-completed-tool",
+      items: [{
+        id: "tool-2",
+        type: "command_execution",
+        status: "completed",
+      }],
+    }],
+  };
+
+  assert.equal(hasActiveDesktopActivityForTurn(state, "turn-running-tool"), true);
+  assert.equal(hasActiveDesktopActivityForTurn(state, "turn-running-function-call"), true);
+  assert.equal(hasActiveDesktopActivityForTurn(state, "turn-finished-function-call"), false);
+  assert.equal(hasActiveDesktopActivityForTurn(state, "turn-completed-tool"), false);
+});
+
+test("projects desktop IPC bare function calls as live tool rows", () => {
+  const mirroredKeys = new Set();
+  const stateWithCall = {
+    turns: [{
+      id: "turn-tool",
+      items: [{
+        id: "call-1",
+        type: "function_call",
+        call_id: "call-1",
+        name: "exec_command",
+        arguments: JSON.stringify({ cmd: "git status", workdir: "/repo" }),
+      }],
+    }],
+  };
+
+  assert.deepEqual(projectDesktopActivityNotifications("thread-1", stateWithCall, mirroredKeys), [{
+    method: "codex/event/exec_command_begin",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-tool",
+      call_id: "call-1",
+      command: "git status",
+      cwd: "/repo",
+      status: "running",
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
+    },
+  }]);
+  assert.deepEqual(projectDesktopActivityNotifications("thread-1", stateWithCall, mirroredKeys), []);
+
+  const stateWithOutput = {
+    turns: [{
+      id: "turn-tool",
+      items: [
+        ...stateWithCall.turns[0].items,
+        {
+          type: "function_call_output",
+          call_id: "call-1",
+          output: "clean\\n",
+        },
+      ],
+    }],
+  };
+
+  assert.deepEqual(projectDesktopActivityNotifications("thread-1", stateWithOutput, mirroredKeys), [{
+    method: "codex/event/exec_command_output_delta",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-tool",
+      call_id: "call-1",
+      command: "git status",
+      cwd: "/repo",
+      chunk: "clean\\n",
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
+    },
+  }, {
+    method: "codex/event/exec_command_end",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-tool",
+      call_id: "call-1",
+      command: "git status",
+      cwd: "/repo",
+      status: "completed",
+      output: "clean\\n",
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
+    },
+  }]);
+});
+
+test("projects completed-fast desktop custom tool calls as finished file changes", () => {
+  const notifications = projectDesktopActivityNotifications("thread-1", {
+    turns: [{
+      id: "turn-patch",
+      status: "running",
+      items: [{
+        id: "patch-1",
+        type: "custom_tool_call",
+        call_id: "patch-1",
+        name: "apply_patch",
+        status: "completed",
+        input: [
+          "*** Begin Patch",
+          "*** Add File: note.txt",
+          "+hello",
+          "*** End Patch",
+        ].join("\n"),
+      }],
+    }],
+  }, new Set());
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].method, "codex/event/patch_apply_end");
+  assert.equal(notifications[0].params.threadId, "thread-1");
+  assert.equal(notifications[0].params.turnId, "turn-patch");
+  assert.equal(notifications[0].params.call_id, "patch-1");
+  assert.equal(notifications[0].params.status, "completed");
+  assert.equal(notifications[0].params.success, true);
+  assert.equal(notifications[0].params.changes[0].path, "note.txt");
 });
 
 test("uses the Codex Desktop named pipe as the default Windows IPC path", (t) => {
@@ -1045,6 +1313,7 @@ test("desktop IPC follower mirrors live assistant text growth from desktop state
       outbound.push(JSON.parse(message));
     },
     requestTimeoutMs: 500,
+    turnCompletionIdleMs: 10,
   });
   t.after(() => follower.stopAll());
 
@@ -1066,6 +1335,10 @@ test("desktop IPC follower mirrors live assistant text growth from desktop state
           turns: [{
             id: "turn-live-delta",
             items: [{
+              id: "user-live-delta",
+              type: "user_message",
+              text: "Make the message show first",
+            }, {
               id: "assistant-live-delta",
               type: "assistant_message",
               text: "Hello",
@@ -1086,7 +1359,7 @@ test("desktop IPC follower mirrors live assistant text growth from desktop state
         type: "patches",
         patches: [{
           op: "replace",
-          path: ["turns", 0, "items", 0, "text"],
+          path: ["turns", 0, "items", 1, "text"],
           value: "Hello world",
         }],
       },
@@ -1094,12 +1367,31 @@ test("desktop IPC follower mirrors live assistant text growth from desktop state
   });
 
   await waitFor(() => outbound.find((message) => message.method === "item/agentMessage/delta"));
+  assert.equal(outbound[0].method, "codex/event/user_message");
+  assert.deepEqual(outbound[0].params, {
+    threadId: "thread-live-delta",
+    turnId: "turn-live-delta",
+    message: "Make the message show first",
+    id: "user-live-delta",
+    remodexDesktopMirror: true,
+    remodexDesktopIpcMirror: true,
+  });
   const deltaMessage = outbound.find((message) => message.method === "item/agentMessage/delta");
   assert.deepEqual(deltaMessage.params, {
     threadId: "thread-live-delta",
     turnId: "turn-live-delta",
     itemId: "assistant-live-delta",
     delta: " world",
+  });
+  await waitFor(() => outbound.find((message) => message.method === "turn/completed"));
+  const completedMessage = outbound.find((message) => message.method === "turn/completed");
+  assert.deepEqual(completedMessage.params, {
+    threadId: "thread-live-delta",
+    turnId: "turn-live-delta",
+    id: "turn-live-delta",
+    status: "completed",
+    remodexDesktopMirror: true,
+    remodexDesktopIpcMirror: true,
   });
 });
 

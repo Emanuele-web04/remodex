@@ -209,6 +209,88 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(service.desktopMirroredRunningThreadIDs.contains(threadID))
     }
 
+    func testDesktopIpcCompletionClearsRunningWithoutStampingTerminalTurn() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+            ])
+        )
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertNil(service.turnTerminalState(for: turnID))
+
+        service.handleNotification(
+            method: "turn/activity",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+    }
+
+    func testDesktopIpcCompletionKeepsRunningWhileToolActivityStreams() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "tool-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+            ])
+        )
+        service.appendStreamingSystemItemDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            kind: .toolActivity,
+            delta: "Reading files"
+        )
+        service.flushPendingSystemDeltas(threadId: threadID, itemId: itemID)
+
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.messages(for: threadID).contains { message in
+            message.itemId == itemID && message.isStreaming
+        })
+        XCTAssertNil(service.turnTerminalState(for: turnID))
+    }
+
     func testTurnStartedAcceptsTopLevelIDAsTurnID() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

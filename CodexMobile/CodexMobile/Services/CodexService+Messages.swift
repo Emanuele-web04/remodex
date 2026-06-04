@@ -459,7 +459,7 @@ extension CodexService {
     }
 
     // Clears running/fallback flags together when a thread finishes or disappears.
-    func clearRunningState(for threadId: String) {
+    func clearRunningState(for threadId: String, scheduleHistoryReconcile: Bool = true) {
         runningThreadIDs.remove(threadId)
         protectedRunningFallbackThreadIDs.remove(threadId)
         desktopMirroredRunningThreadIDs.remove(threadId)
@@ -468,7 +468,9 @@ extension CodexService {
         clearMirroredRunningCatchupNeeded(for: threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
         refreshThreadTimelineState(for: threadId)
-        scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
+        if scheduleHistoryReconcile {
+            scheduleCanonicalHistoryReconcileIfNeeded(for: threadId)
+        }
     }
 
     // Clears every running marker during disconnect/cleanup so stale repo-busy state cannot leak.
@@ -592,6 +594,16 @@ extension CodexService {
         threadsWithSatisfiedDeferredHistoryHydration.insert(threadId)
     }
 
+    // Desktop IPC completion is only a local mirror signal, not proof that a
+    // follow-up thread/read is authoritative enough to replace local chronology.
+    func suppressCanonicalHistoryReconcileAfterDesktopIpcCompletion(for threadId: String) {
+        threadsNeedingCanonicalHistoryReconcile.remove(threadId)
+        canonicalHistoryReconcileTaskByThreadID[threadId]?.cancel()
+        canonicalHistoryReconcileTaskByThreadID.removeValue(forKey: threadId)
+        canonicalHistoryReconcileRetryTaskByThreadID[threadId]?.cancel()
+        canonicalHistoryReconcileRetryTaskByThreadID.removeValue(forKey: threadId)
+    }
+
     // With turn pagination, the cursor-backed store replaces one-shot full-history reconciliation.
     func markThreadPaginatedHistorySatisfied(_ threadId: String) {
         threadsNeedingCanonicalHistoryReconcile.remove(threadId)
@@ -611,6 +623,40 @@ extension CodexService {
     // Returns turn ids that ended via interruption so copy actions can stay hidden.
     func stoppedTurnIDs(for threadId: String) -> Set<String> {
         stoppedTurnIDsByThread[threadId] ?? []
+    }
+
+    // Desktop IPC idle completion can arrive while tool rows are still the only active signal.
+    // Keep those rows streaming/running until their own item completion lands.
+    func hasActiveStreamingSystemActivity(threadId: String, turnId: String?) -> Bool {
+        let normalizedTurnId = normalizedIdentifier(turnId)
+        let belongsToTurn: (String?) -> Bool = { candidateTurnId in
+            guard let normalizedTurnId else { return true }
+            return self.normalizedIdentifier(candidateTurnId) == normalizedTurnId
+        }
+
+        if pendingSystemDeltasByKey.values.contains(where: { pending in
+            pending.threadId == threadId
+                && belongsToTurn(pending.turnId)
+                && Self.isActiveSystemActivityKind(pending.kind)
+        }) {
+            return true
+        }
+
+        return messagesByThread[threadId]?.contains(where: { message in
+            message.role == .system
+                && message.isStreaming
+                && belongsToTurn(message.turnId)
+                && Self.isActiveSystemActivityKind(message.kind)
+        }) ?? false
+    }
+
+    private static func isActiveSystemActivityKind(_ kind: CodexMessageKind) -> Bool {
+        switch kind {
+        case .toolActivity, .commandExecution, .fileChange, .subagentAction:
+            return true
+        case .thinking, .chat, .plan, .userInputPrompt:
+            return false
+        }
     }
 
     // Returns sidebar-only chat badge state. This intentionally stays separate from
@@ -1530,7 +1576,6 @@ extension CodexService {
                 if threadMessages[targetIndex].itemId == nil {
                     threadMessages[targetIndex].itemId = itemId
                 }
-                let keepID = threadMessages[targetIndex].id
                 pruneDuplicateSystemRows(
                     in: &threadMessages,
                     keepIndex: targetIndex,
@@ -4109,13 +4154,18 @@ extension CodexService {
         return true
     }
 
-    // Marks streaming assistant state complete once turn/completed arrives.
-    func markTurnCompleted(threadId: String, turnId: String?) {
+    // Flushes streaming rows and clears running flags for terminal or synthetic completion signals.
+    // Callers decide whether the signal is authoritative enough to trigger canonical history reconcile.
+    func markTurnCompleted(
+        threadId: String,
+        turnId: String?,
+        scheduleHistoryReconcile: Bool = true
+    ) {
         let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
         flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId)
         flushPendingSystemDeltasForTurn(threadId: threadId, turnId: resolvedTurnId)
 
-        clearRunningState(for: threadId)
+        clearRunningState(for: threadId, scheduleHistoryReconcile: scheduleHistoryReconcile)
         clearRunningThreadWatch(threadId)
         let shouldFinalizePlanSteps: Bool = {
             if let resolvedTurnId {

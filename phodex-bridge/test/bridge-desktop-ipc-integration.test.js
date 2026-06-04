@@ -134,7 +134,6 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
       },
     },
   });
-
   const actionMessage = await waitForMessage(relayMessages, (message) => message.id === "req-ipc");
   assert.equal(actionMessage.method, "item/tool/requestUserInput");
 
@@ -385,6 +384,10 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
           turns: [{
             id: "turn-ipc-delta",
             items: [{
+              id: "user-ipc-delta",
+              type: "user_message",
+              text: "Please mirror me first",
+            }, {
               id: "assistant-ipc-delta",
               type: "assistant_message",
               text: "Hello",
@@ -405,8 +408,25 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
         type: "patches",
         patches: [{
           op: "replace",
-          path: ["turns", 0, "items", 0, "text"],
+          path: ["turns", 0, "items", 1, "text"],
           value: "Hello world",
+        }],
+      },
+    },
+  });
+  writeFrame(ipcServerSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 1,
+    params: {
+      conversationId: "thread-ipc-delta",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 0, "status"],
+          value: "completed",
         }],
       },
     },
@@ -416,11 +436,162 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
     relayMessages,
     (message) => message.method === "item/agentMessage/delta"
   );
+  const userMessage = relayMessages.find((message) => message.method === "codex/event/user_message");
+  assert.deepEqual(userMessage.params, {
+    threadId: "thread-ipc-delta",
+    turnId: "turn-ipc-delta",
+    message: "Please mirror me first",
+    id: "user-ipc-delta",
+    remodexDesktopMirror: true,
+    remodexDesktopIpcMirror: true,
+  });
+  assert.ok(relayMessages.indexOf(userMessage) < relayMessages.indexOf(deltaMessage));
   assert.deepEqual(deltaMessage.params, {
     threadId: "thread-ipc-delta",
     turnId: "turn-ipc-delta",
     itemId: "assistant-ipc-delta",
     delta: " world",
+  });
+  const completedMessage = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "turn/completed"
+  );
+  assert.deepEqual(completedMessage.params, {
+    threadId: "thread-ipc-delta",
+    turnId: "turn-ipc-delta",
+    id: "turn-ipc-delta",
+    status: "completed",
+    remodexDesktopMirror: true,
+    remodexDesktopIpcMirror: true,
+  });
+  assert.ok(relayMessages.indexOf(deltaMessage) < relayMessages.indexOf(completedMessage));
+});
+
+test("bridge forwards live desktop IPC tool calls to the phone", async (t) => {
+  const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-bridge-ipc-tools-");
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let ipcServerSocket = null;
+  let bridge = null;
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => {
+      const parsed = safeParseJSON(data.toString("utf8"));
+      if (parsed) {
+        relayMessages.push(parsed);
+      }
+    });
+  });
+
+  const ipcServer = net.createServer((socket) => {
+    ipcServerSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "desktop-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => ipcServer.listen(ipcSocketPath, resolve));
+
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      return createFakeCodexTransport();
+    },
+  });
+
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    ipcServer.close();
+    ipcServerSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      pushPreviewMaxChars: 160,
+      refreshEnabled: false,
+      refreshDebounceMs: 1,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcSocketPath: ipcSocketPath,
+    },
+  });
+
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "resume-from-phone",
+    method: "thread/resume",
+    params: { threadId: "thread-ipc-tool" },
+  }));
+
+  await waitFor(() => ipcServerSocket, 2_000);
+  writeFrame(ipcServerSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 1,
+    params: {
+      conversationId: "thread-ipc-tool",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-ipc-tool",
+            status: "running",
+            items: [{
+              id: "user-ipc-tool",
+              type: "user_message",
+              text: "Run git status",
+            }, {
+              id: "call-ipc-tool",
+              type: "function_call",
+              call_id: "call-ipc-tool",
+              name: "exec_command",
+              arguments: JSON.stringify({ cmd: "git status", workdir: "/repo" }),
+            }],
+          }],
+        },
+      },
+    },
+  });
+
+  const userMessage = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "codex/event/user_message"
+  );
+  const toolMessage = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "codex/event/exec_command_begin"
+  );
+
+  assert.ok(relayMessages.indexOf(userMessage) < relayMessages.indexOf(toolMessage));
+  assert.deepEqual(toolMessage.params, {
+    threadId: "thread-ipc-tool",
+    turnId: "turn-ipc-tool",
+    call_id: "call-ipc-tool",
+    command: "git status",
+    cwd: "/repo",
+    status: "running",
+    remodexDesktopMirror: true,
+    remodexDesktopIpcMirror: true,
   });
 });
 

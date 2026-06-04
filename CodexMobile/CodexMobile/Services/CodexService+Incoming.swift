@@ -599,6 +599,7 @@ extension CodexService {
     private func handleTurnCompleted(_ paramsObject: IncomingParamsObject?) {
         let completedTurnID = extractTurnIDForTurnLifecycleEvent(from: paramsObject)
         let turnFailureMessage = parseTurnFailureMessage(from: paramsObject)
+        let isDesktopIpcMirrorCompletion = paramsObject?["remodexDesktopIpcMirror"]?.boolValue == true
 
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: completedTurnID) {
             if let completedTurnID {
@@ -609,9 +610,29 @@ extension CodexService {
                 from: paramsObject,
                 turnFailureMessage: turnFailureMessage
             )
+            if isDesktopIpcMirrorCompletion {
+                suppressCanonicalHistoryReconcileAfterDesktopIpcCompletion(for: threadId)
+                if hasActiveStreamingSystemActivity(threadId: threadId, turnId: resolvedTurnID) {
+                    return
+                }
+                // Desktop IPC completion is an idle/local projection signal. It can stop
+                // running chrome, but must not stamp the turn terminal: a premature
+                // terminal state makes live commentary collapse behind "previous messages"
+                // and makes later mirror activity look stale.
+                markTurnCompleted(
+                    threadId: threadId,
+                    turnId: resolvedTurnID,
+                    scheduleHistoryReconcile: false
+                )
+                return
+            }
             recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: terminalState)
             noteTurnFinished(turnId: resolvedTurnID)
-            markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
+            markTurnCompleted(
+                threadId: threadId,
+                turnId: resolvedTurnID,
+                scheduleHistoryReconcile: true
+            )
             if terminalState == .completed {
                 Task { @MainActor [weak self] in
                     await self?.captureTurnEndWorkspaceCheckpointIfPossible(
