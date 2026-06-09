@@ -10,6 +10,14 @@ const assert = require("node:assert/strict");
 const { createPushNotificationTracker } = require("../src/push-notification-tracker");
 const { createNotificationsHandler } = require("../src/notifications-handler");
 
+// Push completion delivery is fire-and-forget async; flush the microtask queue under full-suite load.
+async function waitForAsyncPushDelivery() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+
 test("push tracker sends one completion push with a stable ready body", async () => {
   const notifications = [];
   const tracker = createPushNotificationTracker({
@@ -75,7 +83,7 @@ test("push tracker sends one completion push with a stable ready body", async ()
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].threadId, "thread-1");
@@ -125,7 +133,7 @@ test("push tracker ignores non-assistant item completions when a turn finishes",
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].body, "Response ready");
@@ -170,7 +178,7 @@ test("push tracker uses failure previews for failed turns", async () => {
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].result, "failed");
@@ -206,7 +214,7 @@ test("push tracker sends a failed push for terminal error events", async () => {
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].result, "failed");
@@ -252,7 +260,7 @@ test("push tracker dedupes turnless terminal thread statuses per time bucket", a
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   currentTime = 31_000;
   tracker.handleOutbound(JSON.stringify({
@@ -263,7 +271,7 @@ test("push tracker dedupes turnless terminal thread statuses per time bucket", a
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(notifications.length, 2);
   assert.equal(notifications[0].threadId, "thread-status");
@@ -304,7 +312,7 @@ test("push tracker ignores thread-status fallback after a turn completion alread
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].turnId, "turn-mixed-runtime");
@@ -352,7 +360,7 @@ test("push tracker clears fallback suppression when a new turn starts", async ()
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(notifications.length, 2);
   assert.equal(notifications[0].turnId, "turn-a");
@@ -383,7 +391,7 @@ test("push tracker expires old sent dedupe keys", async () => {
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
   assert.equal(notifications.length, 1);
 
   currentTime = 24 * 60 * 60 * 1000 + 1;
@@ -395,8 +403,50 @@ test("push tracker expires old sent dedupe keys", async () => {
     },
   }));
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
   assert.equal(notifications.length, 2);
+});
+
+test("push tracker sends permission push on permission/request", async () => {
+  const notifications = [];
+  const tracker = createPushNotificationTracker({
+    sessionId: "session-perm",
+    pushServiceClient: {
+      hasConfiguredBaseUrl: true,
+      async notifyPermissionNeeded(payload) {
+        notifications.push(payload);
+        return { ok: true };
+      },
+    },
+  });
+
+  tracker.handleOutbound(JSON.stringify({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "thread-perm",
+        title: "Deploy fix",
+      },
+    },
+  }));
+  tracker.handleOutbound(JSON.stringify({
+    method: "permission/request",
+    params: {
+      threadId: "thread-perm",
+      turnId: "turn-perm",
+      permissionId: "perm-1",
+      tool: "bash",
+    },
+  }));
+
+  await waitForAsyncPushDelivery();
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].threadId, "thread-perm");
+  assert.equal(notifications[0].turnId, "turn-perm");
+  assert.equal(notifications[0].title, "Deploy fix");
+  assert.match(notifications[0].body, /bash/i);
+  assert.equal(notifications[0].dedupeKey, "permission:thread-perm:perm-1");
 });
 
 test("notifications handler forwards device registration to the push service client", async () => {
@@ -425,7 +475,7 @@ test("notifications handler forwards device registration to the push service cli
     responses.push(JSON.parse(message));
   });
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  await waitForAsyncPushDelivery();
 
   assert.equal(handled, true);
   assert.deepEqual(registrations, [{

@@ -12,7 +12,7 @@ const { createPushNotificationServiceClient } = require("../src/push-notificatio
 test("push service client aborts stalled requests with a timeout error", async () => {
   let attempts = 0;
   const client = createPushNotificationServiceClient({
-    baseUrl: "https://push.example.test",
+    baseUrl: "http://localhost:4321",
     sessionId: "session-timeout",
     notificationSecret: "secret-timeout",
     requestTimeoutMs: 5,
@@ -46,7 +46,7 @@ test("push service client retries transient server failures with exponential del
   const delays = [];
   const payloads = [];
   const client = createPushNotificationServiceClient({
-    baseUrl: "https://push.example.test",
+    baseUrl: "http://localhost:4321",
     sessionId: "session-retry",
     notificationSecret: "secret-retry",
     retryBaseDelayMs: 25,
@@ -81,4 +81,35 @@ test("push service client retries transient server failures with exponential del
   assert.deepEqual(delays, [25, 50]);
   assert.equal(payloads.length, 3);
   assert.equal(new Set(payloads).size, 1);
+});
+
+test("push service client allows IPv6 loopback base URLs", () => {
+  assert.doesNotThrow(() => {
+    const client = createPushNotificationServiceClient({
+      baseUrl: "http://[::1]:4321",
+      sessionId: "session-ipv6",
+      notificationSecret: "secret-ipv6",
+    });
+    assert.equal(client.hasConfiguredBaseUrl, true);
+  });
+});
+
+test("push service client rejects non-HTTP/HTTPS protocols", () => {
+  assert.throws(() => {
+    createPushNotificationServiceClient({
+      baseUrl: "ftp://localhost/x",
+      sessionId: "session-ftp",
+      notificationSecret: "secret-ftp",
+    });
+  }, /must use HTTP or HTTPS protocol/);
+});
+
+test("push service client rejects non-localhost HTTPS when whitelist empty", () => {
+  assert.throws(() => {
+    createPushNotificationServiceClient({
+      baseUrl: "https://evil.example.test",
+      sessionId: "session-remote",
+      notificationSecret: "secret-remote",
+    });
+  }, /whitelist is empty/);
 });

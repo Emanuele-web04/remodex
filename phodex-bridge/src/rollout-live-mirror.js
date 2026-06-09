@@ -12,6 +12,7 @@ const {
   resolveSessionsRoot,
 } = require("./rollout-watch");
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
+const { safeParseJSON } = require("./safe-json");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 
 const DEFAULT_POLL_INTERVAL_MS = 700;
@@ -24,6 +25,7 @@ const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
 // bridge notifications so the phone can render live thinking/tool activity.
 function createRolloutLiveMirrorController({
   sendApplicationResponse,
+  getCodexLaunchState = null,
   logPrefix = "[remodex]",
   fsModule = fs,
   now = () => Date.now(),
@@ -40,6 +42,10 @@ function createRolloutLiveMirrorController({
     const request = safeParseJSON(rawMessage);
     const method = readString(request?.method);
     if (!DESKTOP_RESUME_METHODS.has(method)) {
+      return;
+    }
+
+    if (!isCodexRolloutMirrorAvailable(getCodexLaunchState)) {
       return;
     }
 
@@ -1105,18 +1111,6 @@ function readFileSlice(filePath, start, endExclusive, fsModule) {
   }
 }
 
-function safeParseJSON(rawValue) {
-  if (typeof rawValue !== "string" || !rawValue.trim()) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(rawValue);
-  } catch {
-    return null;
-  }
-}
-
 function readString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
 }
@@ -1128,6 +1122,10 @@ function firstNonEmptyString(values) {
     }
   }
   return "";
+}
+
+function isCodexRolloutMirrorAvailable(getCodexLaunchState) {
+  return typeof getCodexLaunchState !== "function" || getCodexLaunchState() === "connected";
 }
 
 module.exports = {

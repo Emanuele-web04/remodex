@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { createHash } = require("crypto");
 const {
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
@@ -18,6 +19,7 @@ const {
   hasRelayConnectionGoneStale,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
+  redactLogIdentifier,
   resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeThreadHistoryImagesForRelay,
@@ -2202,3 +2204,27 @@ test("sanitizeThreadHistoryImagesForRelay truncates the newest oversized text it
   assert.equal(item.text.startsWith("…\n"), true);
   assert.equal(item.text.includes("header"), false);
 });
+
+test("redactLogIdentifier hashes thread and turn ids unless verbose logging is enabled", () => {
+  const previousVerbose = process.env.REMODEX_VERBOSE_LOGS;
+  delete process.env.REMODEX_VERBOSE_LOGS;
+
+  const threadId = "opencode-thread-1780887827406-786vaj";
+  const expectedDigest = createHash("sha256").update(threadId).digest("hex").slice(0, 8);
+
+  assert.equal(redactLogIdentifier(threadId, "thread"), `thread#${expectedDigest}`);
+  assert.equal(redactLogIdentifier(null, "thread"), null);
+
+  process.env.REMODEX_VERBOSE_LOGS = "1";
+  assert.equal(redactLogIdentifier(threadId, "thread"), threadId);
+
+  restoreEnvValue("REMODEX_VERBOSE_LOGS", previousVerbose);
+});
+
+function restoreEnvValue(name, previousValue) {
+  if (previousValue === undefined) {
+    delete process.env[name];
+    return;
+  }
+  process.env[name] = previousValue;
+}

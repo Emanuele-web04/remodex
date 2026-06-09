@@ -8,12 +8,22 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { resolveCodexHome } = require("./codex-home");
+const {
+  assertProjectPathAllowed,
+  isPathAllowed,
+  normalizeCandidatePath,
+  realpathSyncIfAvailable,
+  resolveHomeDir,
+  validateDirectory,
+} = require("./project-path-policy");
+const { safeParseJSON } = require("./safe-json");
 
 const DEFAULT_DIRECTORY_LIMIT = 200;
 const DEFAULT_DIRECTORY_SEARCH_LIMIT = 80;
 const DEFAULT_DIRECTORY_SEARCH_MAX_DEPTH = 8;
 const DEFAULT_DIRECTORY_SEARCH_MAX_VISITED = 5000;
 const DEFAULT_HIDDEN_DIRECTORY_NAMES = new Set(["Library"]);
+const DEFAULT_KNOWN_PROJECT_LIMIT = 100;
 
 // Rootless chat slug rules mirror Codex Desktop's `~/Documents/Codex/<DATE>/<slug>`
 // convention so iOS-created Quick Chats land in the same bucket Desktop classifies
@@ -25,11 +35,9 @@ const ROOTLESS_CHAT_DEDUP_LIMIT = 50;
 
 // ─── ENTRY POINT ─────────────────────────────────────────────
 
-function handleProjectRequest(rawMessage, sendResponse) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+function handleProjectRequest(rawMessage, sendResponse, options = {}) {
+  const parsed = safeParseJSON(rawMessage);
+  if (!parsed) {
     return false;
   }
 
@@ -41,7 +49,7 @@ function handleProjectRequest(rawMessage, sendResponse) {
   const id = parsed.id;
   const params = parsed.params || {};
 
-  handleProjectMethod(method, params)
+  handleProjectMethod(method, params, options)
     .then((result) => {
       sendResponse(JSON.stringify({ id, result }));
     })
@@ -79,6 +87,10 @@ async function handleProjectMethod(method, params, options = {}) {
       return projectCreateDirectory(params, options);
     case "project/createRootlessChatRoot":
       return projectCreateRootlessChatRoot(params, options);
+    case "project/knownProjects":
+      return projectKnownProjects(options);
+    case "project/rememberKnownProject":
+      return projectRememberKnownProject(params, options);
     default:
       throw projectError("unknown_method", `Unknown project method: ${method}`);
   }
@@ -221,6 +233,146 @@ async function projectCreateDirectory(params, options = {}) {
 // `thread/start`. Without an explicit cwd the app-server falls back to its own
 // process working directory (often the user's home), which would otherwise show
 // up in the sidebar as a project named after the user account.
+function resolveFileProjectRegistry(options = {}) {
+  if (options.projectRegistry && typeof options.projectRegistry.listProjects === "function") {
+    return options.projectRegistry;
+  }
+  return null;
+}
+
+function projectKnownProjectsRegistry(options = {}) {
+  const fileRegistry = resolveFileProjectRegistry(options);
+  if (fileRegistry) {
+    return { kind: "file", registry: fileRegistry };
+  }
+  if (options.knownProjectsRegistry && typeof options.knownProjectsRegistry.list === "function") {
+    return { kind: "memory", registry: options.knownProjectsRegistry };
+  }
+  if (!projectKnownProjectsRegistry._default) {
+    projectKnownProjectsRegistry._default = createKnownProjectsRegistry();
+  }
+  return { kind: "memory", registry: projectKnownProjectsRegistry._default };
+}
+
+function adaptKnownProjectForRpc(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const projectPath = readString(entry.path);
+  if (!projectPath) {
+    return null;
+  }
+
+  const label =
+    readString(entry.label) ||
+    readString(entry.name) ||
+    path.basename(projectPath);
+  const providerHints = Array.isArray(entry.providerHints)
+    ? entry.providerHints.filter(Boolean)
+    : readString(entry.provider)
+      ? [readString(entry.provider)]
+      : [];
+
+  return {
+    id: readString(entry.id) || projectPath,
+    path: projectPath,
+    label,
+    name: label,
+    source: readString(entry.source) || null,
+    sources: Array.isArray(entry.sources) ? entry.sources.filter(Boolean) : [],
+    providerHints,
+    rememberedAt: readString(entry.firstSeenAt || entry.rememberedAt) || null,
+    lastSeenAt: readString(entry.lastSeenAt) || null,
+    provider: providerHints[0] || readString(entry.provider) || null,
+  };
+}
+
+function createKnownProjectsRegistry() {
+  const projects = new Map();
+  return {
+    remember(pathValue, metadata = {}) {
+      const normalized = readString(pathValue);
+      if (!normalized) {
+        return null;
+      }
+      const resolved = path.resolve(normalized);
+      const existing = projects.get(resolved) || {
+        path: resolved,
+        name: path.basename(resolved),
+        rememberedAt: new Date().toISOString(),
+      };
+      const next = {
+        ...existing,
+        ...metadata,
+        path: resolved,
+        name: readString(metadata.name) || existing.name || path.basename(resolved),
+        rememberedAt: metadata.rememberedAt || existing.rememberedAt || new Date().toISOString(),
+        lastSeenAt: metadata.lastSeenAt || new Date().toISOString(),
+      };
+      projects.set(resolved, next);
+      return next;
+    },
+    list(limit = DEFAULT_KNOWN_PROJECT_LIMIT) {
+      return [...projects.values()]
+        .sort((left, right) =>
+          (readString(right.lastSeenAt) || "").localeCompare(readString(left.lastSeenAt) || ""))
+        .slice(0, limit);
+    },
+  };
+}
+
+async function projectKnownProjects(options = {}) {
+  const registrySource = projectKnownProjectsRegistry(options);
+  const projects =
+    registrySource.kind === "file"
+      ? registrySource.registry
+          .listProjects({ limit: DEFAULT_KNOWN_PROJECT_LIMIT })
+          .map(adaptKnownProjectForRpc)
+          .filter(Boolean)
+      : registrySource.registry
+          .list(DEFAULT_KNOWN_PROJECT_LIMIT)
+          .map(adaptKnownProjectForRpc)
+          .filter(Boolean);
+  return { projects };
+}
+
+async function projectRememberKnownProject(params = {}, options = {}) {
+  const projectPath = readString(params.path || params.cwd || params.projectPath);
+  if (!projectPath) {
+    throw projectError("missing_path", "A project path is required.");
+  }
+
+  const validation = await validateDirectory(projectPath, options).catch(() => null);
+  if (!validation?.exists || !validation.isDirectory || !validation.isAllowed) {
+    throw projectError("missing_directory", "That project folder does not exist on this Mac.");
+  }
+
+  const fileRegistry = resolveFileProjectRegistry(options);
+  if (fileRegistry && typeof fileRegistry.rememberProjectPath === "function") {
+    const remembered = fileRegistry.rememberProjectPath(validation.path, {
+      label: readString(params.name || params.title),
+      provider: readString(params.provider),
+      source: readString(params.source) || "ios-picker",
+      lastSeenAt: new Date().toISOString(),
+    });
+    const project = adaptKnownProjectForRpc(remembered);
+    return { project };
+  }
+
+  const registrySource = projectKnownProjectsRegistry(options);
+  const remembered = registrySource.registry.remember(validation.path, {
+    name: readString(params.name || params.title),
+    provider: readString(params.provider),
+    source: readString(params.source) || "project/rememberKnownProject",
+    lastSeenAt: new Date().toISOString(),
+  });
+
+  return {
+    project: adaptKnownProjectForRpc(remembered),
+  };
+}
+
 async function projectCreateRootlessChatRoot(params = {}, options = {}) {
   const homeDir = resolveHomeDir(options);
   const desktopDocumentsRoot = path.join(homeDir, "Documents", "Codex");
@@ -441,37 +593,6 @@ async function requireUsableDirectory(candidatePath, options = {}) {
   return validation;
 }
 
-async function validateDirectory(candidatePath, options = {}) {
-  const normalizedPath = normalizeCandidatePath(candidatePath, options);
-  const isAllowed = isPathAllowed(normalizedPath, options);
-  if (!isAllowed) {
-    return {
-      path: normalizedPath,
-      exists: false,
-      isDirectory: false,
-      isAllowed: false,
-    };
-  }
-
-  try {
-    const realPath = await fs.promises.realpath(normalizedPath);
-    const stats = await fs.promises.stat(realPath);
-    return {
-      path: realPath,
-      exists: true,
-      isDirectory: stats.isDirectory(),
-      isAllowed: isPathAllowed(realPath, options),
-    };
-  } catch {
-    return {
-      path: normalizedPath,
-      exists: false,
-      isDirectory: false,
-      isAllowed,
-    };
-  }
-}
-
 function parentPathWithinAllowedRoots(candidatePath, options = {}) {
   const parentPath = path.dirname(candidatePath);
   if (!parentPath || parentPath === candidatePath) {
@@ -482,47 +603,7 @@ function parentPathWithinAllowedRoots(candidatePath, options = {}) {
 }
 
 function assertPathAllowed(candidatePath, options = {}) {
-  if (!isPathAllowed(candidatePath, options)) {
-    throw projectError("path_not_allowed", "That folder is outside the allowed local project locations.");
-  }
-}
-
-function isPathAllowed(candidatePath, options = {}) {
-  const normalizedPath = path.resolve(candidatePath);
-  return allowedProjectRoots(options).some((rootPath) => samePathOrDescendant(normalizedPath, rootPath));
-}
-
-function allowedProjectRoots(options = {}) {
-  const roots = Array.isArray(options.allowedRoots) && options.allowedRoots.length
-    ? options.allowedRoots
-    : [resolveHomeDir(options)];
-
-  return [...new Set(roots.flatMap((rootPath) => {
-    const resolvedRoot = path.resolve(rootPath);
-    return [resolvedRoot, realpathSyncIfAvailable(resolvedRoot)].filter(Boolean);
-  }))];
-}
-
-function samePathOrDescendant(candidatePath, rootPath) {
-  const relative = path.relative(rootPath, candidatePath);
-  return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function normalizeCandidatePath(candidatePath, options = {}) {
-  const rawPath = readString(candidatePath);
-  if (!rawPath) {
-    throw projectError("missing_path", "A folder path is required.");
-  }
-
-  if (rawPath === "~" || rawPath.startsWith("~/")) {
-    return path.resolve(resolveHomeDir(options), rawPath.slice(2));
-  }
-
-  if (!path.isAbsolute(rawPath)) {
-    throw projectError("invalid_path", "Use an absolute folder path.");
-  }
-
-  return path.resolve(rawPath);
+  assertProjectPathAllowed(candidatePath, options);
 }
 
 function isHiddenDirectoryName(name) {
@@ -599,10 +680,6 @@ function directoryMatchesSearch(directory, tokens) {
   return tokens.every((token) => haystack.includes(token));
 }
 
-function resolveHomeDir(options = {}) {
-  return options.homeDir || os.homedir();
-}
-
 function uniqueExistingOrCandidatePaths(paths) {
   const seen = new Set();
   const result = [];
@@ -618,14 +695,6 @@ function uniqueExistingOrCandidatePaths(paths) {
   }
 
   return result;
-}
-
-function realpathSyncIfAvailable(candidatePath) {
-  try {
-    return fs.realpathSync(candidatePath);
-  } catch {
-    return null;
-  }
 }
 
 function readString(value) {
@@ -649,6 +718,9 @@ module.exports = {
   projectValidatePath,
   projectCreateDirectory,
   projectCreateRootlessChatRoot,
+  projectKnownProjects,
+  projectRememberKnownProject,
+  createKnownProjectsRegistry,
   validateDirectory,
   rootlessChatSlugFromPromptHint,
 };

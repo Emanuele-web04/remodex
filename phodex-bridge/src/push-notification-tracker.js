@@ -7,6 +7,7 @@
 const {
   createPushNotificationCompletionDedupe,
 } = require("./push-notification-completion-dedupe");
+const { safeParseJSON } = require("./safe-json");
 
 const DEFAULT_PREVIEW_MAX_CHARS = 160;
 const MAX_THREAD_TITLE_ENTRIES = 200;
@@ -70,6 +71,11 @@ function createPushNotificationTracker({
 
     if (method === "turn/completed") {
       void notifyCompletion(threadId, turnId, params, eventObject);
+      return;
+    }
+
+    if (method === "permission/request") {
+      void notifyPermissionNeeded(threadId, turnId, params, eventObject);
     }
   }
 
@@ -106,6 +112,33 @@ function createPushNotificationTracker({
 
     if (method === "turn/started" || isActiveThreadStatus(method, params, eventObject)) {
       completionDedupe.clearForNewRun(threadId);
+    }
+  }
+
+  async function notifyPermissionNeeded(threadId, turnId, params, eventObject) {
+    const resolvedThreadId = threadId || readString(params?.threadId || eventObject?.threadId);
+    if (!pushServiceClient?.hasConfiguredBaseUrl || !resolvedThreadId) {
+      return;
+    }
+    if (typeof pushServiceClient.notifyPermissionNeeded !== "function") {
+      return;
+    }
+
+    const title = normalizePreviewText(threadTitleById.get(resolvedThreadId)) || "Permission required";
+    const tool = readString(params?.tool || eventObject?.tool) || "tool";
+    const body = normalizePreviewText(`OpenCode needs approval for ${tool}.`);
+    const dedupeKey = `permission:${resolvedThreadId}:${readString(params?.permissionId || eventObject?.permissionId)}`;
+
+    try {
+      await pushServiceClient.notifyPermissionNeeded({
+        threadId: resolvedThreadId,
+        turnId,
+        title,
+        body,
+        dedupeKey,
+      });
+    } catch (error) {
+      console.error(`${logPrefix} permission push failed: ${error.message}`);
     }
   }
 
@@ -684,14 +717,6 @@ function normalizeToken(value) {
   return typeof value === "string"
     ? value.toLowerCase().replace(/[_-\s]+/g, "")
     : "";
-}
-
-function safeParseJSON(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
 }
 
 function turnStateKey(threadId, turnId) {

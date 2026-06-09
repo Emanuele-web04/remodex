@@ -4,12 +4,12 @@
 // Exports: createNotificationsHandler
 // Depends on: none
 
+const { safeParseJSON } = require("./safe-json");
+
 function createNotificationsHandler({ pushServiceClient, logPrefix = "[remodex]" } = {}) {
   function handleNotificationsRequest(rawMessage, sendResponse) {
-    let parsed;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+    const parsed = safeParseJSON(rawMessage);
+    if (!parsed) {
       return false;
     }
 

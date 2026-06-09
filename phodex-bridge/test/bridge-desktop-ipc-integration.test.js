@@ -439,6 +439,9 @@ function loadBridgeWithTestDoubles({ createCodexTransportImpl }) {
     if (parent?.filename === bridgePath && request === "./secure-device-state") {
       return createSecureDeviceStateDouble();
     }
+    if (parent?.filename === bridgePath && request === "./runtime-detection") {
+      return createRuntimeDetectionDouble("codex+opencode");
+    }
     return originalLoad.call(this, request, parent, isMain);
   };
 
@@ -484,6 +487,28 @@ function createSecureDeviceStateDouble() {
         sessionId: "session-test",
         deviceState,
       };
+    },
+  };
+}
+
+function createRuntimeDetectionDouble(mode = "codex+opencode") {
+  const opencodeAvailable = mode !== "codex-only" && mode !== "none";
+  const codexAvailable = mode !== "opencode-only" && mode !== "none";
+  return {
+    resolveAvailableRuntimes() {
+      return {
+        mode,
+        codexAvailable,
+        opencodeAvailable,
+        opencodeEnabled: opencodeAvailable,
+        opencodeCommand: "opencode",
+      };
+    },
+    formatRuntimePreflightFailureMessage() {
+      return "no runtime";
+    },
+    opencodeCarriesBridge(runtimes) {
+      return runtimes?.opencodeAvailable === true;
     },
   };
 }

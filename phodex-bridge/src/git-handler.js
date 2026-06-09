@@ -10,6 +10,7 @@ const os = require("os");
 const path = require("path");
 const { randomBytes } = require("crypto");
 const { promisify } = require("util");
+const { safeParseJSON } = require("./safe-json");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
@@ -38,10 +39,8 @@ function resolveGitWriterModel(rawModel) {
  * @returns {boolean} true if message was handled, false if it should pass through
  */
 function handleGitRequest(rawMessage, sendResponse, options = {}) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+  const parsed = safeParseJSON(rawMessage);
+  if (!parsed) {
     return false;
   }
 
@@ -1739,6 +1738,54 @@ function shouldRetryCodexExecWithNextCommand(error) {
   return error?.code === "ENOENT";
 }
 
+function validateSpawnCommand(command) {
+  // Allow only known safe commands
+  const allowedCommands = ["codex", "git", "gh"];
+  
+  // Check if command is a simple basename
+  const basename = path.basename(command);
+  if (allowedCommands.includes(basename)) {
+    return;
+  }
+  
+  // Check if command is an absolute path to a bundled codex
+  if (command.includes("Contents/Resources/codex")) {
+    // Verify it's an absolute path
+    if (!path.isAbsolute(command)) {
+      throw new Error(`Codex bundled command must be absolute path: ${command}`);
+    }
+    return;
+  }
+  
+  throw new Error(`Disallowed command in spawn: ${command}. Allowed: ${allowedCommands.join(", ")}`);
+}
+
+function validateSpawnCwd(cwd) {
+  if (!cwd || typeof cwd !== "string") {
+    throw new Error("Cwd must be a non-empty string");
+  }
+  
+  // Resolve to absolute path to prevent directory traversal
+  const resolvedCwd = path.resolve(cwd);
+  
+  // Check for path traversal attempts
+  if (cwd.includes("..") || cwd.includes("~")) {
+    throw new Error(`Path traversal detected in cwd: ${cwd}`);
+  }
+  
+  // Ensure the path exists and is a directory
+  try {
+    const stat = fs.statSync(resolvedCwd);
+    if (!stat.isDirectory()) {
+      throw new Error(`Cwd is not a directory: ${resolvedCwd}`);
+    }
+  } catch (error) {
+    throw new Error(`Invalid cwd path: ${resolvedCwd} - ${error.message}`);
+  }
+  
+  return resolvedCwd;
+}
+
 function spawnCodexExecJson({
   command,
   cwd,
@@ -1749,6 +1796,10 @@ function spawnCodexExecJson({
   skipGitRepoCheck = false,
   sandboxMode = null,
 }) {
+  // Security: Validate command and cwd before spawn
+  validateSpawnCommand(command);
+  const validatedCwd = validateSpawnCwd(cwd);
+  
   const args = [
     "exec",
     "--ephemeral",
@@ -1767,7 +1818,7 @@ function spawnCodexExecJson({
 
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
-      cwd,
+      cwd: validatedCwd,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -2486,8 +2537,14 @@ async function gitDiffNoIndexPatch(cwd, filePath) {
 // ─── Helpers ──────────────────────────────────────────────────
 
 function git(cwd, ...args) {
+  let validatedCwd;
+  try {
+    validatedCwd = validateSpawnCwd(cwd);
+  } catch (error) {
+    return Promise.reject(new Error(error.message));
+  }
   return execFileAsync("git", args, {
-    cwd,
+    cwd: validatedCwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES,
   })
@@ -2501,7 +2558,13 @@ function git(cwd, ...args) {
 
 // Runs GitHub CLI in the same working tree so PR creation respects local auth and remotes.
 function runGitHubCli(cwd, args) {
-  return execFileAsync("gh", args, { cwd, timeout: GITHUB_CLI_TIMEOUT_MS })
+  let validatedCwd;
+  try {
+    validatedCwd = validateSpawnCwd(cwd);
+  } catch (error) {
+    return Promise.reject(gitError("github_cli_failed", error.message));
+  }
+  return execFileAsync("gh", args, { cwd: validatedCwd, timeout: GITHUB_CLI_TIMEOUT_MS })
     .then(({ stdout, stderr }) => ({ stdout, stderr }))
     .catch((err) => {
       const detail = (err.stderr || err.message || "").trim();

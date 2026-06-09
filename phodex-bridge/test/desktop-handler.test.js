@@ -9,6 +9,197 @@ const assert = require("node:assert/strict");
 const path = require("node:path");
 
 const { handleDesktopRequest } = require("../src/desktop-handler");
+const { createThreadOwnershipStore } = require("../src/thread-ownership-store");
+
+function waitOneTick() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+test("desktop/continueOpenCode returns wrong_provider for non-OpenCode threads", async () => {
+  const ownershipStore = createThreadOwnershipStore({
+    storagePath: "/tmp/desktop-handler-wrong-provider.json",
+    fsImpl: {
+      readFileSync() {
+        throw new Error("ENOENT");
+      },
+      writeFileSync() {},
+      renameSync() {},
+      mkdirSync() {},
+    },
+  });
+  ownershipStore.setOwnership("codex-thread-handoff", "codex");
+
+  const responses = [];
+  const handled = handleDesktopRequest(JSON.stringify({
+    id: "request-opencode-wrong-provider",
+    method: "desktop/continueOpenCode",
+    params: { threadId: "codex-thread-handoff" },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    env: { REMODEX_OPENCODE_HANDOFF: "1" },
+    ownershipStore,
+    opencodeProvider: {
+      id: "opencode",
+      async getHandoffContext() {
+        throw new Error("should not reach provider");
+      },
+    },
+    executor: async () => ({ stdout: "", stderr: "" }),
+    fsModule: { existsSync: () => false },
+  });
+
+  assert.equal(handled, true);
+  await waitOneTick();
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].id, "request-opencode-wrong-provider");
+  assert.equal(responses[0].error?.data?.errorCode, "wrong_provider");
+});
+
+test("desktop/continueOpenCode returns opencode_handoff_disabled when env gate is off", async () => {
+  const ownershipStore = createThreadOwnershipStore({
+    storagePath: "/tmp/desktop-handler-handoff-disabled.json",
+    fsImpl: {
+      readFileSync() {
+        throw new Error("ENOENT");
+      },
+      writeFileSync() {},
+      renameSync() {},
+      mkdirSync() {},
+    },
+  });
+  ownershipStore.setOwnership("opencode-thread-handoff", "opencode");
+
+  let providerCalled = false;
+  const responses = [];
+  const handled = handleDesktopRequest(JSON.stringify({
+    id: "request-opencode-disabled",
+    method: "desktop/continueOpenCode",
+    params: { threadId: "opencode-thread-handoff" },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    env: { REMODEX_OPENCODE_HANDOFF: "0" },
+    ownershipStore,
+    opencodeProvider: {
+      id: "opencode",
+      async getHandoffContext() {
+        providerCalled = true;
+        throw new Error("should not reach provider when handoff disabled");
+      },
+    },
+    executor: async () => ({ stdout: "", stderr: "" }),
+    fsModule: { existsSync: () => false },
+  });
+
+  assert.equal(handled, true);
+  await waitOneTick();
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].id, "request-opencode-disabled");
+  assert.equal(responses[0].error?.data?.errorCode, "opencode_handoff_disabled");
+  assert.equal(providerCalled, false);
+});
+
+test("desktop/continueOpenCode returns missing_thread_id when threadId is absent", async () => {
+  const responses = [];
+  const handled = handleDesktopRequest(JSON.stringify({
+    id: "request-opencode-missing-thread",
+    method: "desktop/continueOpenCode",
+    params: {},
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    env: { REMODEX_OPENCODE_HANDOFF: "1" },
+    executor: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  assert.equal(handled, true);
+  await waitOneTick();
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].error?.data?.errorCode, "missing_thread_id");
+});
+
+test("desktop/continueOpenCode returns invalid_thread_id for unsafe thread ids", async () => {
+  const responses = [];
+  const handled = handleDesktopRequest(JSON.stringify({
+    id: "request-opencode-invalid-thread",
+    method: "desktop/continueOpenCode",
+    params: { threadId: "bad id & injection" },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    env: { REMODEX_OPENCODE_HANDOFF: "1" },
+    executor: async () => ({ stdout: "", stderr: "" }),
+  });
+
+  assert.equal(handled, true);
+  await waitOneTick();
+
+  assert.equal(responses[0].error?.data?.errorCode, "invalid_thread_id");
+});
+
+test("desktop/continueOpenCode succeeds when env gate and ownership are valid", async () => {
+  const ownershipStore = createThreadOwnershipStore({
+    storagePath: "/tmp/desktop-handler-handoff-success.json",
+    fsImpl: {
+      readFileSync() {
+        throw new Error("ENOENT");
+      },
+      writeFileSync() {},
+      renameSync() {},
+      mkdirSync() {},
+    },
+  });
+  ownershipStore.setOwnership("opencode-thread-handoff", "opencode");
+
+  const responses = [];
+  const handled = handleDesktopRequest(JSON.stringify({
+    id: "request-opencode-success",
+    method: "desktop/continueOpenCode",
+    params: { threadId: "opencode-thread-handoff" },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  }, {
+    platform: "darwin",
+    env: { REMODEX_OPENCODE_HANDOFF: "1" },
+    ownershipStore,
+    opencodeProvider: {
+      id: "opencode",
+      async getHandoffContext(threadId) {
+        return {
+          threadId,
+          sessionId: "ses_handler_ok",
+          cwd: "/tmp/handoff-project",
+          model: "openai/gpt-5.5",
+          agent: "build",
+          title: "Handler handoff",
+        };
+      },
+      async selectTuiSession(sessionId) {
+        assert.equal(sessionId, "ses_handler_ok");
+        return true;
+      },
+    },
+    executor: async () => ({ stdout: "", stderr: "" }),
+    fsModule: { existsSync: () => false },
+  });
+
+  assert.equal(handled, true);
+  await waitOneTick();
+
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].result?.success, true);
+  assert.equal(responses[0].result?.sessionId, "ses_handler_ok");
+  assert.equal(responses[0].result?.handoffMode, "tui");
+  assert.equal(responses[0].result?.sessionSelected, true);
+});
 
 test("desktop/continueOnMac relaunches Codex for the requested thread", async () => {
   const executorCalls = [];

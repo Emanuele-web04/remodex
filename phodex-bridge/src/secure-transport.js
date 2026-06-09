@@ -21,6 +21,7 @@ const {
   getTrustedPhonePublicKey,
   rememberTrustedPhone,
 } = require("./secure-device-state");
+const { safeParseJSON } = require("./safe-json");
 
 const PAIRING_QR_VERSION = 2;
 const SECURE_PROTOCOL_VERSION = 1;
@@ -30,8 +31,30 @@ const HANDSHAKE_MODE_TRUSTED_RECONNECT = "trusted_reconnect";
 const SECURE_SENDER_MAC = "mac";
 const SECURE_SENDER_IPHONE = "iphone";
 const MAX_PAIRING_AGE_MS = 5 * 60 * 1000;
-const MAX_BRIDGE_OUTBOUND_MESSAGES = 500;
+const MAX_BRIDGE_OUTBOUND_MESSAGES = 100;
 const MAX_BRIDGE_OUTBOUND_BYTES = 10 * 1024 * 1024;
+const LIFECYCLE_STREAM_BYTE_RESERVE_RATIO = 0.3;
+const DEFAULT_RECENT_TURN_PROTECT_COUNT = 2;
+const DEFAULT_NOTIFY_EVICTION_MAX_AGE_MS = 120_000;
+const OUTBOUND_PRIORITY = {
+  LIFECYCLE: 0,
+  STREAM: 1,
+  NOTIFY: 2,
+  RPC_RESPONSE: 3,
+  TOOL: 4,
+};
+const SYSTEM_OUTBOUND_METHODS = new Set([
+  "thread/status",
+  "thread/status/changed",
+  "thread/tokenUsage/updated",
+  "runtime/catalog/updated",
+  "runtime/auth/error",
+  "runtime/warning",
+  "account/rateLimits/updated",
+]);
+const PERMISSION_PROTECTED_OUTBOUND_METHODS = new Set([
+  "permission/request",
+]);
 
 function createBridgeSecureTransport({
   sessionId,
@@ -50,11 +73,15 @@ function createBridgeSecureTransport({
   // Tracks the highest bridge seq the phone has definitely acked, so replay
   // decisions never depend on best-effort local socket writes.
   let lastRelayedBridgeOutboundSeq = 0;
+  // Mutex to prevent concurrent replay operations
+  let isReplaying = false;
   let currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
   let nextKeyEpoch = 1;
   let nextBridgeOutboundSeq = 1;
   let outboundBufferBytes = 0;
   const outboundBuffer = [];
+  const turnRegistrationOrder = [];
+  const turnRegistrationRank = new Map();
 
   function createPairingPayload() {
     currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
@@ -110,15 +137,36 @@ function createBridgeSecureTransport({
       return;
     }
 
+    const parsedPayload = safeParseJSON(normalizedPayload) || {};
+    const turnContextKey = extractTurnContextKey(parsedPayload);
+    if (turnContextKey && !turnRegistrationRank.has(turnContextKey)) {
+      turnRegistrationRank.set(turnContextKey, turnRegistrationOrder.length);
+      turnRegistrationOrder.push(turnContextKey);
+    }
     const bufferEntry = {
+      queuedAt: Date.now(),
+      raw: normalizedPayload,
       bridgeOutboundSeq: nextBridgeOutboundSeq,
-      payloadText: normalizedPayload,
       sizeBytes: Buffer.byteLength(normalizedPayload, "utf8"),
+      priority: classifyOutboundPriority(parsedPayload),
+      method: normalizeNonEmptyString(parsedPayload.method) || null,
+      turnPinKey: extractTurnPinKey(parsedPayload),
+      turnContextKey,
     };
     nextBridgeOutboundSeq += 1;
     outboundBuffer.push(bufferEntry);
     outboundBufferBytes += bufferEntry.sizeBytes;
     trimOutboundBuffer();
+
+    if (!activeSession?.isResumed) {
+      console.log(
+        JSON.stringify({
+          event: "bridge_outbound_buffered",
+          bridgeOutboundSeq: bufferEntry.bridgeOutboundSeq,
+          payloadBytes: bufferEntry.sizeBytes,
+        })
+      );
+    }
 
     const liveSessionSender = activeSession?.sendWireMessage;
     const effectiveSendWireMessage = typeof liveSessionSender === "function"
@@ -482,10 +530,23 @@ function createBridgeSecureTransport({
   }
 
   function trimOutboundBuffer() {
+    const messageCap = readOutboundMessageCap();
+    const priorityEnabled = readEnvFlag("REMODEX_BRIDGE_PRIORITY_OUTBOUND", true);
+    const legacyTrim = readEnvFlag("REMODEX_BRIDGE_OUTBOUND_LEGACY_TRIM", false);
+
+    if (legacyTrim || !priorityEnabled) {
+      trimOutboundBufferLegacy(messageCap);
+      return;
+    }
+
+    trimOutboundBufferPriority(messageCap);
+  }
+
+  function trimOutboundBufferLegacy(messageCap) {
     let removeCount = 0;
     let removedBytes = 0;
     while (
-      (outboundBuffer.length - removeCount) > MAX_BRIDGE_OUTBOUND_MESSAGES
+      (outboundBuffer.length - removeCount) > messageCap
       || (outboundBufferBytes - removedBytes) > MAX_BRIDGE_OUTBOUND_BYTES
     ) {
       const entry = outboundBuffer[removeCount];
@@ -496,15 +557,114 @@ function createBridgeSecureTransport({
       removeCount += 1;
     }
     if (removeCount > 0) {
+      const droppedEntries = outboundBuffer.slice(0, removeCount);
+      logOutboundDropped(droppedEntries, removedBytes, "overflow");
       outboundBuffer.splice(0, removeCount);
       outboundBufferBytes = Math.max(0, outboundBufferBytes - removedBytes);
     }
+  }
+
+  function trimOutboundBufferPriority(messageCap) {
+    const droppedEntries = [];
+    let stallDropCount = 0;
+
+    while (
+      outboundBuffer.length > messageCap
+      || outboundBufferBytes > MAX_BRIDGE_OUTBOUND_BYTES
+    ) {
+      const protectedIndices = computeProtectedEntryIndices(outboundBuffer, {
+        turnRegistrationOrder,
+      });
+      let dropIndex = selectPriorityDropIndex(outboundBuffer, protectedIndices);
+      let dropReason = "overflow";
+
+      if (dropIndex < 0) {
+        dropIndex = selectAgeBasedNotifyDropIndex(outboundBuffer);
+        if (dropIndex >= 0) {
+          dropReason = "notify_age_eviction";
+          stallDropCount += 1;
+        }
+      }
+
+      if (dropIndex < 0) {
+        dropIndex = selectOldestRpcDropIndex(outboundBuffer);
+        if (dropIndex >= 0) {
+          dropReason = "stall_rpc_eviction";
+          stallDropCount += 1;
+        }
+      }
+
+      if (dropIndex < 0) {
+        dropIndex = selectOldestStreamDropIndex(outboundBuffer);
+        if (dropIndex >= 0) {
+          dropReason = "stall_stream_eviction";
+          stallDropCount += 1;
+        }
+      }
+
+      if (dropIndex < 0 && outboundBuffer.length > 0) {
+        dropIndex = 0;
+        dropReason = "stall_fifo_eviction";
+        stallDropCount += 1;
+      }
+
+      if (dropIndex < 0) {
+        break;
+      }
+
+      const [entry] = outboundBuffer.splice(dropIndex, 1);
+      outboundBufferBytes = Math.max(0, outboundBufferBytes - entry.sizeBytes);
+      droppedEntries.push({ entry, reason: dropReason });
+    }
+
+    if (stallDropCount > 0) {
+      console.log(
+        JSON.stringify({
+          event: "bridge_outbound_drop_stalled",
+          stallDropCount,
+          bufferLength: outboundBuffer.length,
+          bufferBytes: outboundBufferBytes,
+        })
+      );
+    }
+
+    if (droppedEntries.length > 0) {
+      const entriesOnly = droppedEntries.map((dropped) => dropped.entry);
+      const droppedBytes = entriesOnly.reduce((total, entry) => total + entry.sizeBytes, 0);
+      const reasons = new Set(droppedEntries.map((dropped) => dropped.reason));
+      const reason = reasons.size === 1 ? [...reasons][0] : "overflow";
+      logOutboundDropped(entriesOnly, droppedBytes, reason);
+    }
+  }
+
+  function logOutboundDropped(droppedEntries, droppedBytes, reason) {
+    const firstEntry = droppedEntries[0] ?? null;
+    const lastEntry = droppedEntries[droppedEntries.length - 1] ?? null;
+    console.log(
+      JSON.stringify({
+        event: "bridge_outbound_dropped",
+        droppedCount: droppedEntries.length,
+        droppedBytes,
+        firstSeq: firstEntry?.bridgeOutboundSeq ?? null,
+        lastSeq: lastEntry?.bridgeOutboundSeq ?? null,
+        reason,
+        priority: firstEntry?.priority ?? null,
+        method: firstEntry?.method ?? null,
+        bridgeOutboundSeq: firstEntry?.bridgeOutboundSeq ?? null,
+        highestPriorityTierDropped: droppedEntries.reduce(
+          (maxPriority, entry) => Math.max(maxPriority, entry.priority ?? OUTBOUND_PRIORITY.NOTIFY),
+          OUTBOUND_PRIORITY.LIFECYCLE
+        ),
+      })
+    );
   }
 
   // Starts each fresh QR bootstrap with a clean catch-up window for the single trusted phone.
   function resetOutboundReplayState() {
     outboundBuffer.length = 0;
     outboundBufferBytes = 0;
+    turnRegistrationOrder.length = 0;
+    turnRegistrationRank.clear();
     lastRelayedBridgeOutboundSeq = 0;
     nextBridgeOutboundSeq = 1;
   }
@@ -517,7 +677,7 @@ function createBridgeSecureTransport({
     const envelope = encryptEnvelopePayload(
       {
         bridgeOutboundSeq: entry.bridgeOutboundSeq,
-        payloadText: entry.payloadText,
+        payloadText: entry.raw,
       },
       activeSession.macToPhoneKey,
       SECURE_SENDER_MAC,
@@ -548,15 +708,27 @@ function createBridgeSecureTransport({
 
   // Replays from the last phone ack instead of local socket writes, so a relay
   // flap cannot make the bridge skip output the phone never actually received.
+  // Mutex-protected to prevent concurrent replay operations.
   function replayBufferedOutboundMessages() {
     if (!activeSession?.isResumed || typeof activeSession.sendWireMessage !== "function") {
       return;
     }
 
-    for (const entry of replayableOutboundEntries(lastRelayedBridgeOutboundSeq)) {
-      if (!sendBufferedEntry(entry, activeSession.sendWireMessage)) {
-        break;
+    // Mutex: Prevent concurrent replay operations
+    if (isReplaying) {
+      debugSecureLog("Replay already in progress, skipping concurrent request");
+      return;
+    }
+
+    isReplaying = true;
+    try {
+      for (const entry of replayableOutboundEntries(lastRelayedBridgeOutboundSeq)) {
+        if (!sendBufferedEntry(entry, activeSession.sendWireMessage)) {
+          break;
+        }
       }
+    } finally {
+      isReplaying = false;
     }
   }
 
@@ -737,16 +909,457 @@ function normalizeNonEmptyString(value) {
   return value.trim();
 }
 
-function safeParseJSON(value) {
-  if (typeof value !== "string") {
+function readEnvFlag(name, defaultValue) {
+  const value = process.env[name];
+  if (value === undefined) {
+    return defaultValue;
+  }
+  return value === "1" || value.toLowerCase() === "true";
+}
+
+function readOutboundMessageCap() {
+  const raw = process.env.REMODEX_BRIDGE_OUTBOUND_CAP;
+  if (!raw) {
+    return MAX_BRIDGE_OUTBOUND_MESSAGES;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return MAX_BRIDGE_OUTBOUND_MESSAGES;
+  }
+  return Math.floor(parsed);
+}
+
+function readString(value) {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function readRecentTurnProtectCount() {
+  const raw = process.env.REMODEX_BRIDGE_OUTBOUND_RECENT_TURNS;
+  if (!raw) {
+    return DEFAULT_RECENT_TURN_PROTECT_COUNT;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_RECENT_TURN_PROTECT_COUNT;
+  }
+
+  return Math.floor(parsed);
+}
+
+function readNotifyEvictionMaxAgeMs() {
+  const raw = process.env.REMODEX_BRIDGE_NOTIFY_EVICTION_MAX_AGE_MS;
+  if (!raw) {
+    return DEFAULT_NOTIFY_EVICTION_MAX_AGE_MS;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return DEFAULT_NOTIFY_EVICTION_MAX_AGE_MS;
+  }
+
+  return Math.floor(parsed);
+}
+
+function classifyOutboundPriority(payload) {
+  if (!payload || typeof payload !== "object") {
+    return OUTBOUND_PRIORITY.NOTIFY;
+  }
+
+  if (payload.id != null && (payload.result !== undefined || payload.error !== undefined)) {
+    return OUTBOUND_PRIORITY.RPC_RESPONSE;
+  }
+
+  const method = normalizeNonEmptyString(payload.method);
+  if (!method) {
+    return OUTBOUND_PRIORITY.NOTIFY;
+  }
+
+  if (SYSTEM_OUTBOUND_METHODS.has(method)) {
+    return OUTBOUND_PRIORITY.LIFECYCLE;
+  }
+
+  switch (method) {
+  case "turn/started":
+  case "turn/completed":
+  case "turn/failed":
+    return OUTBOUND_PRIORITY.LIFECYCLE;
+  case "item/completed":
+  case "item/agentMessage/delta":
+  case "item/reasoning/textDelta":
+    return OUTBOUND_PRIORITY.STREAM;
+  case "item/toolCall":
+  case "item/toolCallUpdate":
+    return OUTBOUND_PRIORITY.TOOL;
+  case "permission/request":
+    return OUTBOUND_PRIORITY.NOTIFY;
+  default:
+    return OUTBOUND_PRIORITY.NOTIFY;
+  }
+}
+
+function readTurnIdsFromParams(params) {
+  const normalizedParams = params && typeof params === "object" ? params : {};
+  const threadId = readString(normalizedParams.threadId)
+    || readString(normalizedParams.thread_id)
+    || readString(normalizedParams.item?.threadId)
+    || readString(normalizedParams.item?.thread_id)
+    || readString(normalizedParams.item?.thread?.id);
+  const turnId = readString(normalizedParams.turnId)
+    || readString(normalizedParams.turn_id)
+    || readString(normalizedParams.item?.turnId)
+    || readString(normalizedParams.item?.turn_id)
+    || readString(normalizedParams.item?.turn?.id);
+  if (!threadId || !turnId) {
     return null;
   }
 
-  try {
-    return JSON.parse(value);
-  } catch {
+  return { threadId, turnId };
+}
+
+function extractTurnContextKey(payload) {
+  if (!payload || typeof payload !== "object") {
     return null;
   }
+
+  const turnIds = readTurnIdsFromParams(payload.params);
+  if (!turnIds) {
+    return null;
+  }
+
+  return turnPinKeyString(turnIds);
+}
+
+function extractTurnPinKey(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const method = normalizeNonEmptyString(payload.method);
+  if (!method) {
+    return null;
+  }
+
+  const pinMethods = new Set([
+    "item/completed",
+    "turn/completed",
+  ]);
+  if (!pinMethods.has(method)) {
+    return null;
+  }
+
+  return readTurnIdsFromParams(payload.params);
+}
+
+function turnPinKeyString(pinKey) {
+  return `${pinKey.threadId}\0${pinKey.turnId}`;
+}
+
+function computePinnedEntryIndices(entries) {
+  const pinnedIndices = new Set();
+  const latestItemCompletedByTurn = new Map();
+  const latestTurnCompletedByTurn = new Map();
+
+  entries.forEach((entry, index) => {
+    if (!entry.turnPinKey) {
+      return;
+    }
+
+    const key = turnPinKeyString(entry.turnPinKey);
+    if (entry.method === "item/completed") {
+      const existing = latestItemCompletedByTurn.get(key);
+      if (!existing || entry.bridgeOutboundSeq > existing.entry.bridgeOutboundSeq) {
+        latestItemCompletedByTurn.set(key, { index, entry });
+      }
+    }
+    if (entry.method === "turn/completed") {
+      const existing = latestTurnCompletedByTurn.get(key);
+      if (!existing || entry.bridgeOutboundSeq > existing.entry.bridgeOutboundSeq) {
+        latestTurnCompletedByTurn.set(key, { index, entry });
+      }
+    }
+  });
+
+  for (const { index } of latestItemCompletedByTurn.values()) {
+    pinnedIndices.add(index);
+  }
+  for (const { index } of latestTurnCompletedByTurn.values()) {
+    pinnedIndices.add(index);
+  }
+
+  return pinnedIndices;
+}
+
+function computeSystemProtectedIndices(entries) {
+  const protectedIndices = new Set();
+  entries.forEach((entry, index) => {
+    if (entry.method && SYSTEM_OUTBOUND_METHODS.has(entry.method)) {
+      protectedIndices.add(index);
+    }
+  });
+  return protectedIndices;
+}
+
+function computePermissionProtectedIndices(entries) {
+  const protectedIndices = new Set();
+  entries.forEach((entry, index) => {
+    if (entry.method && PERMISSION_PROTECTED_OUTBOUND_METHODS.has(entry.method)) {
+      protectedIndices.add(index);
+    }
+  });
+  return protectedIndices;
+}
+
+function computeRecentTurnProtectedIndices(
+  entries,
+  recentCount = readRecentTurnProtectCount(),
+  options = {},
+) {
+  if (recentCount <= 0) {
+    return new Set();
+  }
+
+  const registrationOrder = Array.isArray(options.turnRegistrationOrder)
+    ? options.turnRegistrationOrder
+    : null;
+  let recentTurnKeySet;
+  if (registrationOrder && registrationOrder.length > 0) {
+    recentTurnKeySet = new Set(registrationOrder.slice(-recentCount));
+  } else {
+    const turnOrder = [];
+    const seenTurnKeys = new Set();
+    entries.forEach((entry) => {
+      const turnContextKey = entry.turnContextKey;
+      if (!turnContextKey || seenTurnKeys.has(turnContextKey)) {
+        return;
+      }
+      seenTurnKeys.add(turnContextKey);
+      turnOrder.push(turnContextKey);
+    });
+    recentTurnKeySet = new Set(turnOrder.slice(-recentCount));
+  }
+
+  const protectedIndices = new Set();
+
+  entries.forEach((entry, index) => {
+    if (entry.turnContextKey && recentTurnKeySet.has(entry.turnContextKey)) {
+      protectedIndices.add(index);
+    }
+  });
+
+  return protectedIndices;
+}
+
+function computeProtectedEntryIndices(entries, options = {}) {
+  const protectedIndices = new Set([
+    ...computePinnedEntryIndices(entries),
+    ...computeSystemProtectedIndices(entries),
+    ...computePermissionProtectedIndices(entries),
+    ...computeRecentTurnProtectedIndices(entries, readRecentTurnProtectCount(), options),
+  ]);
+  return protectedIndices;
+}
+
+function sumEntryBytesByPriority(entries, maxPriorityInclusive) {
+  return entries.reduce((total, entry) => {
+    if ((entry.priority ?? OUTBOUND_PRIORITY.NOTIFY) <= maxPriorityInclusive) {
+      return total + entry.sizeBytes;
+    }
+    return total;
+  }, 0);
+}
+
+function selectPriorityDropIndex(entries, protectedIndices) {
+  const lifecycleStreamBytes = sumEntryBytesByPriority(entries, OUTBOUND_PRIORITY.STREAM);
+  const totalBytes = entries.reduce((total, entry) => total + entry.sizeBytes, 0);
+  const nonLifecycleStreamBytes = totalBytes - lifecycleStreamBytes;
+  const maxNonLifecycleStreamBytes = Math.floor(
+    MAX_BRIDGE_OUTBOUND_BYTES * (1 - LIFECYCLE_STREAM_BYTE_RESERVE_RATIO)
+  );
+  const protectLifecycleStream = nonLifecycleStreamBytes > maxNonLifecycleStreamBytes;
+
+  const candidateIndices = [];
+  entries.forEach((entry, index) => {
+    if (protectedIndices.has(index)) {
+      return;
+    }
+    if (
+      protectLifecycleStream
+      && (entry.priority ?? OUTBOUND_PRIORITY.NOTIFY) <= OUTBOUND_PRIORITY.STREAM
+    ) {
+      return;
+    }
+    candidateIndices.push(index);
+  });
+
+  if (candidateIndices.length === 0) {
+    entries.forEach((entry, index) => {
+      if (protectedIndices.has(index)) {
+        return;
+      }
+      candidateIndices.push(index);
+    });
+  }
+
+  if (candidateIndices.length === 0) {
+    return selectOldestPinnedTurnDropIndex(entries, protectedIndices);
+  }
+
+  let selectedIndex = candidateIndices[0];
+  for (const index of candidateIndices.slice(1)) {
+    const candidate = entries[index];
+    const selected = entries[selectedIndex];
+    const candidatePriority = candidate.priority ?? OUTBOUND_PRIORITY.NOTIFY;
+    const selectedPriority = selected.priority ?? OUTBOUND_PRIORITY.NOTIFY;
+    if (candidatePriority > selectedPriority) {
+      selectedIndex = index;
+      continue;
+    }
+    if (
+      candidatePriority === selectedPriority
+      && candidate.bridgeOutboundSeq < selected.bridgeOutboundSeq
+    ) {
+      selectedIndex = index;
+    }
+  }
+
+  return selectedIndex;
+}
+
+function selectAgeBasedNotifyDropIndex(entries, now = Date.now()) {
+  const maxAgeMs = readNotifyEvictionMaxAgeMs();
+  let selectedIndex = -1;
+  let selectedSeq = Infinity;
+
+  entries.forEach((entry, index) => {
+    const priority = entry.priority ?? OUTBOUND_PRIORITY.NOTIFY;
+    if (priority !== OUTBOUND_PRIORITY.NOTIFY && priority !== OUTBOUND_PRIORITY.TOOL) {
+      return;
+    }
+
+    const ageMs = now - (entry.queuedAt ?? 0);
+    if (ageMs < maxAgeMs) {
+      return;
+    }
+
+    if (entry.bridgeOutboundSeq < selectedSeq) {
+      selectedSeq = entry.bridgeOutboundSeq;
+      selectedIndex = index;
+    }
+  });
+
+  if (selectedIndex >= 0) {
+    return selectedIndex;
+  }
+
+  entries.forEach((entry, index) => {
+    const priority = entry.priority ?? OUTBOUND_PRIORITY.NOTIFY;
+    if (priority !== OUTBOUND_PRIORITY.NOTIFY && priority !== OUTBOUND_PRIORITY.TOOL) {
+      return;
+    }
+
+    if (entry.bridgeOutboundSeq < selectedSeq) {
+      selectedSeq = entry.bridgeOutboundSeq;
+      selectedIndex = index;
+    }
+  });
+
+  return selectedIndex;
+}
+
+function selectOldestRpcDropIndex(entries) {
+  let selectedIndex = -1;
+  let selectedSeq = Infinity;
+
+  entries.forEach((entry, index) => {
+    if ((entry.priority ?? OUTBOUND_PRIORITY.NOTIFY) !== OUTBOUND_PRIORITY.RPC_RESPONSE) {
+      return;
+    }
+
+    if (entry.bridgeOutboundSeq < selectedSeq) {
+      selectedSeq = entry.bridgeOutboundSeq;
+      selectedIndex = index;
+    }
+  });
+
+  return selectedIndex;
+}
+
+function selectOldestStreamDropIndex(entries) {
+  let selectedIndex = -1;
+  let selectedSeq = Infinity;
+
+  entries.forEach((entry, index) => {
+    const priority = entry.priority ?? OUTBOUND_PRIORITY.NOTIFY;
+    if (priority !== OUTBOUND_PRIORITY.STREAM && priority !== OUTBOUND_PRIORITY.TOOL) {
+      return;
+    }
+
+    if (entry.bridgeOutboundSeq < selectedSeq) {
+      selectedSeq = entry.bridgeOutboundSeq;
+      selectedIndex = index;
+    }
+  });
+
+  return selectedIndex;
+}
+
+function selectOldestPinnedTurnDropIndex(entries, pinnedIndices) {
+  const turnsByKey = new Map();
+
+  for (const index of pinnedIndices) {
+    const entry = entries[index];
+    if (!entry.turnPinKey) {
+      continue;
+    }
+
+    const key = turnPinKeyString(entry.turnPinKey);
+    const turnState = turnsByKey.get(key) ?? {
+      turnCompletedIndex: -1,
+      turnCompletedSeq: Infinity,
+      itemCompletedIndex: -1,
+      itemCompletedSeq: Infinity,
+    };
+
+    if (entry.method === "turn/completed") {
+      turnState.turnCompletedIndex = index;
+      turnState.turnCompletedSeq = entry.bridgeOutboundSeq;
+    }
+    if (entry.method === "item/completed") {
+      turnState.itemCompletedIndex = index;
+      turnState.itemCompletedSeq = entry.bridgeOutboundSeq;
+    }
+
+    turnsByKey.set(key, turnState);
+  }
+
+  let oldestTurn = null;
+  for (const turnState of turnsByKey.values()) {
+    const turnAge = turnState.turnCompletedSeq !== Infinity
+      ? turnState.turnCompletedSeq
+      : turnState.itemCompletedSeq;
+    if (
+      oldestTurn === null
+      || turnAge < oldestTurn.turnAge
+      || (
+        turnAge === oldestTurn.turnAge
+        && turnState.itemCompletedSeq < oldestTurn.itemCompletedSeq
+      )
+    ) {
+      oldestTurn = { ...turnState, turnAge };
+    }
+  }
+
+  if (!oldestTurn) {
+    return -1;
+  }
+
+  if (oldestTurn.turnCompletedIndex >= 0) {
+    return oldestTurn.turnCompletedIndex;
+  }
+
+  return oldestTurn.itemCompletedIndex;
 }
 
 function base64ToBuffer(value) {
@@ -769,8 +1382,22 @@ function base64ToBase64Url(value) {
 module.exports = {
   HANDSHAKE_MODE_QR_BOOTSTRAP,
   HANDSHAKE_MODE_TRUSTED_RECONNECT,
+  MAX_BRIDGE_OUTBOUND_BYTES,
+  MAX_BRIDGE_OUTBOUND_MESSAGES,
+  OUTBOUND_PRIORITY,
   PAIRING_QR_VERSION,
   SECURE_PROTOCOL_VERSION,
+  classifyOutboundPriority,
+  computePermissionProtectedIndices,
+  computeProtectedEntryIndices,
+  computeRecentTurnProtectedIndices,
+  computeSystemProtectedIndices,
   createBridgeSecureTransport,
+  extractTurnContextKey,
+  extractTurnPinKey,
   nonceForDirection,
+  readNotifyEvictionMaxAgeMs,
+  selectAgeBasedNotifyDropIndex,
+  selectOldestRpcDropIndex,
+  selectOldestStreamDropIndex,
 };

@@ -8,6 +8,8 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 
+const { safeParseJSON } = require("./safe-json");
+
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -39,6 +41,7 @@ const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline", "ca
 function createDesktopIpcActionFollower({
   sendApplicationResponse,
   readConversationState = null,
+  getCodexLaunchState = null,
   logPrefix = "[remodex]",
   socketPath = resolveDefaultIpcSocketPath(),
   netModule = net,
@@ -71,6 +74,10 @@ function createDesktopIpcActionFollower({
 
     const method = readString(message?.method);
     if (!DESKTOP_RESUME_METHODS.has(method)) {
+      return false;
+    }
+
+    if (!isCodexDesktopFollowerAvailable(getCodexLaunchState)) {
       return false;
     }
 
@@ -831,12 +838,8 @@ function cloneJSON(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function safeParseJSON(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
+function isCodexDesktopFollowerAvailable(getCodexLaunchState) {
+  return typeof getCodexLaunchState !== "function" || getCodexLaunchState() === "connected";
 }
 
 module.exports = {
