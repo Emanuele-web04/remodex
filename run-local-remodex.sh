@@ -20,6 +20,8 @@ RELAY_URL="${RELAY_URL:-}"
 RELAY_BRIDGE_HOST=""
 RELAY_PID=""
 BRIDGE_PID=""
+SHUTTING_DOWN=0
+RESTART_BRIDGE_ON_EXIT="${REMODEX_RESTART_BRIDGE_ON_EXIT:-1}"
 
 log() {
   echo "[run-local-remodex] $*"
@@ -46,6 +48,11 @@ Defaults:
   --port                9000
   --hostname            macOS LocalHostName.local, then hostname, then localhost
   --relay-url           auto-built as ws://<hostname>:<port>/relay
+
+Device E2E (iPad): prefer Terminal.app, not Cursor/agent shells — this script's
+EXIT trap stops relay+bridge when the shell exits. For long-lived pairing use:
+  ./scripts/remodex-dev-pairing.sh <LAN-IP>
+See docs/operations/device-e2e-checklist.md
 EOF
 }
 
@@ -132,6 +139,10 @@ healthcheck_host() {
 }
 
 cleanup() {
+  if [[ "${SHUTTING_DOWN}" != "1" ]]; then
+    return
+  fi
+
   if [[ -n "${BRIDGE_PID}" ]] && kill -0 "${BRIDGE_PID}" 2>/dev/null; then
     kill "${BRIDGE_PID}" 2>/dev/null || true
     wait "${BRIDGE_PID}" 2>/dev/null || true
@@ -364,6 +375,18 @@ print_summary() {
 EOF
 }
 
+stop_launchd_bridge_if_loaded() {
+  local gui_domain="gui/$(id -u)"
+  if ! launchctl print "${gui_domain}/com.remodex.bridge" >/dev/null 2>&1; then
+    return
+  fi
+
+  log "Stopping launchd bridge (com.remodex.bridge) so only this local relay owns the Mac slot"
+  launchctl bootout "${gui_domain}/com.remodex.bridge" 2>/dev/null \
+    || launchctl unload "${HOME}/Library/LaunchAgents/com.remodex.bridge.plist" 2>/dev/null \
+    || true
+}
+
 start_bridge() {
   log "Starting bridge"
   cd "${BRIDGE_DIR}"
@@ -384,15 +407,28 @@ hold_open() {
     fi
 
     if [[ -n "${BRIDGE_PID}" ]] && ! kill -0 "${BRIDGE_PID}" 2>/dev/null; then
-      wait "${BRIDGE_PID}"
-      return $?
+      local bridge_exit=0
+      wait "${BRIDGE_PID}" || bridge_exit=$?
+      BRIDGE_PID=""
+      if [[ "${RESTART_BRIDGE_ON_EXIT}" == "1" && "${SHUTTING_DOWN}" != "1" ]]; then
+        log "Bridge exited (code ${bridge_exit}); restarting bridge (relay stays up)"
+        start_bridge
+        continue
+      fi
+      return "${bridge_exit}"
     fi
 
     sleep 1
   done
 }
 
-trap cleanup EXIT INT TERM
+shutdown_requested() {
+  SHUTTING_DOWN=1
+  cleanup
+  exit 0
+}
+
+trap shutdown_requested INT TERM
 
 parse_args "$@"
 RELAY_HOSTNAME="$(default_hostname)"
@@ -406,5 +442,6 @@ ensure_port_available
 print_summary
 start_embedded_relay
 wait_for_relay
+stop_launchd_bridge_if_loaded
 start_bridge
 hold_open
