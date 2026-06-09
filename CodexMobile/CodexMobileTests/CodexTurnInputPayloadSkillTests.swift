@@ -1,5 +1,8 @@
 // FILE: CodexTurnInputPayloadSkillTests.swift
 // Purpose: Verifies turn/start input payload generation when structured skill items are enabled/disabled.
+//          Updated for RP-SKILL-3: bridge now conditionally emits skills[] to OC SDK prompt payload
+//          (when iOS includeStructuredSkillItems per cap flag); OC flag remains false (SDK verification:
+//          no skills:[] in Prompt/SessionPromptData; see opencode-sdk.md "gated pending upstream").
 // Layer: Unit Test
 // Exports: CodexTurnInputPayloadSkillTests
 // Depends on: XCTest, CodexMobile
@@ -10,6 +13,36 @@ import XCTest
 @MainActor
 final class CodexTurnInputPayloadSkillTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
+
+    func testMakeTurnInputPayloadIncludesMultipleSkillFilePathsWhenEnabled() {
+        let service = makeService()
+        let payload = service.makeTurnInputPayload(
+            userInput: "Run skills",
+            attachments: [],
+            imageURLKey: "url",
+            skillMentions: [
+                CodexTurnSkillMention(
+                    id: "review",
+                    name: "review",
+                    path: "/Users/me/.agents/skills/review/SKILL.md"
+                ),
+                CodexTurnSkillMention(
+                    id: "lint",
+                    name: "lint",
+                    path: "/Users/me/.agents/skills/lint/SKILL.md"
+                ),
+            ],
+            includeStructuredSkillItems: true
+        )
+
+        let skillItems = payload
+            .compactMap(\.objectValue)
+            .filter { $0["type"]?.stringValue == "skill" }
+
+        XCTAssertEqual(skillItems.count, 2)
+        XCTAssertEqual(skillItems[0]["path"]?.stringValue, "/Users/me/.agents/skills/review/SKILL.md")
+        XCTAssertEqual(skillItems[1]["path"]?.stringValue, "/Users/me/.agents/skills/lint/SKILL.md")
+    }
 
     func testMakeTurnInputPayloadIncludesStructuredSkillItemsWhenEnabled() {
         let service = makeService()

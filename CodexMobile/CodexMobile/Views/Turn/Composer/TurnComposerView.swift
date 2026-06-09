@@ -2,7 +2,7 @@
 // Purpose: Renders the turn composer input, queued-draft actions, attachments, and send/stop controls.
 // Layer: View Component (orchestrator)
 // Exports: TurnComposerView, TurnComposerInputChangeHandler
-// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, TurnMentionChips, TurnComposerInputTextView, TurnComposerSecondaryBar
+// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel (V2: sectioned+badges+60pt+See all per RP-SKILL-2), SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, TurnMentionChips, TurnComposerInputTextView, TurnComposerSecondaryBar
 
 import SwiftUI
 import UIKit
@@ -47,8 +47,12 @@ struct TurnComposerView: View {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isLoadingOpenCodeProvider: Bool
     let isRuntimeSelectionLoading: Bool
+    let modelsErrorMessage: String?
+    let openCodeProviderDiscoveryReasonCode: String?
 
+    let threadId: String?
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
@@ -91,10 +95,13 @@ struct TurnComposerView: View {
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
     let onSelectPluginAutocomplete: (CodexPluginMetadata) -> Void
-    let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
+    let onSelectSlashCommand: (TurnComposerSlashCommandItem) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
+    let onRetryBridgeSlashCommands: () -> Void
+    var onSeeAllBridgeSlashCommands: () -> Void = {}
+    var onSeeAllSkills: () -> Void = {}
     let onRemoveMentionedFile: (String) -> Void
     let onRemoveMentionedSkill: (String) -> Void
     let onRemoveMentionedPlugin: (String) -> Void
@@ -109,6 +116,9 @@ struct TurnComposerView: View {
     // Call sites can hide the project git/runtime row above the input for
     // constrained surfaces; access and usage always live in the bottom bar.
     var showsSecondaryBar: Bool = true
+    var showsComposerDesktopHandoff: Bool = false
+    var isDesktopHandoffLoading: Bool = false
+    var onContinueOnDesktop: (() -> Void)?
 
     @State private var composerInputHeight: CGFloat = 32
     @State private var inputChangeTask: Task<Void, Never>?
@@ -153,13 +163,18 @@ struct TurnComposerView: View {
                         onSelectGitBaseBranch: onSelectGitBaseBranch,
                         onRefreshGitBranches: onRefreshGitBranches,
                         canHandOffToWorktree: canHandOffToWorktree,
-                        onTapCreateWorktree: onTapCreateWorktree
+                        onTapCreateWorktree: onTapCreateWorktree,
+                        showsComposerDesktopHandoff: showsComposerDesktopHandoff,
+                        isDesktopHandoffLoading: isDesktopHandoffLoading,
+                        onContinueOnDesktop: onContinueOnDesktop
                     )
                 }
 
                 TurnComposerQueuedDraftsSection(
                     drafts: accessoryState.queuedDrafts,
                     canSteerDrafts: accessoryState.canSteerQueuedDrafts,
+                    showsSteerControl: accessoryState.showsSteerQueuedDraftControl,
+                    steerUnavailableReason: accessoryState.steerUnavailableReason,
                     canRestoreDrafts: accessoryState.canRestoreQueuedDrafts,
                     steeringDraftID: accessoryState.steeringDraftID,
                     onRestoreQueuedDraft: onRestoreQueuedDraft,
@@ -221,11 +236,15 @@ struct TurnComposerView: View {
                     }
 
                     ComposerBottomBar(
+                        threadId: threadId,
                         orderedModelOptions: orderedModelOptions,
                         selectedModelID: selectedModelID,
                         selectedModelTitle: selectedModelTitle,
                         isLoadingModels: isLoadingModels,
+                        isLoadingOpenCodeProvider: isLoadingOpenCodeProvider,
                         isRuntimeSelectionLoading: isRuntimeSelectionLoading,
+                        modelsErrorMessage: modelsErrorMessage,
+                        openCodeProviderDiscoveryReasonCode: openCodeProviderDiscoveryReasonCode,
                         runtimeState: runtimeState,
                         runtimeActions: runtimeActions,
                         remainingAttachmentSlots: remainingAttachmentSlots,
@@ -273,7 +292,10 @@ struct TurnComposerView: View {
                                 onSelectSlashCommand: onSelectSlashCommand,
                                 onSelectCodeReviewTarget: onSelectCodeReviewTarget,
                                 onSelectForkDestination: onSelectForkDestination,
-                                onCloseSlashCommandPanel: onCloseSlashCommandPanel
+                                onCloseSlashCommandPanel: onCloseSlashCommandPanel,
+                                onRetryBridgeSlashCommands: onRetryBridgeSlashCommands,
+                                onSeeAllBridgeSlashCommands: onSeeAllBridgeSlashCommands,
+                                onSeeAllSkills: onSeeAllSkills
                             )
                             .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -299,10 +321,13 @@ private struct TurnComposerAutocompletePanels: View {
     let onSelectFileAutocomplete: (CodexFuzzyFileMatch) -> Void
     let onSelectSkillAutocomplete: (CodexSkillMetadata) -> Void
     let onSelectPluginAutocomplete: (CodexPluginMetadata) -> Void
-    let onSelectSlashCommand: (TurnComposerSlashCommand) -> Void
+    let onSelectSlashCommand: (TurnComposerSlashCommandItem) -> Void
     let onSelectCodeReviewTarget: (TurnComposerReviewTarget) -> Void
     let onSelectForkDestination: (TurnComposerForkDestination) -> Void
     let onCloseSlashCommandPanel: () -> Void
+    let onRetryBridgeSlashCommands: () -> Void
+    var onSeeAllBridgeSlashCommands: () -> Void = {}
+    var onSeeAllSkills: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -333,19 +358,50 @@ private struct TurnComposerAutocompletePanels: View {
             }
 
             if state.isSkillAutocompleteVisible {
-                SkillAutocompletePanel(
-                    items: state.skillAutocompleteItems,
-                    isLoading: state.isSkillAutocompleteLoading,
-                    query: state.skillAutocompleteQuery,
-                    trigger: state.skillAutocompleteTrigger,
-                    onSelect: onSelectSkillAutocomplete
-                )
+                if state.supportsSkillAutocomplete {
+                    SkillAutocompletePanel(
+                        items: state.skillAutocompleteItems,
+                        totalCount: state.skillTotalCount,
+                        isLoading: state.isSkillAutocompleteLoading,
+                        query: state.skillAutocompleteQuery,
+                        trigger: state.skillAutocompleteTrigger,
+                        onSelect: onSelectSkillAutocomplete,
+                        onSeeAll: onSeeAllSkills
+                    )
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle")
+                                .font(AppFont.footnote())
+                                .foregroundStyle(.secondary)
+                            Text(ComposerCapabilityCopy.capabilityReason(for: .skillAutocomplete))
+                                .font(AppFont.footnote())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(4)
+                    .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                    .padding(.horizontal, 4)
+                }
             }
 
             if state.slashCommandPanelState != .hidden {
                 SlashCommandAutocompletePanel(
                     state: state.slashCommandPanelState,
                     availableCommands: state.availableSlashCommands,
+                    groupedBridgeSlashSections: state.groupedBridgeSlashSections,
+                    supportsSlashCommands: state.supportsSlashCommands,
+                    supportsSlashCommandExecute: state.supportsSlashCommandExecute,
+                    usesBridgeSlashCommands: state.usesBridgeSlashCommands,
+                    isLoadingBridgeSlashCommands: state.isLoadingBridgeSlashCommands,
+                    showsBridgeSlashCommandsEmptyHint: state.showsBridgeSlashCommandsEmptyHint,
+                    bridgeSlashCommandsLoadError: state.bridgeSlashCommandsLoadError,
+                    onRetryBridgeSlashCommands: onRetryBridgeSlashCommands,
+                    supportsThreadFork: state.supportsThreadFork,
                     hasComposerContentConflictingWithReview: state.hasComposerContentConflictingWithReview,
                     isThreadRunning: state.isThreadRunning,
                     showsGitBranchSelector: state.showsGitBranchSelector,
@@ -356,7 +412,8 @@ private struct TurnComposerAutocompletePanels: View {
                     onSelectCommand: onSelectSlashCommand,
                     onSelectReviewTarget: onSelectCodeReviewTarget,
                     onSelectForkDestination: onSelectForkDestination,
-                    onClose: onCloseSlashCommandPanel
+                    onClose: onCloseSlashCommandPanel,
+                    onSeeAll: onSeeAllBridgeSlashCommands
                 )
             }
         }
@@ -372,6 +429,8 @@ private struct TurnComposerQueuedDraftsSection: View {
 
     let drafts: [QueuedTurnDraft]
     let canSteerDrafts: Bool
+    let showsSteerControl: Bool
+    let steerUnavailableReason: String?
     let canRestoreDrafts: Bool
     let steeringDraftID: String?
     let onRestoreQueuedDraft: (String) -> Void
@@ -384,6 +443,8 @@ private struct TurnComposerQueuedDraftsSection: View {
                 QueuedDraftsPanel(
                     drafts: drafts,
                     canSteerDrafts: canSteerDrafts,
+                    showsSteerControl: showsSteerControl,
+                    steerUnavailableReason: steerUnavailableReason,
                     canRestoreDrafts: canRestoreDrafts,
                     steeringDraftID: steeringDraftID,
                     onRestore: onRestoreQueuedDraft,
@@ -621,6 +682,8 @@ private struct ComposerPreviewContent: View {
             accessoryState: TurnComposerAccessoryState(
                 queuedDrafts: queuedDrafts,
                 canSteerQueuedDrafts: canSteerQueuedDrafts,
+                showsSteerQueuedDraftControl: canSteerQueuedDrafts,
+                steerUnavailableReason: nil,
                 canRestoreQueuedDrafts: canSteerQueuedDrafts,
                 steeringDraftID: nil,
                 composerAttachments: [],
@@ -635,12 +698,23 @@ private struct ComposerPreviewContent: View {
                 voiceRecordingDuration: 0
             ),
             autocompleteState: TurnComposerAutocompleteState(
-                availableSlashCommands: TurnComposerSlashCommand.allCommands,
+                availableSlashCommands: TurnComposerSlashCommand.allCommands.map { .codex($0) },
+                groupedBridgeSlashSections: [],
+                supportsSlashCommands: true,
+                supportsSlashCommandExecute: false,
+                usesBridgeSlashCommands: false,
+                isLoadingBridgeSlashCommands: false,
+                showsBridgeSlashCommandsEmptyHint: false,
+                bridgeSlashCommandsLoadError: nil,
+                supportsThreadFork: true,
+                supportsSkillAutocomplete: true,
                 fileAutocompleteItems: [],
                 isFileAutocompleteVisible: false,
                 isFileAutocompleteLoading: false,
                 fileAutocompleteQuery: "",
                 skillAutocompleteItems: [],
+                skillFullListItems: [],
+                skillTotalCount: 0,
                 isSkillAutocompleteVisible: false,
                 isSkillAutocompleteLoading: false,
                 skillAutocompleteQuery: "",
@@ -674,20 +748,39 @@ private struct ComposerPreviewContent: View {
             selectedModelID: "gpt-5.5",
             selectedModelTitle: "GPT-5.5",
             isLoadingModels: false,
+            isLoadingOpenCodeProvider: false,
             isRuntimeSelectionLoading: false,
+            modelsErrorMessage: nil,
+            openCodeProviderDiscoveryReasonCode: nil,
+            threadId: nil,
             runtimeState: TurnComposerRuntimeState(
                 reasoningDisplayOptions: reasoningOptions,
                 effectiveReasoningEffort: "high",
                 selectedReasoningEffort: "high",
                 reasoningMenuDisabled: false,
                 selectedServiceTier: .fast,
-                supportsFastMode: true
+                capabilities: ProviderCapabilities.defaultCodex,
+                availableAgents: [],
+                selectedAgent: nil,
+                isRuntimeEnabled: true,
+                runtimeUnavailableReason: nil,
+                runtimeUnavailableReasonCode: nil,
+                disabledProviderIDs: [],
+                catalogProviderIDs: ["codex"],
+                openCodeCatalogProviders: [],
+                unavailableReasonByProviderID: [:],
+                reasonCodeByProviderID: [:],
+                showsBetaLabel: false,
+                showsComposerAccessMode: true
             ),
             runtimeActions: TurnComposerRuntimeActions(
                 selectModel: { _ in },
                 selectAutomaticReasoning: {},
                 selectReasoning: { _ in },
-                selectServiceTier: { _ in }
+                selectServiceTier: { _ in },
+                selectAgent: { _ in },
+                refreshModels: {},
+                browseAllModels: {}
             ),
             voiceButtonPresentation: TurnComposerVoiceButtonPresentation(
                 systemImageName: "mic",
@@ -743,6 +836,7 @@ private struct ComposerPreviewContent: View {
             onSelectCodeReviewTarget: { _ in },
             onSelectForkDestination: { _ in },
             onCloseSlashCommandPanel: {},
+            onRetryBridgeSlashCommands: {},
             onRemoveMentionedFile: { _ in },
             onRemoveMentionedSkill: { _ in },
             onRemoveMentionedPlugin: { _ in },

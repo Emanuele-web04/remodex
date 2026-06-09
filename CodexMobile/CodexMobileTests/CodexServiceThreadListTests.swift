@@ -198,9 +198,9 @@ final class CodexServiceThreadListTests: XCTestCase {
         service.pendingRuntimeOptionRefresh = true
 
         var threadListRequestCount = 0
-        var modelListRequestCount = 0
+        var runtimeRefreshRequestCount = 0
         var didReturnThreadListResponse = false
-        var didLoadModelsBeforeThreadListReturned = false
+        var didRefreshRuntimeBeforeThreadListReturned = false
 
         service.requestTransportOverride = { method, _ in
             switch method {
@@ -213,12 +213,12 @@ final class CodexServiceThreadListTests: XCTestCase {
                     result: .object(["threads": .array([])]),
                     includeJSONRPC: false
                 )
-            case "model/list":
-                modelListRequestCount += 1
-                didLoadModelsBeforeThreadListReturned = !didReturnThreadListResponse
+            case "model/list", "runtime/catalog":
+                runtimeRefreshRequestCount += 1
+                didRefreshRuntimeBeforeThreadListReturned = !didReturnThreadListResponse
                 return RPCMessage(
                     id: .string(UUID().uuidString),
-                    result: .object(["items": .array([])]),
+                    result: .object(method == "runtime/catalog" ? ["runtimes": .array([])] : ["items": .array([])]),
                     includeJSONRPC: false
                 )
             default:
@@ -228,11 +228,11 @@ final class CodexServiceThreadListTests: XCTestCase {
         }
 
         try await service.listThreads()
-        await waitUntil { modelListRequestCount > 0 }
+        await waitUntil { runtimeRefreshRequestCount >= 2 }
 
         XCTAssertEqual(threadListRequestCount, 1)
-        XCTAssertEqual(modelListRequestCount, 1)
-        XCTAssertFalse(didLoadModelsBeforeThreadListReturned)
+        XCTAssertEqual(runtimeRefreshRequestCount, 2)
+        XCTAssertFalse(didRefreshRuntimeBeforeThreadListReturned)
         XCTAssertFalse(service.pendingRuntimeOptionRefresh)
         XCTAssertNil(service.runtimeOptionRefreshTask)
         XCTAssertNil(service.runtimeOptionRefreshToken)
@@ -243,7 +243,7 @@ final class CodexServiceThreadListTests: XCTestCase {
         let laterByUpdatedAt = CodexThread(
             id: "later-by-updated-at",
             createdAt: Date(timeIntervalSince1970: 10),
-            updatedAt: Date(timeIntervalSince1970: 50)
+            updatedAt: Date(timeIntervalSince1970: 150)
         )
         let laterByCreatedAt = CodexThread(
             id: "later-by-created-at",
@@ -262,6 +262,70 @@ final class CodexServiceThreadListTests: XCTestCase {
             sorted.map(\.id),
             ["later-by-updated-at", "later-by-created-at", "oldest-thread"]
         )
+    }
+
+    func testReconcileKeepsOpenCodeThreadWithMessagesWhenServerOmits() {
+        let service = makeService()
+        let ghostID = "opencode-local-with-messages"
+        service.threads = [
+            CodexThread(
+                id: ghostID,
+                title: CodexThread.openCodePlaceholderChatTitle,
+                name: CodexThread.openCodePlaceholderChatTitle,
+                cwd: nil,
+                modelProvider: "opencode"
+            ),
+        ]
+        service.messagesByThread[ghostID] = [
+            CodexMessage(
+                threadId: ghostID,
+                role: .user,
+                text: "hello",
+                deliveryState: .confirmed
+            ),
+        ]
+
+        service.reconcileLocalThreadsWithServer([])
+
+        XCTAssertEqual(service.thread(for: ghostID)?.displayTitle, CodexThread.openCodePlaceholderChatTitle)
+        XCTAssertEqual(service.messagesByThread[ghostID]?.count, 1)
+    }
+
+    func testReconcilePrunesBareOpenCodeStubWhenServerOmits() {
+        let service = makeService()
+        let ghostID = "opencode-bare-stub"
+        service.threads = [
+            CodexThread(
+                id: ghostID,
+                title: CodexThread.openCodePlaceholderChatTitle,
+                name: CodexThread.openCodePlaceholderChatTitle,
+                cwd: nil,
+                modelProvider: "opencode"
+            ),
+        ]
+        service.messagesByThread[ghostID] = []
+
+        service.reconcileLocalThreadsWithServer([])
+
+        XCTAssertNil(service.thread(for: ghostID))
+        XCTAssertNil(service.messagesByThread[ghostID])
+    }
+
+    func testUpsertThreadSkipsBareOpenCodeServerStubWithoutLocalThread() {
+        let service = makeService()
+
+        service.upsertThread(
+            CodexThread(
+                id: "opencode-server-stub",
+                title: CodexThread.openCodePlaceholderChatTitle,
+                name: CodexThread.openCodePlaceholderChatTitle,
+                cwd: nil,
+                modelProvider: "opencode"
+            ),
+            treatAsServerState: true
+        )
+
+        XCTAssertNil(service.thread(for: "opencode-server-stub"))
     }
 
     func testUserRenameSurvivesStaleThreadListRefreshForPinnedThread() {

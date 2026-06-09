@@ -18,6 +18,7 @@ struct SidebarThreadRowView: View {
     let isSubagentExpanded: Bool
     let onToggleSubagents: (() -> Void)?
     let onTap: () -> Void
+    let showsBetaLabel: Bool
     var onRename: ((String) -> Void)? = nil
     var onPinToggle: (() -> Void)? = nil
     var onArchiveToggle: (() -> Void)? = nil
@@ -81,13 +82,9 @@ struct SidebarThreadRowView: View {
                 // Keep trailing metadata inside the main stack so long titles truncate before it.
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
-                        // Pinned glyph hidden on the row itself: pinned threads already
-                        // live under the "Pinned" section header, so the per-row badge
-                        // was redundant. Kept the `isPinned` plumbing for the context
-                        // menu / accessibility / future use.
-                        // if isPinned && !thread.isSubagent {
-                        //     SidebarPinIcon(style: .rowBadge)
-                        // }
+                        if !thread.isSubagent {
+                            SidebarProviderBadge(provider: thread.modelProvider)
+                        }
 
                         Text(thread.displayTitle)
                             .font(AppFont.body())
@@ -115,10 +112,19 @@ struct SidebarThreadRowView: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 12)
         .padding(.vertical, 12)
+        .accessibilityLabel(
+            thread.displayTitle
+                + ", "
+                + TurnComposerMetaMapper.threadProviderAccessibilityLabel(for: thread.modelProvider)
+        )
     }
 
     private var parentTrailingMeta: some View {
         HStack(spacing: 6) {
+            if showsBetaLabel {
+                OpenCodeBetaCapsule()
+            }
+
             if thread.syncState == .archivedLocal {
                 Text("Archived")
                     .font(AppFont.caption2())
@@ -131,6 +137,13 @@ struct SidebarThreadRowView: View {
             expansionToggleButton
 
             SidebarThreadStatusIcon(thread: thread, pointSize: 12)
+
+            if thread.isDiscoveredExternalOpenCodeThread {
+                RemodexIcon.image(systemName: "desktopcomputer")
+                    .font(AppFont.caption(weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .accessibilityLabel("Started on Mac")
+            }
 
             if let pinnedProjectLabel, !pinnedProjectLabel.isEmpty {
                 Text(pinnedProjectLabel)

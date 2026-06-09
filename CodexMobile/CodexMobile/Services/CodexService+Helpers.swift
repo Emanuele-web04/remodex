@@ -49,6 +49,12 @@ extension CodexService {
 
     func upsertThread(_ incomingThread: CodexThread, treatAsServerState: Bool = false) {
         let existingThread = self.thread(for: incomingThread.id)
+        if treatAsServerState,
+           existingThread == nil,
+           isOpenCodeBareStubThread(incomingThread) {
+            return
+        }
+
         var resolvedThread = mergedThread(
             incomingThread,
             with: existingThread,
@@ -109,7 +115,8 @@ extension CodexService {
         if merged.cwd == nil { merged.cwd = existing.normalizedProjectPath }
         merged.metadata = mergedThreadMetadata(
             serverMetadata: merged.metadata,
-            localMetadata: existing.metadata
+            localMetadata: existing.metadata,
+            treatAsServerState: treatAsServerState
         )
         if merged.forkedFromThreadId == nil { merged.forkedFromThreadId = existing.forkedFromThreadId }
         if merged.parentThreadId == nil { merged.parentThreadId = existing.parentThreadId }
@@ -118,10 +125,49 @@ extension CodexService {
         if merged.agentRole == nil { merged.agentRole = existing.agentRole }
         if merged.model == nil { merged.model = existing.model }
         if merged.modelProvider == nil { merged.modelProvider = existing.modelProvider }
+        if treatAsServerState, isOpenCodeBareStubThread(incoming), !isOpenCodeBareStubThread(existing) {
+            merged.title = existing.title
+            merged.name = existing.name
+            merged.preview = existing.preview
+            merged.createdAt = existing.createdAt
+            merged.updatedAt = existing.updatedAt
+            merged.cwd = existing.normalizedProjectPath
+            merged.model = existing.model
+            merged.modelProvider = existing.modelProvider
+        }
         return applyingAuthoritativeProjectPath(
             to: merged,
             treatAsServerState: treatAsServerState
         )
+    }
+
+    // OpenCode session rehydrate can surface title-only ghosts with no cwd; keep Codex pagination parity.
+    func isOpenCodeBareStubThread(_ thread: CodexThread) -> Bool {
+        guard CodexModelOption.normalizedProvider(thread.modelProvider) == "opencode" else {
+            return false
+        }
+
+        guard isOpenCodeBareStubTitle(thread) else {
+            return false
+        }
+
+        return thread.gitWorkingDirectory == nil
+    }
+
+    private func isOpenCodeBareStubTitle(_ thread: CodexThread) -> Bool {
+        let titleCandidates = [thread.title, thread.name]
+            .compactMap { value -> String? in
+                let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                return trimmed.isEmpty ? nil : trimmed
+            }
+
+        if titleCandidates.isEmpty {
+            return true
+        }
+
+        return titleCandidates.allSatisfy {
+            $0.localizedCaseInsensitiveCompare(CodexThread.openCodePlaceholderChatTitle) == .orderedSame
+        }
     }
 
     // Persists fork ancestry outside transient thread payloads so sidebar badges survive reconnects.
@@ -225,7 +271,8 @@ extension CodexService {
     func pinThread(_ threadId: String) {
         guard let pinnedRootThreadID = pinnedRootThreadID(for: threadId),
               let snapshotThreads = snapshotThreadsForPinnedRoot(pinnedRootThreadID),
-              !snapshotThreads.isEmpty else {
+              !snapshotThreads.isEmpty,
+              !snapshotThreads.allSatisfy(isOpenCodeBareStubThread) else {
             return
         }
 
@@ -341,7 +388,8 @@ extension CodexService {
 
             for snapshotThread in snapshotThreads {
                 guard !deletedThreadIDs.contains(snapshotThread.id),
-                      mergedThreadsByID[snapshotThread.id] == nil else {
+                      mergedThreadsByID[snapshotThread.id] == nil,
+                      !isOpenCodeBareStubThread(snapshotThread) else {
                     continue
                 }
 
@@ -438,13 +486,16 @@ extension CodexService {
         let subtreeThreadIDs = subtreeThreadIDs(for: normalizedRootThreadID)
         if !subtreeThreadIDs.isEmpty {
             let subtreeThreadIDSet = Set(subtreeThreadIDs)
-            let subtreeThreads = threads.filter { subtreeThreadIDSet.contains($0.id) }
+            let subtreeThreads = threads
+                .filter { subtreeThreadIDSet.contains($0.id) }
+                .filter { !isOpenCodeBareStubThread($0) }
             if !subtreeThreads.isEmpty {
                 return subtreeThreads
             }
         }
 
-        if let currentThread = thread(for: normalizedRootThreadID) {
+        if let currentThread = thread(for: normalizedRootThreadID),
+           !isOpenCodeBareStubThread(currentThread) {
             return [currentThread]
         }
 

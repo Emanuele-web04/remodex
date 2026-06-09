@@ -26,10 +26,15 @@ extension CodexService {
         guard let delta = extractAssistantDeltaText(
             from: paramsObject,
             eventObject: eventObject
-        ) else { return }
+        ) else {
+            if let threadId = extractThreadID(from: paramsObject) {
+                traceAssistantDeltaDrop(threadId: threadId, reason: "missing_delta")
+            }
+            return
+        }
 
         if let directThreadId = extractThreadID(from: paramsObject), !directThreadId.isEmpty {
-            markThreadAsRunning(directThreadId)
+            markIncomingThreadAsRunning(directThreadId, turnId: extractTurnID(from: paramsObject))
         }
 
         guard let context = resolveAssistantEventContext(
@@ -38,10 +43,18 @@ extension CodexService {
             requiresTurnId: true
         ),
         let turnId = context.identity.turnId else {
+            if let threadId = extractThreadID(from: paramsObject) {
+                traceAssistantDeltaDrop(threadId: threadId, reason: "missing_turn_id")
+            }
             return
         }
 
-        markThreadAsRunning(context.threadId)
+        markIncomingThreadAsRunning(context.threadId, turnId: turnId)
+        // Strict late guard (RP-MSG-3): skip + trace if activeTurnID(threadId) != turnId
+        if let active = activeTurnID(for: context.threadId), active != turnId {
+            traceAssistantDeltaDrop(threadId: context.threadId, reason: "late_turn_mismatch", turnId: turnId)
+            return
+        }
         if activeTurnID(for: context.threadId) == nil {
             setActiveTurnID(turnId, for: context.threadId)
             threadIdByTurnID[turnId] = context.threadId
@@ -77,6 +90,13 @@ extension CodexService {
         guard let text else { return }
         let createdAt = decodeHistoryTimestamp(from: paramsObject)
 
+        if hasMatchingPendingUserMessage(threadId: threadId, text: text) {
+            return
+        }
+        if hasMatchingConfirmedUserMessage(threadId: threadId, turnId: turnId, text: text) {
+            return
+        }
+
         markMirroredRunningCatchupNeeded(for: threadId)
         appendConfirmedMirroredUserMessage(
             threadId: threadId,
@@ -111,6 +131,11 @@ extension CodexService {
                 eventObject: eventObject,
                 itemObject: nil
             )
+            if let turnId, let active = activeTurnID(for: context.threadId), active != turnId {
+                // strict late guard for completion item
+                traceAssistantDeltaDrop(threadId: context.threadId, reason: "late_turn_mismatch", turnId: turnId)
+                return
+            }
             completeAssistantMessage(
                 threadId: context.threadId,
                 turnId: turnId,
@@ -243,7 +268,7 @@ extension CodexService {
         let eventObject = envelopeEventObject(from: paramsObject)
 
         if let directThreadId = extractThreadID(from: paramsObject), !directThreadId.isEmpty {
-            markThreadAsRunning(directThreadId)
+            markIncomingThreadAsRunning(directThreadId, turnId: extractTurnID(from: paramsObject))
         }
 
         guard let itemObject = extractIncomingItemObject(from: paramsObject, eventObject: eventObject) else {

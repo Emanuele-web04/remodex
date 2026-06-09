@@ -108,6 +108,7 @@ extension CodexService {
             isConnected = true
             lastErrorMessage = nil
             try await initializeSession()
+            await finishTrustedReconnectSessionBootstrapIfNeeded()
             shouldAutoReconnectOnForeground = false
             connectionRecoveryState = .idle
             trustedReconnectFailureCount = 0
@@ -154,18 +155,55 @@ extension CodexService {
         isInitialized = false
         isLoadingThreads = false
         isLoadingModels = false
+        resetOpenCodeModelsRetry()
         pendingRuntimeOptionRefresh = false
         runtimeOptionRefreshTask?.cancel()
         runtimeOptionRefreshTask = nil
         runtimeOptionRefreshToken = nil
-        clearPendingApprovals()
-        finalizeAllStreamingState()
+        catalogRefetchDebounceTask?.cancel()
+        catalogRefetchDebounceTask = nil
+        lastOpenCodeCatalogRevision = nil
         messagePersistenceDebounceTask?.cancel()
         messagePersistenceDebounceTask = nil
         if !suspendAutomaticMacScopedPersistence {
             persistCurrentMacMessages()
         }
+        deferredSyncTasks.values.forEach { $0.cancel() }
+        deferredSyncTasks.removeAll()
+        endBackgroundRunGraceTask(reason: "disconnect")
+        clearConnectionSyncState(preservingRunningThreads: preserveReconnectIntent)
+        resetSecureTransportState()
+        cancelTrustedSessionResolve()
+
+        if preserveReconnectIntent {
+            teardownTransportOnly()
+        } else {
+            teardownFullSessionOnDisconnect()
+        }
+
+        failAllPendingRequests(with: CodexServiceError.disconnected)
+    }
+
+    // Transport-only path: preserve turn maps, running markers, timeline, and approval queues (Bug A1 fix).
+    private func teardownTransportOnly() {
+        finalizeStreamingPresentationOnly()
+        clearHydrationCachesPreservingRunningThreads()
+        // Catalog snapshot is stale until reconnect; per-thread capability gates remain authoritative.
+        supportsStructuredSkillInput = false
+        supportsStructuredMentionInput = true
+        supportsTurnCollaborationMode = false
+        hasResolvedRateLimitsSnapshot = false
+        bridgeInstalledVersion = nil
+        latestBridgePackageVersion = nil
+    }
+
+    // Full session reset on explicit logout, server switch, or preserveReconnectIntent: false.
+    private func teardownFullSessionOnDisconnect() {
+        clearPendingApprovals()
+        clearPendingOpenCodePermissions()
+        finalizeAllStreamingState()
         assistantCompletionFingerprintByThread.removeAll()
+        assistantCompletionFingerprintByTurn.removeAll()
         recentActivityLineByThread.removeAll()
         removeAllThreadTimelineState()
         assistantRevertStateCacheByThread.removeAll()
@@ -185,24 +223,16 @@ extension CodexService {
         failedThreadIDs.removeAll()
         runningThreadWatchByID.removeAll()
         clearTransientConnectionPrompts()
-        endBackgroundRunGraceTask(reason: "disconnect")
-        if !preserveReconnectIntent {
-            shouldAutoReconnectOnForeground = false
-            connectionRecoveryState = .idle
-        }
-        supportsStructuredSkillInput = true
+        shouldAutoReconnectOnForeground = false
+        connectionRecoveryState = .idle
+        supportsStructuredSkillInput = false
         supportsStructuredMentionInput = true
         supportsTurnCollaborationMode = false
         hasResolvedRateLimitsSnapshot = false
         bridgeInstalledVersion = nil
         latestBridgePackageVersion = nil
-        clearConnectionSyncState()
         clearHydrationCaches()
         resumedThreadIDs.removeAll()
-        resetSecureTransportState()
-        cancelTrustedSessionResolve()
-
-        failAllPendingRequests(with: CodexServiceError.disconnected)
     }
 
     func setKeepMacAwakeWhileBridgeRunsPreference(_ enabled: Bool) {
@@ -301,8 +331,13 @@ extension CodexService {
             clearPreviousTrustedMacDeviceId()
         }
 
-        if normalizedRelayMacDeviceId == targetDeviceId {
+        // Atomic re-pair: drop saved relay keys when forgetting the Mac that owns them,
+        // or when no trusted Macs remain (avoids trusted_reconnect with stale sessionId).
+        if normalizedRelayMacDeviceId == targetDeviceId || trustedMacRegistry.records.isEmpty {
             clearSavedRelaySession()
+            shouldForceQRBootstrapOnNextHandshake = true
+            secureConnectionState = .notPaired
+            secureMacFingerprint = nil
         } else {
             resetSecureTransportState()
         }
@@ -311,6 +346,11 @@ extension CodexService {
     // Gives the UI one stable "forget pair" action whether reconnect comes from a trusted record
     // or only from the last saved relay session.
     func forgetReconnectCandidate() {
+        shouldAutoReconnectOnForeground = false
+        connectionRecoveryState = .idle
+        lastErrorMessage = nil
+        cancelTrustedSessionResolve()
+
         if let normalizedRelayMacDeviceId,
            trustedMacRegistry.records[normalizedRelayMacDeviceId] != nil {
             forgetTrustedMac(deviceId: normalizedRelayMacDeviceId)
@@ -323,6 +363,9 @@ extension CodexService {
         }
 
         clearSavedRelaySession()
+        shouldForceQRBootstrapOnNextHandshake = true
+        secureConnectionState = .notPaired
+        secureMacFingerprint = nil
     }
 
     func initializeSession() async throws {
@@ -506,9 +549,14 @@ extension CodexService {
         }
         connectionRecoveryState = disposition.connectionRecoveryState
         lastErrorMessage = disposition.lastErrorMessage
-        finalizeAllStreamingState()
+        if disposition.shouldAutoReconnectOnForeground {
+            finalizeStreamingPresentationOnly()
+            clearConnectionSyncState(preservingRunningThreads: true)
+        } else {
+            finalizeAllStreamingState()
+            clearConnectionSyncState()
+        }
         endBackgroundRunGraceTask(reason: "receive-error")
-        clearConnectionSyncState()
         // Thread resumes are transport-scoped; a fresh socket must be allowed to
         // issue `thread/resume` again for desktop-origin threads after recovery.
         resumedThreadIDs.removeAll()
@@ -540,10 +588,12 @@ extension CodexService {
     // Paint chats first; runtime metadata is useful composer chrome but must
     // never block thread sync on bridges where model/list is slow.
     func performPostConnectSyncPass(preferredThreadId: String? = nil) async {
-        await syncThreadsList()
+        _ = applyProgressiveSidebarFromStaleCacheIfNeeded()
+        scheduleRuntimeOptionRefresh()
+        async let threadListRefresh: Void = syncThreadsList()
         if await routePendingNotificationOpenIfPossible(refreshIfNeeded: false) {
+            await threadListRefresh
             scheduleCompleteThreadListHydration()
-            scheduleRuntimeOptionRefresh()
             return
         }
         let resolvedPreferredThreadId = normalizedInterruptIdentifier(preferredThreadId)
@@ -574,8 +624,43 @@ extension CodexService {
                 )
             }
         }
+        await threadListRefresh
         scheduleCompleteThreadListHydration()
-        scheduleRuntimeOptionRefresh()
+    }
+
+    // Paints pinned/local thread snapshots before the first thread/list RPC returns so the
+    // sidebar can render in <2s on reconnect while discovery sync continues in the background.
+    @discardableResult
+    func applyProgressiveSidebarFromStaleCacheIfNeeded() -> Bool {
+        guard threads.isEmpty else {
+            return true
+        }
+
+        var mergedThreadsByID: [String: CodexThread] = [:]
+        let deletedThreadIDs = locallyDeletedThreadIDs
+        let injectedThreadIDs = injectPinnedSnapshotThreads(
+            into: &mergedThreadsByID,
+            deletedThreadIDs: deletedThreadIDs
+        )
+        guard !mergedThreadsByID.isEmpty else {
+            return false
+        }
+
+        for threadID in Array(mergedThreadsByID.keys) {
+            guard var thread = mergedThreadsByID[threadID] else { continue }
+            applyPersistedThreadRename(to: &thread)
+            mergedThreadsByID[threadID] = thread
+        }
+
+        threads = sortThreads(Array(mergedThreadsByID.values))
+        snapshotOnlyPinnedThreadIDs.formUnion(injectedThreadIDs)
+        if activeThreadId == nil {
+            activeThreadId = firstLiveThreadID()
+        }
+        debugSyncLog(
+            "progressive sidebar painted cached=\(mergedThreadsByID.count) injected=\(injectedThreadIDs.count)"
+        )
+        return true
     }
 
     // Refreshes capped sidebar metadata without keeping initial reconnect in the loading state.
@@ -593,16 +678,16 @@ extension CodexService {
     // runtimes can answer chats while model/list is still slow or unavailable.
     private func scheduleRuntimeOptionRefresh() {
         pendingRuntimeOptionRefresh = true
-        flushPendingRuntimeOptionRefreshIfPossible(delayNanoseconds: 1_000_000_000)
+        flushPendingRuntimeOptionRefreshIfPossible()
     }
 
-    // Runs a queued runtime metadata refresh once thread hydration is no longer busy.
+    // Runs runtime metadata independently from chat hydration. Settings already uses this
+    // path directly; reopen should not require visiting Settings to populate runtimes.
     func flushPendingRuntimeOptionRefreshIfPossible(delayNanoseconds: UInt64 = 0) {
         guard pendingRuntimeOptionRefresh,
               runtimeOptionRefreshTask == nil,
               isConnected,
-              isInitialized,
-              !isLoadingThreads else {
+              isInitialized else {
             return
         }
 
@@ -627,11 +712,7 @@ extension CodexService {
                 }
             }
             guard self.isConnected, self.isInitialized else { return }
-            guard !self.isLoadingThreads else {
-                self.pendingRuntimeOptionRefresh = true
-                return
-            }
-            try? await self.listModels()
+            await self.refreshRuntimeMetadataParallel()
             if self.runtimeOptionRefreshToken == refreshToken {
                 self.pendingRuntimeOptionRefresh = false
             }
@@ -660,15 +741,23 @@ extension CodexService {
         refreshAllThreadTimelineStates()
         threadIdByTurnID.removeAll()
         clearPendingApprovals()
+        clearPendingOpenCodePermissions()
         currentOutput = ""
         lastErrorMessage = nil
         isLoadingModels = false
+        resetOpenCodeModelsRetry()
         pendingRuntimeOptionRefresh = false
         runtimeOptionRefreshTask?.cancel()
         runtimeOptionRefreshTask = nil
         runtimeOptionRefreshToken = nil
-        modelsErrorMessage = nil
+        catalogRefetchDebounceTask?.cancel()
+        catalogRefetchDebounceTask = nil
+        lastOpenCodeCatalogRevision = nil
+        clearModelsErrorMessages()
         assistantCompletionFingerprintByThread.removeAll()
+        assistantCompletionFingerprintByTurn.removeAll()
+        deferredSyncTasks.values.forEach { $0.cancel() }
+        deferredSyncTasks.removeAll()
         recentActivityLineByThread.removeAll()
         removeAllThreadTimelineState()
         assistantRevertStateCacheByThread.removeAll()
@@ -692,7 +781,8 @@ extension CodexService {
         endBackgroundRunGraceTask(reason: "server-switch")
         shouldAutoReconnectOnForeground = false
         connectionRecoveryState = .idle
-        supportsStructuredSkillInput = true
+        // Server switch drops catalog until runtime/catalog reloads; forThreadId: is authoritative meanwhile.
+        supportsStructuredSkillInput = false
         supportsStructuredMentionInput = true
         supportsTurnCollaborationMode = false
         bridgeInstalledVersion = nil
@@ -735,7 +825,7 @@ extension CodexService {
     }
 
     // Drops sync work tied to the old transport so reconnect starts from a clean baseline.
-    private func clearConnectionSyncState() {
+    private func clearConnectionSyncState(preservingRunningThreads: Bool = false) {
         isBootstrappingConnectionSync = false
         stopSyncLoop()
         postConnectSyncTask?.cancel()
@@ -743,7 +833,11 @@ extension CodexService {
         postConnectSyncToken = nil
         threadListFetchTaskByLimit.values.forEach { $0.task.cancel() }
         threadListFetchTaskByLimit.removeAll()
-        cancelAllPerThreadRefreshWork()
+        if preservingRunningThreads {
+            clearHydrationCachesPreservingRunningThreads()
+        } else {
+            cancelAllPerThreadRefreshWork()
+        }
     }
 
     // Avoids wiping thread/runtime state when reconnecting after a socket that already died.
@@ -820,14 +914,15 @@ extension CodexService {
                 ?? "This relay pairing is no longer valid. Scan a new QR code to reconnect.")
             : nil
         let explicitRelayDropMessage = explicitRelayDropMessage(for: relayCloseCode)
+        let isExplicitRelayDrop = explicitRelayDropMessage != nil
         let isBenignDisconnect = isBenignBackgroundDisconnect(error)
         let shouldSuppressMessage = isBenignDisconnect && !isActivelyForegroundedForConnectionUI()
         // Foreground relay drops should reconnect too, otherwise Stop disappears mid-run.
         let shouldAttemptAutoRecovery = !shouldClearSavedRelaySession
-            && explicitRelayDropMessage == nil
             && (retryableSessionUnavailableMessage != nil
                 || isRecoverableTransientConnectionError(error)
-                || isBenignDisconnect)
+                || isBenignDisconnect
+                || isExplicitRelayDrop)
 
         let connectionRecoveryState: CodexConnectionRecoveryState = shouldAttemptAutoRecovery
             ? .retrying(attempt: 0, message: recoveryStatusMessage(for: error))
@@ -1091,6 +1186,17 @@ extension CodexService {
         return "Reconnecting..."
     }
 
+    // Keeps trusted auto-reconnect attempts visually quiet instead of flashing interrupt copy.
+    func shouldSuppressInterruptedConnectionMessageDuringTrustedRecovery() -> Bool {
+        guard case .retrying = connectionRecoveryState else {
+            return false
+        }
+        guard hasTrustedReconnectContext else {
+            return false
+        }
+        return trustedReconnectFailureCount < Self.maxTrustedReconnectFailures
+    }
+
     func userFacingConnectFailureMessage(_ error: Error) -> String {
         if let retryableSessionUnavailableMessage = retryableSessionUnavailableMessage(forConnectError: error) {
             return retryableSessionUnavailableMessage
@@ -1099,6 +1205,9 @@ extension CodexService {
             return oversizedRelayPayloadMessage
         }
         if shouldTreatSendFailureAsDisconnect(error) || isBenignBackgroundDisconnect(error) {
+            if shouldSuppressInterruptedConnectionMessageDuringTrustedRecovery() {
+                return recoveryStatusMessage(for: error)
+            }
             return "Connection was interrupted. Tap Reconnect to try again."
         }
         if isRecoverableTransientConnectionError(error) {

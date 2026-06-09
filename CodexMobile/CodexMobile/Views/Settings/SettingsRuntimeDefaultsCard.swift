@@ -24,6 +24,21 @@ struct SettingsRuntimeDefaultsCard: View {
                 selection: runtimeModelSelection
             )
 
+            if showsOpenCodeAgentPicker {
+                SettingsMenuPickerRow(
+                    title: "OpenCode Agent",
+                    value: defaultOpenCodeAgentTitle,
+                    options: openCodeAgentPickerOptions,
+                    selection: defaultOpenCodeAgentSelection
+                )
+
+                Toggle("Discover Mac sessions", isOn: openCodeExternalDiscoveryBinding)
+
+                Text("Show OpenCode sessions started on your Mac in the sidebar.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
+
             SettingsMenuPickerRow(
                 title: "Reasoning",
                 value: runtimeReasoningTitle,
@@ -55,7 +70,87 @@ struct SettingsRuntimeDefaultsCard: View {
                 selection: gitWriterModelSelection,
                 isDisabled: gitWriterModelOptions.isEmpty
             )
+
+            if let opencodeRuntime = codex.availableRuntimes.first(where: {
+                CodexModelOption.normalizedProvider($0.id) == "opencode"
+            }) {
+                Text(openCodeRuntimeFootnote(opencodeRuntime))
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+
+                Text("Configure MCP in OpenCode on your Mac — not from Remodex.")
+                    .font(AppFont.caption())
+                    .foregroundStyle(.secondary)
+            }
         }
+        .task {
+            guard codex.isConnected, codex.isInitialized else { return }
+            await codex.refreshRuntimeMetadataSequential()
+        }
+    }
+
+    private var defaultOpenCodeAgentTitle: String {
+        TurnComposerMetaMapper.agentTitle(
+            for: codex.defaultOpenCodeAgentId
+                ?? codex.availableAgents.first?.id
+                ?? "build"
+        )
+    }
+
+    private var openCodeAgentPickerOptions: [SettingsMenuPickerOption<String>] {
+        codex.availableAgents.map {
+            SettingsMenuPickerOption(value: $0.id, title: TurnComposerMetaMapper.agentTitle(for: $0.id))
+        }
+    }
+
+    private func openCodeRuntimeFootnote(_ runtime: RuntimeInfo) -> String {
+        let details = runtime.opencode
+        let discoveryReason = codex.openCodeProviderDiscoveryReasonCode
+            ?? details?.providerDiscoveryReasonCode
+
+        if discoveryReason == "no_connected_providers" {
+            return "Connect providers in OpenCode on your Mac."
+        }
+
+        if discoveryReason == "unknown" {
+            return "OpenCode provider status is unknown. Tap Retry in Settings or the model menu."
+        }
+
+        if discoveryReason == "provider_list_failed" {
+            return runtime.unavailableReason ?? "OpenCode provider list is unavailable on this Mac."
+        }
+
+        if runtime.enabled {
+            var summary = ComposerCapabilityCopy.openCodeStatusSummary(
+                version: details?.version,
+                minVersion: details?.minVersion,
+                handoffEnvEnabled: details?.handoffEnvEnabled ?? false
+            )
+            if discoveryReason == "ok",
+               let connected = details?.connectedProviders,
+               !connected.isEmpty {
+                let names = connected.map(\.displayName).joined(separator: ", ")
+                summary += " · Connected on Mac: \(names)"
+            } else if let auth = details?.authConfigured {
+                summary += auth ? " · Providers connected on Mac" : " · No providers connected on Mac"
+            } else {
+                summary += " · Provider status unknown"
+            }
+            if details?.versionBelowMinimum == true {
+                summary += " · Upgrade OpenCode on your Mac"
+            }
+            return summary
+        }
+        return runtime.unavailableReason ?? "OpenCode is not available on this Mac bridge."
+    }
+
+    private var showsOpenCodeAgentPicker: Bool {
+        guard let opencodeRuntime = codex.availableRuntimes.first(where: {
+            CodexModelOption.normalizedProvider($0.id) == "opencode"
+        }) else {
+            return false
+        }
+        return opencodeRuntime.enabled && !codex.availableAgents.isEmpty
     }
 
     private var runtimeModelOptions: [CodexModelOption] {
@@ -71,7 +166,7 @@ struct SettingsRuntimeDefaultsCard: View {
     private var runtimeModelPickerOptions: [SettingsMenuPickerOption<String>] {
         [SettingsMenuPickerOption(value: runtimeAutoValue, title: "Auto")]
             + runtimeModelOptions.map {
-                SettingsMenuPickerOption(value: $0.id, title: TurnComposerMetaMapper.modelTitle(for: $0))
+                SettingsMenuPickerOption(value: $0.selectionKey, title: TurnComposerMetaMapper.settingsModelLabel(for: $0))
             }
     }
 
@@ -97,16 +192,16 @@ struct SettingsRuntimeDefaultsCard: View {
 
     private var gitWriterModelPickerOptions: [SettingsMenuPickerOption<String>] {
         gitWriterModelOptions.map {
-            SettingsMenuPickerOption(value: $0.id, title: TurnComposerMetaMapper.modelTitle(for: $0))
+            SettingsMenuPickerOption(value: $0.selectionKey, title: TurnComposerMetaMapper.modelTitle(for: $0))
         }
     }
 
     private var runtimeModelTitle: String {
-        guard let selectedModelId = codex.selectedModelOption()?.id,
-              let model = runtimeModelOptions.first(where: { $0.id == selectedModelId }) else {
+        guard let selectedKey = codex.selectedModelOption()?.selectionKey,
+              let model = runtimeModelOptions.first(where: { $0.selectionKey == selectedKey }) else {
             return "Auto"
         }
-        return TurnComposerMetaMapper.modelTitle(for: model)
+        return TurnComposerMetaMapper.settingsModelLabel(for: model)
     }
 
     private var runtimeReasoningTitle: String {
@@ -138,10 +233,28 @@ struct SettingsRuntimeDefaultsCard: View {
 
     private var runtimeModelSelection: Binding<String> {
         Binding(
-            get: { codex.selectedModelOption()?.id ?? runtimeAutoValue },
+            get: { codex.selectedModelOption()?.selectionKey ?? runtimeAutoValue },
             set: { selection in
                 codex.setSelectedModelId(selection == runtimeAutoValue ? nil : selection)
             }
+        )
+    }
+
+    private var defaultOpenCodeAgentSelection: Binding<String> {
+        Binding(
+            get: {
+                codex.defaultOpenCodeAgentId
+                    ?? codex.availableAgents.first?.id
+                    ?? "build"
+            },
+            set: { codex.setDefaultOpenCodeAgent($0) }
+        )
+    }
+
+    private var openCodeExternalDiscoveryBinding: Binding<Bool> {
+        Binding(
+            get: { codex.openCodeExternalDiscoveryEnabled },
+            set: { codex.setOpenCodeExternalDiscoveryEnabled($0) }
         )
     }
 
@@ -173,12 +286,19 @@ struct SettingsRuntimeDefaultsCard: View {
     }
 
     private var gitWriterModelOptions: [CodexModelOption] {
-        TurnComposerMetaMapper.orderedModels(from: codex.availableModels)
+        let codexOnly = codex.availableModels.filter {
+            CodexModelOption.normalizedProvider($0.modelProvider) == "codex"
+        }
+        return TurnComposerMetaMapper.orderedModels(from: codexOnly)
+    }
+
+    private var isGitWriterModelPickerEnabled: Bool {
+        !gitWriterModelOptions.isEmpty
     }
 
     private var gitWriterModelSelection: Binding<String> {
         Binding(
-            get: { codex.selectedGitWriterModelOption()?.id ?? gitWriterModelOptions.first?.id ?? "" },
+            get: { codex.selectedGitWriterModelOption()?.selectionKey ?? gitWriterModelOptions.first?.selectionKey ?? "" },
             set: { codex.setSelectedGitWriterModelId($0.isEmpty ? nil : $0) }
         )
     }

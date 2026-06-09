@@ -175,6 +175,264 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
         XCTAssertEqual(projected.last?.id, "file-change")
     }
 
+    func testTurnStartedSchedulesDeferredSyncWithoutImmediateThreadRead() async {
+        let service = makeService()
+        let threadID = "thread-deferred-\(UUID().uuidString)"
+        let turnID = "turn-deferred-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [CodexThread(id: threadID, title: threadID)]
+
+        var readThreadIDs: [String] = []
+        service.requestTransportOverride = { method, params in
+            switch method {
+            case "thread/list":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "threads": .array([
+                            .object([
+                                "id": .string(threadID),
+                                "title": .string(threadID),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "thread/read":
+                let threadId = params?.objectValue?["threadId"]?.stringValue ?? "missing"
+                readThreadIDs.append(threadId)
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(threadId),
+                            "title": .string(threadId),
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([:]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+
+        XCTAssertNotNil(service.deferredSyncTasks[threadID])
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(readThreadIDs.isEmpty)
+    }
+
+    func testDeferredSyncCoalescesRapidTurnStarts() async {
+        let service = makeService()
+        let threadID = "thread-coalesce-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [CodexThread(id: threadID, title: threadID)]
+
+        service.requestDeferredSync(threadId: threadID, delayNanoseconds: 200_000_000)
+        let firstTask = service.deferredSyncTasks[threadID]
+        service.requestDeferredSync(threadId: threadID, delayNanoseconds: 200_000_000)
+        let secondTask = service.deferredSyncTasks[threadID]
+
+        XCTAssertNotNil(firstTask)
+        XCTAssertNotNil(secondTask)
+        XCTAssertFalse(firstTask === secondTask)
+    }
+
+    func testTurnFailedCancelsDeferredSyncAndClearsPerTurnFingerprint() async {
+        let service = makeService()
+        let threadID = "thread-failed-\(UUID().uuidString)"
+        let turnID = "turn-failed-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [CodexThread(id: threadID, title: threadID)]
+        service.recordAssistantCompletion(
+            threadId: threadID,
+            turnId: turnID,
+            text: "Partial answer before failure.",
+            itemId: "item-failed"
+        )
+        XCTAssertNotNil(service.assistantCompletionFingerprintByTurn[turnID])
+
+        service.requestDeferredSync(threadId: threadID, delayNanoseconds: 500_000_000)
+        XCTAssertNotNil(service.deferredSyncTasks[threadID])
+
+        service.handleNotification(
+            method: "turn/failed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "message": .string("Provider error"),
+            ])
+        )
+
+        XCTAssertNil(service.deferredSyncTasks[threadID])
+        XCTAssertNil(service.assistantCompletionFingerprintByTurn[turnID])
+    }
+
+    func testTurnCompletedCancelsDeferredSync() async {
+        let service = makeService()
+        let threadID = "thread-cancel-\(UUID().uuidString)"
+        let turnID = "turn-cancel-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [CodexThread(id: threadID, title: threadID)]
+        service.requestTransportOverride = { method, _ in
+            switch method {
+            case "thread/list":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "threads": .array([
+                            .object([
+                                "id": .string(threadID),
+                                "title": .string(threadID),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "thread/read":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(threadID),
+                            "title": .string(threadID),
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([:]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        service.requestDeferredSync(threadId: threadID, delayNanoseconds: 500_000_000)
+        XCTAssertNotNil(service.deferredSyncTasks[threadID])
+
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+
+        XCTAssertNil(service.deferredSyncTasks[threadID])
+    }
+
+    func testMacContextSwitchClearsDeferredSyncAndPerTurnFingerprints() {
+        let service = makeService()
+        let threadID = "thread-mac-\(UUID().uuidString)"
+        let turnID = "turn-mac-\(UUID().uuidString)"
+
+        service.recordAssistantCompletion(
+            threadId: threadID,
+            turnId: turnID,
+            text: "Answer from prior Mac context.",
+            itemId: "item-mac"
+        )
+        service.requestDeferredSync(threadId: threadID, delayNanoseconds: 500_000_000)
+
+        XCTAssertNotNil(service.assistantCompletionFingerprintByTurn[turnID])
+        XCTAssertNotNil(service.deferredSyncTasks[threadID])
+
+        service.clearInMemoryMacScopedState()
+
+        XCTAssertTrue(service.assistantCompletionFingerprintByTurn.isEmpty)
+        XCTAssertTrue(service.deferredSyncTasks.isEmpty)
+    }
+
+    func testDesktopMirroredTurnStartedStillRequestsImmediateSync() async {
+        let service = makeService()
+        let threadID = "thread-mirror-\(UUID().uuidString)"
+        let turnID = "turn-mirror-\(UUID().uuidString)"
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [CodexThread(id: threadID, title: threadID)]
+
+        var readThreadIDs: [String] = []
+        service.requestTransportOverride = { method, params in
+            switch method {
+            case "thread/list":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "threads": .array([
+                            .object([
+                                "id": .string(threadID),
+                                "title": .string(threadID),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "thread/read":
+                let threadId = params?.objectValue?["threadId"]?.stringValue ?? "missing"
+                readThreadIDs.append(threadId)
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "id": .string(threadId),
+                            "title": .string(threadId),
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([:]),
+                    includeJSONRPC: false
+                )
+            }
+        }
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertNotNil(service.deferredSyncTasks[threadID])
+
+        for _ in 0..<40 where readThreadIDs.isEmpty {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        XCTAssertEqual(readThreadIDs, [threadID])
+    }
+
     func testProjectionWindowPreservesPlanFromVisibleTurnPrefix() {
         let service = makeService()
         let threadID = "thread-plan-window"

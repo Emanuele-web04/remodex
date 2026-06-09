@@ -1567,7 +1567,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2"])
     }
 
-    func testRemoveDuplicateUserMessagesDoesNotGuessBetweenTwoIdenticalPendingRows() {
+    func testRemoveDuplicateUserMessagesMergesConfirmedIntoNearestPendingWithinTwelveSeconds() {
         let now = Date()
         var first = makeMessage(
             id: "user-1",
@@ -1597,7 +1597,71 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
 
         let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [first, second, confirmed])
-        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2", "user-3"])
+
+        XCTAssertEqual(deduped.count, 2)
+        XCTAssertEqual(deduped.map(\.id), ["user-1", "user-2"])
+        XCTAssertEqual(deduped[1].deliveryState, .confirmed)
+        XCTAssertEqual(deduped[1].turnId, "turn-1")
+    }
+
+    func testRemoveDuplicateUserMessagesCollapsesDoublePendingWithinTwelveSeconds() {
+        let now = Date()
+        var first = makeMessage(
+            id: "user-1",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now
+        )
+        first.deliveryState = .pending
+
+        var second = makeMessage(
+            id: "user-2",
+            threadID: "thread",
+            role: .user,
+            text: "Fix this",
+            createdAt: now.addingTimeInterval(0.2)
+        )
+        second.deliveryState = .pending
+
+        let deduped = TurnTimelineReducer.removeDuplicateUserMessages(in: [first, second])
+
+        XCTAssertEqual(deduped.count, 1)
+        XCTAssertEqual(deduped[0].id, "user-1")
+    }
+
+    func testProjectSuppressesCommandExecutionUserTextEcho() {
+        let now = Date()
+        let user = makeMessage(
+            id: "user-1",
+            threadID: "thread",
+            role: .user,
+            text: "Hey",
+            createdAt: now,
+            turnID: "turn-1"
+        )
+        let commandEcho = makeMessage(
+            id: "command-1",
+            threadID: "thread",
+            role: .system,
+            kind: .commandExecution,
+            text: "running Hey",
+            createdAt: now.addingTimeInterval(0.1),
+            turnID: "turn-1"
+        )
+        let assistant = makeMessage(
+            id: "assistant-1",
+            threadID: "thread",
+            role: .assistant,
+            kind: .chat,
+            text: "Hello there",
+            createdAt: now.addingTimeInterval(0.2),
+            turnID: "turn-1"
+        )
+
+        let projection = TurnTimelineReducer.project(messages: [user, commandEcho, assistant])
+
+        XCTAssertEqual(projection.messages.map(\.id), ["user-1", "assistant-1"])
     }
 
     func testRemoveDuplicateAssistantMessagesKeepsDistinctItemsInSameTurn() {

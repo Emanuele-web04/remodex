@@ -4,7 +4,9 @@
 // Exports: SettingsSubscriptionCard
 // Depends on: SwiftUI, StoreKit, SubscriptionService, RevenueCatPaywallView
 
+#if !REMODEX_LOCAL_DEVICE
 import StoreKit
+#endif
 import SwiftUI
 
 struct SettingsSubscriptionCard: View {

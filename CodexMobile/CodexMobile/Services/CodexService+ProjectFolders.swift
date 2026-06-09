@@ -1,7 +1,8 @@
 // FILE: CodexService+ProjectFolders.swift
 // Purpose: Mac-local project folder browsing RPCs used by the sidebar new-chat flow.
 // Layer: Service Extension
-// Exports: CodexProjectLocation, CodexProjectDirectoryEntry, CodexProjectDirectoryListing, CodexService project folder APIs
+// Exports: CodexProjectLocation, CodexKnownProject, CodexProjectDirectoryEntry,
+//          CodexProjectDirectoryListing, CodexService project folder APIs
 // Depends on: Foundation, JSONValue, RPC transport
 
 import Foundation
@@ -32,6 +33,16 @@ struct CodexProjectlessChatRoots: Equatable, Sendable {
     let desktopDocumentsRoot: String?
 }
 
+struct CodexKnownProject: Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let path: String
+    let source: String?
+    let sources: [String]
+    let providerHints: [String]
+    let lastSeenAt: Date?
+}
+
 extension CodexService {
     // Loads Mac-local shortcut folders through the bridge instead of the Codex runtime.
     func fetchProjectQuickLocations() async throws -> [CodexProjectLocation] {
@@ -57,6 +68,35 @@ extension CodexService {
             documentedThreadsRoot: object["documentedThreadsRoot"]?.stringValue,
             desktopDocumentsRoot: object["desktopDocumentsRoot"]?.stringValue
         )
+    }
+
+    // Loads provider-neutral projects remembered by the bridge from Codex,
+    // OpenCode, and manual local-folder selections.
+    func fetchKnownProjects() async throws -> [CodexKnownProject] {
+        let response = try await sendRequest(method: "project/knownProjects", params: .object([:]))
+        guard let projects = response.result?.objectValue?["projects"]?.arrayValue else {
+            throw CodexServiceError.invalidResponse("project/knownProjects response missing projects")
+        }
+
+        return projects.compactMap(Self.decodeKnownProject)
+    }
+
+    // Stores a user-picked local folder so future provider pickers can offer it
+    // even before any provider has written a thread in that repo.
+    @discardableResult
+    func rememberKnownProject(path: String) async throws -> CodexKnownProject? {
+        let response = try await sendRequest(
+            method: "project/rememberKnownProject",
+            params: .object([
+                "path": .string(path),
+                "source": .string("ios-picker"),
+            ])
+        )
+
+        guard let projectValue = response.result?.objectValue?["project"] else {
+            return nil
+        }
+        return Self.decodeKnownProject(projectValue)
     }
 
     // Lists only child directories for the phone-side project picker.
@@ -150,6 +190,24 @@ private extension CodexService {
         return CodexProjectLocation(id: id, label: label, path: path)
     }
 
+    static func decodeKnownProject(_ value: JSONValue) -> CodexKnownProject? {
+        guard let object = value.objectValue,
+              let path = object["path"]?.stringValue else {
+            return nil
+        }
+
+        let label = object["label"]?.stringValue ?? CodexThread.projectDisplayLabel(for: path)
+        return CodexKnownProject(
+            id: object["id"]?.stringValue ?? path,
+            label: label,
+            path: path,
+            source: object["source"]?.stringValue,
+            sources: object["sources"]?.arrayValue?.compactMap(\.stringValue) ?? [],
+            providerHints: object["providerHints"]?.arrayValue?.compactMap(\.stringValue) ?? [],
+            lastSeenAt: decodeKnownProjectDate(object["lastSeenAt"])
+        )
+    }
+
     static func decodeProjectDirectoryEntry(_ value: JSONValue) -> CodexProjectDirectoryEntry? {
         guard let object = value.objectValue,
               let name = object["name"]?.stringValue,
@@ -162,5 +220,15 @@ private extension CodexService {
             path: path,
             isSymlink: object["isSymlink"]?.boolValue ?? false
         )
+    }
+
+    static func decodeKnownProjectDate(_ value: JSONValue?) -> Date? {
+        if let stringValue = value?.stringValue {
+            return CodexTimestampParser.parseString(stringValue)
+        }
+        if let doubleValue = value?.doubleValue {
+            return CodexTimestampParser.decodeUnixTimestamp(doubleValue)
+        }
+        return nil
     }
 }

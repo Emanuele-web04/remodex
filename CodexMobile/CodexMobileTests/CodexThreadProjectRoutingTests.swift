@@ -124,6 +124,26 @@ final class CodexThreadProjectRoutingTests: XCTestCase {
         XCTAssertFalse(service.resumedThreadIDs.contains("thread-1"))
     }
 
+    func testThreadHasValidatedWorkingDirectoryRequiresProjectPath() {
+        let service = makeService()
+        let projectThread = CodexThread(
+            id: "thread-project",
+            title: "Project chat",
+            cwd: "/tmp/remodex-project"
+        )
+        service.threads = [projectThread]
+
+        XCTAssertTrue(service.threadHasValidatedWorkingDirectory(for: "thread-project"))
+
+        let rootlessThread = CodexThread(
+            id: "quick-chat",
+            title: "Quick chat",
+            cwd: nil
+        )
+        service.threads = [rootlessThread]
+        XCTAssertFalse(service.threadHasValidatedWorkingDirectory(for: "quick-chat"))
+    }
+
     func testRolloutMissingFallbackStillRejectsImmediateStaleServerProjectPath() async throws {
         let service = makeService()
         service.upsertThread(

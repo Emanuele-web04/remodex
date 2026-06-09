@@ -98,6 +98,19 @@ struct BridgeMenuBarContentView: View {
             }
 
             LabelValueRow(label: "Device", value: store.snapshot?.trustedPhoneStatusLabel ?? "Unknown")
+
+            if let opencode = store.snapshot?.bridgeStatus?.opencode {
+                let versionLabel = opencode.version?.nonEmptyTrimmed ?? "unknown"
+                let enabledLabel = (opencode.enabled == true) ? "enabled" : "disabled"
+                var detail = "\(enabledLabel) · v\(versionLabel) · \(opencode.sessionCount ?? 0) sessions"
+                if opencode.versionBelowMinimum == true {
+                    detail += " · below minimum"
+                }
+                if let lastError = opencode.lastError?.nonEmptyTrimmed {
+                    detail += " · \(lastError)"
+                }
+                LabelValueRow(label: "OpenCode", value: detail)
+            }
         }
         .padding(12)
         .background(cardFill, in: cardShape)

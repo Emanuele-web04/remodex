@@ -164,6 +164,20 @@ extension CodexService {
         return normalizedStoredProjectPath(authoritativeProjectPathByThreadID[normalizedThreadId])
     }
 
+    // True when the thread record has a confirmed on-disk project path (not a rootless chat bucket).
+    func threadHasValidatedWorkingDirectory(for threadId: String) -> Bool {
+        if currentAuthoritativeProjectPath(for: threadId) != nil {
+            return true
+        }
+        guard let thread = thread(for: threadId) else {
+            return false
+        }
+        guard thread.gitWorkingDirectory != nil else {
+            return false
+        }
+        return !SidebarThreadGrouping.isRootlessChatThread(thread)
+    }
+
     func beginAuthoritativeProjectPathTransition(threadId: String, projectPath: String) {
         guard let normalizedThreadId = normalizedInterruptIdentifier(threadId) ?? normalizedThreadIdValue(threadId),
               let normalizedProjectPath = normalizedStoredProjectPath(projectPath) else {

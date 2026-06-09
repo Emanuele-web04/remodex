@@ -465,6 +465,7 @@ extension CodexService {
         desktopMirroredRunningThreadIDs.remove(threadId)
         desktopMirroredRunningStaleSnapshotCountsByThread.removeValue(forKey: threadId)
         desktopMirroredRunningLastActivityAtByThread.removeValue(forKey: threadId)
+        mirroredRunningSuppressedAfterTurnStartFailureThreadIDs.remove(threadId)
         clearMirroredRunningCatchupNeeded(for: threadId)
         refreshBusyRepoRootsAndDependentTimelineStates()
         refreshThreadTimelineState(for: threadId)
@@ -635,6 +636,27 @@ extension CodexService {
         if threadCompletionBanner?.threadId == threadId {
             threadCompletionBanner = nil
         }
+    }
+
+    // Honors post-failure suppression so late mirror deltas cannot resurrect "thinking".
+    func shouldAcceptIncomingRunningMark(threadId: String, turnId: String?) -> Bool {
+        guard mirroredRunningSuppressedAfterTurnStartFailureThreadIDs.contains(threadId) else {
+            return true
+        }
+        guard let turnId,
+              let activeTurn = activeTurnID(for: threadId),
+              turnId == activeTurn else {
+            return false
+        }
+        return true
+    }
+
+    func markIncomingThreadAsRunning(_ threadId: String, turnId: String? = nil) {
+        guard shouldAcceptIncomingRunningMark(threadId: threadId, turnId: turnId) else {
+            return
+        }
+        markThreadAsRunning(threadId)
+        markDesktopMirroredRunning(for: threadId)
     }
 
     // Marks thread as actively running while ensuring stale outcomes are cleared.
@@ -1309,6 +1331,40 @@ extension CodexService {
         )
         appendMessage(message)
         return message.id
+    }
+
+    // Phone-native optimistic rows already own this prompt; turn/started will confirm them.
+    func hasMatchingPendingUserMessage(threadId: String, text: String) -> Bool {
+        let normalizedIncomingText = Self.normalizedMessageText(text)
+        guard !normalizedIncomingText.isEmpty else {
+            return false
+        }
+
+        return messagesByThread[threadId]?.contains(where: { candidate in
+            candidate.role == .user
+                && candidate.deliveryState == .pending
+                && Self.normalizedMessageText(candidate.text) == normalizedIncomingText
+        }) ?? false
+    }
+
+    // Skips runtime echoes once the phone row is already confirmed for this turn.
+    func hasMatchingConfirmedUserMessage(threadId: String, turnId: String?, text: String) -> Bool {
+        let normalizedIncomingText = Self.normalizedMessageText(text)
+        guard !normalizedIncomingText.isEmpty else {
+            return false
+        }
+
+        return messagesByThread[threadId]?.contains(where: { candidate in
+            guard candidate.role == .user,
+                  candidate.deliveryState == .confirmed,
+                  Self.normalizedMessageText(candidate.text) == normalizedIncomingText else {
+                return false
+            }
+            guard let turnId, !turnId.isEmpty else {
+                return true
+            }
+            return candidate.turnId == nil || candidate.turnId == turnId
+        }) ?? false
     }
 
     // Upserts a confirmed user row mirrored from a desktop-origin rollout so
@@ -2438,21 +2494,7 @@ extension CodexService {
     }
 
     private func commandExecutionPreviewKey(from text: String) -> String? {
-        let tokens = text.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard tokens.count >= 2 else {
-            return nil
-        }
-        let phase = tokens[0].lowercased()
-        guard phase == "running"
-            || phase == "completed"
-            || phase == "failed"
-            || phase == "stopped" else {
-            return nil
-        }
-        let command = tokens.dropFirst().joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        return command.isEmpty ? nil : command
+        TurnTimelineReducer.commandExecutionPreviewKey(from: text)
     }
 
     // Uses normalized visible lines so live/history tool rows can rebind without
@@ -3179,6 +3221,58 @@ extension CodexService {
         return true
     }
 
+    func shouldDedupeAssistantCompletion(
+        threadId: String,
+        turnId: String?,
+        text: String,
+        itemId: String?,
+        now: Date = Date()
+    ) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let textHash = trimmed.hashValue.description
+
+        if let turnId,
+           let fingerprint = assistantCompletionFingerprintByTurn[turnId],
+           now.timeIntervalSince(fingerprint.timestamp) < 30,
+           fingerprint.textHash == textHash,
+           fingerprint.itemId == itemId || fingerprint.itemId == nil || itemId == nil {
+            return true
+        }
+
+        if let fingerprint = assistantCompletionFingerprintByThread[threadId],
+           now.timeIntervalSince(fingerprint.timestamp) < 45,
+           fingerprint.text == trimmed {
+            return true
+        }
+
+        return false
+    }
+
+    func recordAssistantCompletion(
+        threadId: String,
+        turnId: String?,
+        text: String,
+        itemId: String?
+    ) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let now = Date()
+        assistantCompletionFingerprintByThread[threadId] = (text: trimmed, timestamp: now)
+        if let turnId {
+            assistantCompletionFingerprintByTurn[turnId] = (
+                textHash: trimmed.hashValue.description,
+                itemId: itemId,
+                timestamp: now
+            )
+        }
+    }
+
+    func clearAssistantCompletionFingerprint(for turnId: String?) {
+        guard let normalizedTurnId = normalizedStreamingItemID(turnId) else {
+            return
+        }
+        assistantCompletionFingerprintByTurn.removeValue(forKey: normalizedTurnId)
+    }
+
     // Finalizes assistant text when item/completed carries the canonical message body.
     func completeAssistantMessage(
         threadId: String,
@@ -3215,7 +3309,12 @@ extension CodexService {
            activeTurnIdForThread != nil || threadHasActiveOrRunningTurn(threadId) {
             // t3code never assigns turn-less completions to the newest active turn.
             // Late legacy payloads are ambiguous, so do not let them overwrite the current answer.
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            recordAssistantCompletion(
+                threadId: threadId,
+                turnId: activeTurnIdForThread,
+                text: trimmedText,
+                itemId: explicitItemId
+            )
             return
         }
 
@@ -3227,10 +3326,16 @@ extension CodexService {
         }
         flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId, itemId: explicitItemId)
 
-        if resolvedTurnId == nil, explicitItemId == nil,
-           let fingerprint = assistantCompletionFingerprintByThread[threadId],
-           fingerprint.text == trimmedText,
-           now.timeIntervalSince(fingerprint.timestamp) <= 45 {
+        if shouldDedupeAssistantCompletion(
+            threadId: threadId,
+            turnId: resolvedTurnId,
+            text: trimmedText,
+            itemId: explicitItemId,
+            now: now
+        ) {
+            debugRuntimeLog(
+                "ios_assistant_completion_deduped thread=\(threadId) turn=\(resolvedTurnId ?? "nil")"
+            )
             return
         }
 
@@ -3244,7 +3349,12 @@ extension CodexService {
                 messageId: replayTerminalMessageId,
                 assistantPhase: normalizedPhase
             )
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            recordAssistantCompletion(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                text: trimmedText,
+                itemId: explicitItemId
+            )
             _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
                 threadId: threadId,
                 turnId: resolvedTurnId,
@@ -3285,7 +3395,12 @@ extension CodexService {
             }
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: imagePreviewIndex)
             let messageId = messagesByThread[threadId]?[imagePreviewIndex].id
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            recordAssistantCompletion(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                text: trimmedText,
+                itemId: explicitItemId
+            )
             if let messageId {
                 _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
                     threadId: threadId,
@@ -3318,7 +3433,12 @@ extension CodexService {
                 assistantPhase: normalizedPhase
             )
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
-            assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+            recordAssistantCompletion(
+                threadId: threadId,
+                turnId: resolvedTurnId,
+                text: trimmedText,
+                itemId: explicitItemId
+            )
             if let resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id {
                 _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
                     threadId: threadId,
@@ -3377,7 +3497,12 @@ extension CodexService {
                     refreshDerivedPlanMetadata(threadId: threadId, messageIndex: targetIndex)
                     resolvedAssistantMessageId = messagesByThread[threadId]?[targetIndex].id
                 }
-                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+                recordAssistantCompletion(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    text: trimmedText,
+                    itemId: explicitItemId
+                )
                 if let resolvedAssistantMessageId {
                     _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
                         threadId: threadId,
@@ -3398,7 +3523,12 @@ extension CodexService {
             if !completedAssistantIndices.isEmpty {
                 // Late legacy completions without item identity are ambiguous once a closed
                 // turn already has assistant bubbles. Ignore them instead of appending a duplicate.
-                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+                recordAssistantCompletion(
+                    threadId: threadId,
+                    turnId: resolvedTurnId,
+                    text: trimmedText,
+                    itemId: explicitItemId
+                )
                 return
             }
         }
@@ -3501,7 +3631,12 @@ extension CodexService {
             }
         }
 
-        assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+        recordAssistantCompletion(
+            threadId: threadId,
+            turnId: resolvedTurnId,
+            text: trimmedText,
+            itemId: explicitItemId
+        )
 
         if let resolvedAssistantMessageId {
             _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
@@ -4268,8 +4403,8 @@ extension CodexService {
         updateCurrentOutput(for: threadId)
     }
 
-    // Converts all pending streaming bubbles to completed state after transport failures.
-    func finalizeAllStreamingState() {
+    // Clears in-flight streaming presentation without wiping turn/running markers (transport-only reconnect).
+    func finalizeStreamingPresentationOnly() {
         flushAllPendingStreamingDeltas()
         var didMutate = false
 
@@ -4288,6 +4423,18 @@ extension CodexService {
             }
         }
 
+        if didMutate {
+            persistCurrentMacMessages()
+            if let activeThreadId {
+                updateCurrentOutput(for: activeThreadId)
+            }
+        }
+    }
+
+    // Converts all pending streaming bubbles to completed state after transport failures.
+    func finalizeAllStreamingState() {
+        finalizeStreamingPresentationOnly()
+
         activeTurnId = nil
         activeTurnIdByThread.removeAll()
         threadsPendingCompletionHaptic.removeAll()
@@ -4301,13 +4448,6 @@ extension CodexService {
         pendingAssistantDeltaFlushTask?.cancel()
         pendingAssistantDeltaFlushTask = nil
         threadIdByTurnID.removeAll()
-
-        if didMutate {
-            persistCurrentMacMessages()
-            if let activeThreadId {
-                updateCurrentOutput(for: activeThreadId)
-            }
-        }
     }
 }
 
@@ -5347,9 +5487,13 @@ extension CodexService {
         activeTurnId: String?,
         now: Date
     ) -> Bool {
-        if let fingerprint = assistantCompletionFingerprintByThread[threadId],
-           fingerprint.text == text,
-           now.timeIntervalSince(fingerprint.timestamp) <= 45 {
+        if shouldDedupeAssistantCompletion(
+            threadId: threadId,
+            turnId: activeTurnId,
+            text: text,
+            itemId: nil,
+            now: now
+        ) {
             return true
         }
 

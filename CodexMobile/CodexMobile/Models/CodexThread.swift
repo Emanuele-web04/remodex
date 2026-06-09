@@ -83,6 +83,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     var agentRole: String?
     var model: String?
     var modelProvider: String?
+    var opencodeAgent: String?
     var syncState: CodexThreadSyncState
 
     // --- Public initializer ---------------------------------------------------
@@ -103,6 +104,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         agentRole: String? = nil,
         model: String? = nil,
         modelProvider: String? = nil,
+        opencodeAgent: String? = nil,
         syncState: CodexThreadSyncState = .live
     ) {
         self.id = id
@@ -120,6 +122,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         self.agentRole = Self.normalizeIdentifier(agentRole)
         self.model = Self.normalizeIdentifier(model)
         self.modelProvider = Self.normalizeIdentifier(modelProvider)
+        self.opencodeAgent = Self.normalizeIdentifier(opencodeAgent)
         self.syncState = syncState
     }
 
@@ -153,6 +156,8 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         case model
         case modelProvider
         case modelProviderSnake = "model_provider"
+        case opencodeAgent
+        case opencodeAgentSnake = "opencode_agent"
         case syncState
     }
 
@@ -212,6 +217,12 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
             keys: [.modelProvider, .modelProviderSnake],
             metadataKeys: ["modelProvider", "model_provider", "modelProviderId", "model_provider_id"]
         )
+        opencodeAgent = Self.decodeThreadIdentity(
+            from: container,
+            metadata: metadata,
+            keys: [.opencodeAgent, .opencodeAgentSnake],
+            metadataKeys: ["opencodeAgent", "opencode_agent"]
+        )
         syncState = try container.decodeIfPresent(CodexThreadSyncState.self, forKey: .syncState) ?? .live
     }
 
@@ -242,6 +253,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
 extension CodexThread {
     // --- UI helpers -----------------------------------------------------------
     static let defaultDisplayTitle = "New Thread"
+    static let openCodePlaceholderChatTitle = "OpenCode chat"
     static let noProjectDisplayName = "No Project"
     private static let noProjectGroupKey = "__no_project__"
 
@@ -386,6 +398,12 @@ extension CodexThread {
             return model
         }
         return nil
+    }
+
+    // Class (e) externally discovered OpenCode sessions are list-visible but not adopted
+    // until the user explicitly opens the chat (thread/read or thread/resume).
+    var isDiscoveredExternalOpenCodeThread: Bool {
+        metadata?["discoveredExternally"]?.boolValue == true
     }
 
     // Normalized absolute project path used for stable grouping.

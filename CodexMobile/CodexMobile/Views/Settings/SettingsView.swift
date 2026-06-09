@@ -56,6 +56,7 @@ struct SettingsView: View {
             SettingsAppIconCard()
             SettingsNotificationsCard()
             SettingsRuntimeDefaultsCard()
+            SettingsOpenCodeProvidersLink()
             SettingsBridgeVersionCard {
                 presentSettingsSheet(.commandReference)
             }
@@ -609,6 +610,13 @@ private struct SettingsNotificationsCard: View {
             footer: "Alerts you when a run finishes while Remodex is in the background."
         ) {
             SettingsValueRow(title: "Permission", value: statusLabel)
+
+            if let pushFailure = codex.pushRegistrationFailureMessage,
+               !pushFailure.isEmpty {
+                Text(pushFailure)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.orange)
+            }
 
             if codex.notificationAuthorizationStatus == .notDetermined {
                 SettingsButton("Allow Notifications") {

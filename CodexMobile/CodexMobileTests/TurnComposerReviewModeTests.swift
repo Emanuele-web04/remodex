@@ -10,6 +10,7 @@ import XCTest
 @MainActor
 final class TurnComposerReviewModeTests: XCTestCase {
     private static var retainedViewModels: [TurnViewModel] = []
+    private static var retainedServices: [CodexService] = []
 
     func testTrailingSlashCommandDoesNotCountAsReviewConflict() {
         let viewModel = makeViewModel()
@@ -49,7 +50,13 @@ final class TurnComposerReviewModeTests: XCTestCase {
             target: .uncommittedChanges
         )
 
-        viewModel.onInputChangedForSlashCommandAutocomplete("follow up", activeTurnID: nil)
+        viewModel.onInputChangedForSlashCommandAutocomplete(
+            "follow up",
+            codex: makeService(),
+            thread: makeThread(),
+            supportsSlashCommands: true,
+            activeTurnID: nil
+        )
 
         XCTAssertNil(viewModel.composerReviewSelection)
         XCTAssertEqual(viewModel.slashCommandPanelState, .hidden)
@@ -131,7 +138,13 @@ final class TurnComposerReviewModeTests: XCTestCase {
         viewModel.slashCommandPanelState = .commands(query: "sub")
 
         viewModel.onSelectSlashCommand(.subagents)
-        viewModel.onInputChangedForSlashCommandAutocomplete(viewModel.input, activeTurnID: nil)
+        viewModel.onInputChangedForSlashCommandAutocomplete(
+            viewModel.input,
+            codex: makeService(),
+            thread: makeThread(),
+            supportsSlashCommands: true,
+            activeTurnID: nil
+        )
 
         XCTAssertEqual(viewModel.input, "")
         XCTAssertTrue(viewModel.isSubagentsSelectionArmed)
@@ -143,7 +156,6 @@ final class TurnComposerReviewModeTests: XCTestCase {
             TurnComposerSlashCommand.filtered(
                 matching: "",
                 within: TurnComposerSlashCommand.availableCommands(
-                    supportsThreadFork: true,
                     allowsForkCommand: true
                 )
             ).map(\.commandToken),
@@ -154,7 +166,6 @@ final class TurnComposerReviewModeTests: XCTestCase {
     func testForkCommandDisappearsWhenDraftAlreadyContainsText() {
         XCTAssertEqual(
             TurnComposerSlashCommand.availableCommands(
-                supportsThreadFork: true,
                 allowsForkCommand: false
             ).map(\.commandToken),
             ["/review", "/compact", "/feedback", "/status", "/subagents"]
@@ -266,5 +277,18 @@ final class TurnComposerReviewModeTests: XCTestCase {
         // Keep instances alive for process lifetime so this suite remains deterministic.
         Self.retainedViewModels.append(viewModel)
         return viewModel
+    }
+
+    private func makeService() -> CodexService {
+        let suiteName = "TurnComposerReviewModeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
+        let service = CodexService(defaults: defaults)
+        Self.retainedServices.append(service)
+        return service
+    }
+
+    private func makeThread() -> CodexThread {
+        CodexThread(id: "thread-review-tests", title: "Review tests", cwd: "/tmp/review-tests")
     }
 }

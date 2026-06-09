@@ -12,6 +12,18 @@ final class TurnViewModelQueueTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
     private static var retainedViewModels: [TurnViewModel] = []
 
+    override func setUp() {
+        super.setUp()
+        // Clear any previous test state
+        Self.retainedViewModels.removeAll()
+    }
+
+    override func tearDown() {
+        // Clean up viewModels to prevent state leakage
+        Self.retainedViewModels.removeAll()
+        super.tearDown()
+    }
+
     func testSendTurnQueuesImmediatelyWhenThreadBusy() async throws {
         let service = makeService()
         service.isConnected = true
@@ -49,7 +61,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         }
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
+        try await waitForSendCompletion(viewModel)
 
         XCTAssertTrue(recordedMethods.isEmpty)
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
@@ -138,7 +150,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertNil(service.lastErrorMessage)
     }
 
-    func testQueuedDraftsPersistAcrossViewModelRecreationForSameThread() {
+    func testQueuedDraftsPersistAcrossViewModelRecreationForSameThread() async throws {
         let service = makeService()
         service.isConnected = true
         service.runningThreadIDs.insert("thread-queue")
@@ -146,6 +158,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         let firstViewModel = makeViewModel()
         firstViewModel.input = "Message one"
         firstViewModel.sendTurn(codex: service, threadID: "thread-queue")
+        try await waitForSendCompletion(firstViewModel)
 
         let secondViewModel = makeViewModel()
         XCTAssertEqual(secondViewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
@@ -185,7 +198,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         viewModel.input = "send now"
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
+        try await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["thread/read", "turn/start"])
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
@@ -225,7 +238,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         viewModel.input = "Follow up now"
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
+        try await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["thread/read"])
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
@@ -256,7 +269,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         ]
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
+        try await waitForSendCompletion(viewModel)
 
         let message = try XCTUnwrap(service.messagesByThread["thread-queue"]?.last)
         XCTAssertEqual(message.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
@@ -280,7 +293,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         viewModel.input = "Please inspect @CodexMobile/Views/Turn/TurnView.swift"
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
+        try await waitForSendCompletion(viewModel)
 
         let message = try XCTUnwrap(service.messagesByThread["thread-queue"]?.last)
         XCTAssertEqual(message.text, "Please inspect @CodexMobile/Views/Turn/TurnView.swift")
@@ -299,7 +312,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         viewModel.input = "Plan the rollout"
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
+        try await waitForSendCompletion(viewModel)
 
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
         XCTAssertEqual(
@@ -348,7 +361,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         viewModel.input = "Retry as new turn"
 
         viewModel.sendTurn(codex: service, threadID: "thread-queue")
-        await waitForSendCompletion(viewModel)
+        try await waitForSendCompletion(viewModel)
 
         XCTAssertTrue(recordedMethods.isEmpty)
         XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 1)
@@ -377,7 +390,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         service.queuedTurnDraftsByThread["thread-queue"] = [first, second, third]
 
         viewModel.steerQueuedDraft(id: second.id, codex: service, threadID: "thread-queue")
-        await waitForSteerCompletion(viewModel)
+        try await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["turn/steer"])
         XCTAssertEqual(
@@ -423,7 +436,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         service.queuedTurnDraftsByThread["thread-queue"] = [draft]
 
         viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
-        await waitForSteerCompletion(viewModel)
+        try await waitForSteerCompletion(viewModel)
 
         let paramsObject = capturedParams?.objectValue
         let inputItems = paramsObject?["input"]?.arrayValue ?? []
@@ -469,7 +482,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         service.queuedTurnDraftsByThread["thread-queue"] = [draft]
 
         viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
-        await waitForSteerCompletion(viewModel)
+        try await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(
             capturedParams?.objectValue?["collaborationMode"]?.objectValue?["mode"]?.stringValue,
@@ -491,7 +504,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         service.queuedTurnDraftsByThread["thread-queue"] = [draft]
 
         viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
-        await waitForSteerCompletion(viewModel)
+        try await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(service.queuedTurnDraftsByThread["thread-queue"]?.map(\.id), [draft.id])
         XCTAssertFalse(viewModel.isQueuePaused(codex: service, threadID: "thread-queue"))
@@ -533,7 +546,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         service.queuedTurnDraftsByThread["thread-queue"] = [draft]
 
         viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
-        await waitForSteerCompletion(viewModel)
+        try await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["thread/read", "turn/steer"])
         XCTAssertEqual(expectedTurnIDs, ["turn-fallback"])
@@ -574,7 +587,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         service.queuedTurnDraftsByThread["thread-queue"] = [draft]
 
         viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
-        await waitForSteerCompletion(viewModel)
+        try await waitForSteerCompletion(viewModel)
 
         XCTAssertEqual(recordedMethods, ["thread/read", "turn/start"])
         XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? false)
@@ -1070,7 +1083,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         service.queuedTurnDraftsByThread["thread-queue"] = [draft]
 
         viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
-        await waitForSteerCompletion(viewModel)
+        try await waitForSteerCompletion(viewModel)
 
         XCTAssertTrue(recordedMethods.isEmpty)
         XCTAssertEqual(service.queuedTurnDraftsByThread["thread-queue"]?.map(\.id), [draft.id])
@@ -1185,17 +1198,52 @@ final class TurnViewModelQueueTests: XCTestCase {
         )
     }
 
-    private func waitForSendCompletion(_ viewModel: TurnViewModel, maxPollCount: Int = 160) async {
-        for _ in 0..<maxPollCount where viewModel.isSending {
-            try? await Task.sleep(nanoseconds: 10_000_000)
+    private func waitForSendCompletion(_ viewModel: TurnViewModel, timeout: TimeInterval = 5.0) async throws {
+        try await withTimeout(seconds: timeout) {
+            while viewModel.isSending {
+                try await Task.sleep(nanoseconds: 25_000_000) // 25ms polling interval
+            }
         }
     }
 
-    private func waitForSteerCompletion(_ viewModel: TurnViewModel, maxPollCount: Int = 160) async {
-        for _ in 0..<maxPollCount where viewModel.steeringDraftID != nil {
-            try? await Task.sleep(nanoseconds: 10_000_000)
+    private func waitForSteerCompletion(_ viewModel: TurnViewModel, timeout: TimeInterval = 5.0) async throws {
+        try await withTimeout(seconds: timeout) {
+            while viewModel.steeringDraftID != nil {
+                try await Task.sleep(nanoseconds: 25_000_000) // 25ms polling interval
+            }
         }
     }
+
+    private func withTimeout(seconds: TimeInterval, operation: @escaping () async throws -> Void) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await operation()
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw TimeoutError()
+            }
+
+            let result = await group.next()
+            group.cancelAll()
+
+            switch result {
+            case .success:
+                return
+            case .failure(let error):
+                if error is TimeoutError {
+                    XCTFail("Operation timed out after \(seconds)s")
+                } else {
+                    throw error
+                }
+            case .none:
+                XCTFail("Task group completed without result")
+            }
+        }
+    }
+
+    private struct TimeoutError: Error {}
 
     private func makeViewModel() -> TurnViewModel {
         let viewModel = TurnViewModel()

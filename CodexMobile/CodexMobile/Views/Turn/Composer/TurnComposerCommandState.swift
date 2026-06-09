@@ -1,10 +1,386 @@
 // FILE: TurnComposerCommandState.swift
 // Purpose: Owns slash-command/review/fork state types and pure parsing helpers used by the composer.
 // Layer: View Support
-// Exports: TurnComposerSlashCommand, TurnComposerForkDestination, TurnComposerReviewTarget, TurnComposerReviewSelection, TurnComposerSlashCommandPanelState, TurnTrailingSlashCommandToken, TurnComposerCommandLogic
-// Depends on: Foundation, CodexReviewTarget
+// Exports: BridgeSlashCommand, TurnComposerSlashCommand, TurnComposerSlashCommandItem,
+//   TurnComposerSlashCommandSource, TurnComposerForkDestination, TurnComposerReviewTarget,
+//   TurnComposerReviewSelection, TurnComposerSlashCommandPanelState, TurnTrailingSlashCommandToken,
+//   TurnComposerCommandLogic
+// Depends on: Foundation, CodexReviewTarget, CodexModelOption
 
 import Foundation
+
+enum SlashCommandSection: String, CaseIterable, Sendable {
+    case codexBuiltin = "codex-builtin"
+    case ocBuiltin = "oc-builtin"
+    case agent
+    case skillDerived = "skill"
+
+    var displayTitle: String {
+        switch self {
+        case .codexBuiltin:
+            return "Codex"
+        case .ocBuiltin:
+            return "OpenCode"
+        case .agent:
+            return "Agents"
+        case .skillDerived:
+            return "Skills"
+        }
+    }
+
+    static let displayOrder: [SlashCommandSection] = [
+        .codexBuiltin, .ocBuiltin, .agent, .skillDerived,
+    ]
+
+    init?(bridgeSectionHint: String?) {
+        guard let bridgeSectionHint else { return nil }
+        let normalized = bridgeSectionHint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch normalized {
+        case "codex", "codex-builtin":
+            self = .codexBuiltin
+        case "oc", "oc-builtin", "opencode", "opencode-builtin":
+            self = .ocBuiltin
+        case "agent", "agents":
+            self = .agent
+        case "skill", "skills", "skill-derived":
+            self = .skillDerived
+        default:
+            return nil
+        }
+    }
+
+    var defaultProviderID: String {
+        switch self {
+        case .codexBuiltin:
+            return "codex"
+        case .ocBuiltin, .agent, .skillDerived:
+            return "opencode"
+        }
+    }
+}
+
+enum OpenCodeSlashBuiltins {
+    static let tokens: Set<String> = [
+        "/undo", "/redo", "/share", "/help", "/init", "/compact", "/login", "/logout",
+        "/models", "/agents", "/skills", "/mcp", "/config", "/clear", "/exit",
+    ]
+}
+
+struct BridgeSlashCommandArgumentField: Equatable, Sendable {
+    let key: String
+    let value: String
+}
+
+struct SlashCommandArgumentFieldSpec: Identifiable, Equatable, Sendable {
+    let id: String
+    let label: String
+    let isMultiline: Bool
+}
+
+struct BridgeSlashCommand: Codable, Equatable, Identifiable, Sendable {
+    let token: String
+    let title: String
+    let description: String
+    let requiresArguments: Bool
+    let template: String?
+    let hints: [String]?
+    let source: String?
+    let agent: String?
+    let provider: String?
+    let section: String?
+
+    init(
+        token: String,
+        title: String,
+        description: String,
+        requiresArguments: Bool = false,
+        template: String? = nil,
+        hints: [String]? = nil,
+        source: String? = nil,
+        agent: String? = nil,
+        provider: String? = nil,
+        section: String? = nil
+    ) {
+        self.token = token
+        self.title = title
+        self.description = description
+        self.requiresArguments = requiresArguments
+        self.template = template
+        self.hints = hints
+        self.source = source
+        self.agent = agent
+        self.provider = provider
+        self.section = section
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case token
+        case title
+        case description
+        case requiresArguments
+        case template
+        case hints
+        case source
+        case agent
+        case provider
+        case section
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        token = try container.decode(String.self, forKey: .token)
+        title = try container.decode(String.self, forKey: .title)
+        description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+        requiresArguments = (try? container.decodeIfPresent(Bool.self, forKey: .requiresArguments)) ?? false
+        template = try container.decodeIfPresent(String.self, forKey: .template)
+        hints = try container.decodeIfPresent([String].self, forKey: .hints)
+        source = try container.decodeIfPresent(String.self, forKey: .source)
+        agent = try container.decodeIfPresent(String.self, forKey: .agent)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        section = try container.decodeIfPresent(String.self, forKey: .section)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(token, forKey: .token)
+        try container.encode(title, forKey: .title)
+        try container.encode(description, forKey: .description)
+        try container.encode(requiresArguments, forKey: .requiresArguments)
+        try container.encodeIfPresent(template, forKey: .template)
+        try container.encodeIfPresent(hints, forKey: .hints)
+        try container.encodeIfPresent(source, forKey: .source)
+        try container.encodeIfPresent(agent, forKey: .agent)
+        try container.encodeIfPresent(provider, forKey: .provider)
+        try container.encodeIfPresent(section, forKey: .section)
+    }
+
+    var id: String { token }
+
+    var argumentFieldSpecs: [SlashCommandArgumentFieldSpec] {
+        let resolvedHints = resolvedArgumentHints
+        if !resolvedHints.isEmpty {
+            let argumentsOnly = resolvedHints.count == 1 && resolvedHints[0] == "$ARGUMENTS"
+            return resolvedHints.map { hint in
+                SlashCommandArgumentFieldSpec(
+                    id: hint,
+                    label: hint == "$ARGUMENTS" ? "Arguments" : hint,
+                    isMultiline: argumentsOnly && hint == "$ARGUMENTS"
+                )
+            }
+        }
+        return extractedNumericPlaceholderKeys.map { placeholder in
+            SlashCommandArgumentFieldSpec(
+                id: placeholder,
+                label: placeholder,
+                isMultiline: false
+            )
+        }
+    }
+
+    private var resolvedArgumentHints: [String] {
+        let trimmedHints = (hints ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return trimmedHints
+    }
+
+    private var extractedNumericPlaceholderKeys: [String] {
+        guard let template else { return [] }
+        let pattern = #"\$\d+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(template.startIndex..<template.endIndex, in: template)
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for match in regex.matches(in: template, range: range) {
+            guard let swiftRange = Range(match.range, in: template) else { continue }
+            let token = String(template[swiftRange])
+            if seen.insert(token).inserted {
+                ordered.append(token)
+            }
+        }
+        return ordered.sorted { lhs, rhs in
+            let left = Int(lhs.dropFirst()) ?? 0
+            let right = Int(rhs.dropFirst()) ?? 0
+            return left < right
+        }
+    }
+
+    private var searchBlob: String {
+        "\(title) \(description) \(token)".lowercased()
+    }
+
+    func resolvedProviderID(for section: SlashCommandSection) -> String {
+        let trimmedProvider = provider?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedProvider.isEmpty {
+            return trimmedProvider
+        }
+        return section.defaultProviderID
+    }
+
+    static func filtered(
+        matching query: String,
+        within commands: [BridgeSlashCommand]
+    ) -> [BridgeSlashCommand] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmedQuery.isEmpty else {
+            return commands
+        }
+        return commands.filter { $0.searchBlob.contains(trimmedQuery) }
+    }
+
+    static func classifySection(
+        for command: BridgeSlashCommand,
+        openCodeBuiltins: Set<String> = OpenCodeSlashBuiltins.tokens,
+        codexOverlapTokens: Set<String>,
+        skillNames: Set<String> = []
+    ) -> SlashCommandSection {
+        if let explicit = SlashCommandSection(bridgeSectionHint: command.section) {
+            return explicit
+        }
+
+        let normalizedSource = command.source?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if normalizedSource == "skill" {
+            return .skillDerived
+        }
+
+        let normalizedToken = command.token.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let skillToken = normalizedToken.hasPrefix("/") ? String(normalizedToken.dropFirst()) : normalizedToken
+        if skillNames.contains(skillToken) {
+            return .skillDerived
+        }
+
+        if normalizedSource == "mcp" {
+            return .agent
+        }
+        let trimmedAgent = command.agent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedAgent.isEmpty || normalizedToken == "/agents" {
+            return .agent
+        }
+        let classificationBlob = "\(command.title) \(command.description)".lowercased()
+        if classificationBlob.contains("agent") {
+            return .agent
+        }
+
+        if openCodeBuiltins.contains(normalizedToken) {
+            return .ocBuiltin
+        }
+
+        if codexOverlapTokens.contains(normalizedToken) {
+            return .codexBuiltin
+        }
+
+        return .ocBuiltin
+    }
+
+    static func groupedSections(
+        commands: [BridgeSlashCommand],
+        matching query: String = "",
+        openCodeBuiltins: Set<String> = OpenCodeSlashBuiltins.tokens,
+        codexOverlapTokens: Set<String>,
+        skillNames: Set<String> = []
+    ) -> [(section: SlashCommandSection, commands: [BridgeSlashCommand])] {
+        let filtered = filtered(matching: query, within: commands)
+        var buckets: [SlashCommandSection: [BridgeSlashCommand]] = [:]
+        for command in filtered {
+            let section = classifySection(
+                for: command,
+                openCodeBuiltins: openCodeBuiltins,
+                codexOverlapTokens: codexOverlapTokens,
+                skillNames: skillNames
+            )
+            buckets[section, default: []].append(command)
+        }
+        return SlashCommandSection.displayOrder.compactMap { section in
+            guard let sectionCommands = buckets[section], !sectionCommands.isEmpty else {
+                return nil
+            }
+            return (section: section, commands: sectionCommands)
+        }
+    }
+}
+
+enum TurnComposerSlashCommandSource: Equatable, Sendable {
+    case disabled
+    case codexEnum
+    case bridgeCommands
+}
+
+enum TurnComposerSlashCommandRouting {
+    static func source(
+        supportsSlashCommands: Bool,
+        modelProvider: String
+    ) -> TurnComposerSlashCommandSource {
+        guard supportsSlashCommands else {
+            return .disabled
+        }
+        if CodexService.usesBridgeSlashCommands(modelProvider: modelProvider) {
+            return .bridgeCommands
+        }
+        return .codexEnum
+    }
+}
+
+enum TurnComposerSlashCommandItem: Identifiable, Equatable, Sendable {
+    case codex(TurnComposerSlashCommand)
+    case bridge(BridgeSlashCommand)
+
+    var id: String {
+        switch self {
+        case .codex(let command):
+            return "codex:\(command.rawValue)"
+        case .bridge(let command):
+            return "bridge:\(command.token)"
+        }
+    }
+
+    var commandToken: String {
+        switch self {
+        case .codex(let command):
+            return command.commandToken
+        case .bridge(let command):
+            return command.token
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .codex(let command):
+            return command.title
+        case .bridge(let command):
+            return command.title
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .codex(let command):
+            return command.subtitle
+        case .bridge(let command):
+            return command.description
+        }
+    }
+
+    var codexCommand: TurnComposerSlashCommand? {
+        if case .codex(let command) = self {
+            return command
+        }
+        return nil
+    }
+
+    static func filtered(
+        matching query: String,
+        within commands: [TurnComposerSlashCommandItem]
+    ) -> [TurnComposerSlashCommandItem] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmedQuery.isEmpty else {
+            return commands
+        }
+        return commands.filter { item in
+            let blob = "\(item.title) \(item.subtitle) \(item.commandToken)".lowercased()
+            return blob.contains(trimmedQuery)
+        }
+    }
+}
 
 enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendable {
     case codeReview
@@ -111,17 +487,52 @@ enum TurnComposerSlashCommand: String, Identifiable, Codable, Equatable, Sendabl
         return commands.filter { $0.searchBlob.contains(trimmedQuery) }
     }
 
-    // Hides slash commands that the connected runtime cannot fulfill for this session.
     static func availableCommands(
-        supportsThreadFork: Bool,
-        allowsForkCommand: Bool
+        allowsForkCommand: Bool,
+        includeCodexOnlyCommands: Bool = true
     ) -> [TurnComposerSlashCommand] {
-        allCommands.filter { command in
+        return allCommands.filter { command in
             switch command {
             case .fork:
-                return supportsThreadFork && allowsForkCommand
-            case .codeReview, .compact, .feedback, .status, .subagents:
+                return allowsForkCommand
+            case .codeReview, .subagents:
+                return includeCodexOnlyCommands
+            case .compact, .feedback, .status:
                 return true
+            }
+        }
+    }
+
+    static func availableCommandsForProvider(
+        allowsForkCommand: Bool,
+        modelProvider: String
+    ) -> [TurnComposerSlashCommand] {
+        let includeCodexOnly = CodexModelOption.normalizedProvider(modelProvider) != "opencode"
+        return availableCommands(
+            allowsForkCommand: allowsForkCommand,
+            includeCodexOnlyCommands: includeCodexOnly
+        )
+    }
+
+    // openCodeExcludedTokens removed (RP-CMD-3): no longer filters bridge data for OC (dynamic primary).
+    // Codex enum assumptions updated; availableCommandsForProvider and allCommands kept for codex paths only.
+
+    // Strengthened minimal hardcoded cross-provider tokens (per Issue 3 + PR desc) for degraded/bridge-down
+    // + codex parity when dynamic bridge unavailable for OC/usesBridge. Dynamic bridge list is primary.
+    // These become .bridge(...) items (synthetic) so that selection for OC always goes to insert-token path.
+    static let minimalFallbackSlashCommandTokens: [String] = ["/compact", "/review", "/help"]
+
+    static func minimalFallbackSlashCommands() -> [BridgeSlashCommand] {
+        minimalFallbackSlashCommandTokens.map { token in
+            switch token {
+            case "/compact":
+                return BridgeSlashCommand(token: "/compact", title: "Compact", description: "Summarize older context to keep this thread lean")
+            case "/review":
+                return BridgeSlashCommand(token: "/review", title: "Code Review", description: "Run the reviewer on your local changes")
+            case "/help":
+                return BridgeSlashCommand(token: "/help", title: "Help", description: "Show available commands and usage")
+            default:
+                return BridgeSlashCommand(token: token, title: token, description: "")
             }
         }
     }

@@ -19,11 +19,13 @@ struct TurnComposerSendAvailability {
     let hasReviewSelection: Bool
     let hasPendingReviewSelection: Bool
     let hasSubagentsSelection: Bool
+    let isRuntimeCapabilitiesLoading: Bool
 
     // Evaluates whether sending is allowed for the current composer state.
     var isSendDisabled: Bool {
         isSending
             || !isConnected
+            || isRuntimeCapabilitiesLoading
             || hasPendingReviewSelection
             || (
                 trimmedInput.isEmpty
@@ -247,15 +249,33 @@ final class TurnViewModel {
     var isFileAutocompleteLoading = false
     var fileAutocompleteQuery = ""
     var skillAutocompleteItems: [CodexSkillMetadata] = []
+    var skillFullListItems: [CodexSkillMetadata] = []
     var isSkillAutocompleteVisible = false
     var isSkillAutocompleteLoading = false
     var skillAutocompleteQuery = ""
     var skillAutocompleteTrigger = "$"
+
+    var skillTotalCount: Int {
+        skillFullListItems.count
+    }
     var pluginAutocompleteItems: [CodexPluginMetadata] = []
     var isPluginAutocompleteVisible = false
     var isPluginAutocompleteLoading = false
     var pluginAutocompleteQuery = ""
     var slashCommandPanelState: TurnComposerSlashCommandPanelState = .hidden
+    var bridgeSlashCommands: [BridgeSlashCommand] = []
+    var isLoadingBridgeSlashCommands = false
+    var didLoadBridgeSlashCommandsSuccessfully = false
+    var bridgeSlashCommandsLoadError: String?
+    var pendingSlashCommandArguments: BridgeSlashCommand?
+    var isShowingSlashCommandArgumentsSheet = false
+    @ObservationIgnored private var bridgeSlashCommandsDirectory: String?
+    @ObservationIgnored private var inFlightBridgeSlashExecuteKeys: Set<String> = []
+    @ObservationIgnored private var lastBridgeSlashExecuteSignature: String?
+    @ObservationIgnored private var lastBridgeSlashExecuteAt: Date?
+    private static let bridgeSlashExecuteDebounceInterval: TimeInterval = 0.3
+    @ObservationIgnored private var bridgeSlashCommandsFetchGeneration: UInt64 = 0
+    @ObservationIgnored private var bridgeSlashCommandsFetchTask: Task<Void, Never>?
     // MARK: - Git state
 
     var runningGitAction: TurnGitActionKind? = nil
@@ -403,7 +423,7 @@ final class TurnViewModel {
     @ObservationIgnored var pendingGitBranchOperation: GitBranchUserOperation?
     @ObservationIgnored var pendingGitWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?
     @ObservationIgnored var pendingManagedGitWorktreeOpenHandler: ((GitCreateManagedWorktreeResult) -> Void)?
-    @ObservationIgnored private var cachedSkillSearchIndexByRoot: [String: [TurnSkillSearchIndexEntry]] = [:]
+    @ObservationIgnored private var cachedSkillSearchIndexByRoot: [String: TurnSkillSearchIndexCacheEntry] = [:]
     @ObservationIgnored private var forceRefreshedSkillMissKeys: Set<String> = []
     @ObservationIgnored private var cachedPluginSearchIndexByRoot: [String: [TurnPluginSearchIndexEntry]] = [:]
     @ObservationIgnored var unsupportedSkillsAutocompleteRoots: Set<String> = []
@@ -413,7 +433,7 @@ final class TurnViewModel {
 
     let maxComposerImages = 4
     let maxFileAutocompleteItems = 6
-    let maxSkillAutocompleteItems = 6
+    let maxSkillAutocompleteItems = 12
     let maxPluginAutocompleteItems = 6
     private let fileAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
     private let skillAutocompleteDebounceNanoseconds: UInt64 = 180_000_000
@@ -595,7 +615,11 @@ final class TurnViewModel {
         return isSending
     }
 
-    func isSendDisabled(isConnected: Bool, activeTurnID: String?) -> Bool {
+    func isSendDisabled(
+        isConnected: Bool,
+        activeTurnID: String?,
+        isRuntimeCapabilitiesLoading: Bool = false
+    ) -> Bool {
         _ = activeTurnID
         return TurnComposerSendAvailability(
             isSending: isSending,
@@ -607,7 +631,8 @@ final class TurnViewModel {
             hasPluginSelection: !composerMentionedPlugins.isEmpty,
             hasReviewSelection: hasComposerReviewSelection,
             hasPendingReviewSelection: hasPendingComposerReviewSelection,
-            hasSubagentsSelection: isSubagentsSelectionArmed
+            hasSubagentsSelection: isSubagentsSelectionArmed,
+            isRuntimeCapabilitiesLoading: isRuntimeCapabilitiesLoading
         ).isSendDisabled
     }
 
@@ -876,8 +901,11 @@ final class TurnViewModel {
         let hasCachedSkillIndex = cachedSkillSearchIndexByRoot[cacheKey] != nil
         let rootIsUnsupported = unsupportedSkillsAutocompleteRoots.contains(cacheKey)
         isSkillAutocompleteLoading = !hasCachedSkillIndex && !rootIsUnsupported
-        if let cachedIndex = cachedSkillSearchIndexByRoot[cacheKey] {
-            skillAutocompleteItems = filteredSkillAutocompleteItems(for: query, indexedSkills: cachedIndex)
+        if let cachedIndex = cachedSkillSearchIndexByRoot[cacheKey]?.indexedSkills {
+            applySkillAutocompleteResults(
+                for: query,
+                indexedSkills: cachedIndex
+            )
             let shouldRefreshCachedMiss = shouldRefreshSkillAutocompleteMiss(
                 query: query,
                 cachedItems: skillAutocompleteItems,
@@ -887,6 +915,7 @@ final class TurnViewModel {
             isSkillAutocompleteVisible = !skillAutocompleteItems.isEmpty || shouldRefreshCachedMiss
         } else {
             skillAutocompleteItems = []
+            skillFullListItems = []
             isSkillAutocompleteVisible = isSkillAutocompleteLoading
         }
         skillAutocompleteDebounceTask?.cancel()
@@ -909,56 +938,66 @@ final class TurnViewModel {
                    cachedSkillSearchIndexByRoot[cacheKey] == nil {
                     guard self.skillAutocompleteQuery == expectedQuery else { return }
                     self.skillAutocompleteItems = []
+                    self.skillFullListItems = []
                     self.isSkillAutocompleteLoading = false
                     self.isSkillAutocompleteVisible = false
                     return
                 }
 
+                let listedSkills = try await codex.listSkills(
+                    cwds: normalizedRoot.map { [$0] },
+                    forceReload: false
+                )
+                guard !Task.isCancelled else { return }
+
+                let incomingSignature = Self.providersSignature(for: listedSkills)
                 let indexedSkills: [TurnSkillSearchIndexEntry]
-                if let cachedIndex = self.cachedSkillSearchIndexByRoot[cacheKey] {
+                if let cachedEntry = self.cachedSkillSearchIndexByRoot[cacheKey],
+                   cachedEntry.providersSignature == incomingSignature {
                     let cachedItems = self.filteredSkillAutocompleteItems(
                         for: expectedQuery,
-                        indexedSkills: cachedIndex
+                        indexedSkills: cachedEntry.indexedSkills
                     )
                     if self.shouldRefreshSkillAutocompleteMiss(
                         query: expectedQuery,
                         cachedItems: cachedItems,
                         cacheKey: cacheKey
                     ) {
-                        let listedSkills = try await codex.listSkills(
+                        let reloadedSkills = try await codex.listSkills(
                             cwds: normalizedRoot.map { [$0] },
                             forceReload: true
                         )
                         guard !Task.isCancelled else { return }
-                        indexedSkills = listedSkills
+                        indexedSkills = reloadedSkills
                             .filter { $0.enabled }
                             .map(TurnSkillSearchIndexEntry.init(skill:))
-                        self.cachedSkillSearchIndexByRoot[cacheKey] = indexedSkills
+                        self.cachedSkillSearchIndexByRoot[cacheKey] = TurnSkillSearchIndexCacheEntry(
+                            indexedSkills: indexedSkills,
+                            providersSignature: Self.providersSignature(for: reloadedSkills)
+                        )
                         self.rememberSkillAutocompleteMissRefresh(
                             query: expectedQuery,
                             cacheKey: cacheKey,
                             indexedSkills: indexedSkills
                         )
                     } else {
-                        indexedSkills = cachedIndex
+                        indexedSkills = cachedEntry.indexedSkills
                     }
                 } else {
-                    let listedSkills = try await codex.listSkills(
-                        cwds: normalizedRoot.map { [$0] },
-                        forceReload: false
-                    )
-                    guard !Task.isCancelled else { return }
                     indexedSkills = listedSkills
                         .filter { $0.enabled }
                         .map(TurnSkillSearchIndexEntry.init(skill:))
-                    self.cachedSkillSearchIndexByRoot[cacheKey] = indexedSkills
+                    self.cachedSkillSearchIndexByRoot[cacheKey] = TurnSkillSearchIndexCacheEntry(
+                        indexedSkills: indexedSkills,
+                        providersSignature: incomingSignature
+                    )
                     self.clearSkillAutocompleteMissRefreshes(cacheKey: cacheKey)
                 }
 
                 guard !Task.isCancelled else { return }
                 guard self.skillAutocompleteQuery == expectedQuery else { return }
 
-                self.skillAutocompleteItems = self.filteredSkillAutocompleteItems(
+                self.applySkillAutocompleteResults(
                     for: expectedQuery,
                     indexedSkills: indexedSkills
                 )
@@ -972,6 +1011,7 @@ final class TurnViewModel {
                 }
 
                 self.skillAutocompleteItems = []
+                self.skillFullListItems = []
                 self.isSkillAutocompleteLoading = false
                 self.isSkillAutocompleteVisible = false
             }
@@ -987,6 +1027,7 @@ final class TurnViewModel {
     ) {
         guard !isComposerInteractionLocked(activeTurnID: activeTurnID),
               codex.isConnected,
+              CodexModelOption.normalizedProvider(codex.runtimeModelProviderForTurn(threadId: thread.id)) != "opencode",
               let root = normalizedAutocompleteRoot(for: thread),
               let token = Self.trailingPluginAutocompleteToken(in: text) else {
             resetPluginAutocompleteState()
@@ -1155,6 +1196,9 @@ final class TurnViewModel {
     // Keeps `/` command discovery separate from @/$ autocomplete while supporting a bare trailing slash.
     func onInputChangedForSlashCommandAutocomplete(
         _ text: String,
+        codex: CodexService,
+        thread: CodexThread,
+        supportsSlashCommands: Bool,
         activeTurnID: String?
     ) {
         clearComposerReviewSelectionIfNeededForInput(text)
@@ -1190,6 +1234,279 @@ final class TurnViewModel {
         resetSkillAutocompleteState()
         resetPluginAutocompleteState()
         slashCommandPanelState = .commands(query: token.query)
+
+        let modelProvider = codex.runtimeModelProviderForTurn(threadId: thread.id)
+        let slashSource = TurnComposerSlashCommandRouting.source(
+            supportsSlashCommands: supportsSlashCommands,
+            modelProvider: modelProvider
+        )
+        guard slashSource == .bridgeCommands else {
+            bridgeSlashCommandsFetchTask?.cancel()
+            bridgeSlashCommandsFetchTask = nil
+            resetBridgeSlashCommandState()
+            return
+        }
+
+        loadBridgeSlashCommandsIfNeeded(codex: codex, thread: thread)
+    }
+
+    func groupedBridgeSlashCommandSections(
+        matching query: String,
+        allowsForkCommand: Bool,
+        modelProvider: String,
+        thread: CodexThread
+    ) -> [(section: SlashCommandSection, commands: [BridgeSlashCommand])] {
+        let commands: [BridgeSlashCommand]
+        if bridgeSlashCommands.isEmpty && !didLoadBridgeSlashCommandsSuccessfully {
+            commands = TurnComposerSlashCommand.minimalFallbackSlashCommands()
+        } else {
+            commands = bridgeSlashCommands
+        }
+
+        let cacheKey = autocompleteCacheKey(forRoot: normalizedAutocompleteRoot(for: thread))
+        let skillNames = Set(
+            (cachedSkillSearchIndexByRoot[cacheKey]?.indexedSkills ?? []).map { entry in
+                entry.skill.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }.filter { !$0.isEmpty }
+        )
+        let codexOverlapTokens = Set(
+            TurnComposerSlashCommand.availableCommandsForProvider(
+                allowsForkCommand: allowsForkCommand,
+                modelProvider: modelProvider
+            ).map(\.commandToken)
+        )
+        return BridgeSlashCommand.groupedSections(
+            commands: commands,
+            matching: query,
+            codexOverlapTokens: codexOverlapTokens,
+            skillNames: skillNames
+        )
+    }
+
+    func availableSlashCommandItems(
+        allowsForkCommand: Bool,
+        slashSource: TurnComposerSlashCommandSource
+    ) -> [TurnComposerSlashCommandItem] {
+        switch slashSource {
+        case .disabled:
+            return []
+        case .codexEnum:
+            return TurnComposerSlashCommand.availableCommands(allowsForkCommand: allowsForkCommand)
+                .map { .codex($0) }
+        case .bridgeCommands:
+            if bridgeSlashCommands.isEmpty && !didLoadBridgeSlashCommandsSuccessfully {
+                // Degraded/bridge-down (no successful dynamic yet or error): use minimal cross-provider fallback.
+                // This + persisted fetch fallback ensures OC with supportsSlashCommands sees commands (e.g. /undo from prior bridge success, or minimal).
+                // Dynamic from bridge is primary; enum is never used for OC/usesBridge after RP-CMD-3.
+                return TurnComposerSlashCommand.minimalFallbackSlashCommands().map { .bridge($0) }
+            }
+            return bridgeSlashCommands.map { .bridge($0) }
+        }
+    }
+
+    var showsBridgeSlashCommandsEmptyHint: Bool {
+        didLoadBridgeSlashCommandsSuccessfully
+            && bridgeSlashCommands.isEmpty
+            && !isLoadingBridgeSlashCommands
+            && bridgeSlashCommandsLoadError == nil
+    }
+
+    func retryBridgeSlashCommandsLoad(codex: CodexService, thread: CodexThread) {
+        codex.invalidateSlashCommandCache(directory: thread.gitWorkingDirectory)
+        bridgeSlashCommandsLoadError = nil
+        didLoadBridgeSlashCommandsSuccessfully = false
+        loadBridgeSlashCommandsIfNeeded(codex: codex, thread: thread)
+    }
+
+    /// Single entry point for slash tap routing (PR5a): execute, arguments sheet, or Codex handlers.
+    func onSelectSlashCommandItem(
+        _ item: TurnComposerSlashCommandItem,
+        hostContext: TurnSlashHostContext
+    ) {
+        removeTrailingSlashCommandTokenFromInputIfNeeded()
+
+        switch item {
+        case .bridge(let command):
+            resetSlashCommandState(clearPendingSelection: true)
+            handleBridgeSlashCommandSelection(command, hostContext: hostContext)
+        case .codex(let command):
+            sendCodexSlashCommand(command, hostContext: hostContext)
+        }
+    }
+
+    func dismissSlashPickerAndClearTrailingToken() {
+        removeTrailingSlashCommandTokenFromInputIfNeeded()
+        resetSlashCommandState(clearPendingSelection: true)
+    }
+
+    private func handleBridgeSlashCommandSelection(
+        _ command: BridgeSlashCommand,
+        hostContext: TurnSlashHostContext
+    ) {
+        let trimmedToken = command.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else { return }
+
+        if command.requiresArguments {
+            pendingSlashCommandArguments = command
+            isShowingSlashCommandArgumentsSheet = true
+            return
+        }
+
+        guard hostContext.codex.runtimeCapabilitiesForTurn(threadId: hostContext.thread.id)
+            .supportsSlashCommandExecute else {
+            return
+        }
+
+        sendBridgeSlashCommand(command, hostContext: hostContext)
+    }
+
+    func submitSlashCommandArguments(
+        command: BridgeSlashCommand,
+        argumentFields: [BridgeSlashCommandArgumentField],
+        hostContext: TurnSlashHostContext
+    ) {
+        sendBridgeSlashCommand(
+            command,
+            hostContext: hostContext,
+            argumentFields: argumentFields,
+            dismissArgumentsSheetOnSuccess: true
+        )
+    }
+
+    func sendBridgeSlashCommand(
+        _ command: BridgeSlashCommand,
+        hostContext: TurnSlashHostContext,
+        argumentFields: [BridgeSlashCommandArgumentField]? = nil,
+        dismissArgumentsSheetOnSuccess: Bool = false
+    ) {
+        let trimmedToken = command.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedToken.isEmpty else { return }
+
+        let threadId = hostContext.thread.id
+        let executeKey = Self.bridgeSlashExecuteKey(threadId: threadId, commandToken: trimmedToken)
+        if inFlightBridgeSlashExecuteKeys.contains(executeKey) {
+            return
+        }
+        if shouldDebounceBridgeSlashExecute(threadId: threadId, commandToken: trimmedToken) {
+            return
+        }
+
+        inFlightBridgeSlashExecuteKeys.insert(executeKey)
+        let clientCommandId = UUID()
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.inFlightBridgeSlashExecuteKeys.remove(executeKey) }
+
+            do {
+                let result = try await hostContext.codex.executeBridgeSlashCommand(
+                    threadId: threadId,
+                    command: trimmedToken,
+                    directory: hostContext.thread.gitWorkingDirectory,
+                    clientCommandId: clientCommandId,
+                    argumentFields: argumentFields,
+                    template: command.template,
+                    hints: command.hints
+                )
+                if result.ok {
+                    hostContext.codex.markThreadAsRunning(threadId)
+                    hostContext.codex.lastErrorMessage = nil
+                    if dismissArgumentsSheetOnSuccess {
+                        self.dismissSlashCommandArgumentsSheet()
+                    }
+                    return
+                }
+
+                if result.errorCode == "command_not_allowed" {
+                    hostContext.codex.invalidateSlashCommandCache(
+                        directory: hostContext.thread.gitWorkingDirectory
+                    )
+                    self.loadBridgeSlashCommandsIfNeeded(
+                        codex: hostContext.codex,
+                        thread: hostContext.thread
+                    )
+                }
+                hostContext.codex.lastErrorMessage = Self.userFacingSlashExecuteError(
+                    errorCode: result.errorCode,
+                    commandToken: trimmedToken
+                )
+            } catch {
+                let errorCode = CodexService.bridgeSlashCommandExecuteErrorCode(from: error)
+                if errorCode == "command_not_allowed" {
+                    hostContext.codex.invalidateSlashCommandCache(
+                        directory: hostContext.thread.gitWorkingDirectory
+                    )
+                    self.loadBridgeSlashCommandsIfNeeded(
+                        codex: hostContext.codex,
+                        thread: hostContext.thread
+                    )
+                }
+                hostContext.codex.lastErrorMessage = hostContext.codex.userFacingTurnErrorMessageForFooter(from: error)
+                    ?? Self.userFacingSlashExecuteError(errorCode: errorCode, commandToken: trimmedToken)
+            }
+        }
+    }
+
+    func sendCodexSlashCommand(
+        _ command: TurnComposerSlashCommand,
+        hostContext: TurnSlashHostContext
+    ) {
+        switch command {
+        case .codeReview:
+            armCodeReviewSelection(command: command, target: nil)
+        case .compact:
+            resetSlashCommandState(clearPendingSelection: true)
+            Task {
+                try? await hostContext.codex.compactThread(hostContext.thread.id)
+            }
+        case .feedback:
+            resetSlashCommandState(clearPendingSelection: true)
+            hostContext.onOpenFeedbackMail()
+        case .fork:
+            slashCommandPanelState = .forkDestinations(hostContext.availableForkDestinations)
+        case .status:
+            resetSlashCommandState(clearPendingSelection: true)
+            hostContext.onShowStatus()
+        case .subagents:
+            armSubagentsSelection()
+        }
+    }
+
+    func dismissSlashCommandArgumentsSheet() {
+        isShowingSlashCommandArgumentsSheet = false
+        pendingSlashCommandArguments = nil
+    }
+
+    private func shouldDebounceBridgeSlashExecute(threadId: String, commandToken: String) -> Bool {
+        let signature = Self.bridgeSlashExecuteKey(threadId: threadId, commandToken: commandToken)
+        if lastBridgeSlashExecuteSignature == signature,
+           let lastBridgeSlashExecuteAt,
+           Date().timeIntervalSince(lastBridgeSlashExecuteAt) < Self.bridgeSlashExecuteDebounceInterval {
+            return true
+        }
+        lastBridgeSlashExecuteSignature = signature
+        lastBridgeSlashExecuteAt = Date()
+        return false
+    }
+
+    private static func bridgeSlashExecuteKey(threadId: String, commandToken: String) -> String {
+        let normalizedToken = commandToken.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return "\(threadId):\(normalizedToken)"
+    }
+
+    private static func userFacingSlashExecuteError(errorCode: String?, commandToken: String) -> String {
+        switch errorCode {
+        case "command_not_allowed":
+            return "\(commandToken) is not available for this project."
+        case "opencode_unavailable":
+            return "OpenCode is not available to run \(commandToken)."
+        case "thread_not_found":
+            return "This thread could not be found on the Mac."
+        case "command_arguments_required":
+            return "Enter all required arguments for \(commandToken)."
+        default:
+            return "Could not run \(commandToken)."
+        }
     }
 
     // Turns the selected slash command into the matching inline composer behavior.
@@ -1266,7 +1583,18 @@ final class TurnViewModel {
         composerMentionedPlugins.removeAll(where: { $0.id == id })
     }
 
-    func openCamera(codex: CodexService) {
+    private func allowsComposerImageAttachments(codex: CodexService, threadID: String) -> Bool {
+        guard codex.supportsImageAttachments(forThreadId: threadID) else {
+            codex.lastErrorMessage = ComposerCapabilityCopy.capabilityReason(for: .imageAttachments)
+            return false
+        }
+        return true
+    }
+
+    func openCamera(codex: CodexService, threadID: String) {
+        guard allowsComposerImageAttachments(codex: codex, threadID: threadID) else {
+            return
+        }
         guard remainingAttachmentSlots > 0 else {
             codex.lastErrorMessage = "You can attach up to \(maxComposerImages) images per message."
             return
@@ -1282,7 +1610,10 @@ final class TurnViewModel {
         enqueuePastedImageData([data], codex: codex, threadID: threadID)
     }
 
-    func openPhotoLibraryPicker(codex: CodexService) {
+    func openPhotoLibraryPicker(codex: CodexService, threadID: String) {
+        guard allowsComposerImageAttachments(codex: codex, threadID: threadID) else {
+            return
+        }
         guard remainingAttachmentSlots > 0 else {
             codex.lastErrorMessage = "You can attach up to \(maxComposerImages) images per message."
             return
@@ -1294,6 +1625,9 @@ final class TurnViewModel {
     // Converts the picker results into loading slots and async image pipeline jobs.
     func enqueuePhotoPickerItems(_ items: [PhotosPickerItem], codex: CodexService, threadID: String) {
         guard !items.isEmpty else {
+            return
+        }
+        guard allowsComposerImageAttachments(codex: codex, threadID: threadID) else {
             return
         }
 
@@ -1331,6 +1665,9 @@ final class TurnViewModel {
     // Reuses the picker intake pipeline so pasted images obey the same limits and processing.
     func enqueuePastedImageData(_ imageDataItems: [Data], codex: CodexService, threadID: String) {
         guard !imageDataItems.isEmpty else {
+            return
+        }
+        guard allowsComposerImageAttachments(codex: codex, threadID: threadID) else {
             return
         }
 
@@ -1480,10 +1817,13 @@ final class TurnViewModel {
             defer { isSending = false }
 
             do {
+                let draftRuntimeOverride = codex.threadRuntimeOverride(for: draftThreadID)
                 let thread = try await codex.startThreadIfReady(
                     preferredProjectPath: preferredProjectPath,
-                    rootlessChatPromptHint: rootlessChatPromptHint
+                    rootlessChatPromptHint: rootlessChatPromptHint,
+                    runtimeOverride: draftRuntimeOverride
                 )
+                codex.applyThreadRuntimeOverride(nil, to: draftThreadID)
                 let preAppendedMessage = movePreAppendedNewThreadUserMessageIfNeeded(
                     draftPreAppendedMessage,
                     pendingSend: pendingSend,
@@ -2487,6 +2827,35 @@ final class TurnViewModel {
         return Array(filtered.prefix(maxSkillAutocompleteItems))
     }
 
+    private static func providersSignature(for skills: [CodexSkillMetadata]) -> String {
+        skills
+            .map { "\($0.name):\($0.providerIds.joined(separator: ","))" }
+            .sorted()
+            .joined(separator: "|")
+    }
+
+    private func applySkillAutocompleteResults(
+        for query: String,
+        indexedSkills: [TurnSkillSearchIndexEntry]
+    ) {
+        let fullList = filteredSkillFullListItems(for: query, indexedSkills: indexedSkills)
+        skillFullListItems = fullList
+        skillAutocompleteItems = Array(fullList.prefix(maxSkillAutocompleteItems))
+    }
+
+    // Filters pre-indexed skills using a single normalized search blob to reduce per-keystroke work.
+    private func filteredSkillFullListItems(
+        for query: String,
+        indexedSkills: [TurnSkillSearchIndexEntry]
+    ) -> [CodexSkillMetadata] {
+        let needle = query.lowercased()
+        return Array(
+            indexedSkills.lazy
+                .filter { needle.isEmpty || $0.searchBlob.contains(needle) }
+                .map(\.skill)
+        )
+    }
+
     private func shouldRefreshSkillAutocompleteMiss(
         query: String,
         cachedItems: [CodexSkillMetadata],
@@ -2825,6 +3194,7 @@ final class TurnViewModel {
         skillAutocompleteDebounceTask?.cancel()
         skillAutocompleteDebounceTask = nil
         skillAutocompleteItems = []
+        skillFullListItems = []
         isSkillAutocompleteVisible = false
         isSkillAutocompleteLoading = false
         skillAutocompleteQuery = ""
@@ -2851,6 +3221,67 @@ final class TurnViewModel {
         }
         if clearPendingSelection, composerReviewSelection?.target == nil {
             composerReviewSelection = nil
+        }
+    }
+
+    private func resetBridgeSlashCommandState() {
+        bridgeSlashCommandsFetchTask?.cancel()
+        bridgeSlashCommandsFetchTask = nil
+        bridgeSlashCommands = []
+        bridgeSlashCommandsDirectory = nil
+        bridgeSlashCommandsFetchGeneration = 0
+        isLoadingBridgeSlashCommands = false
+        didLoadBridgeSlashCommandsSuccessfully = false
+        bridgeSlashCommandsLoadError = nil
+    }
+
+    private func loadBridgeSlashCommandsIfNeeded(codex: CodexService, thread: CodexThread) {
+        let directory = thread.gitWorkingDirectory
+        if bridgeSlashCommandsDirectory != directory {
+            bridgeSlashCommandsFetchTask?.cancel()
+            bridgeSlashCommandsFetchTask = nil
+            bridgeSlashCommands = []
+            didLoadBridgeSlashCommandsSuccessfully = false
+            bridgeSlashCommandsLoadError = nil
+            isLoadingBridgeSlashCommands = false
+            bridgeSlashCommandsDirectory = directory
+            bridgeSlashCommandsFetchGeneration &+= 1
+        }
+
+        let generation = bridgeSlashCommandsFetchGeneration
+
+        bridgeSlashCommandsFetchTask?.cancel()
+        isLoadingBridgeSlashCommands = true
+        bridgeSlashCommandsLoadError = nil
+
+        bridgeSlashCommandsFetchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let commands = try await codex.fetchSlashCommands(directory: directory)
+                guard !Task.isCancelled else { return }
+                guard generation == self.bridgeSlashCommandsFetchGeneration else { return }
+                guard self.bridgeSlashCommandsDirectory == directory else { return }
+
+                if commands.isEmpty {
+                    // Empty success is degraded — use minimal fallback and allow retry/refetch.
+                    self.bridgeSlashCommands = TurnComposerSlashCommand.minimalFallbackSlashCommands()
+                    self.didLoadBridgeSlashCommandsSuccessfully = false
+                } else {
+                    self.bridgeSlashCommands = commands
+                    self.didLoadBridgeSlashCommandsSuccessfully = true
+                }
+                self.isLoadingBridgeSlashCommands = false
+                self.bridgeSlashCommandsLoadError = nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                guard generation == self.bridgeSlashCommandsFetchGeneration else { return }
+                guard self.bridgeSlashCommandsDirectory == directory else { return }
+
+                self.bridgeSlashCommands = []
+                self.isLoadingBridgeSlashCommands = false
+                self.didLoadBridgeSlashCommandsSuccessfully = false
+                self.bridgeSlashCommandsLoadError = "Couldn't load commands. Tap to retry."
+            }
         }
     }
 
@@ -3455,17 +3886,28 @@ private struct TurnTrailingToken: Equatable {
     let tokenRange: Range<String.Index>
 }
 
+private struct TurnSkillSearchIndexCacheEntry: Equatable {
+    let indexedSkills: [TurnSkillSearchIndexEntry]
+    let providersSignature: String
+}
+
 private struct TurnSkillSearchIndexEntry: Equatable {
     let skill: CodexSkillMetadata
     let name: String
     let displayName: String
     let description: String
+    let searchBlob: String
 
     init(skill: CodexSkillMetadata) {
         self.skill = skill
         self.name = skill.name.lowercased()
         self.displayName = SkillDisplayNameFormatter.displayName(for: skill.name).lowercased()
         self.description = skill.description?.lowercased() ?? ""
+        if description.isEmpty {
+            self.searchBlob = "\(name)\n\(displayName)"
+        } else {
+            self.searchBlob = "\(name)\n\(displayName)\n\(description)"
+        }
     }
 
     func matchScore(for needle: String) -> Int? {

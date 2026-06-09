@@ -28,6 +28,7 @@
 		7750A4973549580C7DBA5792 /* RemodexLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA83C07BD6661A63FFD1400F /* RemodexLaunchIntent.swift */; };
 		7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */; };
 		7D4F2A91C8E64B3DA5F67001 /* CodexThreadGitControlScopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D4F2A91C8E64B3DA5F67002 /* CodexThreadGitControlScopeTests.swift */; };
+		8F1E2D3C4B5A69788796A5B4 /* OpenCodeModelMenuGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1E2D3C4B5A69788796A5B5 /* OpenCodeModelMenuGroupingTests.swift */; };
 		7EFA3E8309EF41CA902C7A67 /* AssistantTurnEndActionVisibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02C96CD0916A43F38184398D /* AssistantTurnEndActionVisibilityTests.swift */; };
 		86E3342F83DA4ED868E87BF2 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1C818F3EC0291EF8B6E5B541 /* Assets.xcassets */; };
 		87DEFF39A5119F5BD0E7B071 /* RemodexControlCenterWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D5C5F38BB3C121F29CA8A40 /* RemodexControlCenterWidget.swift */; };
@@ -42,6 +43,7 @@
 		9B4A1F81BFE9FA5190652A22 /* RemodexLaunchIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA83C07BD6661A63FFD1400F /* RemodexLaunchIntent.swift */; };
 		9D7C9A8B7E6D5C4B3A291817 /* TurnViewModelQueueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */; };
 		A2B3C4D5E6F708192A3B4C6 /* CodexServiceThreadListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B3C4D5E6F708192A3B4C7 /* CodexServiceThreadListTests.swift */; };
+		B1C2D3E4F5A60718293A4C01 /* OpenCodeDiscoveryParamsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A60718293A4C02 /* OpenCodeDiscoveryParamsTests.swift */; };
 		A4B0C1D2E3F4051627384A02 /* GhosttyKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A01 /* GhosttyKit.xcframework */; };
 		A4B0C1D2E3F4051627384A04 /* IOSurface.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A03 /* IOSurface.framework */; };
 		A4B0C1D2E3F4051627384A06 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A05 /* Metal.framework */; };
@@ -53,6 +55,8 @@
 		A7D1C9E4B6F84321ABCD1201 /* TerminalPasteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D1C9E4B6F84321ABCD1202 /* TerminalPasteTests.swift */; };
 		A9F1B2C3D4E5F60718293A40 /* TurnSkillAutocompleteTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */; };
 		A9F1B2C3D4E5F60718293A42 /* CodexSkillsListDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */; };
+		C1D2E3F40516273849A5B801 /* TurnViewModelSkillsAutocompleteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D2E3F40516273849A5B802 /* TurnViewModelSkillsAutocompleteTests.swift */; };
+		B2C3D4E5F60718293A4B5C6D /* BridgeSlashCommandDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F60718293A4B5C6E /* BridgeSlashCommandDecodeTests.swift */; };
 		A9F1B2C3D4E5F60718293A44 /* CodexTurnInputPayloadSkillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A45 /* CodexTurnInputPayloadSkillTests.swift */; };
 		A9F1B2C3D4E5F60718293A46 /* CodexStructuredUserInputDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A47 /* CodexStructuredUserInputDecodeTests.swift */; };
 		AB1C2D3E4F5061728394A5B7 /* TurnComposerReviewModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1C2D3E4F5061728394A5B6 /* TurnComposerReviewModeTests.swift */; };
@@ -89,12 +93,16 @@
 		D1A000000000000000000214 /* TreeSitterYAMLRunestone in Frameworks */ = {isa = PBXBuildFile; productRef = D1A000000000000000000114 /* TreeSitterYAMLRunestone */; };
 		D27B9CA5F0B60ECA8AF38016 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */; };
+		E7F8A9B0C1D2E3F405162739 /* CodexServiceHistoryMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7F8A9B0C1D2E3F405162738 /* CodexServiceHistoryMergeTests.swift */; };
+		E8F9A0B1C2D3E4F50617283A /* CodexServiceImmediateSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8F9A0B1C2D3E4F506172839 /* CodexServiceImmediateSyncTests.swift */; };
 		DAAD0C0C717F9415C3E9D21A /* RemodexMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0B9CCCCC45E47616AB452FA /* RemodexMenuBarApp.swift */; };
 		DC6E023DD6E4FA68DF3D7FDE /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E5E1FA12CF5120C8C8A64111 /* Cocoa.framework */; };
 		DC74E420421DFA86D90D14BF /* RemodexWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 821C46F274E62AA48DE694F4 /* RemodexWidgetBundle.swift */; };
 		E1A2B3C4D5E6F708192A3B4C /* QRScannerPairingValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */; };
 		E6F1A2B3C4D5E6F708192A51 /* UserBubbleInlineMarkdownRendererTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6F1A2B3C4D5E6F708192A50 /* UserBubbleInlineMarkdownRendererTests.swift */; };
 		F1B2C3D4E5F60718293A4B10 /* CodexGPTAccountTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */; };
+		D1B2C3D4E5F60718293A4B13 /* DesktopHandoffServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1B2C3D4E5F60718293A4B12 /* DesktopHandoffServiceTests.swift */; };
+		C1D2E3F40516273849A5B903 /* ComposerCapabilityCopyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D2E3F40516273849A5B904 /* ComposerCapabilityCopyTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -153,6 +161,7 @@
 		74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnComposerSendAvailabilityTests.swift; sourceTree = "<group>"; };
 		7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadRuntimeOverrideTests.swift; sourceTree = "<group>"; };
 		7D4F2A91C8E64B3DA5F67002 /* CodexThreadGitControlScopeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexThreadGitControlScopeTests.swift; sourceTree = "<group>"; };
+		8F1E2D3C4B5A69788796A5B5 /* OpenCodeModelMenuGroupingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenCodeModelMenuGroupingTests.swift; sourceTree = "<group>"; };
 		821C46F274E62AA48DE694F4 /* RemodexWidgetBundle.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexWidgetBundle.swift; sourceTree = "<group>"; };
 		8B4A2F5E7D1C4B9AA1234568 /* TurnComposerAttachmentIntakePlanTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnComposerAttachmentIntakePlanTests.swift; sourceTree = "<group>"; };
 		8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarRunBadgePerformanceTests.swift; sourceTree = "<group>"; };
@@ -166,6 +175,7 @@
 		9A37794F4B32C1952A3770E0 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		9D7C9A8B7E6D5C4B3A291818 /* TurnViewModelQueueTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnViewModelQueueTests.swift; sourceTree = "<group>"; };
 		A2B3C4D5E6F708192A3B4C7 /* CodexServiceThreadListTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceThreadListTests.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A60718293A4C02 /* OpenCodeDiscoveryParamsTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenCodeDiscoveryParamsTests.swift; sourceTree = "<group>"; };
 		A4B0C1D2E3F4051627384A01 /* GhosttyKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = GhosttyKit.xcframework; path = CodexMobile/Terminal/Vendor/GhosttyKit.xcframework; sourceTree = SOURCE_ROOT; };
 		A4B0C1D2E3F4051627384A03 /* IOSurface.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOSurface.framework; path = System/Library/Frameworks/IOSurface.framework; sourceTree = SDKROOT; };
 		A4B0C1D2E3F4051627384A05 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
@@ -178,6 +188,8 @@
 		A932BE773A84EFEA525DF684 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = CodexMobile/Assets.xcassets; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnSkillAutocompleteTokenTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexSkillsListDecodeTests.swift; sourceTree = "<group>"; };
+		C1D2E3F40516273849A5B802 /* TurnViewModelSkillsAutocompleteTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnViewModelSkillsAutocompleteTests.swift; sourceTree = "<group>"; };
+		B2C3D4E5F60718293A4B5C6E /* BridgeSlashCommandDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BridgeSlashCommandDecodeTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A45 /* CodexTurnInputPayloadSkillTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexTurnInputPayloadSkillTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A47 /* CodexStructuredUserInputDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexStructuredUserInputDecodeTests.swift; sourceTree = "<group>"; };
 		AAB2091CCBD8647AD8C4CE46 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -195,12 +207,16 @@
 		C9CD1EA13B728103A5654EEA /* BridgeControlModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BridgeControlModels.swift; sourceTree = "<group>"; };
 		D0C0FFEE0000000000000002 /* RemodexTextKitMarkdownRenderingRegressionTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexTextKitMarkdownRenderingRegressionTests.swift; sourceTree = "<group>"; };
 		D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceIncomingRunIndicatorTests.swift; sourceTree = "<group>"; };
+		E7F8A9B0C1D2E3F405162738 /* CodexServiceHistoryMergeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceHistoryMergeTests.swift; sourceTree = "<group>"; };
+		E8F9A0B1C2D3E4F506172839 /* CodexServiceImmediateSyncTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexServiceImmediateSyncTests.swift; sourceTree = "<group>"; };
 		D523A0A98D6540D0E2EE6131 /* CodexMobileUITests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexMobileUITests.swift; sourceTree = "<group>"; };
 		E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QRScannerPairingValidatorTests.swift; sourceTree = "<group>"; };
 		E5E1FA12CF5120C8C8A64111 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX15.0.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		E6F1A2B3C4D5E6F708192A50 /* UserBubbleInlineMarkdownRendererTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UserBubbleInlineMarkdownRendererTests.swift; sourceTree = "<group>"; };
 		F0EE6A924EE6B288E7D0DFE1 /* CodexMobileUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexMobileUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexGPTAccountTests.swift; sourceTree = "<group>"; };
+		D1B2C3D4E5F60718293A4B12 /* DesktopHandoffServiceTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DesktopHandoffServiceTests.swift; sourceTree = "<group>"; };
+		C1D2E3F40516273849A5B904 /* ComposerCapabilityCopyTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ComposerCapabilityCopyTests.swift; sourceTree = "<group>"; };
 		F83CF468ACB7D025235894CC /* RemodexWidget.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; path = RemodexWidget.entitlements; sourceTree = "<group>"; };
 		FBC8EB1341C49A392A43BFB3 /* CodexMobileTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CodexMobileTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		FDBD5C45B205BFD7C281AD0D /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/SwiftUI.framework; sourceTree = DEVELOPER_DIR; };
@@ -238,9 +254,7 @@
 				A4B0C1D2E3F4051627384A10 /* UIKit.framework in Frameworks */,
 				A4B0C1D2E3F4051627384A0C /* libc++.tbd in Frameworks */,
 				A4B0C1D2E3F4051627384A0E /* libz.tbd in Frameworks */,
-				C04E214D2F71D4DB00AA3193 /* StoreKit.framework in Frameworks */,
 				C078C1A22F79000100BEEF01 /* Citadel in Frameworks */,
-				C04E214B2F71D34100AA3193 /* RevenueCat in Frameworks */,
 				D1A000000000000000000200 /* Runestone in Frameworks */,
 				D1A000000000000000000201 /* TreeSitterBashRunestone in Frameworks */,
 				D1A000000000000000000202 /* TreeSitterCRunestone in Frameworks */,
@@ -306,13 +320,19 @@
 				8FA12BC34DE56F708192A3B9 /* CodexSecurePairingStateTests.swift */,
 				8FA12BC34DE56F708192A3B5 /* CodexTrustedMacSelectionTests.swift */,
 				D4F56781234567890ABCDE02 /* CodexServiceIncomingRunIndicatorTests.swift */,
+				E7F8A9B0C1D2E3F405162738 /* CodexServiceHistoryMergeTests.swift */,
+				E8F9A0B1C2D3E4F506172839 /* CodexServiceImmediateSyncTests.swift */,
 				A2B3C4D5E6F708192A3B4C7 /* CodexServiceThreadListTests.swift */,
+				B1C2D3E4F5A60718293A4C02 /* OpenCodeDiscoveryParamsTests.swift */,
 				E1A2B3C4D5E6F708192A3B4D /* QRScannerPairingValidatorTests.swift */,
 				2A6D4B8C1E3F507192A4B6C9 /* CodexStatusTests.swift */,
 				6F8E129A7BC34A12D45E6F71 /* CodexThreadStartProjectBindingTests.swift */,
 				F1B2C3D4E5F60718293A4B11 /* CodexGPTAccountTests.swift */,
+				D1B2C3D4E5F60718293A4B12 /* DesktopHandoffServiceTests.swift */,
+				C1D2E3F40516273849A5B904 /* ComposerCapabilityCopyTests.swift */,
 				7A1B2C3D4E5F60718293A4B6 /* CodexThreadRuntimeOverrideTests.swift */,
 				7D4F2A91C8E64B3DA5F67002 /* CodexThreadGitControlScopeTests.swift */,
+				8F1E2D3C4B5A69788796A5B5 /* OpenCodeModelMenuGroupingTests.swift */,
 				B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */,
 				A7D1C9E4B6F84321ABCD1202 /* TerminalPasteTests.swift */,
 				8CE11223A4B5C6D7E8F90124 /* SidebarRunBadgePerformanceTests.swift */,
@@ -325,6 +345,8 @@
 				B0C1D2E3F40516273849A5B6 /* TurnSlashCommandTokenTests.swift */,
 				A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */,
 				A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */,
+				C1D2E3F40516273849A5B802 /* TurnViewModelSkillsAutocompleteTests.swift */,
+				B2C3D4E5F60718293A4B5C6E /* BridgeSlashCommandDecodeTests.swift */,
 				A9F1B2C3D4E5F60718293A45 /* CodexTurnInputPayloadSkillTests.swift */,
 				A9F1B2C3D4E5F60718293A47 /* CodexStructuredUserInputDecodeTests.swift */,
 				B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */,
@@ -549,7 +571,6 @@
 			);
 			name = CodexMobile;
 			packageProductDependencies = (
-				C04E214A2F71D34100AA3193 /* RevenueCat */,
 				C078C1A12F79000100BEEF01 /* Citadel */,
 				C0A34C392FBA9D04007294E3 /* RemodexTextKit */,
 				D1A000000000000000000100 /* Runestone */,
@@ -719,13 +740,19 @@
 				8FA12BC34DE56F708192A3B8 /* CodexSecurePairingStateTests.swift in Sources */,
 				8FA12BC34DE56F708192A3B4 /* CodexTrustedMacSelectionTests.swift in Sources */,
 				D4F56781234567890ABCDE01 /* CodexServiceIncomingRunIndicatorTests.swift in Sources */,
+				E7F8A9B0C1D2E3F405162739 /* CodexServiceHistoryMergeTests.swift in Sources */,
+				E8F9A0B1C2D3E4F50617283A /* CodexServiceImmediateSyncTests.swift in Sources */,
 				A2B3C4D5E6F708192A3B4C6 /* CodexServiceThreadListTests.swift in Sources */,
+				B1C2D3E4F5A60718293A4C01 /* OpenCodeDiscoveryParamsTests.swift in Sources */,
 				E1A2B3C4D5E6F708192A3B4C /* QRScannerPairingValidatorTests.swift in Sources */,
 				2A6D4B8C1E3F507192A4B6C8 /* CodexStatusTests.swift in Sources */,
 				6F8E129A7BC34A12D45E6F70 /* CodexThreadStartProjectBindingTests.swift in Sources */,
 				F1B2C3D4E5F60718293A4B10 /* CodexGPTAccountTests.swift in Sources */,
+				D1B2C3D4E5F60718293A4B13 /* DesktopHandoffServiceTests.swift in Sources */,
+				C1D2E3F40516273849A5B903 /* ComposerCapabilityCopyTests.swift in Sources */,
 				7A1B2C3D4E5F60718293A4B5 /* CodexThreadRuntimeOverrideTests.swift in Sources */,
 				7D4F2A91C8E64B3DA5F67001 /* CodexThreadGitControlScopeTests.swift in Sources */,
+				8F1E2D3C4B5A69788796A5B4 /* OpenCodeModelMenuGroupingTests.swift in Sources */,
 				B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */,
 				A7D1C9E4B6F84321ABCD1201 /* TerminalPasteTests.swift in Sources */,
 				8CE11223A4B5C6D7E8F90123 /* SidebarRunBadgePerformanceTests.swift in Sources */,
@@ -738,6 +765,8 @@
 				B0C1D2E3F40516273849A5B7 /* TurnSlashCommandTokenTests.swift in Sources */,
 				A9F1B2C3D4E5F60718293A40 /* TurnSkillAutocompleteTokenTests.swift in Sources */,
 				A9F1B2C3D4E5F60718293A42 /* CodexSkillsListDecodeTests.swift in Sources */,
+				C1D2E3F40516273849A5B801 /* TurnViewModelSkillsAutocompleteTests.swift in Sources */,
+				B2C3D4E5F60718293A4B5C6D /* BridgeSlashCommandDecodeTests.swift in Sources */,
 				A9F1B2C3D4E5F60718293A44 /* CodexTurnInputPayloadSkillTests.swift in Sources */,
 				A9F1B2C3D4E5F60718293A46 /* CodexStructuredUserInputDecodeTests.swift in Sources */,
 				B3C4D5E6F708192A3B4C5D6E /* CodexPlanModeTests.swift in Sources */,
@@ -772,6 +801,7 @@
 /* Begin XCBuildConfiguration section */
 		3B2D3DD83907B1945F87BD57 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ENABLE_OBJC_WEAK = NO;
@@ -779,7 +809,6 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 130;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RemodexWidget/Info.plist;
@@ -789,8 +818,8 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex.RemodexWidget;
+				MARKETING_VERSION = 2.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_WIDGET_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -813,11 +842,10 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.CodexMobileTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_TESTS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
@@ -831,11 +859,10 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.CodexMobileUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_UITESTS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
@@ -846,6 +873,7 @@
 		};
 		76CDC79EBE13E11B723C86C0 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = 3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CLANG_ENABLE_OBJC_WEAK = NO;
@@ -853,7 +881,6 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 130;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RemodexWidget/Info.plist;
@@ -863,8 +890,8 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex.RemodexWidget;
+				MARKETING_VERSION = 2.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_WIDGET_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SKIP_INSTALL = YES;
@@ -885,11 +912,10 @@
 			buildSettings = {
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.CodexMobileUITests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_UITESTS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
@@ -905,11 +931,10 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "$(PRODUCT_NAME)";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.2;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.CodexMobileTests;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_TESTS_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
 				SWIFT_VERSION = 5.0;
@@ -954,7 +979,6 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -1018,7 +1042,6 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -1049,11 +1072,10 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
-				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "$(REMODEX_IOS_ENTITLEMENTS)";
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 130;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "BuildSupport/CodexMobile-Info.plist";
@@ -1072,7 +1094,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_MAIN_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1097,11 +1119,10 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = Remodex2;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
-				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = CodexMobile/CodexMobile.entitlements;
+				"CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]" = "$(REMODEX_IOS_ENTITLEMENTS)";
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 130;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "BuildSupport/CodexMobile-Info.plist";
@@ -1120,7 +1141,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.Remodex;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_MAIN_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1146,7 +1167,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "BuildSupport/RemodexMenuBar-Info.plist";
@@ -1157,7 +1177,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.RemodexMenuBar;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_MENUBAR_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -1180,7 +1200,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = HR24WHR326;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "BuildSupport/RemodexMenuBar-Info.plist";
@@ -1191,7 +1210,7 @@
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.emanueledipietro.RemodexMenuBar;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(REMODEX_MENUBAR_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

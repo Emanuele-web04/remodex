@@ -67,6 +67,9 @@ extension CodexService {
             latestAssistantOutputByThread.removeAll()
             latestRepoAffectingMessageSignalByThread.removeAll()
             assistantCompletionFingerprintByThread.removeAll()
+            assistantCompletionFingerprintByTurn.removeAll()
+            deferredSyncTasks.values.forEach { $0.cancel() }
+            deferredSyncTasks.removeAll()
             recentActivityLineByThread.removeAll()
             contextWindowUsageByThread.removeAll()
             removeAllThreadTimelineState()
@@ -249,6 +252,9 @@ extension CodexService {
             queuedTurnDraftsByThread.removeAll()
             queuePauseStateByThread.removeAll()
             assistantCompletionFingerprintByThread.removeAll()
+            assistantCompletionFingerprintByTurn.removeAll()
+            deferredSyncTasks.values.forEach { $0.cancel() }
+            deferredSyncTasks.removeAll()
             recentActivityLineByThread.removeAll()
             contextWindowUsageByThread.removeAll()
             aiChangeSetsByID.removeAll()
@@ -701,5 +707,24 @@ private extension CodexService {
 
     func markLegacyLocalStateFallbackMigrated() {
         defaults.set(true, forKey: Self.legacyLocalStateMigrationCompletedDefaultsKey)
+    }
+
+    // Persists per-thread plan-mode provenance so reconnect/relaunch keeps native vs fallback behavior stable.
+    func persistPlanSessionSources() {
+        guard !suspendAutomaticMacScopedPersistence, !isApplyingMacScopedState else {
+            return
+        }
+
+        guard !planSessionSourceByThread.isEmpty else {
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.planSessionSourcesDefaultsKey))
+            return
+        }
+
+        guard let data = try? encoder.encode(planSessionSourceByThread) else {
+            defaults.removeObject(forKey: macScopedDefaultsKey(Self.planSessionSourcesDefaultsKey))
+            return
+        }
+
+        defaults.set(data, forKey: macScopedDefaultsKey(Self.planSessionSourcesDefaultsKey))
     }
 }

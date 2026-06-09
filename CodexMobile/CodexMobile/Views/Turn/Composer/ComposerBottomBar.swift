@@ -2,21 +2,26 @@
 // Purpose: Bottom bar with attachment/runtime/access menus, queue controls, and send button.
 // Layer: View Component
 // Exports: ComposerBottomBar
-// Depends on: SwiftUI, TurnComposerMetaMapper, UIKitMenuButton, TurnComposerRuntimeUIKitMenuBuilder
+// Depends on: SwiftUI, TurnComposerMetaMapper, UIKitMenuButton, TurnComposerRuntimeUIKitMenuBuilder, CodexService (catalog for logos)
 
 import SwiftUI
 
 struct ComposerBottomBar: View {
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(CodexService.self) private var codex
     @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     @State private var showsAllModelsSheet = false
 
     // Data
+    let threadId: String?
     let orderedModelOptions: [CodexModelOption]
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isLoadingOpenCodeProvider: Bool
     let isRuntimeSelectionLoading: Bool
+    let modelsErrorMessage: String?
+    let openCodeProviderDiscoveryReasonCode: String?
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     let remainingAttachmentSlots: Int
@@ -48,6 +53,10 @@ struct ComposerBottomBar: View {
 
     // MARK: - Constants
 
+    private var composerChromeForeground: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.94 : 0.86)
+    }
+
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
     private let composerIconSide: CGFloat = 22
@@ -68,13 +77,17 @@ struct ComposerBottomBar: View {
     }
 
     private var sendButtonIconColor: Color {
-        if isSendDisabled { return Color(.systemGray2) }
-        return sendButtonPaletteColor.bubbleForeground(for: colorScheme)
+        ComposerDisabledAppearance.sendForeground(
+            isDisabled: isSendDisabled,
+            enabled: sendButtonPaletteColor.bubbleForeground(for: colorScheme)
+        )
     }
 
     private var sendButtonBackgroundColor: Color {
-        if isSendDisabled { return Color(.systemGray5) }
-        return sendButtonPaletteColor.bubbleBackground(for: colorScheme)
+        ComposerDisabledAppearance.sendBackground(
+            isDisabled: isSendDisabled,
+            enabled: sendButtonPaletteColor.bubbleBackground(for: colorScheme)
+        )
     }
 
     private var showsStopButton: Bool {
@@ -87,7 +100,9 @@ struct ComposerBottomBar: View {
         HStack(spacing: 8) {
             attachmentMenu
                 .padding(.leading, 8)
-            inlineAccessMenuLabel
+            if runtimeState.showsComposerAccessMode {
+                inlineAccessMenuLabel
+            }
             Spacer(minLength: 0)
 
             inlineStatusControl
@@ -100,8 +115,8 @@ struct ComposerBottomBar: View {
                 } label: {
                     RemodexCircleBadge(
                         systemName: "arrow.clockwise",
-                        foreground: Color(.systemBackground),
-                        background: Color(.systemGray2),
+                        foreground: ComposerDisabledAppearance.queueBadgeForeground(isPaused: true),
+                        background: ComposerDisabledAppearance.queueBadgeBackground(isPaused: true),
                         diameter: 28
                     )
                 }
@@ -114,8 +129,13 @@ struct ComposerBottomBar: View {
             } label: {
                 voiceButtonLabel
             }
-            .disabled(voiceButtonPresentation.isDisabled)
+            .disabled(voiceButtonPresentation.isDisabled || !runtimeState.capabilities.supportsVoice)
             .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
+            .capabilityGreyOut(
+                isEnabled: runtimeState.capabilities.supportsVoice,
+                reason: ComposerCapabilityCopy.capabilityReason(for: .voice),
+                showsCaption: false
+            )
 
             if showsStopButton && isSending && activeTurnID == nil {
                 ProgressView()
@@ -252,7 +272,10 @@ struct ComposerBottomBar: View {
             selectedModelID: selectedModelID,
             selectedModelTitle: selectedModelTitle,
             isLoadingModels: isLoadingModels,
+            isLoadingOpenCodeProvider: isLoadingOpenCodeProvider,
             isRuntimeSelectionLoading: isRuntimeSelectionLoading,
+            modelsErrorMessage: modelsErrorMessage,
+            openCodeProviderDiscoveryReasonCode: openCodeProviderDiscoveryReasonCode,
             runtimeState: runtimeState,
             runtimeActions: runtimeActions,
             showsAllModelsSheet: $showsAllModelsSheet
@@ -287,17 +310,23 @@ struct ComposerBottomBar: View {
             )) {
                 RemodexIcon.menuLabel("Plan mode", systemName: "remodex.plan-mode")
             }
+            .capabilityGreyOut(
+                isEnabled: runtimeState.capabilities.supportsPlanMode,
+                reason: ComposerCapabilityCopy.capabilityReason(for: .planMode)
+            )
 
-            if runtimeState.supportsFastMode {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    toggleFastMode()
-                } label: {
-                    // Native SF bolt on purpose so the menu item matches the
-                    // speed badge / Speed submenu icon used elsewhere.
-                    Label("Fast Mode", systemImage: fastModePlusMenuIconName)
-                }
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                toggleFastMode()
+            } label: {
+                // Native SF bolt on purpose so the menu item matches the
+                // speed badge / Speed submenu icon used elsewhere.
+                Label("Fast Mode", systemImage: fastModePlusMenuIconName)
             }
+            .capabilityGreyOut(
+                isEnabled: runtimeState.capabilities.supportsFastMode,
+                reason: ComposerCapabilityCopy.capabilityReason(for: .fastMode)
+            )
 
             Section {
                 Button {
@@ -307,6 +336,10 @@ struct ComposerBottomBar: View {
                     RemodexIcon.menuLabel("Photo library", systemName: "photo")
                 }
                 .disabled(remainingAttachmentSlots == 0)
+                .capabilityGreyOut(
+                    isEnabled: supportsImageAttachments,
+                    reason: ComposerCapabilityCopy.capabilityReason(for: .imageAttachments)
+                )
 
                 Button {
                     HapticFeedback.shared.triggerImpactFeedback()
@@ -315,11 +348,15 @@ struct ComposerBottomBar: View {
                     RemodexIcon.menuLabel("Take a photo", systemName: "camera.fill")
                 }
                 .disabled(remainingAttachmentSlots == 0)
+                .capabilityGreyOut(
+                    isEnabled: supportsImageAttachments,
+                    reason: ComposerCapabilityCopy.capabilityReason(for: .imageAttachments)
+                )
             }
         } label: {
             RemodexIcon.image(systemName: "plus")
                 .font(AppFont.title3(weight: .regular))
-                .foregroundStyle(Color.primary)
+                .foregroundStyle(composerChromeForeground)
                 .frame(width: composerIconSide, height: composerIconSide)
                 .contentShape(Capsule())
         }
@@ -342,6 +379,10 @@ struct ComposerBottomBar: View {
         return model.supportsServiceTier(.fast)
     }
 
+    private var supportsImageAttachments: Bool {
+        codex.supportsImageAttachments(forThreadId: threadId)
+    }
+
     private var queueBadge: some View {
         HStack(spacing: 3) {
             if isQueuePaused {
@@ -355,7 +396,7 @@ struct ComposerBottomBar: View {
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
         .background(
-            Capsule().fill(isQueuePaused ? Color(.systemGray3) : Color(.systemGray4))
+            Capsule().fill(ComposerDisabledAppearance.queueBadgeBackground(isPaused: isQueuePaused))
         )
     }
 }
@@ -366,23 +407,39 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     let selectedModelID: String?
     let selectedModelTitle: String
     let isLoadingModels: Bool
+    let isLoadingOpenCodeProvider: Bool
     let isRuntimeSelectionLoading: Bool
+    let modelsErrorMessage: String?
+    let openCodeProviderDiscoveryReasonCode: String?
     let runtimeState: TurnComposerRuntimeState
     let runtimeActions: TurnComposerRuntimeActions
     @Binding var showsAllModelsSheet: Bool
 
-    private let metaLabelColor = Color(.secondaryLabel)
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(CodexService.self) private var codex: CodexService?
+
+    private var composerChromeForeground: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.94 : 0.86)
+    }
+
     private var metaTextFont: Font { AppFont.callout() }
     private var leadingIconFont: Font { AppFont.subheadline() }
     private let maxInlineRuntimeControlWidth: CGFloat = 128
     private let maxInlineRuntimeTextWidth: CGFloat = 104
+
+    private var selectedComposerLogoProvider: String {
+        orderedModelOptions.first(where: { $0.selectionKey == selectedModelID })?.composerLogoProviderId ?? "codex"
+    }
 
     static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {
         lhs.orderedModelOptions == rhs.orderedModelOptions
             && lhs.selectedModelID == rhs.selectedModelID
             && lhs.selectedModelTitle == rhs.selectedModelTitle
             && lhs.isLoadingModels == rhs.isLoadingModels
+            && lhs.isLoadingOpenCodeProvider == rhs.isLoadingOpenCodeProvider
             && lhs.isRuntimeSelectionLoading == rhs.isRuntimeSelectionLoading
+            && lhs.modelsErrorMessage == rhs.modelsErrorMessage
+            && lhs.openCodeProviderDiscoveryReasonCode == rhs.openCodeProviderDiscoveryReasonCode
             && lhs.runtimeState == rhs.runtimeState
     }
 
@@ -405,7 +462,11 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                     selectedModelID: selectedModelID,
                     selectedModelTitle: selectedModelTitle,
                     isLoadingModels: isLoadingModels,
+                    isLoadingOpenCodeProvider: isLoadingOpenCodeProvider,
                     isRuntimeSelectionLoading: isRuntimeSelectionLoading,
+                    modelsErrorMessage: modelsErrorMessage,
+                    openCodeProviderDiscoveryReasonCode: openCodeProviderDiscoveryReasonCode,
+                    openCodeCatalogProviders: codex?.openCodeCatalogProviders ?? [],
                     featuredModelIdentifiers: Self.featuredModelIdentifiers,
                     onRequestAllModelsSheet: {
                         // Defer to the next runloop so the menu dismissal
@@ -419,14 +480,19 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
         }
         .frame(minWidth: 0, maxWidth: maxInlineRuntimeControlWidth, alignment: .trailing)
         .layoutPriority(-1)
-        .tint(metaLabelColor)
+        .opacity(runtimeState.isRuntimeEnabled ? 1.0 : ComposerDisabledAppearance.controlOpacity)
+        .tint(composerChromeForeground)
         .accessibilityLabel(runtimeAccessibilityLabel)
     }
 
     // Split label parts so the model name and effort can carry different foreground styles.
     private var modelLabelPart: String {
+        if !runtimeState.isRuntimeEnabled {
+            let message = ComposerCapabilityCopy.runtimeUnavailableMessage(runtimeState.runtimeUnavailableReason, reasonCode: runtimeState.runtimeUnavailableReasonCode)
+            return message.title
+        }
         if selectedModelID == nil {
-            return isRuntimeSelectionLoading ? "Loading…" : "Select model"
+            return isRuntimeSelectionLoading ? "Loading..." : "Select model"
         }
         return compactModelTitle
     }
@@ -477,6 +543,12 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
         leadingImageName: String?
     ) -> some View {
         HStack(spacing: 6) {
+            RuntimeProviderLogoView(provider: selectedComposerLogoProvider, size: 14)
+
+            if runtimeState.showsBetaLabel {
+                OpenCodeBetaCapsule()
+            }
+
             if let leadingImageName {
                 // Native SF Symbol on purpose: the Central lightning artwork
                 // reads as a different glyph from the system bolt that the
@@ -544,9 +616,9 @@ private struct AllModelsSheet: View {
                 } else {
                     List {
                         Section {
-                            ForEach(models, id: \.id) { model in
+                            ForEach(models, id: \.selectionKey) { model in
                                 Button {
-                                    onSelect(model.id)
+                                    onSelect(model.selectionKey)
                                 } label: {
                                     modelRow(for: model)
                                 }
@@ -571,9 +643,9 @@ private struct AllModelsSheet: View {
     private func modelRow(for model: CodexModelOption) -> some View {
         let title = TurnComposerMetaMapper.modelTitle(for: model)
         HStack(alignment: .top, spacing: 12) {
-            RemodexIcon.image(systemName: model.id == selectedModelID ? "checkmark.circle.fill" : "circle")
+            RemodexIcon.image(systemName: model.selectionKey == selectedModelID ? "checkmark.circle.fill" : "circle")
                 .font(.system(size: 18))
-                .foregroundStyle(model.id == selectedModelID ? Color.accentColor : Color(.tertiaryLabel))
+                .foregroundStyle(model.selectionKey == selectedModelID ? Color.accentColor : Color(.tertiaryLabel))
                 .padding(.top, 2)
 
             VStack(alignment: .leading, spacing: 2) {

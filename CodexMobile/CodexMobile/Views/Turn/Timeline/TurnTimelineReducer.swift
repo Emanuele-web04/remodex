@@ -13,6 +13,7 @@ struct TurnTimelineProjection {
 enum TurnTimelineReducer {
     private static let largeTextDedupeByteLimit = 64_000
     private static let smallWhitespaceScanByteLimit = 512
+    private static let userDedupeTimeWindowSeconds: TimeInterval = 12
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
 
@@ -22,7 +23,10 @@ enum TurnTimelineReducer {
         let reordered = enforceIntraTurnOrder(in: visibleMessages)
         let collapsedThinking = collapseThinkingMessages(in: reordered)
         let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
-        let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandThinkingEchoes)
+        let withoutCommandUserEchoes = suppressCommandExecutionUserTextEchoes(
+            in: withoutCommandThinkingEchoes
+        )
+        let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandUserEchoes)
         let dedupedFileChanges = removeDuplicateFileChangeMessages(in: dedupedUsers)
         let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
         let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
@@ -234,6 +238,9 @@ enum TurnTimelineReducer {
             return true
         case .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
             return false
+        default:
+            // .thinking handled by isThinkingMessage guard above (for exhaustiveness; per Swift 6/iOS 18.6 strict enum switch requirement after PR refactor to helper).
+            return false
         }
     }
 
@@ -260,6 +267,9 @@ enum TurnTimelineReducer {
             case .fileChange:
                 // Keep edited-file cards at the end of the turn timeline.
                 return 5
+            default:
+                // .thinking handled by isThinkingMessage guard above (for exhaustiveness after PR isThinkingMessage refactor + case pruning; Swift requires covering all CodexMessageKind cases).
+                return 4
             }
         case .assistant:
             return 4
@@ -575,6 +585,11 @@ enum TurnTimelineReducer {
     // Collapses optimistic phone-send rows with their confirmed runtime echoes so
     // a locally-started turn does not render duplicate user prompts.
     static func removeDuplicateUserMessages(in messages: [CodexMessage]) -> [CodexMessage] {
+        let upgraded = mergeUserMessageDeliveryUpgrades(in: messages)
+        return collapseDuplicatePendingUserMessages(in: upgraded)
+    }
+
+    private static func mergeUserMessageDeliveryUpgrades(in messages: [CodexMessage]) -> [CodexMessage] {
         var result: [CodexMessage] = []
         result.reserveCapacity(messages.count)
 
@@ -584,12 +599,14 @@ enum TurnTimelineReducer {
                 continue
             }
 
-            // Only fold the phone-send echo when there is a single clear local source row.
             let matchingIndices = result.indices.reversed().filter { index in
                 shouldMergeUserMessages(previous: result[index], incoming: message)
             }
-            guard matchingIndices.count == 1,
-                  let previousIndex = matchingIndices.first else {
+            guard let previousIndex = preferredUserMergeIndex(
+                in: result,
+                matchingIndices: matchingIndices,
+                incoming: message
+            ) else {
                 result.append(message)
                 continue
             }
@@ -598,6 +615,43 @@ enum TurnTimelineReducer {
         }
 
         return result
+    }
+
+    private static func collapseDuplicatePendingUserMessages(in messages: [CodexMessage]) -> [CodexMessage] {
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for message in messages {
+            guard message.role == .user else {
+                result.append(message)
+                continue
+            }
+
+            guard let previousIndex = result.indices.reversed().first(where: { index in
+                shouldCollapseDuplicatePendingUserMessages(previous: result[index], incoming: message)
+            }) else {
+                result.append(message)
+                continue
+            }
+
+            result[previousIndex] = mergedUserMessage(previous: result[previousIndex], incoming: message)
+        }
+
+        return result
+    }
+
+    private static func shouldCollapseDuplicatePendingUserMessages(
+        previous: CodexMessage,
+        incoming: CodexMessage
+    ) -> Bool {
+        previous.role == .user
+            && incoming.role == .user
+            && previous.deliveryState == .pending
+            && incoming.deliveryState == .pending
+            && previous.threadId == incoming.threadId
+            && messageTextsMatchForDedupe(previous.text, incoming.text)
+            && userMessageMetadataLooksCompatible(previous: previous, incoming: incoming)
+            && abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= userDedupeTimeWindowSeconds
     }
 
     private static func shouldMergeUserMessages(previous: CodexMessage, incoming: CodexMessage) -> Bool {
@@ -611,21 +665,26 @@ enum TurnTimelineReducer {
 
         let previousTurnId = normalizedIdentifier(previous.turnId)
         let incomingTurnId = normalizedIdentifier(incoming.turnId)
-        if let previousTurnId, let incomingTurnId {
+        if let previousTurnId, let incomingTurnId, previousTurnId == incomingTurnId {
             // Some reopen/history fallbacks arrive with epoch timestamps (shown as 1:00).
             // Treat those as stale echoes when identity and content already agree.
-            if previousTurnId == incomingTurnId,
-               hasFallbackHistoryTimestamp(previous.createdAt) || hasFallbackHistoryTimestamp(incoming.createdAt) {
+            if hasFallbackHistoryTimestamp(previous.createdAt) || hasFallbackHistoryTimestamp(incoming.createdAt) {
                 return true
             }
-            if previousTurnId == incomingTurnId,
-               shouldCollapseSemanticMentionEcho(previous: previous, incoming: incoming) {
+            if shouldCollapseSemanticMentionEcho(previous: previous, incoming: incoming) {
                 return true
             }
-            return previousTurnId == incomingTurnId
-                && previous.deliveryState == .pending
-                && incoming.deliveryState == .confirmed
-                && abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= 12
+            let withinWindow = abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= userDedupeTimeWindowSeconds
+            if previous.deliveryState == .confirmed,
+               incoming.deliveryState == .confirmed,
+               withinWindow {
+                return true
+            }
+            if previous.deliveryState == .pending,
+               incoming.deliveryState == .confirmed,
+               withinWindow {
+                return true
+            }
         }
 
         // Allow only the phone-send upgrade path: optimistic local row without turnId
@@ -646,7 +705,88 @@ enum TurnTimelineReducer {
             return true
         }
 
-        return abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= 12
+        return abs(incoming.createdAt.timeIntervalSince(previous.createdAt)) <= userDedupeTimeWindowSeconds
+    }
+
+    private static func preferredUserMergeIndex(
+        in messages: [CodexMessage],
+        matchingIndices: [Array<CodexMessage>.Index],
+        incoming: CodexMessage
+    ) -> Array<CodexMessage>.Index? {
+        guard !matchingIndices.isEmpty else {
+            return nil
+        }
+        if matchingIndices.count == 1 {
+            return matchingIndices[0]
+        }
+
+        let pendingMatches = matchingIndices.filter { messages[$0].deliveryState == .pending }
+        let candidates = pendingMatches.isEmpty ? matchingIndices : pendingMatches
+        return candidates.min(by: { lhs, rhs in
+            abs(incoming.createdAt.timeIntervalSince(messages[lhs].createdAt))
+                < abs(incoming.createdAt.timeIntervalSince(messages[rhs].createdAt))
+        })
+    }
+
+    // Drops commandExecution rows that only echo the latest user prompt for the same turn.
+    private static func suppressCommandExecutionUserTextEchoes(in messages: [CodexMessage]) -> [CodexMessage] {
+        var latestUserTextByTurn: [String: String] = [:]
+
+        for message in messages where message.role == .user {
+            guard let turnId = normalizedIdentifier(message.turnId),
+                  let normalizedText = normalizedSmallMessageText(message.text)?.lowercased() else {
+                continue
+            }
+            latestUserTextByTurn[turnId] = normalizedText
+        }
+
+        guard !latestUserTextByTurn.isEmpty else {
+            return messages
+        }
+
+        return messages.filter { message in
+            guard message.role == .system,
+                  message.kind == .commandExecution,
+                  let turnId = normalizedIdentifier(message.turnId),
+                  let latestUserText = latestUserTextByTurn[turnId],
+                  let previewKey = commandExecutionPreviewKey(from: message.text) else {
+                return true
+            }
+            return previewKey != latestUserText
+        }
+    }
+
+    static func commandExecutionPreviewKey(from text: String) -> String? {
+        guard text.utf8.count <= largeTextDedupeByteLimit else {
+            return nil
+        }
+
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let tokens = trimmed
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard !tokens.isEmpty else {
+            return nil
+        }
+
+        let statusPrefixes: Set<String> = ["running", "completed", "failed", "stopped"]
+        let commandTokens: [String]
+        if let first = tokens.first,
+           statusPrefixes.contains(first.lowercased()) {
+            commandTokens = Array(tokens.dropFirst())
+        } else {
+            commandTokens = tokens
+        }
+
+        let command = commandTokens
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return command.isEmpty ? nil : command
     }
 
     private static func mergedUserMessage(previous: CodexMessage, incoming: CodexMessage) -> CodexMessage {
@@ -858,7 +998,7 @@ enum TurnTimelineReducer {
                     let hasStableIdentity = dedupeScope != nil
                     let turnTextKey = "\(turnId)|\(normalizedText)"
                     if let previous = seenTurnText[turnTextKey],
-                       abs(message.createdAt.timeIntervalSince(previous.createdAt)) <= 12,
+                       abs(message.createdAt.timeIntervalSince(previous.createdAt)) <= userDedupeTimeWindowSeconds,
                        !previous.hasStableIdentity || !hasStableIdentity {
                         continue
                     }
@@ -874,7 +1014,7 @@ enum TurnTimelineReducer {
 
             if let normalizedText = normalizedSmallMessageText(message.text) {
                 if let previous = seenNoTurnByText[normalizedText],
-                   abs(message.createdAt.timeIntervalSince(previous)) <= 12 {
+                   abs(message.createdAt.timeIntervalSince(previous)) <= userDedupeTimeWindowSeconds {
                     continue
                 }
 

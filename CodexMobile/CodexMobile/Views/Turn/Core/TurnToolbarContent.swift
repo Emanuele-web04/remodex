@@ -31,6 +31,7 @@ struct TurnToolbarContent: ToolbarContent {
     let gitActionLoadingTitle: String?
     let showsDiscardRuntimeChangesAndSync: Bool
     let gitSyncState: String?
+    let supportsDesktopHandoff: Bool
     var onTapMacHandoff: (() -> Void)?
     var onTapWorktreeHandoff: (() -> Void)?
     var onTapNewChat: (() -> Void)?
@@ -153,15 +154,28 @@ struct TurnToolbarContent: ToolbarContent {
         canTapNewChat: Bool,
         canTapTerminal: Bool
     ) -> [TurnThreadActionMenuItem] {
-        var actions: [TurnThreadActionMenuItem] = [
-            TurnThreadActionMenuItem(
-                title: "Hand off to Desktop",
-                icon: .system("arrow.left.arrow.right"),
-                isEnabled: canTapMacHandoff
-            ) {
-                onTapMacHandoff?()
-            },
-        ]
+        var actions: [TurnThreadActionMenuItem] = []
+
+        if supportsDesktopHandoff {
+            actions.append(
+                TurnThreadActionMenuItem(
+                    title: "Hand off to Desktop",
+                    icon: .system("arrow.left.arrow.right"),
+                    isEnabled: canTapMacHandoff
+                ) {
+                    onTapMacHandoff?()
+                }
+            )
+        } else {
+            actions.append(
+                TurnThreadActionMenuItem(
+                    title: "Hand off to Desktop",
+                    subtitle: "Not supported by this runtime",
+                    icon: .system("arrow.left.arrow.right"),
+                    isEnabled: false
+                ) {}
+            )
+        }
 
         if onTapWorktreeHandoff != nil {
             actions.append(
@@ -325,17 +339,32 @@ struct TurnThreadActionMenuItem {
                 CodexWorktreeIcon.toolbarMenuUIImage()
             }
         }
+
+        var isRemodexIcon: Bool {
+            if case .system = self { return false }
+            return true
+        }
     }
 
     let title: String
+    let subtitle: String?
     let icon: Icon
     var isEnabled: Bool = true
     let handler: () -> Void
+
+    init(title: String, subtitle: String? = nil, icon: Icon, isEnabled: Bool = true, handler: @escaping () -> Void) {
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon
+        self.isEnabled = isEnabled
+        self.handler = handler
+    }
 
     func uiAction() -> UIAction {
         let attributes: UIMenuElement.Attributes = isEnabled ? [] : .disabled
         return UIAction(
             title: title,
+            subtitle: subtitle,
             image: icon.uiImage,
             attributes: attributes
         ) { _ in

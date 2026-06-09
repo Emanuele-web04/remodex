@@ -98,6 +98,8 @@ private struct CodexThreadNotificationPayload {
 }
 
 extension CodexService {
+    static let pushRegistrationUnavailableMessage = "Notifications unavailable — check relay"
+
     // Wires the UNUserNotificationCenter delegate once so taps can reopen the right thread.
     func configureNotifications() {
         guard !hasConfiguredNotifications else {
@@ -215,10 +217,16 @@ extension CodexService {
         ])
 
         do {
-            _ = try await sendRequest(method: "notifications/push/register", params: params)
+            let response = try await sendRequest(method: "notifications/push/register", params: params)
             lastPushRegistrationSignature = signature
+            if response.result?.objectValue?["skipped"]?.boolValue == true {
+                pushRegistrationFailureMessage = Self.pushRegistrationUnavailableMessage
+            } else {
+                pushRegistrationFailureMessage = nil
+            }
         } catch {
             debugRuntimeLog("push registration sync failed: \(error.localizedDescription)")
+            pushRegistrationFailureMessage = Self.pushRegistrationUnavailableMessage
         }
     }
 
@@ -410,6 +418,7 @@ private extension CodexService {
 
             Task { @MainActor [weak self] in
                 self?.debugRuntimeLog("remote notification registration failed: \(error.localizedDescription)")
+                self?.pushRegistrationFailureMessage = Self.pushRegistrationUnavailableMessage
             }
         }
 

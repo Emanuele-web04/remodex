@@ -7,12 +7,23 @@
 import SwiftUI
 
 struct TurnComposerAutocompleteState {
-    let availableSlashCommands: [TurnComposerSlashCommand]
+    let availableSlashCommands: [TurnComposerSlashCommandItem]
+    let groupedBridgeSlashSections: [(section: SlashCommandSection, commands: [BridgeSlashCommand])]
+    let supportsSlashCommands: Bool
+    let supportsSlashCommandExecute: Bool
+    let usesBridgeSlashCommands: Bool
+    let isLoadingBridgeSlashCommands: Bool
+    let showsBridgeSlashCommandsEmptyHint: Bool
+    let bridgeSlashCommandsLoadError: String?
+    let supportsThreadFork: Bool
+    let supportsSkillAutocomplete: Bool
     let fileAutocompleteItems: [CodexFuzzyFileMatch]
     let isFileAutocompleteVisible: Bool
     let isFileAutocompleteLoading: Bool
     let fileAutocompleteQuery: String
     let skillAutocompleteItems: [CodexSkillMetadata]
+    let skillFullListItems: [CodexSkillMetadata]
+    let skillTotalCount: Int
     let isSkillAutocompleteVisible: Bool
     let isSkillAutocompleteLoading: Bool
     let skillAutocompleteQuery: String
@@ -34,6 +45,8 @@ struct TurnComposerAutocompleteState {
 struct TurnComposerAccessoryState {
     let queuedDrafts: [QueuedTurnDraft]
     let canSteerQueuedDrafts: Bool
+    let showsSteerQueuedDraftControl: Bool
+    let steerUnavailableReason: String?
     let canRestoreQueuedDrafts: Bool
     let steeringDraftID: String?
     let composerAttachments: [TurnComposerImageAttachment]

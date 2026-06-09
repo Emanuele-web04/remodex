@@ -123,4 +123,23 @@ extension JSONValue {
         guard case .array(let value) = self else { return nil }
         return value
     }
+
+    var debugDescription: String {
+        switch self {
+        case .null:
+            return "null"
+        case .bool(let value):
+            return value ? "true" : "false"
+        case .integer(let value):
+            return String(value)
+        case .double(let value):
+            return String(value)
+        case .string(let value):
+            return value
+        case .array(let values):
+            return "[\(values.count) items]"
+        case .object(let values):
+            return "{\(values.count) keys}"
+        }
+    }
 }

@@ -4,6 +4,8 @@
 // Exports: Package termsDescription, SubscriptionPeriod display titles
 // Depends on: Foundation, RevenueCat, StoreKit
 
+#if !REMODEX_LOCAL_DEVICE
+
 import Foundation
 import RevenueCat
 import StoreKit
@@ -49,3 +51,5 @@ extension RevenueCat.SubscriptionPeriod {
         return value > 1 ? "\(periodString)s" : periodString
     }
 }
+
+#endif

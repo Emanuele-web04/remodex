@@ -4,7 +4,9 @@
 // Exports: SubscriptionGateView
 // Depends on: StoreKit, SwiftUI, SubscriptionService, RevenueCatPaywallView
 
+#if !REMODEX_LOCAL_DEVICE
 import StoreKit
+#endif
 import SwiftUI
 
 private struct SubscriptionGateFeature: Identifiable {
@@ -76,9 +78,11 @@ struct SubscriptionGateView: View {
         .fullScreenCover(isPresented: $isPresentingPaywall) {
             RevenueCatPaywallView()
         }
+        #if !REMODEX_LOCAL_DEVICE
         .offerCodeRedemption(isPresented: $isPresentingOfferCodeRedemption) { result in
             handleOfferCodeRedemptionCompletion(result)
         }
+        #endif
     }
 
     private var hero: some View {

@@ -135,7 +135,8 @@ enum SidebarThreadGrouping {
         _ thread: CodexThread,
         projectlessRootPaths: [String] = []
     ) -> Bool {
-        thread.normalizedProjectPath == nil
+        isFallbackProjectCwd(thread)
+            || thread.normalizedProjectPath == nil
             || isUnderProjectlessRoot(thread.normalizedProjectPath, roots: projectlessRootPaths)
             || isGeneratedCodexProjectlessPath(thread.normalizedProjectPath)
     }
@@ -162,6 +163,42 @@ enum SidebarThreadGrouping {
                 sortDate: group.sortDate
             )
         }
+    }
+
+    // Merges persisted provider-neutral project history into the picker without
+    // changing sidebar groups, which should still only show projects with chats.
+    static func makeProjectChoices(
+        from threads: [CodexThread],
+        knownProjects: [CodexKnownProject],
+        projectlessRootPaths: [String] = []
+    ) -> [SidebarProjectChoice] {
+        var choicesByPathKey: [String: SidebarProjectChoice] = [:]
+        for choice in makeProjectChoices(from: threads, projectlessRootPaths: projectlessRootPaths) {
+            choicesByPathKey[projectPathIdentityKey(choice.projectPath)] = choice
+        }
+
+        for knownProject in knownProjects {
+            guard let normalizedPath = CodexThread.normalizedFilesystemProjectPath(knownProject.path),
+                  !isUnderProjectlessRoot(normalizedPath, roots: projectlessRootPaths),
+                  !isGeneratedCodexProjectlessPath(normalizedPath) else {
+                continue
+            }
+
+            let key = projectPathIdentityKey(normalizedPath)
+            guard choicesByPathKey[key] == nil else {
+                continue
+            }
+
+            choicesByPathKey[key] = SidebarProjectChoice(
+                id: "project:\(normalizedPath)",
+                label: CodexThread.projectDisplayLabel(for: normalizedPath),
+                iconSystemName: CodexThread.projectIconSystemName(for: normalizedPath),
+                projectPath: normalizedPath,
+                sortDate: knownProject.lastSeenAt ?? .distantPast
+            )
+        }
+
+        return choicesByPathKey.values.sorted(by: compareProjectChoices)
     }
 
     // Resolves all live thread ids that belong to the tapped project, even if the visible group is filtered.
@@ -260,6 +297,11 @@ enum SidebarThreadGrouping {
             || isCodexHomeThreadsPath(pathComponents)
     }
 
+    private static func isFallbackProjectCwd(_ thread: CodexThread) -> Bool {
+        thread.metadata?["projectCwdSource"]?.stringValue == "fallback"
+            || thread.metadata?["project_cwd_source"]?.stringValue == "fallback"
+    }
+
     private static func isGeneratedDocumentsCodexPath(_ components: [String]) -> Bool {
         for index in components.indices {
             let dateIndex = index + 2
@@ -300,6 +342,10 @@ enum SidebarThreadGrouping {
             .map(String.init)
     }
 
+    private static func projectPathIdentityKey(_ path: String) -> String {
+        path.lowercased()
+    }
+
     private static func isISODateFolderName(_ value: String) -> Bool {
         let scalars = Array(value.unicodeScalars)
         guard scalars.count == 10,
@@ -334,16 +380,38 @@ enum SidebarThreadGrouping {
             makeProjectGroup(projectKey: projectKey, threads: projectThreads)
         }
         .sorted { lhs, rhs in
-            if lhs.sortDate != rhs.sortDate {
-                return lhs.sortDate > rhs.sortDate
-            }
-
-            if lhs.label != rhs.label {
-                return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
-            }
-
-            return lhs.id < rhs.id
+            compareProjectGroups(lhs, rhs)
         }
+    }
+
+    private nonisolated static func compareProjectChoices(
+        _ lhs: SidebarProjectChoice,
+        _ rhs: SidebarProjectChoice
+    ) -> Bool {
+        if lhs.sortDate != rhs.sortDate {
+            return lhs.sortDate > rhs.sortDate
+        }
+
+        if lhs.label != rhs.label {
+            return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+        }
+
+        return lhs.id < rhs.id
+    }
+
+    private nonisolated static func compareProjectGroups(
+        _ lhs: SidebarThreadGroup,
+        _ rhs: SidebarThreadGroup
+    ) -> Bool {
+        if lhs.sortDate != rhs.sortDate {
+            return lhs.sortDate > rhs.sortDate
+        }
+
+        if lhs.label != rhs.label {
+            return lhs.label.localizedCaseInsensitiveCompare(rhs.label) == .orderedAscending
+        }
+
+        return lhs.id < rhs.id
     }
 
     // Keeps pinned roots and their descendants together so sidebar trees do not split across sections.

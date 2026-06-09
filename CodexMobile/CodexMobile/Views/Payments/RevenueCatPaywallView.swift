@@ -4,6 +4,8 @@
 // Exports: RevenueCatPaywallView
 // Depends on: SwiftUI, SubscriptionService
 
+#if !REMODEX_LOCAL_DEVICE
+
 import RevenueCat
 import StoreKit
 import SwiftUI
@@ -582,3 +584,15 @@ struct RevenueCatPaywallView: View {
     )
     .environment(SubscriptionService())
 }
+
+#else
+
+import SwiftUI
+
+struct RevenueCatPaywallView: View {
+    var body: some View {
+        Text("Subscriptions are disabled in local device builds.")
+    }
+}
+
+#endif
