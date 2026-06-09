@@ -254,7 +254,9 @@
 				A4B0C1D2E3F4051627384A10 /* UIKit.framework in Frameworks */,
 				A4B0C1D2E3F4051627384A0C /* libc++.tbd in Frameworks */,
 				A4B0C1D2E3F4051627384A0E /* libz.tbd in Frameworks */,
+				C04E214D2F71D4DB00AA3193 /* StoreKit.framework in Frameworks */,
 				C078C1A22F79000100BEEF01 /* Citadel in Frameworks */,
+				C04E214B2F71D34100AA3193 /* RevenueCat in Frameworks */,
 				D1A000000000000000000200 /* Runestone in Frameworks */,
 				D1A000000000000000000201 /* TreeSitterBashRunestone in Frameworks */,
 				D1A000000000000000000202 /* TreeSitterCRunestone in Frameworks */,
@@ -571,6 +573,7 @@
 			);
 			name = CodexMobile;
 			packageProductDependencies = (
+				C04E214A2F71D34100AA3193 /* RevenueCat */,
 				C078C1A12F79000100BEEF01 /* Citadel */,
 				C0A34C392FBA9D04007294E3 /* RemodexTextKit */,
 				D1A000000000000000000100 /* Runestone */,

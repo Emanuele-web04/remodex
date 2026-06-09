@@ -252,6 +252,7 @@ struct SkillAutocompletePanel: View {
             totalCount: 3,
             isLoading: false,
             query: "",
+            trigger: "$",
             onSelect: { _ in }
         )
         .frame(width: 320)
@@ -261,6 +262,7 @@ struct SkillAutocompletePanel: View {
             totalCount: 0,
             isLoading: false,
             query: "foo",
+            trigger: "$",
             onSelect: { _ in }
         )
         .frame(width: 320)
@@ -275,6 +277,7 @@ struct SkillAutocompletePanel: View {
         totalCount: 0,
         isLoading: true,
         query: "re",
+        trigger: "$",
         onSelect: { _ in }
     )
     .frame(width: 320)

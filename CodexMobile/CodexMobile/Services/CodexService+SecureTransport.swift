@@ -1445,8 +1445,11 @@ private extension CodexService {
         SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined().prefix(16).description
     }
 
-    // MARK: - Trusted Mac Device ID
+}
 
+// MARK: - Trusted Mac Device ID
+
+extension CodexService {
     func trustedMacRecord(for deviceId: String?) -> CodexTrustedMacRecord? {
         guard let normalizedDeviceId = deviceId?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1493,5 +1496,11 @@ private extension CodexService {
         .first { trustedMacRegistry.records[$0] != nil }
 
         setCurrentTrustedMacDeviceId(bootstrapDeviceId)
+    }
+}
+
+private extension String {
+    var codexNilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }

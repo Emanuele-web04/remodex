@@ -421,9 +421,7 @@ struct CodexConnectionState {
     var isConnecting = false
     var isInitialized = false
     var isBootstrappingConnectionSync = false
-    var isLoadingThreads = false {
-        didSet { connection.isLoadingThreads = isLoadingThreads }
-    }
+    var isLoadingThreads = false
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     var shouldAutoReconnectOnForeground = false
     var backgroundTurnGraceExpiredUntilForeground = false
@@ -490,7 +488,7 @@ struct CodexThreadRegistry {
     // Thread lifecycle tasks
     var threadResumeTaskByThreadID: [String: Task<CodexThread?, Error>] = [:]
     var threadResumeRequestSignatureByThreadID: [String: CodexThreadResumeRequestSignature] = [:]
-    var threadHistoryLoadTaskByThreadID: [String: Task<ThreadHistoryLoadOutcome, Error>] = [:]
+    var threadHistoryLoadTaskByThreadID: [String: Task<CodexService.ThreadHistoryLoadOutcome, Error>] = [:]
     var forcedHistoryLoadThreadIDs: Set<String> = []
     var deferHydratedMarkForNotMaterializedThreadIDs: Set<String> = []
     var threadRefreshGenerationByThreadID: [String: UInt64] = [:]
@@ -503,7 +501,7 @@ struct CodexThreadRegistry {
     var forcedRunningCatchupEscalationThreadIDs: Set<String> = []
     var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     @ObservationIgnored var turnStateRefreshTaskByThreadID: [String: Task<Bool, Never>] = [:]
-    @ObservationIgnored var runningThreadCatchupTaskByThreadID: [String: Task<RunningThreadCatchupOutcome, Never>] = [:]
+    @ObservationIgnored var runningThreadCatchupTaskByThreadID: [String: Task<CodexService.RunningThreadCatchupOutcome, Never>] = [:]
 
     // Thread identity and lookup
     var threadByID: [String: CodexThread] = [:]
@@ -2229,13 +2227,13 @@ final class CodexService {
             // Also cancel tasks referenced from grouped state structs (Issue #9).
             // These reference the same Task objects as the flat properties above,
             // so cancellation is idempotent and ensures no leaks through either path.
-            connection.runtimeOptionRefreshTask?.cancel()
-            connection.catalogRefetchDebounceTask?.cancel()
-            connection.openCodeModelsRetryTask?.cancel()
+            modelSelection.runtimeOptionRefreshTask?.cancel()
+            modelSelection.catalogRefetchDebounceTask?.cancel()
+            modelSelection.openCodeModelsRetryTask?.cancel()
             connection.webSocketKeepAliveTask?.cancel()
-            connection.pendingAssistantDeltaFlushTask?.cancel()
-            connection.deferredSyncTasks.values.forEach { $0.cancel() }
-            connection.deferredSyncTasks.removeAll()
+            streaming.pendingAssistantDeltaFlushTask?.cancel()
+            streaming.deferredSyncTasks.values.forEach { $0.cancel() }
+            streaming.deferredSyncTasks.removeAll()
 
             threadRegistry.threadHistoryLoadTaskByThreadID.values.forEach { $0.cancel() }
             threadRegistry.threadHistoryLoadTaskByThreadID.removeAll()
