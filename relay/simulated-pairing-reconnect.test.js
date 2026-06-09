@@ -174,6 +174,119 @@ test("simulated relay harness covers QR bootstrap, trusted resolve, and reconnec
   });
 });
 
+test("trusted reconnect replays turn/completed buffered mid-prompt after relay drop", async () => {
+  await withServer(async ({ port, wss }) => {
+    const sessionId = "simulated-mid-prompt-session";
+    const macDeviceId = "simulated-mac-mid-prompt";
+    const pairingCode = "CD45EF56";
+    const macIdentity = createOkpKeyPair("ed25519");
+    const phoneIdentity = createPhoneIdentity("simulated-phone-mid-prompt");
+
+    let macSocket = null;
+    const secureTransport = createBridgeSecureTransport({
+      sessionId,
+      relayUrl: `ws://127.0.0.1:${port}/relay`,
+      displayName: "Simulated Mac",
+      persistTrustedPhone: false,
+      deviceState: {
+        macDeviceId,
+        macIdentityPrivateKey: macIdentity.privateKey,
+        macIdentityPublicKey: macIdentity.publicKey,
+        trustedPhones: {
+          [phoneIdentity.phoneDeviceId]: phoneIdentity.phoneIdentityPublicKey,
+        },
+      },
+    });
+
+    macSocket = new WebSocket(`ws://127.0.0.1:${port}/relay/${sessionId}`, {
+      headers: {
+        "x-role": "mac",
+        "x-mac-device-id": macDeviceId,
+        "x-mac-identity-public-key": macIdentity.publicKey,
+        "x-machine-name": "Simulated Mac",
+        "x-pairing-code": pairingCode,
+        "x-pairing-version": "2",
+        "x-pairing-expires-at": String(Date.now() + 60_000),
+      },
+    });
+    await onceOpen(macSocket);
+    bindBridgeTransportToSocket({ applicationMessages: [], secureTransport, socket: macSocket });
+
+    const firstPhoneSocket = new WebSocket(`ws://127.0.0.1:${port}/relay/${sessionId}`, {
+      headers: { "x-role": "iphone" },
+    });
+    await onceOpen(firstPhoneSocket);
+    const firstPhone = new SimulatedPhone({
+      macDeviceId,
+      macIdentityPublicKey: macIdentity.publicKey,
+      phoneIdentity,
+      sessionId,
+      socket: firstPhoneSocket,
+    });
+    await firstPhone.completeHandshake({
+      handshakeMode: HANDSHAKE_MODE_TRUSTED_RECONNECT,
+      lastAppliedBridgeOutboundSeq: 0,
+    });
+    await waitUntil(() => secureTransport.isSecureChannelReady());
+
+    secureTransport.queueOutboundApplicationMessage(
+      JSON.stringify({ method: "turn/started", params: { threadId: "thread-1", turnId: "turn-1" } }),
+      failUnexpectedDirectSend
+    );
+    const startedPayload = await firstPhone.nextBridgePayload();
+    assert.equal(startedPayload.bridgeOutboundSeq, 1);
+
+    const firstPhoneClosed = onceClosed(firstPhoneSocket);
+    firstPhoneSocket.close();
+    await firstPhoneClosed;
+    await waitUntil(() => countRelayClients(wss, "iphone") === 0);
+    await delay(25);
+
+    const secondPhoneSocket = new WebSocket(`ws://127.0.0.1:${port}/relay/${sessionId}`, {
+      headers: { "x-role": "iphone" },
+    });
+    await onceOpen(secondPhoneSocket);
+    const secondPhone = new SimulatedPhone({
+      macDeviceId,
+      macIdentityPublicKey: macIdentity.publicKey,
+      phoneIdentity,
+      sessionId,
+      socket: secondPhoneSocket,
+    });
+    await secondPhone.completeHandshake({
+      handshakeMode: HANDSHAKE_MODE_TRUSTED_RECONNECT,
+      lastAppliedBridgeOutboundSeq: 0,
+      stopBeforeResumeState: true,
+    });
+    assert.equal(secureTransport.isSecureChannelReady(), false);
+
+    secureTransport.queueOutboundApplicationMessage(
+      JSON.stringify({
+        method: "turn/completed",
+        params: { threadId: "thread-1", turnId: "turn-1", status: "completed" },
+      }),
+      failUnexpectedDirectSend
+    );
+
+    const completedPayloadPromise = secondPhone.nextBridgePayload();
+    secondPhone.sendResumeState(999);
+    await waitUntil(() => secureTransport.isSecureChannelReady());
+
+    const completedPayload = await completedPayloadPromise;
+    assert.equal(completedPayload.bridgeOutboundSeq, 2);
+    assert.deepEqual(JSON.parse(completedPayload.payloadText), {
+      method: "turn/completed",
+      params: { threadId: "thread-1", turnId: "turn-1", status: "completed" },
+    });
+
+    const secondPhoneClosed = onceClosed(secondPhoneSocket);
+    const macClosed = onceClosed(macSocket);
+    secondPhoneSocket.close();
+    macSocket.close();
+    await Promise.all([secondPhoneClosed, macClosed]);
+  });
+});
+
 class SimulatedPhone {
   constructor({
     macDeviceId,
@@ -193,6 +306,7 @@ class SimulatedPhone {
   async completeHandshake({
     handshakeMode,
     lastAppliedBridgeOutboundSeq,
+    stopBeforeResumeState = false,
   }) {
     const phoneEphemeral = createOkpKeyPair("x25519");
     const clientNonce = Buffer.alloc(32, 7 + this.outboundCounter);
@@ -268,6 +382,12 @@ class SimulatedPhone {
     this.phoneToMacKey = keys.phoneToMacKey;
     this.outboundCounter = 0;
 
+    if (!stopBeforeResumeState) {
+      this.sendResumeState(lastAppliedBridgeOutboundSeq);
+    }
+  }
+
+  sendResumeState(lastAppliedBridgeOutboundSeq) {
     this.socket.send(JSON.stringify({
       kind: "resumeState",
       sessionId: this.sessionId,

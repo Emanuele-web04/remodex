@@ -13,6 +13,8 @@ const {
   createFixedWindowRateLimiter,
   clientAddressKey,
   redactRelayPathname,
+  RELAY_WEBSOCKET_MAX_PAYLOAD_BYTES,
+  DEFAULT_RELAY_BIND_HOST,
 } = require("./server");
 
 test("health is minimal by default and detailed only when enabled", async () => {
@@ -47,6 +49,10 @@ test("detailed health exposes relay pressure counters", async () => {
     assert.equal(body.relay.sessionsWithStaleMac, 0);
     assert.equal(body.relay.sessionsWithClients, 0);
     assert.equal(typeof body.relay.heartbeatTerminations, "number");
+    assert.equal(typeof body.relay.heartbeatTerminationsByRole, "object");
+    assert.equal(typeof body.relay.acceptedConnectionsByRole, "object");
+    assert.equal(typeof body.relay.closedConnectionsByRole, "object");
+    assert.equal(body.relay.acceptedConnectionsByRole.mac, 1);
 
     const macClosed = onceClosed(mac);
     mac.close();
@@ -67,6 +73,35 @@ test("relay negotiates per-message deflate when clients offer it", async () => {
     const macClosed = onceClosed(mac);
     mac.close();
     await macClosed;
+  });
+});
+
+test("relay production defaults bind localhost and cap websocket payload size", () => {
+  assert.equal(DEFAULT_RELAY_BIND_HOST, "127.0.0.1");
+  assert.equal(RELAY_WEBSOCKET_MAX_PAYLOAD_BYTES, 4 * 1024 * 1024);
+});
+
+test("websocket rejects frames larger than maxPayload", async () => {
+  await withServer(async ({ port }) => {
+    const mac = new WebSocket(`ws://127.0.0.1:${port}/relay/session-payload-limit`, {
+      headers: { "x-role": "mac" },
+    });
+    await onceOpen(mac);
+
+    const oversize = Buffer.alloc(RELAY_WEBSOCKET_MAX_PAYLOAD_BYTES + 1, 1);
+    const rejected = new Promise((resolve, reject) => {
+      mac.once("error", (error) => resolve(error));
+      mac.once("close", () => resolve(null));
+      setTimeout(() => reject(new Error("timed out waiting for oversize frame rejection")), 2_000);
+    });
+    mac.send(oversize);
+    const rejection = await rejected;
+
+    if (rejection instanceof Error) {
+      assert.match(rejection.message, /Max payload size exceeded/i);
+    } else {
+      assert.equal(mac.readyState, WebSocket.CLOSED);
+    }
   });
 });
 

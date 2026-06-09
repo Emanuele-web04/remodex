@@ -145,6 +145,71 @@ function createPushSessionService({
     return { ok: true };
   }
 
+  async function notifyPermission({
+    sessionId,
+    notificationSecret,
+    threadId,
+    turnId,
+    title,
+    body,
+    dedupeKey,
+  } = {}) {
+    const normalizedSessionId = readString(sessionId);
+    const normalizedSecret = readString(notificationSecret);
+    const normalizedThreadId = readString(threadId);
+    const normalizedDedupeKey = readString(dedupeKey);
+
+    if (!normalizedSessionId || !normalizedSecret || !normalizedThreadId || !normalizedDedupeKey) {
+      throw pushServiceError(
+        "invalid_request",
+        "Permission push requires sessionId, notificationSecret, threadId, and dedupeKey.",
+        400
+      );
+    }
+
+    if (!await resolvedCanNotifyCompletion({
+      sessionId: normalizedSessionId,
+      notificationSecret: normalizedSecret,
+    })) {
+      throw pushServiceError(
+        "session_unavailable",
+        "Permission push requires an active relay session.",
+        403
+      );
+    }
+
+    pruneDeliveredDedupeKeys();
+    if (deliveredDedupeKeys.has(normalizedDedupeKey)) {
+      return { ok: true, deduped: true };
+    }
+
+    const session = sessions.get(normalizedSessionId);
+    if (!session || !secretsEqual(session.notificationSecret, normalizedSecret)) {
+      throw pushServiceError("unauthorized", "Invalid notification secret for this session.", 403);
+    }
+
+    if (!session.alertsEnabled || !session.deviceToken) {
+      return { ok: true, skipped: true };
+    }
+
+    await apnsClient.sendNotification({
+      deviceToken: session.deviceToken,
+      apnsEnvironment: session.apnsEnvironment,
+      title: normalizePreviewText(title) || "Permission required",
+      body: normalizePreviewText(body) || "OpenCode needs your approval to continue.",
+      payload: {
+        source: "codex.structuredUserInput",
+        threadId: normalizedThreadId,
+        turnId: readString(turnId) || "",
+        result: "permission",
+      },
+    });
+
+    deliveredDedupeKeys.set(normalizedDedupeKey, now());
+    persistState("notifyPermission");
+    return { ok: true };
+  }
+
   function getStats() {
     pruneDeliveredDedupeKeys();
     return {
@@ -201,6 +266,7 @@ function createPushSessionService({
   return {
     registerDevice,
     notifyCompletion,
+    notifyPermission,
     getStats,
   };
 }
@@ -258,6 +324,102 @@ function apnsConfigFromEnv(env) {
     bundleId: readFirstDefinedEnv(["REMODEX_APNS_BUNDLE_ID", "PHODEX_APNS_BUNDLE_ID"], env),
     privateKey: readAPNsPrivateKey(env),
   };
+}
+
+function isApnsConfiguredFromEnv(env = process.env) {
+  const config = apnsConfigFromEnv(env);
+  return Boolean(config.teamId && config.keyId && config.bundleId && config.privateKey);
+}
+
+function resolveRelayProfile(env = process.env) {
+  const explicitProfile = readString(env.REMODEX_PROFILE || env.PHODEX_PROFILE).toLowerCase();
+  if (explicitProfile === "dev") {
+    return "dev";
+  }
+  if (explicitProfile === "managed-relay" || explicitProfile === "managed") {
+    return "managed-relay";
+  }
+  if (explicitProfile === "self-hosted" || explicitProfile === "selfhost") {
+    return "self-hosted";
+  }
+
+  const nodeEnv = readString(env.NODE_ENV).toLowerCase();
+  if (nodeEnv === "development" || nodeEnv === "test") {
+    return "dev";
+  }
+
+  if (isApnsConfiguredFromEnv(env)) {
+    return "managed-relay";
+  }
+
+  return "self-hosted";
+}
+
+function resolvePushServiceEnablement(env = process.env) {
+  const explicit = readOptionalBooleanEnv(
+    ["REMODEX_ENABLE_PUSH_SERVICE", "PHODEX_ENABLE_PUSH_SERVICE"],
+    env
+  );
+  const apnsConfigured = isApnsConfiguredFromEnv(env);
+  const profile = resolveRelayProfile(env);
+
+  if (explicit === false) {
+    return {
+      enabled: false,
+      wouldEnablePush: apnsConfigured,
+      profile,
+    };
+  }
+  if (explicit === true) {
+    return {
+      enabled: true,
+      wouldEnablePush: apnsConfigured,
+      profile,
+    };
+  }
+
+  if (profile === "dev") {
+    return {
+      enabled: false,
+      wouldEnablePush: apnsConfigured,
+      profile,
+    };
+  }
+
+  if (profile === "managed-relay" && apnsConfigured) {
+    return {
+      enabled: true,
+      wouldEnablePush: true,
+      profile,
+    };
+  }
+
+  return {
+    enabled: false,
+    wouldEnablePush: apnsConfigured,
+    profile,
+  };
+}
+
+function readOptionalBooleanEnv(keys, env = process.env) {
+  const truthy = new Set(["1", "true", "yes", "on"]);
+  const falsy = new Set(["0", "false", "no", "off"]);
+
+  for (const key of keys) {
+    const rawValue = env?.[key];
+    if (typeof rawValue !== "string" || !rawValue.trim()) {
+      continue;
+    }
+    const normalizedValue = rawValue.trim().toLowerCase();
+    if (truthy.has(normalizedValue)) {
+      return true;
+    }
+    if (falsy.has(normalizedValue)) {
+      return false;
+    }
+  }
+
+  return null;
 }
 
 function readAPNsPrivateKey(env) {
@@ -380,4 +542,7 @@ module.exports = {
   createPushSessionService,
   createFileBackedPushStateStore,
   resolvePushStateFilePath,
+  isApnsConfiguredFromEnv,
+  resolvePushServiceEnablement,
+  resolveRelayProfile,
 };
