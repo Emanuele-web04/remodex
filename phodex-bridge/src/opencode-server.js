@@ -11,17 +11,29 @@ const http = require("http");
 const net = require("net");
 const path = require("path");
 
-function resolveTimeoutMs(envKey, defaultMs) {
+const MAX_START_TIMEOUT_MS = 120_000;
+const MAX_HEALTH_TIMEOUT_MS = 60_000;
+
+function resolveTimeoutMs(envKey, defaultMs, maxMs) {
   const numeric = Number(readString(process.env[envKey]));
   if (!Number.isFinite(numeric) || numeric <= 0) {
     return defaultMs;
   }
-  return Math.min(Math.floor(numeric), defaultMs);
+  const ceiling = Number.isFinite(maxMs) && maxMs > 0 ? maxMs : numeric;
+  return Math.min(Math.floor(numeric), ceiling);
 }
 
-const START_TIMEOUT_MS = resolveTimeoutMs("REMODEX_OPENCODE_START_TIMEOUT_MS", 15_000);
+const START_TIMEOUT_MS = resolveTimeoutMs(
+  "REMODEX_OPENCODE_START_TIMEOUT_MS",
+  15_000,
+  MAX_START_TIMEOUT_MS,
+);
 const SHUTDOWN_TIMEOUT_MS = 5_000;
-const HEALTH_TIMEOUT_MS = resolveTimeoutMs("REMODEX_OPENCODE_HEALTH_TIMEOUT_MS", 5_000);
+const HEALTH_TIMEOUT_MS = resolveTimeoutMs(
+  "REMODEX_OPENCODE_HEALTH_TIMEOUT_MS",
+  5_000,
+  MAX_HEALTH_TIMEOUT_MS,
+);
 const PORT_RANGE_START = 4200;
 const PORT_RANGE_END = 4299;
 const SERVE_HOST = "127.0.0.1";
@@ -464,6 +476,9 @@ module.exports = {
   createOpenCodeServer,
   START_TIMEOUT_MS,
   HEALTH_TIMEOUT_MS,
+  MAX_START_TIMEOUT_MS,
+  MAX_HEALTH_TIMEOUT_MS,
+  resolveTimeoutMs,
   HEALTH_PATHS,
   PORT_RANGE_START,
   PORT_RANGE_END,

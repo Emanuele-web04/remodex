@@ -4,6 +4,7 @@
 // Exports: createPushNotificationServiceClient
 // Depends on: global fetch
 
+const { readString } = require("./normalize");
 const { safeParseJSON } = require("./safe-json");
 
 const DEFAULT_PUSH_SERVICE_TIMEOUT_MS = 10_000;
@@ -212,32 +213,34 @@ function validatePushServiceUrl(url) {
       );
     }
 
-    // Whitelist of allowed push service domains
-    // Add production/staging domains here as needed
-    const allowedDomains = [
-      // Example: 'push.remodex.dev',
-      // Example: 'push-staging.remodex.dev',
-    ];
+    // Explicit operator configuration is trusted for non-localhost HTTPS targets.
+    const configuredUrl = readString(process.env.REMODEX_PUSH_SERVICE_URL)
+      || readString(process.env.PHODEX_PUSH_SERVICE_URL);
+    if (configuredUrl) {
+      try {
+        const configuredHost = new URL(configuredUrl).hostname.toLowerCase();
+        if (hostname === configuredHost) {
+          return;
+        }
+      } catch {
+        // Fall through to static whitelist check.
+      }
+    }
 
-    // Reject non-localhost domains when whitelist is empty
+    // Optional static whitelist for shared relay infrastructure.
+    const allowedDomains = [];
+
     if (allowedDomains.length === 0) {
       throw new Error(
-        `Push service URL whitelist is empty - non-localhost domains not allowed. Hostname: ${hostname}`
+        `Push service URL hostname is not allowed. Hostname: ${hostname}`
       );
     }
 
-    const isAllowed = allowedDomains.some(domain =>
-      hostname === domain || hostname.endsWith(`.${domain}`)
-    );
+    const isAllowed = allowedDomains.some((domain) =>
+      hostname === domain || hostname.endsWith(`.${domain}`));
 
     if (!isAllowed) {
-      console.error(
-        `Push service URL hostname not in whitelist: ${hostname}. ` +
-        `Allowed: ${allowedDomains.join(', ')}`
-      );
-      throw new Error(
-        `Push service URL hostname not allowed: ${hostname}`
-      );
+      throw new Error(`Push service URL hostname not allowed: ${hostname}`);
     }
 
   } catch (error) {

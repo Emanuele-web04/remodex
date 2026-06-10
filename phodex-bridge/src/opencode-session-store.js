@@ -82,6 +82,7 @@ function createOpenCodeSessionStore({
       model: readString(meta.model) || readString(previous.model) || "",
       agent: readString(meta.agent) || readString(previous.agent) || "",
       title: readString(meta.title) || readString(previous.title) || "",
+      archived: meta.archived === true || (meta.archived === undefined && previous.archived === true),
       discovered: meta.discovered === true || previous.discovered === true,
       updatedAt: new Date(nowMs()).toISOString(),
     };

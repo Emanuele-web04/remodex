@@ -9,6 +9,14 @@ const os = require("os");
 const path = require("path");
 const { readString } = require("./normalize");
 
+const SENSITIVE_HOME_SUBDIRS = [
+  ".ssh",
+  ".aws",
+  ".gnupg",
+  ".config/gh",
+  "Library/Keychains",
+];
+
 function resolveHomeDir(options = {}) {
   return options.homeDir || os.homedir();
 }
@@ -37,8 +45,24 @@ function samePathOrDescendant(candidatePath, rootPath) {
   return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+function isSensitiveHomeSubpath(candidatePath, options = {}) {
+  const homeDir = resolveHomeDir(options);
+  const normalizedPath = path.resolve(candidatePath);
+  const relative = path.relative(homeDir, normalizedPath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return false;
+  }
+
+  const normalizedRelative = relative.split(path.sep).join("/");
+  return SENSITIVE_HOME_SUBDIRS.some((denied) =>
+    normalizedRelative === denied || normalizedRelative.startsWith(`${denied}/`));
+}
+
 function isPathAllowed(candidatePath, options = {}) {
   const normalizedPath = path.resolve(candidatePath);
+  if (isSensitiveHomeSubpath(normalizedPath, options)) {
+    return false;
+  }
   return allowedProjectRoots(options).some((rootPath) => samePathOrDescendant(normalizedPath, rootPath));
 }
 
@@ -110,6 +134,7 @@ module.exports = {
   allowedProjectRoots,
   assertProjectPathAllowed,
   isPathAllowed,
+  isSensitiveHomeSubpath,
   normalizeCandidatePath,
   realpathSyncIfAvailable,
   resolveHomeDir,

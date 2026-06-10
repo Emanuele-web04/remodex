@@ -157,6 +157,43 @@ test("continueOpenCodeHandoff rejects when env gate is off", async () => {
   );
 });
 
+test("continueOpenCodeHandoff lazy-creates session when thread has no sessionId yet", async () => {
+  let ensureSessionCalls = 0;
+  const lazyProvider = {
+    id: "opencode",
+    async getHandoffContext(threadId) {
+      ensureSessionCalls += 1;
+      return {
+        threadId,
+        sessionId: "ses_lazy_created",
+        cwd: "/Users/dev/project",
+        model: "anthropic/claude-sonnet-4-5",
+        agent: "build",
+        title: "Fresh thread",
+      };
+    },
+    async selectTuiSession() {
+      return false;
+    },
+  };
+
+  const result = await continueOpenCodeHandoff(
+    { threadId: "opencode-thread-1" },
+    {
+      env: { REMODEX_OPENCODE_HANDOFF: "1" },
+      platform: "darwin",
+      ownershipStore: fakeOwnership(),
+      opencodeProvider: lazyProvider,
+      executor: async () => ({ stdout: "", stderr: "" }),
+      fsModule: { existsSync: () => false },
+    },
+  );
+
+  assert.equal(ensureSessionCalls, 1);
+  assert.equal(result.sessionId, "ses_lazy_created");
+  assert.equal(result.success, true);
+});
+
 test("continueOpenCodeHandoff returns payload with TUI selection", async () => {
   const result = await continueOpenCodeHandoff(
     {
@@ -181,7 +218,9 @@ test("continueOpenCodeHandoff returns payload with TUI selection", async () => {
   assert.equal(result.agent, "build");
   assert.equal(result.title, "Mobile thread");
   assert.equal(result.handoffMode, "tui");
+  assert.equal(result.handoffStatus, "complete");
   assert.equal(result.sessionSelected, true);
+  assert.match(result.instructions, /Session ID: ses_abc/);
 });
 
 test("continueOpenCodeHandoff uses desktop_app + TUI fallback when no deep link", async () => {
@@ -211,9 +250,11 @@ test("continueOpenCodeHandoff uses desktop_app + TUI fallback when no deep link"
   assert.equal(executorCalls.length, 1);
   assert.deepEqual(executorCalls[0][0], "open");
   assert.equal(result.handoffMode, "desktop_app");
+  assert.equal(result.handoffStatus, "partial");
   assert.equal(result.sessionSelected, false);
   assert.equal(result.desktopAppInstalled, true);
   assert.match(result.instructions, /Terminal|session picker/i);
+  assert.match(result.bridgeHandoffCommand, /opencode/);
 });
 
 test("continueOpenCodeHandoff returns tui_only when desktop app is missing", async () => {

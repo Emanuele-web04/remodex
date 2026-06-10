@@ -36,7 +36,7 @@ private let paywallFeatures: [PaywallFeature] = [
     .init(id: 3, icon: "waveform", title: "Voice mode with speech-to-text"),
     .init(id: 4, icon: "point.3.connected.trianglepath.dotted", title: "Subagents"),
     .init(id: 5, icon: "at", title: "$skills, /commands & @file mentions"),
-    .init(id: 6, icon: "server.rack", title: "Hosted relay included"),
+    .init(id: 6, icon: "laptopcomputer.and.iphone", title: "Secure Mac pairing"),
     .init(id: 7, icon: "heart", title: "Support development"),
 ]
 

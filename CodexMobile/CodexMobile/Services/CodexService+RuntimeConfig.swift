@@ -1,8 +1,8 @@
 // FILE: CodexService+RuntimeConfig.swift
-// Purpose: Runtime model/reasoning/access preferences, per-thread overrides, and model/list loading.
+// Purpose: Per-thread runtime overrides, selection persistence, and thin forwards to RuntimeCoordinator.
 // Layer: Service
 // Exports: CodexService runtime config APIs
-// Depends on: CodexModelOption, CodexReasoningEffortOption, CodexAccessMode, OpenCodeCatalogProvider (for logo catalog)
+// Depends on: RuntimeCoordinator, CodexModelOption, CodexReasoningEffortOption, CodexAccessMode
 
 import Foundation
 
@@ -13,30 +13,8 @@ private let runtimeDebugTimestampFormatter: DateFormatter = {
     return formatter
 }()
 
-private enum RuntimeConfigLoadingPolicy {
-    // Bridge may cold-start OpenCode while listing agents; allow relay + decode headroom.
-    static let runtimeCatalogTimeoutNanoseconds: UInt64 = 15_000_000_000
-    // OpenCode model discovery can cold-start `opencode serve` (~25s on the bridge).
-    static let modelListTimeoutNanoseconds: UInt64 = 35_000_000_000
-}
-
 private enum RuntimeReasoningFallback {
     static let codexEfforts = ["low", "medium", "high", "xhigh"]
-}
-
-private enum RuntimeSelectionDefaults {
-    static let provider = "codex"
-    static let modelId = "gpt-5.5"
-    static let selectionKey = CodexModelOption.selectionKey(provider: provider, modelId: modelId)
-    static let reasoningEffort = "medium"
-
-    static func reasoningEffort(for unresolvedModelId: String?) -> String? {
-        guard let unresolvedModelId,
-              unresolvedModelId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == modelId else {
-            return nil
-        }
-        return reasoningEffort
-    }
 }
 
 private struct RuntimeModelIdentity {
@@ -50,53 +28,125 @@ private enum RuntimeProviderPolicy {
     ]
 }
 
-private let openCodeModelsRetryErrorMessage = "OpenCode models did not load. Tap Retry in the model menu."
+// MARK: - RuntimeCoordinator forwards
 
 extension CodexService {
     func modelsErrorMessage(forThreadId threadId: String?) -> String? {
-        guard let threadId = threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !threadId.isEmpty else {
-            return nil
-        }
-        let provider = CodexModelOption.normalizedProvider(
-            runtimeModelProviderForTurn(threadId: threadId)
-        ) ?? RuntimeSelectionDefaults.provider
-        return modelsErrorMessageByProvider[provider]
+        runtimeCoordinator.modelsErrorMessage(forThreadId: threadId)
     }
 
     func setModelsErrorMessage(_ message: String?, forProvider provider: String) {
-        let normalizedProvider = CodexModelOption.normalizedProvider(provider) ?? provider
-        let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if trimmed.isEmpty {
-            modelsErrorMessageByProvider.removeValue(forKey: normalizedProvider)
-        } else {
-            modelsErrorMessageByProvider[normalizedProvider] = trimmed
-        }
-        persistModelsErrorMessages()
+        runtimeCoordinator.setModelsErrorMessage(message, forProvider: provider)
     }
 
     func clearModelsErrorMessages() {
-        modelsErrorMessageByProvider.removeAll()
-        persistModelsErrorMessages()
+        runtimeCoordinator.clearModelsErrorMessages()
     }
 
     func loadPersistedModelsErrorMessages() {
-        guard let data = defaults.object(forKey: Self.modelsErrorMessageByProviderDefaultsKey) as? Data,
-              let decoded = try? decoder.decode([String: String].self, from: data) else {
-            return
-        }
-        modelsErrorMessageByProvider = decoded
+        runtimeCoordinator.loadPersistedModelsErrorMessages()
     }
 
-    private func persistModelsErrorMessages() {
-        if modelsErrorMessageByProvider.isEmpty {
-            defaults.removeObject(forKey: Self.modelsErrorMessageByProviderDefaultsKey)
-            return
-        }
-        guard let data = try? encoder.encode(modelsErrorMessageByProvider) else { return }
-        defaults.set(data, forKey: Self.modelsErrorMessageByProviderDefaultsKey)
+    var isLoadingOpenCodeProvider: Bool {
+        runtimeCoordinator.isLoadingOpenCodeProvider
     }
 
+    var openCodeProviderDiscoveryReasonCode: String? {
+        runtimeCoordinator.openCodeProviderDiscoveryReasonCode
+    }
+
+    var menuCatalogProviderIDs: [String] {
+        runtimeCoordinator.menuCatalogProviderIDs
+    }
+
+    var isOpenCodeRuntimeEnabledInCatalog: Bool {
+        runtimeCoordinator.isOpenCodeRuntimeEnabledInCatalog
+    }
+
+    var shouldAttemptOpenCodeModelLoad: Bool {
+        runtimeCoordinator.shouldAttemptOpenCodeModelLoad
+    }
+
+    var openCodeRuntimeCatalogEntry: RuntimeInfo? {
+        runtimeCoordinator.openCodeRuntimeCatalogEntry
+    }
+
+    var openCodeRuntimeDetails: OpenCodeRuntimeDetails? {
+        runtimeCoordinator.openCodeRuntimeDetails
+    }
+
+    var openCodeCatalogProviders: [OpenCodeCatalogProvider] {
+        runtimeCoordinator.openCodeCatalogProviders
+    }
+
+    var handoffEnvEnabled: Bool {
+        runtimeCoordinator.handoffEnvEnabled
+    }
+
+    func isOpenCodeModelListRetryTerminal() -> Bool {
+        runtimeCoordinator.isOpenCodeModelListRetryTerminal()
+    }
+
+    func listModels(refreshProviders: Bool = false) async throws {
+        try await runtimeCoordinator.listModels(refreshProviders: refreshProviders)
+    }
+
+    func fetchFullOpenCodeModelList(threadId: String?) async throws -> [CodexModelOption] {
+        try await runtimeCoordinator.fetchFullOpenCodeModelList(threadId: threadId)
+    }
+
+    func resetOpenCodeModelsRetry() {
+        runtimeCoordinator.resetOpenCodeModelsRetry()
+    }
+
+    func reconcileOpenCodeModelsAfterList() {
+        runtimeCoordinator.reconcileOpenCodeModelsAfterList()
+    }
+
+    func fetchRuntimeCatalog() async throws {
+        try await runtimeCoordinator.fetchRuntimeCatalog()
+    }
+
+    func refreshRuntimeMetadataSequential() async {
+        await runtimeCoordinator.refreshRuntimeMetadataSequential()
+    }
+
+    func refreshRuntimeMetadataParallel() async {
+        await runtimeCoordinator.refreshRuntimeMetadataParallel()
+    }
+
+    func noteOpenCodeCatalogRevisionAfterFetch() {
+        runtimeCoordinator.noteOpenCodeCatalogRevisionAfterFetch()
+    }
+
+    func supportsStructuredSkillInput(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.supportsStructuredSkillInput(forThreadId: threadId)
+    }
+
+    func supportsSkillFileInjection(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.supportsSkillFileInjection(forThreadId: threadId)
+    }
+
+    func supportsImageAttachments(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.supportsImageAttachments(forThreadId: threadId)
+    }
+
+    func providerCapabilitiesForTurn(threadId: String?) -> ProviderCapabilities {
+        runtimeCoordinator.providerCapabilitiesForTurn(threadId: threadId)
+    }
+
+    func supportsDesktopHandoffForTurn(threadId: String?) -> Bool {
+        runtimeCoordinator.supportsDesktopHandoffForTurn(threadId: threadId)
+    }
+
+    func isDesktopHandoffActionAvailable(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.isDesktopHandoffActionAvailable(forThreadId: threadId)
+    }
+}
+
+// MARK: - Thread overrides and selection persistence
+
+extension CodexService {
     // Resolves the effective per-chat override record after normalizing the thread id.
     func threadRuntimeOverride(for threadId: String?) -> CodexThreadRuntimeOverride? {
         guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
@@ -132,255 +182,6 @@ extension CodexService {
         }
 
         throw lastError ?? CodexServiceError.invalidResponse("\(method) failed with unknown approvalPolicy error")
-    }
-
-    var isLoadingOpenCodeProvider: Bool {
-        guard shouldAttemptOpenCodeModelLoad else {
-            return false
-        }
-        if openCodeProviderDiscoveryReasonCode == "no_connected_providers" {
-            return false
-        }
-        if openCodeModelsRetryTask != nil {
-            return true
-        }
-        if isLoadingModels, openCodeProviderDiscoveryReasonCode == nil, lastModelListOpenCodeMeta == nil {
-            return true
-        }
-        if isLoadingModels {
-            return true
-        }
-        return false
-    }
-
-    var openCodeProviderDiscoveryReasonCode: String? {
-        let fromList = lastModelListOpenCodeMeta?.reasonCode?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let fromList, !fromList.isEmpty {
-            return fromList
-        }
-        let fromCatalog = openCodeRuntimeDetails?.providerDiscoveryReasonCode?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let fromCatalog, !fromCatalog.isEmpty {
-            return fromCatalog
-        }
-        return nil
-    }
-
-    /// Provider IDs for the model menu — from `runtime/catalog`, or default-on until catalog arrives.
-    var menuCatalogProviderIDs: [String] {
-        let fromCatalog = availableRuntimes.map {
-            CodexModelOption.normalizedProvider($0.id)
-        }
-        if !fromCatalog.isEmpty {
-            return fromCatalog
-        }
-        guard isConnected, isInitialized else {
-            return ["codex"]
-        }
-        return ["codex", "opencode"]
-    }
-
-    var isOpenCodeRuntimeEnabledInCatalog: Bool {
-        openCodeRuntimeCatalogEntry?.enabled == true
-    }
-
-    /// True when OpenCode should appear in the model menu and model/list retries may run.
-    var shouldAttemptOpenCodeModelLoad: Bool {
-        if let entry = openCodeRuntimeCatalogEntry {
-            if entry.reasonCode == "opencode_not_enabled" {
-                return false
-            }
-            return true
-        }
-        return isConnected && isInitialized
-    }
-
-    var openCodeRuntimeCatalogEntry: RuntimeInfo? {
-        availableRuntimes.first {
-            CodexModelOption.normalizedProvider($0.id) == "opencode"
-        }
-    }
-
-    var openCodeRuntimeDetails: OpenCodeRuntimeDetails? {
-        openCodeRuntimeCatalogEntry?.opencode
-    }
-
-    /// Catalog-driven providers for logo resolution (id, name, logoAssetId? from BRAND-1).
-    /// Used by ProviderLogoView catalog resolver; see provider-branding.md for emergency SF fallback.
-    var openCodeCatalogProviders: [OpenCodeCatalogProvider] {
-        openCodeRuntimeCatalogEntry?.opencode?.providers ?? []
-    }
-
-    func isOpenCodeModelListRetryTerminal() -> Bool {
-        guard shouldAttemptOpenCodeModelLoad else {
-            return true
-        }
-        guard let reason = openCodeProviderDiscoveryReasonCode?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !reason.isEmpty
-        else {
-            return false
-        }
-
-        switch reason {
-        case "no_connected_providers", "unknown", "provider_list_failed":
-            return true
-        case "ok":
-            return !availableModels.contains {
-                CodexModelOption.normalizedProvider($0.modelProvider) == "opencode"
-            }
-        default:
-            return false
-        }
-    }
-
-    func listModels(refreshProviders: Bool = false) async throws {
-        isLoadingModels = true
-        defer { isLoadingModels = false }
-
-        do {
-            var params: [String: JSONValue] = [
-                "cursor": .null,
-                "limit": .integer(50),
-                "includeHidden": .bool(false),
-            ]
-            if refreshProviders {
-                params["refreshProviders"] = .bool(true)
-            }
-            let response = try await sendRequest(
-                method: "model/list",
-                params: .object(params),
-                timeoutNanoseconds: RuntimeConfigLoadingPolicy.modelListTimeoutNanoseconds,
-                timeoutMessage: "model/list timed out while syncing runtime options."
-            )
-
-            guard let resultObject = response.result?.objectValue else {
-                throw CodexServiceError.invalidResponse("model/list response missing payload")
-            }
-
-            if let opencodeObject = resultObject["opencode"]?.objectValue,
-               let opencodeData = try? JSONEncoder().encode(opencodeObject),
-               let meta = try? JSONDecoder().decode(OpenCodeModelListMeta.self, from: opencodeData) {
-                lastModelListOpenCodeMeta = meta
-            }
-
-            let items =
-                resultObject["items"]?.arrayValue
-                ?? resultObject["data"]?.arrayValue
-                ?? resultObject["models"]?.arrayValue
-                ?? []
-
-            let decodedModels = items.compactMap { decodeModel(CodexModelOption.self, from: $0) }
-            if decodedModels.isEmpty, !items.isEmpty {
-                setModelsErrorMessage(
-                    "Models could not be decoded. Tap Retry in the model menu.",
-                    forProvider: "opencode"
-                )
-                debugRuntimeLog("model/list decode produced 0 models from \(items.count) items")
-            } else {
-                availableModels = decodedModels
-                clearModelsErrorMessages()
-                normalizeRuntimeSelectionsAfterModelsUpdate()
-                debugRuntimeLog("model/list success count=\(decodedModels.count)")
-            }
-            reconcileOpenCodeModelsAfterList()
-        } catch {
-            if !availableModels.isEmpty {
-                clearModelsErrorMessages()
-                debugRuntimeLog("model/list refresh failed; keeping \(availableModels.count) cached models")
-                reconcileOpenCodeModelsAfterList()
-                return
-            }
-            handleModelListFailure(error)
-            reconcileOpenCodeModelsAfterList()
-            throw error
-        }
-    }
-
-    func fetchFullOpenCodeModelList(threadId: String?) async throws -> [CodexModelOption] {
-        let response = try await sendRequest(
-            method: "model/list",
-            params: .object([
-                "full": .bool(true),
-                "provider": .string("opencode"),
-                "refreshProviders": .bool(true),
-            ]),
-            timeoutNanoseconds: RuntimeConfigLoadingPolicy.modelListTimeoutNanoseconds,
-            timeoutMessage: "model/list full timed out."
-        )
-
-        guard let resultObject = response.result?.objectValue else {
-            throw CodexServiceError.invalidResponse("model/list full response missing payload")
-        }
-
-        let items =
-            resultObject["items"]?.arrayValue
-            ?? resultObject["data"]?.arrayValue
-            ?? resultObject["models"]?.arrayValue
-            ?? []
-
-        return items
-            .compactMap { decodeModel(CodexModelOption.self, from: $0) }
-            .filter { CodexModelOption.normalizedProvider($0.modelProvider) == "opencode" }
-            .sorted {
-                TurnComposerMetaMapper.modelTitle(for: $0)
-                    .localizedCaseInsensitiveCompare(TurnComposerMetaMapper.modelTitle(for: $1)) == .orderedAscending
-            }
-    }
-
-    func resetOpenCodeModelsRetry() {
-        openCodeModelsRetryTask?.cancel()
-        openCodeModelsRetryTask = nil
-        openCodeModelRetryCount = 0
-    }
-
-    func reconcileOpenCodeModelsAfterList() {
-        guard shouldAttemptOpenCodeModelLoad else {
-            resetOpenCodeModelsRetry()
-            return
-        }
-
-        if isOpenCodeModelListRetryTerminal() {
-            resetOpenCodeModelsRetry()
-            if openCodeProviderDiscoveryReasonCode == "no_connected_providers" {
-                setModelsErrorMessage(nil, forProvider: "opencode")
-            }
-            return
-        }
-
-        let hasOpenCodeModels = availableModels.contains {
-            CodexModelOption.normalizedProvider($0.modelProvider) == "opencode"
-        }
-        if hasOpenCodeModels {
-            resetOpenCodeModelsRetry()
-            if modelsErrorMessage(forThreadId: activeThreadId) == openCodeModelsRetryErrorMessage {
-                setModelsErrorMessage(nil, forProvider: "opencode")
-            }
-            return
-        }
-
-        guard openCodeModelRetryCount < 4 else {
-            openCodeModelsRetryTask = nil
-            setModelsErrorMessage(openCodeModelsRetryErrorMessage, forProvider: "opencode")
-            debugRuntimeLog("OpenCode model/list gave up after \(openCodeModelRetryCount) retries")
-            return
-        }
-
-        openCodeModelRetryCount += 1
-        let attempt = openCodeModelRetryCount
-        debugRuntimeLog("OpenCode models missing after model/list; retry \(attempt)/4 in \(attempt + 2)s")
-        openCodeModelsRetryTask?.cancel()
-        openCodeModelsRetryTask = Task { @MainActor [weak self] in
-            let delaySeconds = UInt64(attempt + 2)
-            try? await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
-            guard !Task.isCancelled else { return }
-            guard let self, self.isConnected, self.isInitialized else {
-                self?.openCodeModelsRetryTask = nil
-                return
-            }
-            defer { self.openCodeModelsRetryTask = nil }
-            try? await self.listModels()
-        }
     }
 
     func setSelectedModelId(_ modelId: String?) {
@@ -555,139 +356,6 @@ extension CodexService {
         persistRuntimeSelections()
     }
 
-    func fetchRuntimeCatalog() async throws {
-        let response = try await sendRequest(
-            method: "runtime/catalog",
-            params: .object([:]),
-            timeoutNanoseconds: RuntimeConfigLoadingPolicy.runtimeCatalogTimeoutNanoseconds,
-            timeoutMessage: "runtime/catalog timed out"
-        )
-
-        guard let resultObject = response.result?.objectValue else {
-            debugRuntimeLog(
-                "runtime/catalog missing payload; keeping \(availableRuntimes.count) cached runtimes"
-            )
-            return
-        }
-
-        let runtimes = resultObject["runtimes"]?.arrayValue ?? []
-        var nextAgents: [AgentOption] = []
-        var nextRuntimes: [RuntimeInfo] = []
-
-        for runtimeJSON in runtimes {
-            guard let runtimeObj = runtimeJSON.objectValue else { continue }
-            guard let runtimeId = runtimeObj["id"]?.stringValue else { continue }
-
-            let label = runtimeObj["label"]?.stringValue ?? runtimeId
-            let enabled = runtimeObj["enabled"]?.boolValue ?? false
-            let unavailableReason = runtimeObj["unavailableReason"]?.stringValue
-            let reasonCode = runtimeObj["reasonCode"]?.stringValue
-
-            let capabilities: ProviderCapabilities
-            if let capsObj = runtimeObj["capabilities"] {
-                if let capsData = try? JSONEncoder().encode(capsObj),
-                   let decoded = try? JSONDecoder().decode(ProviderCapabilities.self, from: capsData) {
-                    capabilities = decoded
-                } else {
-                    debugRuntimeLog("capability decode fallback — bridge catalog capabilities could not be parsed; using defaultCodex. capsObj=\(capsObj)")
-                    capabilities = ProviderCapabilities.defaultCodex
-                }
-            } else {
-                capabilities = ProviderCapabilities.defaultCodex
-            }
-
-            // Parse agents
-            let agents = (runtimeObj["agents"]?.arrayValue ?? []).compactMap { agentJSON -> AgentOption? in
-                guard let agentId = agentJSON.objectValue?["id"]?.stringValue,
-                      let agentLabel = agentJSON.objectValue?["label"]?.stringValue else {
-                    return nil
-                }
-                return AgentOption(id: agentId, displayName: agentLabel)
-            }
-
-            let showsBetaLabel = runtimeObj["showsBetaLabel"]?.boolValue ?? false
-
-            var opencodeDetails: OpenCodeRuntimeDetails?
-            if let opencodeObj = runtimeObj["opencode"]?.objectValue,
-               let opencodeData = try? JSONEncoder().encode(opencodeObj) {
-                opencodeDetails = try? JSONDecoder().decode(OpenCodeRuntimeDetails.self, from: opencodeData)
-            }
-
-            let runtimeInfo = RuntimeInfo(
-                id: runtimeId,
-                label: label,
-                enabled: enabled,
-                unavailableReason: unavailableReason,
-                reasonCode: reasonCode,
-                showsBetaLabel: showsBetaLabel,
-                capabilities: capabilities,
-                agents: agents,
-                opencode: opencodeDetails
-            )
-            nextRuntimes.append(runtimeInfo)
-            nextAgents.append(contentsOf: agents)
-        }
-
-        availableRuntimes = nextRuntimes
-        availableAgents = nextAgents
-
-        if let codexRuntime = nextRuntimes.first(where: {
-            CodexModelOption.normalizedProvider($0.id) == "codex"
-        }) {
-            supportsStructuredSkillInput = codexRuntime.capabilities.supportsStructuredSkillInput
-        }
-
-        debugRuntimeLog(
-            "runtime/catalog success runtimes=\(nextRuntimes.map(\.id).joined(separator: ","))"
-        )
-        noteOpenCodeCatalogRevisionAfterFetch()
-    }
-
-    func refreshRuntimeMetadataSequential() async {
-        await refreshRuntimeMetadataParallel()
-    }
-
-    // Warms model inventory and runtime/catalog (logo providers) concurrently so composer
-    // chrome and sidebar badges settle faster after connect.
-    func refreshRuntimeMetadataParallel() async {
-        async let modelsRefresh: Void = {
-            try? await self.listModels(refreshProviders: true)
-        }()
-        async let catalogRefresh: Void = {
-            try? await self.fetchRuntimeCatalog()
-        }()
-        _ = await (modelsRefresh, catalogRefresh)
-    }
-
-    func noteOpenCodeCatalogRevisionAfterFetch() {
-        let revision = openCodeRuntimeDetails?.catalogRevision?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let revision, !revision.isEmpty else {
-            return
-        }
-        guard revision != lastOpenCodeCatalogRevision else {
-            return
-        }
-        if lastOpenCodeCatalogRevision != nil {
-            debugRuntimeLog(
-                "ios_catalog_revision_changed revision=\(revision) previous=\(lastOpenCodeCatalogRevision ?? "nil")"
-            )
-        }
-        lastOpenCodeCatalogRevision = revision
-    }
-
-    func supportsStructuredSkillInput(forThreadId threadId: String?) -> Bool {
-        providerCapabilitiesForTurn(threadId: threadId).supportsStructuredSkillInput
-    }
-
-    func supportsSkillFileInjection(forThreadId threadId: String?) -> Bool {
-        providerCapabilitiesForTurn(threadId: threadId).supportsSkillFileInjection
-    }
-
-    func supportsImageAttachments(forThreadId threadId: String?) -> Bool {
-        providerCapabilitiesForTurn(threadId: threadId).supportsImageAttachments
-    }
-
     // Remodex app drives Mac-started OpenCode session/project discovery via thread/list params.
     var openCodeExternalDiscoveryEnabled: Bool {
         if defaults.object(forKey: Self.openCodeExternalDiscoveryDefaultsKey) == nil {
@@ -698,51 +366,6 @@ extension CodexService {
 
     func setOpenCodeExternalDiscoveryEnabled(_ enabled: Bool) {
         defaults.set(enabled, forKey: Self.openCodeExternalDiscoveryDefaultsKey)
-    }
-
-    func providerCapabilitiesForTurn(threadId: String?) -> ProviderCapabilities {
-        let provider = CodexModelOption.normalizedProvider(runtimeModelProviderForTurn(threadId: threadId))
-        if let model = selectedModelOption(threadId: threadId),
-           CodexModelOption.normalizedProvider(model.modelProvider) == provider {
-            return model.capabilities
-        }
-        if isRuntimeCapabilitiesLoadingForComposer(threadId: threadId) {
-            if provider == "opencode", let catalogCapabilities = openCodeRuntimeCatalogEntry?.capabilities {
-                return catalogCapabilities
-            }
-            if let runtime = availableRuntimes.first(where: {
-                CodexModelOption.normalizedProvider($0.id) == provider
-            }) {
-                return runtime.capabilities
-            }
-        }
-        if provider == "opencode" {
-            return openCodeRuntimeCatalogEntry?.capabilities ?? .defaultOpenCode
-        }
-        if let codexRuntime = availableRuntimes.first(where: {
-            CodexModelOption.normalizedProvider($0.id) == "codex"
-        }) {
-            return codexRuntime.capabilities
-        }
-        return .defaultCodex
-    }
-
-    func supportsDesktopHandoffForTurn(threadId: String?) -> Bool {
-        providerCapabilitiesForTurn(threadId: threadId).supportsDesktopHandoff
-    }
-
-    /// True when catalog advertises handoff and the Mac bridge reports handoff RPC is available.
-    func isDesktopHandoffActionAvailable(forThreadId threadId: String?) -> Bool {
-        guard supportsDesktopHandoffForTurn(threadId: threadId) else {
-            return false
-        }
-
-        let provider = CodexModelOption.normalizedProvider(runtimeModelProviderForTurn(threadId: threadId))
-        guard provider == "opencode" else {
-            return true
-        }
-
-        return openCodeRuntimeDetails?.handoffEnvEnabled == true
     }
 
     func selectedModelOption() -> CodexModelOption? {
@@ -1115,13 +738,6 @@ extension CodexService {
         )
     }
 
-    func handleModelListFailure(_ error: Error) {
-        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = message.isEmpty ? "Unable to load models" : message
-        setModelsErrorMessage(normalized, forProvider: "opencode")
-        debugRuntimeLog("model/list failed: \(normalized)")
-    }
-
     func debugRuntimeLog(_ message: String) {
         let entry = "[\(runtimeDebugTimestampFormatter.string(from: Date()))] \(message)"
         runtimeDebugLogEntries.append(entry)
@@ -1328,8 +944,6 @@ private extension CodexService {
     }
 
     func fallbackModel(from models: [CodexModelOption]) -> CodexModelOption? {
-        // Prefer GPT-5.5 when the bridge advertises it; the rest of the app treats
-        // it as the canonical default regardless of the bridge's `isDefault` flag.
         if let preferred = models.first(where: {
             $0.modelProvider == RuntimeSelectionDefaults.provider
                 && ($0.id.lowercased() == "gpt-5.5" || $0.model.lowercased() == "gpt-5.5")

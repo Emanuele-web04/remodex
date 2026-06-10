@@ -104,12 +104,43 @@ test("push service client rejects non-HTTP/HTTPS protocols", () => {
   }, /must use HTTP or HTTPS protocol/);
 });
 
-test("push service client rejects non-localhost HTTPS when whitelist empty", () => {
-  assert.throws(() => {
-    createPushNotificationServiceClient({
-      baseUrl: "https://evil.example.test",
-      sessionId: "session-remote",
-      notificationSecret: "secret-remote",
+test("push service client rejects non-localhost HTTPS when not explicitly configured", () => {
+  const previous = process.env.REMODEX_PUSH_SERVICE_URL;
+  delete process.env.REMODEX_PUSH_SERVICE_URL;
+  try {
+    assert.throws(() => {
+      createPushNotificationServiceClient({
+        baseUrl: "https://evil.example.test",
+        sessionId: "session-remote",
+        notificationSecret: "secret-remote",
+      });
+    }, /hostname is not allowed/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.REMODEX_PUSH_SERVICE_URL;
+    } else {
+      process.env.REMODEX_PUSH_SERVICE_URL = previous;
+    }
+  }
+});
+
+test("push service client allows configured REMODEX_PUSH_SERVICE_URL hostname", () => {
+  const previous = process.env.REMODEX_PUSH_SERVICE_URL;
+  process.env.REMODEX_PUSH_SERVICE_URL = "https://relay.example";
+  try {
+    assert.doesNotThrow(() => {
+      const client = createPushNotificationServiceClient({
+        baseUrl: "https://relay.example",
+        sessionId: "session-relay",
+        notificationSecret: "secret-relay",
+      });
+      assert.equal(client.hasConfiguredBaseUrl, true);
     });
-  }, /whitelist is empty/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.REMODEX_PUSH_SERVICE_URL;
+    } else {
+      process.env.REMODEX_PUSH_SERVICE_URL = previous;
+    }
+  }
 });

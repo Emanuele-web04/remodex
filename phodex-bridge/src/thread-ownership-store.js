@@ -54,6 +54,7 @@ function createThreadOwnershipStore({
   });
 
   let ownership = sanitizeOwnershipEntries(store.read());
+  let retainThreadId = null;
   pruneStaleEntries();
 
   function setOwnership(threadId, providerId) {
@@ -119,6 +120,9 @@ function createThreadOwnershipStore({
         didChange = true;
         continue;
       }
+      if (typeof retainThreadId === "function" && retainThreadId(threadId)) {
+        continue;
+      }
       const assignedTime = Date.parse(entry?.assignedAt || "");
       if (Number.isFinite(assignedTime) && assignedTime < cutoff) {
         delete ownership[threadId];
@@ -140,6 +144,10 @@ function createThreadOwnershipStore({
     store.flush();
   }
 
+  function setRetainThreadIdPredicate(predicate) {
+    retainThreadId = typeof predicate === "function" ? predicate : null;
+  }
+
   return {
     flush,
     getOwnership,
@@ -148,6 +156,7 @@ function createThreadOwnershipStore({
     pruneStaleEntries,
     removeOwnership,
     setOwnership,
+    setRetainThreadIdPredicate,
     size,
   };
 }

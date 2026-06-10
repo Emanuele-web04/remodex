@@ -2,52 +2,56 @@
 // Purpose: Routes provider-aware Remodex RPCs between Codex app-server and local provider harnesses.
 // Layer: Bridge runtime routing
 // Exports: createRuntimeProviderRouter plus merge helpers used by tests
-// Depends on: ./opencode-models, ./opencode-provider, ./provider-capabilities, ./thread-ownership-store, ./opencode-provider-inventory (for logo catalog RP-BRAND-1)
+// Depends on: ./opencode-models, ./opencode-provider, ./provider-capabilities, ./thread-ownership-store, ./runtime-catalog
 
-const { createHash } = require("crypto");
 const os = require("os");
 
-const { resolveOpenCodeHandoffEnabled } = require("./bridge-operator-profile");
 const { readString, resolvedParam } = require("./normalize");
-const { projectDiscoverFromOpenCode } = require("./opencode-project-discover-handler");
+const { handleOpenCodeProjectDiscoverRequest } = require("./opencode-project-discover-handler");
+const { handleOpenCodeSessionUsageRequest } = require("./opencode-session-usage-handler");
 const { createOpenCodeProvider } = require("./opencode-provider");
 const { safeParseJSON } = require("./safe-json");
 const {
   CODEX_PROVIDER_ID,
-  DEFAULT_OPENCODE_MODEL,
   OPENCODE_PROVIDER_ID,
-  buildOpenCodeModelOption,
   capOpenCodeModelsForMobileList,
-  compareThreadsByUpdatedAt,
+  isDiscoveredExternalThreadId,
   isOpenCodeProvider,
   readModelProvider,
   readThreadId,
 } = require("./opencode-models");
 const { isOpenCodeRuntimeDisabled, isOpenCodeRuntimeEnabled } = require("./opencode-runtime-policy");
-const {
-  resolveDiscoverProjectsEnabled,
-  resolveDiscoverSessionsEnabled,
-} = require("./opencode-discovery-policy");
+const { resolveDiscoverProjectsEnabled } = require("./opencode-discovery-policy");
 const { START_TIMEOUT_MS, HEALTH_TIMEOUT_MS } = require("./opencode-server");
 const {
-  CODEX_CAPABILITIES,
   resolveModelCapabilities,
-  resolveOpenCodeCatalogCapabilities,
 } = require("./provider-capabilities");
 const { createThreadOwnershipStore } = require("./thread-ownership-store");
-const { buildOpenCodeRuntimeStatus } = require("./opencode-runtime-status");
-const { buildProviderLogoCatalog } = require("./opencode-provider-inventory");
-
-const PROVIDER_FIELD_KEYS = [
-  "modelProvider",
-  "model_provider",
-  "provider",
-  "runtimeProvider",
-  "runtime_provider",
-  "harness",
-];
-
-const DISCOVERED_THREAD_ID_PREFIX = "opencode-session-";
+const {
+  buildCatalogOpenCodePlaceholderModels,
+  buildCatalogOpenCodeRuntime,
+  buildRuntimeCatalog,
+  catalogOpenCodeSnapshotForModelList,
+  computeCatalogFingerprint,
+  computeCatalogRevision,
+  countAuthenticated,
+  isOpenCodeDiscoverProjectsEnabled,
+  maybeDiscoverOpenCodeProjects,
+  maybeEmitCatalogUpdated,
+  readDiscoverProjectTtlMs,
+  readOpenCodeCatalogAvailability,
+  resetCatalogPushState,
+  resetOpenCodeProjectDiscoverState,
+  shouldWarmProviderInventory,
+  shortHash,
+} = require("./runtime-catalog");
+const {
+  PROVIDER_FIELD_KEYS,
+  firstArrayKey,
+  mergeModelListResult,
+  mergeThreadListResult,
+  stripRuntimeProviderFieldsForCodex,
+} = require("./runtime-merge");
 
 const ROUTABLE_THREAD_METHODS = new Set([
   "thread/start",
@@ -383,8 +387,30 @@ function createRuntimeProviderRouter({
       });
   }
 
+  function handleAuxiliaryRequest(rawMessage) {
+    if (
+      handleOpenCodeSessionUsageRequest(rawMessage, sendApplicationResponse, {
+        ownershipStore: threadOwnership,
+        opencodeProvider,
+      })
+    ) {
+      return true;
+    }
+    if (
+      handleOpenCodeProjectDiscoverRequest(rawMessage, sendApplicationResponse, {
+        homeDir: resolvedHomeDir,
+        projectRegistry,
+        opencodeProvider,
+      })
+    ) {
+      return true;
+    }
+    return false;
+  }
+
   return {
     handleApplicationMessage,
+    handleAuxiliaryRequest,
     providers: runtimeProviders,
     shutdown() {
       for (const provider of runtimeProviders) {
@@ -409,161 +435,6 @@ const threadListInFlightByProvider = new Map();
 // Cold `opencode serve` can take START_TIMEOUT_MS + health polling; 8s was too short on device.
 const DEFAULT_OPENCODE_MODEL_LIST_BUDGET_MS =
   START_TIMEOUT_MS + HEALTH_TIMEOUT_MS + 5_000;
-const RUNTIME_CATALOG_AGENT_BUDGET_MS = 2_000;
-const DEFAULT_OPENCODE_DISCOVER_PROJECT_TTL_MS = 120_000;
-let lastOpenCodeCatalogAgents = [];
-let lastEmittedCatalogFingerprint = null;
-let lastOpenCodeProjectDiscoverAt = 0;
-let openCodeProjectDiscoverInFlight = false;
-
-function shortHash(value) {
-  return createHash("sha256").update(String(value)).digest("hex").slice(0, 8);
-}
-
-function computeCatalogFingerprint(runtimeStatus) {
-  const inventory = runtimeStatus?.providerInventory ?? [];
-  return [
-    runtimeStatus?.providerInventoryPartial ? "partial:1" : "partial:0",
-    runtimeStatus?.authDiscoveryReasonCode ?? "unknown",
-    ...inventory
-      .map((provider) => {
-        const connectedOnServe = provider.connectedOnServe ?? provider.connected;
-        return `${provider.id}:${provider.authenticated ? 1 : 0}:${connectedOnServe ? 1 : 0}`;
-      })
-      .sort(),
-  ].join("|");
-}
-
-function computeCatalogRevision(runtimeStatus) {
-  return `fp:${shortHash(computeCatalogFingerprint(runtimeStatus))}`;
-}
-
-function countAuthenticated(inventory) {
-  if (!Array.isArray(inventory)) {
-    return 0;
-  }
-  return inventory.filter((provider) => provider?.authenticated === true).length;
-}
-
-function isCatalogWarmInventoryEnabled(env = process.env) {
-  const raw = readString(env?.REMODEX_CATALOG_WARM_INVENTORY);
-  if (!raw) {
-    return true;
-  }
-  const normalized = raw.toLowerCase();
-  return normalized !== "0" && normalized !== "false";
-}
-
-function shouldWarmProviderInventory(runtimeStatus, env = process.env) {
-  if (!isCatalogWarmInventoryEnabled(env)) {
-    return false;
-  }
-  const inventory = runtimeStatus?.providerInventory ?? [];
-  if (!Array.isArray(inventory) || inventory.length === 0) {
-    return true;
-  }
-  if (runtimeStatus?.providerInventoryPartial === true) {
-    return true;
-  }
-  if (readString(runtimeStatus?.authDiscoveryReasonCode) !== "ok") {
-    return true;
-  }
-  return false;
-}
-
-function maybeEmitCatalogUpdated(runtimeStatus, sendRuntimeMessage) {
-  if (typeof sendRuntimeMessage !== "function") {
-    return false;
-  }
-  const fingerprint = computeCatalogFingerprint(runtimeStatus);
-  if (fingerprint === lastEmittedCatalogFingerprint) {
-    return false;
-  }
-  lastEmittedCatalogFingerprint = fingerprint;
-  const catalogRevision = computeCatalogRevision(runtimeStatus);
-  sendRuntimeMessage(
-    JSON.stringify({
-      method: "runtime/catalog/updated",
-      params: {
-        catalogRevision,
-        providerInventoryPartial: runtimeStatus?.providerInventoryPartial ?? false,
-      },
-    }),
-  );
-  return true;
-}
-
-function resetCatalogPushState() {
-  lastEmittedCatalogFingerprint = null;
-}
-
-function resetOpenCodeProjectDiscoverState() {
-  lastOpenCodeProjectDiscoverAt = 0;
-  openCodeProjectDiscoverInFlight = false;
-}
-
-function readDiscoverProjectTtlMs(env = process.env) {
-  const numeric = Number(readString(env?.REMODEX_OPENCODE_DISCOVER_PROJECT_TTL_MS));
-  if (!Number.isFinite(numeric) || numeric <= 0) {
-    return DEFAULT_OPENCODE_DISCOVER_PROJECT_TTL_MS;
-  }
-  return Math.floor(numeric);
-}
-
-function isOpenCodeDiscoverProjectsEnabled(env = process.env, params = {}) {
-  return resolveDiscoverProjectsEnabled(env, params);
-}
-
-function maybeDiscoverOpenCodeProjects({
-  opencodeProvider,
-  projectRegistry,
-  homeDir,
-  env = process.env,
-  params = {},
-  logPrefix = "[remodex]",
-} = {}) {
-  if (!resolveDiscoverProjectsEnabled(env, params)) {
-    return false;
-  }
-  if (isOpenCodeRuntimeDisabled(env)) {
-    return false;
-  }
-  if (!opencodeProvider || !projectRegistry) {
-    return false;
-  }
-
-  const ttlMs = readDiscoverProjectTtlMs(env);
-  const now = Date.now();
-  if (now - lastOpenCodeProjectDiscoverAt < ttlMs) {
-    return false;
-  }
-  if (openCodeProjectDiscoverInFlight) {
-    return false;
-  }
-
-  lastOpenCodeProjectDiscoverAt = now;
-  openCodeProjectDiscoverInFlight = true;
-
-  console.log(
-    JSON.stringify({
-      event: "opencode_discover_on_list",
-      ttlMs,
-    }),
-  );
-
-  void projectDiscoverFromOpenCode({}, { homeDir, opencodeProvider, projectRegistry })
-    .catch((error) => {
-      console.warn(
-        `${logPrefix} OpenCode project discover on thread/list failed: ${error?.message || error}`,
-      );
-    })
-    .finally(() => {
-      openCodeProjectDiscoverInFlight = false;
-    });
-
-  return true;
-}
-
 function readModelListBudgetMs(env, key, fallbackMs) {
   const numeric = Number(readString(env?.[key]));
   if (!Number.isFinite(numeric) || numeric <= 0) {
@@ -892,11 +763,6 @@ function normalizeExplicitRequestedProvider(params = {}) {
   return isOpenCodeProvider(readModelProvider(params)) ? OPENCODE_PROVIDER_ID : CODEX_PROVIDER_ID;
 }
 
-function isDiscoveredExternalThreadId(threadId) {
-  const normalized = readString(threadId);
-  return Boolean(normalized && normalized.startsWith(DISCOVERED_THREAD_ID_PREFIX));
-}
-
 function providerForRequest(request, providers, ownershipStore = null) {
   const params = request.params || {};
   const providerFromRequest = readModelProvider(params);
@@ -975,6 +841,17 @@ function providerForRequest(request, providers, ownershipStore = null) {
   if (
     !resolved &&
     isOpenCodeRuntimeEnabled(process.env) &&
+    readString(threadId).startsWith("opencode-thread-")
+  ) {
+    const opencodeProvider = providers.find((provider) => provider.id === OPENCODE_PROVIDER_ID);
+    if (opencodeProvider?.ownsThread?.(threadId)) {
+      resolved = opencodeProvider;
+      matchReason = "opencode_thread_session_mapping";
+    }
+  }
+  if (
+    !resolved &&
+    isOpenCodeRuntimeEnabled(process.env) &&
     isDiscoveredExternalThreadId(threadId)
   ) {
     resolved = providers.find((provider) => provider.id === OPENCODE_PROVIDER_ID) || null;
@@ -993,183 +870,6 @@ function providerForRequest(request, providers, ownershipStore = null) {
     }),
   );
   return resolved;
-}
-
-function mergeModelListResult(codexResult, providerModels, extras = {}) {
-  const result = codexResult && typeof codexResult === "object" ? codexResult : {};
-  const key = firstArrayKey(result, ["items", "data", "models"]) || "items";
-  const codexModels = Array.isArray(result[key]) ? result[key] : [];
-  const normalizedCodexModels = codexModels.map((model) => {
-    const capabilities = resolveModelCapabilities(CODEX_PROVIDER_ID, model);
-    return {
-      ...model,
-      modelProvider: CODEX_PROVIDER_ID,
-      provider: CODEX_PROVIDER_ID,
-      capabilities,
-    };
-  });
-  const normalizedProviderModels = providerModels.map((model) => {
-    const provider = readModelProvider(model) || OPENCODE_PROVIDER_ID;
-    return {
-      ...model,
-      modelProvider: provider,
-      provider,
-      capabilities: model.capabilities ?? resolveModelCapabilities(provider, model),
-    };
-  });
-
-  const merged = {
-    ...result,
-    [key]: [...normalizedCodexModels, ...normalizedProviderModels],
-  };
-  if (extras.opencode && typeof extras.opencode === "object") {
-    merged.opencode = extras.opencode;
-  }
-  return merged;
-}
-
-function mergeThreadListResult(codexResult, providerThreads, extras = {}) {
-  const result = codexResult && typeof codexResult === "object" ? codexResult : {};
-  const key = firstArrayKey(result, ["data", "items", "threads"]) || "data";
-  const codexThreads = Array.isArray(result[key]) ? result[key] : [];
-  const merged = dedupeMergedThreads(codexThreads, providerThreads).toSorted(
-    compareThreadsByUpdatedAt,
-  );
-  const mergedResult = {
-    ...result,
-    [key]: merged,
-  };
-  if (extras.meta && typeof extras.meta === "object") {
-    mergedResult.meta = {
-      ...(result.meta && typeof result.meta === "object" ? result.meta : {}),
-      ...extras.meta,
-    };
-  }
-  return mergedResult;
-}
-
-function readThreadSessionId(thread) {
-  const metadata = thread?.metadata;
-  const fromMetadata = metadata && typeof metadata === "object" ? metadata.sessionId : null;
-  const threadId = readThreadIdentifier(thread);
-  return (
-    readString(fromMetadata) ||
-    readString(thread?.sessionId) ||
-    parseDiscoveredThreadSessionId(threadId)
-  );
-}
-
-function isDiscoveredExternalThreadRow(thread) {
-  const metadata = thread?.metadata;
-  if (metadata && typeof metadata === "object" && metadata.discoveredExternally === true) {
-    return true;
-  }
-  const threadId = readThreadIdentifier(thread);
-  return Boolean(threadId && threadId.startsWith(DISCOVERED_THREAD_ID_PREFIX));
-}
-
-function parseDiscoveredThreadSessionId(threadId) {
-  const normalized = readString(threadId);
-  if (!normalized || !normalized.startsWith(DISCOVERED_THREAD_ID_PREFIX)) {
-    return "";
-  }
-  return readString(normalized.slice(DISCOVERED_THREAD_ID_PREFIX.length));
-}
-
-function threadMergePreferenceScore(thread) {
-  const threadId = readThreadIdentifier(thread);
-  let score = 0;
-  if (threadId && threadId.startsWith("opencode-thread-")) {
-    score += 4;
-  }
-  if (hasProviderThreadMetadata(thread)) {
-    score += 2;
-  }
-  if (isDiscoveredExternalThreadRow(thread)) {
-    score -= 8;
-  }
-  const updatedAt = Date.parse(readString(thread?.updatedAt) || "") || 0;
-  return { score, updatedAt };
-}
-
-function shouldReplaceThreadForSessionId(existingThread, candidateThread) {
-  const existing = threadMergePreferenceScore(existingThread);
-  const candidate = threadMergePreferenceScore(candidateThread);
-  if (candidate.score !== existing.score) {
-    return candidate.score > existing.score;
-  }
-  return candidate.updatedAt >= existing.updatedAt;
-}
-
-function dedupeMergedThreads(codexThreads, providerThreads) {
-  const mergedById = new Map();
-  const ownedSessionIds = new Set();
-  const sessionIdToThreadId = new Map();
-
-  const rememberOwnedSession = (thread) => {
-    const sessionId = readThreadSessionId(thread);
-    if (!sessionId || isDiscoveredExternalThreadRow(thread)) {
-      return;
-    }
-    ownedSessionIds.add(sessionId);
-    const threadId = readThreadIdentifier(thread);
-    if (threadId) {
-      sessionIdToThreadId.set(sessionId, threadId);
-    }
-  };
-
-  const upsertThread = (thread) => {
-    const threadId = readThreadIdentifier(thread);
-    if (!threadId) {
-      return;
-    }
-    const sessionId = readThreadSessionId(thread);
-    if (sessionId && !isDiscoveredExternalThreadRow(thread)) {
-      const existingThreadId = sessionIdToThreadId.get(sessionId);
-      if (existingThreadId && existingThreadId !== threadId) {
-        const existingThread = mergedById.get(existingThreadId);
-        if (existingThread && !shouldReplaceThreadForSessionId(existingThread, thread)) {
-          return;
-        }
-        mergedById.delete(existingThreadId);
-      }
-      sessionIdToThreadId.set(sessionId, threadId);
-      ownedSessionIds.add(sessionId);
-    }
-    if (!mergedById.has(threadId) || hasProviderThreadMetadata(thread)) {
-      mergedById.set(threadId, thread);
-    }
-  };
-
-  for (const thread of codexThreads) {
-    upsertThread(thread);
-    rememberOwnedSession(thread);
-  }
-
-  for (const thread of providerThreads) {
-    rememberOwnedSession(thread);
-  }
-
-  for (const thread of providerThreads) {
-    const threadId = readThreadIdentifier(thread);
-    if (!threadId) {
-      continue;
-    }
-
-    if (isDiscoveredExternalThreadRow(thread)) {
-      const sessionId = readThreadSessionId(thread);
-      if (sessionId && ownedSessionIds.has(sessionId)) {
-        continue;
-      }
-    }
-
-    upsertThread(thread);
-  }
-  return Array.from(mergedById.values());
-}
-
-function hasProviderThreadMetadata(thread) {
-  return readModelProvider(thread) !== CODEX_PROVIDER_ID;
 }
 
 function threadsFromListResult(result) {
@@ -1207,51 +907,6 @@ function rememberProjectFromRequest(projectRegistry, request, metadata = {}) {
   }
 }
 
-function stripRuntimeProviderFieldsForCodex(rawMessage) {
-  const parsed = safeParseJSON(rawMessage);
-  if (
-    !parsed ||
-    !parsed.params ||
-    typeof parsed.params !== "object" ||
-    Array.isArray(parsed.params)
-  ) {
-    return rawMessage;
-  }
-
-  const params = stripProviderFieldsFromObject(parsed.params);
-  return JSON.stringify({
-    ...parsed,
-    params,
-  });
-}
-
-function stripProviderFieldsFromObject(value) {
-  const result = { ...value };
-  delete result.modelProvider;
-  delete result.model_provider;
-  delete result.provider;
-  delete result.runtimeProvider;
-  delete result.runtime_provider;
-  delete result.harness;
-
-  for (const key of ["collaborationMode", "collaboration_mode"]) {
-    if (!result[key] || typeof result[key] !== "object" || Array.isArray(result[key])) {
-      continue;
-    }
-    const collaborationMode = { ...result[key] };
-    if (collaborationMode.settings && typeof collaborationMode.settings === "object") {
-      collaborationMode.settings = stripProviderFieldsFromObject(collaborationMode.settings);
-    }
-    result[key] = collaborationMode;
-  }
-
-  return result;
-}
-
-function firstArrayKey(value, keys) {
-  return keys.find((key) => Array.isArray(value?.[key])) || "";
-}
-
 function hasCursor(params = {}) {
   const cursor = params.cursor ?? params.nextCursor ?? params.next_cursor;
   return cursor != null && cursor !== "" && cursor !== false;
@@ -1273,10 +928,6 @@ function hasExplicitProviderField(params = {}) {
   }
 
   return false;
-}
-
-function readThreadIdentifier(thread = {}) {
-  return resolvedParam(thread, 'id', 'threadId', 'thread_id');
 }
 
 function createJsonRpcErrorResponse(requestId, error, defaultErrorCode) {
@@ -1320,19 +971,6 @@ function resolveProviders({
   ];
 }
 
-function buildCatalogOpenCodePlaceholderModels() {
-  const model = buildOpenCodeModelOption(DEFAULT_OPENCODE_MODEL, { isDefault: true });
-  if (!model) {
-    return [];
-  }
-  return [
-    {
-      ...model,
-      capabilities: resolveModelCapabilities(OPENCODE_PROVIDER_ID, model),
-    },
-  ];
-}
-
 function providerModelsForModelList(providerModels, catalogOpenCode, opencodeMeta = null) {
   const opencodeModels = providerModels.filter(
     (model) => readModelProvider(model) === OPENCODE_PROVIDER_ID,
@@ -1348,181 +986,6 @@ function providerModelsForModelList(providerModels, catalogOpenCode, opencodeMet
       ? buildCatalogOpenCodePlaceholderModels()
       : [];
   return [...cappedOpenCode, ...placeholderModels];
-}
-
-function readOpenCodeCatalogAvailability(opencodeProvider) {
-  if (!opencodeProvider || typeof opencodeProvider.getCatalogAvailability !== "function") {
-    return null;
-  }
-  return opencodeProvider.getCatalogAvailability();
-}
-
-function catalogOpenCodeSnapshotForModelList(providers, env) {
-  if (isOpenCodeRuntimeDisabled(env)) {
-    return null;
-  }
-  const opencodeProvider = providers.find((provider) => provider.id === OPENCODE_PROVIDER_ID);
-  if (!opencodeProvider) {
-    return null;
-  }
-  const availability = readOpenCodeCatalogAvailability(opencodeProvider);
-  return {
-    id: OPENCODE_PROVIDER_ID,
-    enabled: !availability?.unavailableReason,
-  };
-}
-
-async function buildCatalogOpenCodeRuntime(providers, env, sendRuntimeMessage = null) {
-  if (isOpenCodeRuntimeDisabled(env)) {
-    return null;
-  }
-
-  const opencodeProvider = providers.find((p) => p.id === OPENCODE_PROVIDER_ID);
-  const hasCommand = readString(env.REMODEX_OPENCODE_COMMAND) || "opencode";
-  let agents = [];
-  let unavailableReason = null;
-  let reasonCode = null;
-
-  const serverAvailability = readOpenCodeCatalogAvailability(opencodeProvider);
-  let runtimeStatus =
-    typeof opencodeProvider?.getRuntimeStatus === "function"
-      ? opencodeProvider.getRuntimeStatus(env)
-      : buildOpenCodeRuntimeStatus({
-          enabled: false,
-          command: hasCommand,
-          handoffEnvEnabled: resolveOpenCodeHandoffEnabled(env),
-        });
-
-  const inventoryBefore = Array.isArray(runtimeStatus?.providerInventory)
-    ? runtimeStatus.providerInventory
-    : [];
-  if (opencodeProvider?.listModels && shouldWarmProviderInventory(runtimeStatus, env)) {
-    const warmResult = await withModelListBudget(
-      opencodeProvider.listModels({ refreshProviders: true }),
-      opencodeModelListBudgetMs(env),
-      null,
-    );
-    runtimeStatus =
-      typeof opencodeProvider.getRuntimeStatus === "function"
-        ? opencodeProvider.getRuntimeStatus(env)
-        : runtimeStatus;
-    const inventoryAfter = Array.isArray(runtimeStatus?.providerInventory)
-      ? runtimeStatus.providerInventory
-      : [];
-    console.log(
-      JSON.stringify({
-        event: "runtime_catalog_warm_inventory",
-        authenticatedBefore: countAuthenticated(inventoryBefore),
-        authenticatedAfter: countAuthenticated(inventoryAfter),
-        timedOut: warmResult === null,
-      }),
-    );
-  }
-
-  const providersForLogos = Array.isArray(runtimeStatus?.providerInventory)
-    ? runtimeStatus.providerInventory
-    : [];
-  const logoProviders = buildProviderLogoCatalog(providersForLogos);
-  const catalogRevision = computeCatalogRevision(runtimeStatus);
-
-  if (serverAvailability?.unavailableReason) {
-    maybeEmitCatalogUpdated(runtimeStatus, sendRuntimeMessage);
-    return {
-      id: OPENCODE_PROVIDER_ID,
-      label: "OpenCode",
-      enabled: false,
-      showsBetaLabel: true,
-      unavailableReason: serverAvailability.unavailableReason,
-      reasonCode: serverAvailability.reasonCode || "opencode_server_failed",
-      agents: [],
-      capabilities: resolveOpenCodeCatalogCapabilities(env),
-      opencode: {
-        ...runtimeStatus,
-        enabled: false,
-        lastError: serverAvailability.unavailableReason,
-        version: readString(serverAvailability.version) || runtimeStatus.version,
-        catalogRevision,
-        providers: logoProviders,
-      },
-    };
-  }
-
-  if (opencodeProvider) {
-    try {
-      const raw = await withModelListBudget(
-        opencodeProvider.listAgents(),
-        RUNTIME_CATALOG_AGENT_BUDGET_MS,
-        null,
-      );
-      const mapped = (raw || []).map((a) => ({
-        id: readString(a?.id || a),
-        label: readString(a?.label || a?.name || a?.displayName || a?.id || a),
-      }));
-      if (mapped.length > 0) {
-        lastOpenCodeCatalogAgents = mapped;
-        agents = mapped;
-      } else if (lastOpenCodeCatalogAgents.length > 0) {
-        console.log(JSON.stringify({ event: "runtime_catalog_agents_stale" }));
-        agents = lastOpenCodeCatalogAgents;
-      } else if (
-        typeof opencodeProvider.getLastCatalogAgents === "function" &&
-        opencodeProvider.getLastCatalogAgents().length > 0
-      ) {
-        console.log(JSON.stringify({ event: "runtime_catalog_agents_stale" }));
-        agents = opencodeProvider.getLastCatalogAgents().map((a) => ({
-          id: readString(a?.id || a),
-          label: readString(a?.label || a?.name || a?.displayName || a?.id || a),
-        }));
-        lastOpenCodeCatalogAgents = agents;
-      } else {
-        agents = [];
-      }
-    } catch {
-      if (lastOpenCodeCatalogAgents.length > 0) {
-        console.log(JSON.stringify({ event: "runtime_catalog_agents_stale" }));
-        agents = lastOpenCodeCatalogAgents;
-      } else {
-        agents = [];
-        unavailableReason = "OpenCode agents could not be listed";
-      }
-    }
-  } else if (!hasCommand) {
-    unavailableReason = "OpenCode command is not configured on this Mac";
-  }
-
-  const enabled = Boolean(opencodeProvider) && !unavailableReason && Boolean(hasCommand);
-  if (!enabled && unavailableReason) {
-    reasonCode = "opencode_agents_unavailable";
-  } else if (!enabled) {
-    reasonCode = "opencode_not_enabled";
-  }
-
-  maybeEmitCatalogUpdated(runtimeStatus, sendRuntimeMessage);
-
-  return {
-    id: OPENCODE_PROVIDER_ID,
-    label: "OpenCode",
-    enabled,
-    showsBetaLabel: true,
-    unavailableReason: enabled
-      ? null
-      : unavailableReason || "OpenCode is not available on this Mac",
-    reasonCode,
-    agents,
-    capabilities: resolveOpenCodeCatalogCapabilities(env),
-    opencode: {
-      ...runtimeStatus,
-      enabled: enabled && runtimeStatus.enabled !== false,
-      lastError: enabled ? null : runtimeStatus.lastError || unavailableReason,
-      connectedProviders: runtimeStatus.connectedProviders || null,
-      providerDiscoveryReasonCode: runtimeStatus.providerDiscoveryReasonCode || null,
-      providerInventory: runtimeStatus.providerInventory || null,
-      authDiscoveryReasonCode: runtimeStatus.authDiscoveryReasonCode || null,
-      providerInventoryPartial: runtimeStatus.providerInventoryPartial ?? null,
-      catalogRevision,
-      providers: logoProviders,
-    },
-  };
 }
 
 function resolveSkillsListCwds(params = {}) {
@@ -1707,32 +1170,6 @@ function mergeSkillsBuckets(codexBuckets, opencodeBuckets) {
     cwd: bucket.cwd,
     skills: mergeSkillsAcrossProviders(bucket.skills || []),
   }));
-}
-
-async function buildRuntimeCatalog(providers, env, sendRuntimeMessage = null, getCodexLaunchState = null) {
-  const codexConnected = isCodexRuntimeConnected(getCodexLaunchState);
-  const runtimes = [
-    {
-      id: "codex",
-      label: "Codex",
-      enabled: codexConnected,
-      codexAvailable: codexConnected,
-      showsBetaLabel: false,
-      unavailableReason: codexConnected
-        ? null
-        : "Codex CLI is not available on this Mac. OpenCode is carrying the bridge.",
-      reasonCode: codexConnected ? null : "codex_degraded",
-      agents: [],
-      capabilities: { ...CODEX_CAPABILITIES },
-    },
-  ];
-
-  const opencodeRuntime = await buildCatalogOpenCodeRuntime(providers, env, sendRuntimeMessage);
-  if (opencodeRuntime) {
-    runtimes.push(opencodeRuntime);
-  }
-
-  return { runtimes };
 }
 
 module.exports = {

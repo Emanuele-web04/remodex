@@ -123,17 +123,36 @@ async function openOpenCodeDesktopApp({ bundleId, appPath, executor } = {}) {
   }
 }
 
-function buildInstructions(handoffMode, sessionSelected) {
-  if (handoffMode === "tui" && sessionSelected) {
-    return "Session selected in OpenCode TUI. Run `opencode` in Terminal if needed.";
+function buildBridgeHandoffCommand(payload = {}) {
+  const cwd = readString(payload.cwd);
+  if (!cwd) {
+    return "";
   }
-  if (handoffMode === "desktop_app" && !sessionSelected) {
-    return "OpenCode opened; use Terminal or in-app session picker.";
+  return `cd ${JSON.stringify(cwd)} && opencode`;
+}
+
+function buildInstructions(payload, { handoffMode, sessionSelected, desktopOpened } = {}) {
+  const lines = [];
+  if (sessionSelected) {
+    lines.push("Session selected in OpenCode TUI.");
+  } else if (desktopOpened || handoffMode === "desktop_app") {
+    lines.push("OpenCode is open on your Mac.");
+  } else {
+    lines.push("Continue this OpenCode session on your Mac.");
   }
-  if (handoffMode === "tui_only") {
-    return "Run `opencode` in Terminal and select the session from the TUI picker.";
+
+  const sessionId = readString(payload?.sessionId);
+  const cwd = readString(payload?.cwd);
+  if (sessionId) {
+    lines.push(`Session ID: ${sessionId}`);
   }
-  return "Continue this OpenCode session on your Mac.";
+  if (cwd) {
+    lines.push(`Folder: ${cwd}`);
+  }
+  if (!sessionSelected) {
+    lines.push("In Terminal, run `opencode` in that folder and select this session from the picker.");
+  }
+  return lines.join(" ");
 }
 
 async function continueOpenCodeHandoff(params = {}, options = {}) {
@@ -254,13 +273,17 @@ async function continueOpenCodeHandoff(params = {}, options = {}) {
     sessionSelected = false;
   }
 
+  const handoffStatus = sessionSelected ? "complete" : "partial";
+
   return {
     success: true,
     ...payload,
     handoffMode,
+    handoffStatus,
     sessionSelected,
     desktopAppInstalled: desktopDetection.installed,
-    instructions: buildInstructions(handoffMode, sessionSelected),
+    instructions: buildInstructions(payload, { handoffMode, sessionSelected, desktopOpened }),
+    bridgeHandoffCommand: buildBridgeHandoffCommand(payload),
   };
 }
 
@@ -274,6 +297,8 @@ function defaultExecutor(command, args, options) {
 module.exports = {
   continueOpenCodeHandoff,
   buildHandoffPayload,
+  buildBridgeHandoffCommand,
+  buildInstructions,
   isOpenCodeHandoffEnabled,
   detectOpenCodeApp,
   isValidDesktopThreadId,

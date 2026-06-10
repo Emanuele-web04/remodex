@@ -16,6 +16,7 @@ const { resolveDefaultOpenCodeAgent } = require("./opencode-runtime-policy");
 const CODEX_PROVIDER_ID = "codex";
 const OPENCODE_PROVIDER_ID = "opencode";
 const DEFAULT_OPENCODE_MODEL = "opencode/gpt-5.5";
+const DISCOVERED_THREAD_ID_PREFIX = "opencode-session-";
 
 function normalizeRuntimeProvider(value) {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -173,6 +174,7 @@ function publicThread(thread) {
     agent: thread.agent || "",
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
+    ...(thread.archived === true ? { archived: true } : {}),
     metadata,
   };
 }
@@ -652,9 +654,23 @@ function readThreadId(params = {}) {
   return resolvedParam(params, 'threadId', 'thread_id', 'id');
 }
 
+function parseDiscoveredThreadSessionId(threadId) {
+  const normalized = readString(threadId);
+  if (!normalized || !normalized.startsWith(DISCOVERED_THREAD_ID_PREFIX)) {
+    return "";
+  }
+  return readString(normalized.slice(DISCOVERED_THREAD_ID_PREFIX.length));
+}
+
+function isDiscoveredExternalThreadId(threadId) {
+  const normalized = readString(threadId);
+  return Boolean(normalized && normalized.startsWith(DISCOVERED_THREAD_ID_PREFIX));
+}
+
 module.exports = {
   CODEX_PROVIDER_ID,
   DEFAULT_OPENCODE_MODEL,
+  DISCOVERED_THREAD_ID_PREFIX,
   OPENCODE_PROVIDER_ID,
   appendNonEmpty,
   boundedPositiveInteger,
@@ -667,6 +683,7 @@ module.exports = {
   skillItemToPromptPart,
   compareThreadsByUpdatedAt,
   displayNameForOpenCodeModel,
+  isDiscoveredExternalThreadId,
   isCodexProvider,
   isOpenCodeProvider,
   messagesToTurns,
@@ -676,6 +693,7 @@ module.exports = {
   normalizeOpenCodeModel,
   normalizeOpenCodeModelReference,
   normalizeRuntimeProvider,
+  parseDiscoveredThreadSessionId,
   parseOpenCodeModelsOutput,
   publicThread,
   sessionHasDiscoverySignal,

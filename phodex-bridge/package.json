@@ -15,7 +15,7 @@
     "start": "node ./bin/remodex.js up",
     "test": "node -r ./test/test-env.js --test --test-force-exit ./test/*.test.js",
     "test:coverage": "node -r ./test/test-env.js --test --test-force-exit --experimental-test-coverage --test-coverage-exclude=test/** --test-coverage-exclude=bin/** ./test/*.test.js",
-    "test:opencode": "REMODEX_DISABLE_OPENCODE= node -r ./test/test-env.js --test --test-force-exit ./test/opencode-*.test.js ./test/runtime-provider-router.test.js ./test/provider-capabilities.test.js ./test/opencode-network-failures.test.js ./test/opencode-concurrency.test.js",
+    "test:opencode": "REMODEX_DISABLE_OPENCODE= node -r ./test/test-env.js --test --test-force-exit ./test/opencode-*.test.js ./test/runtime-merge.test.js ./test/runtime-catalog.test.js ./test/runtime-routing.test.js ./test/provider-capabilities.test.js ./test/opencode-network-failures.test.js ./test/opencode-concurrency.test.js",
     "test:integration": "node -r ./test/test-integration-env.js --test --test-force-exit ./test/opencode-integration.test.js",
     "postinstall": "node ./src/bootstrap-codex-cli.js",
     "postinstall:check-sdk": "node -e \"require.resolve('@opencode-ai/sdk/v2')\"",

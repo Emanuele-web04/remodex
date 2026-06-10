@@ -1015,6 +1015,8 @@ final class CodexService {
     }
     // Owns the scarce App Store review prompt budget for successful in-app runs.
     @ObservationIgnored let appReviewPromptCoordinator = AppReviewPromptCoordinator()
+    // Owns runtime catalog fetch, model/list loading, retry state, and provider capability lookups.
+    @ObservationIgnored lazy var runtimeCoordinator = RuntimeCoordinator(codex: self)
     // Interactive SSH terminal state is owned on-device so it can bootstrap a Mac before the bridge runs.
     var terminalSnapshot: RemodexTerminalSnapshot = .idle {
         didSet { terminalState.terminalSnapshot = terminalSnapshot }

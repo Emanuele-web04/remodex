@@ -420,3 +420,66 @@ test("turn/start rehydrates from persisted session after provider restart", asyn
   await new Promise((resolve) => setImmediate(resolve));
   await provider2.shutdown();
 });
+
+test("archived OpenCode thread stays archived after provider restart", async () => {
+  const fs = fakeFs();
+  const sessionStore = createOpenCodeSessionStore({
+    storagePath: "/tmp/rehydrate-archived.json",
+    fsImpl: fs,
+  });
+  const ownershipStore = fakeOwnershipStore();
+
+  const provider1 = makeProvider({
+    sessionStore,
+    ownershipStore,
+    clientFactory: () => ({
+      ...fakeClient(),
+      subscribeToEvents: (handler) => {
+        setImmediate(() => {
+          handler("turn/completed", { status: "completed" });
+        });
+        return () => {};
+      },
+    }),
+  });
+  const started = await provider1.handleRequest({
+    method: "thread/start",
+    params: { cwd: REHYDRATE_PROJECT },
+  });
+  await provider1.handleRequest({
+    method: "turn/start",
+    params: { threadId: started.thread.id, input: "archive me" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await provider1.handleRequest({
+    method: "thread/archive",
+    params: { threadId: started.thread.id },
+  });
+  await provider1.shutdown();
+
+  const archivedEntry = sessionStore.getEntry(started.thread.id);
+  assert.equal(archivedEntry?.archived, true);
+
+  const provider2 = makeProvider({
+    sessionStore,
+    ownershipStore,
+    clientFactory: () =>
+      fakeClient({
+        getMessagesImpl: async () => [
+          {
+            id: "msg-archive",
+            role: "user",
+            content: [{ type: "text", text: "archive me" }],
+          },
+        ],
+      }),
+  });
+  const listed = await provider2.listThreads();
+  const ids = (listed.data || []).map((thread) => thread.id);
+  assert.ok(!ids.includes(started.thread.id));
+
+  const archivedList = await provider2.listThreads({ includeArchived: true });
+  const archivedThread = (archivedList.data || []).find((thread) => thread.id === started.thread.id);
+  assert.equal(archivedThread?.archived, true);
+  await provider2.shutdown();
+});

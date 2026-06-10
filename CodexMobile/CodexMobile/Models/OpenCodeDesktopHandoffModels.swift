@@ -54,9 +54,11 @@ struct OpenCodeDesktopHandoffResult: Equatable, Sendable {
     let agent: String
     let title: String
     let handoffMode: String
+    let handoffStatus: String
     let sessionSelected: Bool
     let desktopAppInstalled: Bool
     let instructions: String
+    let bridgeHandoffCommand: String
 
     init(from json: [String: JSONValue]) {
         success = json["success"]?.boolValue ?? false
@@ -67,9 +69,15 @@ struct OpenCodeDesktopHandoffResult: Equatable, Sendable {
         agent = json["agent"]?.stringValue ?? ""
         title = json["title"]?.stringValue ?? ""
         handoffMode = json["handoffMode"]?.stringValue ?? ""
+        handoffStatus = json["handoffStatus"]?.stringValue ?? ""
         sessionSelected = json["sessionSelected"]?.boolValue ?? false
         desktopAppInstalled = json["desktopAppInstalled"]?.boolValue ?? false
         instructions = json["instructions"]?.stringValue ?? ""
+        bridgeHandoffCommand = json["bridgeHandoffCommand"]?.stringValue ?? ""
+    }
+
+    var isPartialHandoff: Bool {
+        handoffStatus == "partial" || (!sessionSelected && success)
     }
 
     var userFacingSummary: String {

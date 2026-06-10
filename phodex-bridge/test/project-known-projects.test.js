@@ -3,6 +3,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const {
@@ -12,9 +13,9 @@ const {
 } = require("../src/project-handler");
 
 test("rememberKnownProject and knownProjects round-trip", async () => {
-  const homeDir = os.homedir();
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-known-projects-"));
   const registry = createKnownProjectsRegistry();
-  const projectDir = path.join(homeDir, "Documents");
+  const projectDir = fs.mkdtempSync(path.join(homeDir, "project-"));
 
   const remembered = await projectRememberKnownProject(
     { path: projectDir, name: "Docs", provider: "opencode" },
