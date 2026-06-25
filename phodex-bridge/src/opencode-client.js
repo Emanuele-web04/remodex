@@ -59,16 +59,16 @@ function validateLocalhostBaseUrl(baseUrl) {
   try {
     const url = new URL(baseUrl);
     const hostname = url.hostname.toLowerCase();
-    
+
     // Allow localhost, 127.0.0.1, and ::1 (IPv6 localhost)
     const allowedHostnames = ['localhost', '127.0.0.1', '::1'];
-    
+
     if (!allowedHostnames.includes(hostname)) {
       throw new Error(
         `OpenCode baseUrl must be localhost or 127.0.0.1 for security. Received: ${hostname}`
       );
     }
-    
+
     // Ensure HTTPS or HTTP for localhost (HTTP is acceptable for localhost)
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
       throw new Error(
@@ -109,7 +109,7 @@ async function createOpenCodeClient({
   }
 
   const resolvedBaseUrl = readString(baseUrl);
-  
+
   // Security: Validate that baseUrl is localhost only
   // Allow override for testing with REMODEX_OPENCODE_ALLOW_REMOTE_BASEURL=1
   if (process.env.REMODEX_OPENCODE_ALLOW_REMOTE_BASEURL !== '1') {

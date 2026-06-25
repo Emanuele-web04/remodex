@@ -3,13 +3,13 @@ const { readThreadId } = require("./opencode-models");
 const { ERROR_CODES, SENSITIVE_PERMISSION_ARG_KEYS, formatStructuredError, resolveOpenCodeTurnWatchdogMs, threadNotFoundError } = require("./opencode-provider-shared");
 
 function createOpenCodePermissions(ctx) {
-  
+
   function isOpenCodePermissionsUIEnabled(currentEnv = ctx.env) {
     const raw = readString(currentEnv?.REMODEX_OPENCODE_PERMISSIONS_UI);
     return raw !== "0" && raw?.toLowerCase() !== "false";
   }
 
-  
+
   function redactPermissionArgs(args) {
     if (!args || typeof args !== "object") {
       return "";
@@ -28,7 +28,7 @@ function createOpenCodePermissions(ctx) {
     return summary;
   }
 
-  
+
   function clearPermissionWatchdog(entry) {
     if (entry?.watchdog) {
       clearTimeout(entry.watchdog);
@@ -36,7 +36,7 @@ function createOpenCodePermissions(ctx) {
     }
   }
 
-  
+
   function clearAllPendingPermissions() {
     for (const pending of ctx.pendingPermissions.values()) {
       ctx.clearPermissionWatchdog(pending);
@@ -44,7 +44,7 @@ function createOpenCodePermissions(ctx) {
     ctx.pendingPermissions.clear();
   }
 
-  
+
   function evictOldestPendingPermission() {
     const oldestPermissionId = ctx.pendingPermissions.keys().next().value;
     if (!oldestPermissionId) {
@@ -75,7 +75,7 @@ function createOpenCodePermissions(ctx) {
     return evicted;
   }
 
-  
+
   function armPermissionWatchdog(entry, payload) {
     ctx.clearPermissionWatchdog(entry);
     entry.watchdog = setTimeout(() => {
@@ -110,7 +110,7 @@ function createOpenCodePermissions(ctx) {
     }
   }
 
-  
+
   function handlePermissionRequestEvent(active, params) {
     const permissionId = readString(params.permissionId || params.permission_id || params.requestId);
     const tool = readString(params.tool || params.toolName) || "tool";
@@ -185,7 +185,7 @@ function createOpenCodePermissions(ctx) {
     ctx.armPermissionWatchdog(entry, payload);
   }
 
-  
+
   function testSeedPendingPermission(permissionId, fields = {}) {
     ctx.pendingPermissions.set(permissionId, {
       permissionId,
@@ -198,7 +198,7 @@ function createOpenCodePermissions(ctx) {
     });
   }
 
-  
+
   function getObservabilityMetrics() {
     return {
       sseReconnectCount: ctx.sseReconnectCount,
@@ -207,7 +207,7 @@ function createOpenCodePermissions(ctx) {
     };
   }
 
-  
+
   async function permissionReply(request) {
     const params = request.params || {};
     const permissionId = readString(

@@ -32,7 +32,7 @@ const {
 } = require("./opencode-provider-shared");
 
 function createOpenCodeSessionDiscovery(ctx) {
-  
+
   function collectOwnedSessionIds() {
     const ids = new Set();
     for (const [, entry] of ctx.sessions.entries()) {
@@ -50,7 +50,7 @@ function createOpenCodeSessionDiscovery(ctx) {
     return ids;
   }
 
-  
+
   function filterDiscoveredRows(rows) {
     const ownedSessionIds = ctx.collectOwnedSessionIds();
     return rows.filter((row) => {
@@ -59,7 +59,7 @@ function createOpenCodeSessionDiscovery(ctx) {
     });
   }
 
-  
+
   function removeDiscoveredRowFromCache(sessionId) {
     const normalizedSessionId = readString(sessionId);
     if (!normalizedSessionId || ctx.discoveredSessionsCache.rows.length === 0) {
@@ -73,7 +73,7 @@ function createOpenCodeSessionDiscovery(ctx) {
     };
   }
 
-  
+
   function scheduleAsyncDiscoverRefresh() {
     if (ctx.discoverRefreshInFlight) {
       return;
@@ -84,7 +84,7 @@ function createOpenCodeSessionDiscovery(ctx) {
     }).catch(() => {});
   }
 
-  
+
   async function ensureStartedWithDiscoverCap() {
     const result = await ctx.ensureStartedWithCap({
       capMs: resolveEnsureStartedListCapMs(ctx.env),
@@ -101,7 +101,7 @@ function createOpenCodeSessionDiscovery(ctx) {
     return result.started;
   }
 
-  
+
   async function refreshDiscoveredSessionsCache({ force = false, background = false } = {}) {
     const cap = resolveDiscoverSessionsCap(ctx.env);
     const ttlMs = resolveDiscoverSessionsTtlMs(ctx.env);
@@ -189,12 +189,12 @@ function createOpenCodeSessionDiscovery(ctx) {
     return ctx.discoverRefreshInFlight;
   }
 
-  
+
   async function discoverExternalSessions() {
     return ctx.refreshDiscoveredSessionsCache();
   }
 
-  
+
   async function internalAdoptDiscoveredSession(threadId) {
     const normalizedThreadId = readThreadId({ threadId });
     const sessionId = parseDiscoveredThreadSessionId(normalizedThreadId);

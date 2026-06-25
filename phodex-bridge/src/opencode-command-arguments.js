@@ -4,7 +4,7 @@
 // Layer: Domain helper
 // Exports: deriveRequiresArguments, extractNumericPlaceholderKeys,
 //          usesArgumentsOnlyPlaceholder, normalizeArgumentFields,
-//          serializeCommandArguments
+//          serializeCommandArguments, mapSdkCommandToBridge
 // Depends on: ./normalize (readString)
 
 const { readString } = require("./normalize");

@@ -1,10 +1,8 @@
-// FILE: opencode-provider.js
-// Purpose: Adapts OpenCode SDK (opencode serve + @opencode-ai/sdk/v2) to Remodex
-//          provider-aware thread/turn RPCs. Manages server lifecycle, session
-//          mapping, event streaming, and permission bridging.
-// Layer: Bridge runtime provider
-// Exports: createOpenCodeProvider
-// Depends on: ./opencode-server, ./opencode-client, ./opencode-models, ./provider-capabilities, ./thread-ownership-store
+// FILE: opencode-provider-shared.js
+// Purpose: Shared constants, env resolvers, error factories, and helpers used by
+//          opencode-provider.js and opencode-thread-ops.js / opencode-turn-stream.js.
+// Layer: Bridge runtime shared helpers
+// Depends on: ./normalize, ./opencode-models, ./opencode-server, ./opencode-client, ./project-path-policy
 
 const path = require("path");
 const { readString, resolvedParam } = require("./normalize");

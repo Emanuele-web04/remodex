@@ -26,7 +26,7 @@ const {
 } = require("./opencode-provider-shared");
 
 function createOpenCodeThreadOps(ctx) {
-  
+
   async function listThreads(params = {}) {
     const limit = boundedPositiveInteger(params.limit, 50);
     const includeArchived = params.includeArchived === true || params.include_archived === true;
@@ -353,7 +353,7 @@ function createOpenCodeThreadOps(ctx) {
     };
   }
 
-  
+
   async function threadStart(request) {
     const params = request.params || {};
     const now = new Date().toISOString();
@@ -391,7 +391,7 @@ function createOpenCodeThreadOps(ctx) {
     return { thread: publicThread(thread) };
   }
 
-  
+
   async function threadRead(request) {
     const params = request.params || {};
     const threadId = readThreadId(params);
@@ -409,7 +409,7 @@ function createOpenCodeThreadOps(ctx) {
     return { thread: responseThread };
   }
 
-  
+
   async function threadTurnsList(request) {
     const params = request.params || {};
     const threadId = readThreadId(params);
@@ -444,7 +444,7 @@ function createOpenCodeThreadOps(ctx) {
     return paginateTurnList(turns, { limit, sortDirection, cursor });
   }
 
-  
+
   async function threadNameSet(request) {
     const params = request.params || {};
     const thread = await ctx.requireThread(readThreadId(params));
@@ -466,7 +466,7 @@ function createOpenCodeThreadOps(ctx) {
     return { thread: publicValue };
   }
 
-  
+
   async function threadArchive(request, archived) {
     const threadId = readThreadId(request.params);
     const inMemory = ctx.threads.get(threadId);
@@ -497,7 +497,7 @@ function createOpenCodeThreadOps(ctx) {
     throw threadNotFoundError(threadId);
   }
 
-  
+
   async function threadFork(request) {
     const params = request.params || {};
     const threadId = readThreadId(params);

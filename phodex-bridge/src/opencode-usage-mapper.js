@@ -1,7 +1,8 @@
 // FILE: opencode-usage-mapper.js
-// Purpose: Maps OpenCode session token counters into Remodex context-window usage shape.
+// Purpose: Maps OpenCode session token counters into Remodex context-window usage
+//          shape, and detects provider auth-error payloads for the auth-error notifier.
 // Layer: Bridge helper
-// Exports: mapOpenCodeSessionToContextUsage, resolveOpenCodeSessionPayload
+// Exports: mapOpenCodeSessionToContextUsage, resolveOpenCodeSessionPayload, isProviderAuthErrorPayload
 // Depends on: ./normalize
 
 const { readString } = require("./normalize");

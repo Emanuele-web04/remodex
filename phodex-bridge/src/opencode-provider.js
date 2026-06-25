@@ -135,7 +135,7 @@ function createOpenCodeProvider({
     limitPerMin: resolveValidationRpcLimitPerMin(env),
   });
 
-  
+
   function consumeValidationRpcToken(cost = 1) {
     if (ctx.validationRpcTokenBucket.tryConsume(cost)) {
       return true;
@@ -149,7 +149,7 @@ function createOpenCodeProvider({
     return false;
   }
 
-  
+
   function readSessionValidationCache(sessionId) {
     const normalizedSessionId = readString(sessionId);
     if (!normalizedSessionId) {
@@ -167,7 +167,7 @@ function createOpenCodeProvider({
     return entry;
   }
 
-  
+
   function writeSessionValidationCache(sessionId, patch = {}) {
     const normalizedSessionId = readString(sessionId);
     if (!normalizedSessionId) {
@@ -181,7 +181,7 @@ function createOpenCodeProvider({
     });
   }
 
-  
+
   function pruneCompletedTurnIds(now = Date.now()) {
     for (const [turnId, completedAt] of ctx.completedTurnIds.entries()) {
       if (now - completedAt >= ctx.COMPLETED_TURN_IDS_TTL_MS) {
@@ -190,7 +190,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   function removeOrphanOpenCodeThread(threadId, reason = "opencode_ownership_orphan_removed") {
     const removedOwnership = ctx.ownership.removeOwnership(threadId);
     const removedSession = ctx.sessions.remove(threadId);
@@ -208,7 +208,7 @@ function createOpenCodeProvider({
     return { removedOwnership: Boolean(removedOwnership), removedSession: Boolean(removedSession) };
   }
 
-  
+
   function ownershipStubFromStore(threadId, storeEntry) {
     const updatedAt = readString(storeEntry?.updatedAt) || new Date().toISOString();
     const cwd = readString(storeEntry?.cwd) || "";
@@ -250,7 +250,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   async function pruneOpenCodeStorageMismatch({
     maxSessionValidations = STARTUP_PRUNE_SESSION_VALIDATE_CAP,
   } = {}) {
@@ -320,7 +320,7 @@ function createOpenCodeProvider({
     };
   }
 
-  
+
   function scheduleStartupPrune() {
     const fullPass = readString(ctx.env.REMODEX_PRUNE_OPENCODE_OWNERSHIP) === "1";
     const maxSessionValidations = fullPass
@@ -343,7 +343,7 @@ function createOpenCodeProvider({
     return Promise.resolve();
   }
 
-  
+
   function scheduleAttachmentCleanup() {
     if (!ctx.attachmentStore) {
       return 0;
@@ -361,7 +361,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   async function ensureStarted() {
     if (ctx.healthy && ctx.client) {
       ctx.scheduleAttachmentCleanup();
@@ -399,7 +399,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   async function startServer() {
     if (Date.now() - ctx.restartWindowStart > HEALTH_RESTART_WINDOW_MS) {
       ctx.restartCount = 0;
@@ -451,7 +451,7 @@ function createOpenCodeProvider({
     ctx.scheduleAttachmentCleanup();
   }
 
-  
+
   async function refreshAuthConfigured({ forceInventory = false } = {}) {
     if (!ctx.client) {
       ctx.cachedAuthConfigured = null;
@@ -500,7 +500,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   function persistSessionRecord(thread) {
     if (!thread?.id || !thread.sessionId) return;
     ctx.sessions.set(thread.id, thread.sessionId, {
@@ -512,7 +512,7 @@ function createOpenCodeProvider({
     });
   }
 
-  
+
   async function rehydrateThreadIfNeeded(threadId) {
     const normalizedThreadId = readThreadId({ threadId });
     if (!normalizedThreadId) {
@@ -585,7 +585,7 @@ function createOpenCodeProvider({
     return thread;
   }
 
-  
+
   async function requireThread(threadId) {
     const normalizedThreadId = readThreadId({ threadId });
     const existing = ctx.threads.get(normalizedThreadId);
@@ -595,7 +595,7 @@ function createOpenCodeProvider({
     return ctx.rehydrateThreadIfNeeded(normalizedThreadId);
   }
 
-  
+
   async function ensureThreadSession(thread) {
     if (readString(thread?.sessionId)) {
       return thread;
@@ -603,7 +603,7 @@ function createOpenCodeProvider({
     return ctx.rehydrateThreadIfNeeded(thread.id);
   }
 
-  
+
   function markUserStartedInProcess(thread) {
     if (!thread) {
       return;
@@ -611,7 +611,7 @@ function createOpenCodeProvider({
     thread.userStartedInProcess = true;
   }
 
-  
+
   function threadHasActiveTurn(threadId) {
     const normalizedThreadId = readThreadId({ threadId });
     for (const active of ctx.activeTurns.values()) {
@@ -622,7 +622,7 @@ function createOpenCodeProvider({
     return false;
   }
 
-  
+
   async function validateThreadHasActivity(threadId, sessionId) {
     if (ctx.threadHasActiveTurn(threadId)) {
       return true;
@@ -649,7 +649,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   function ownsThread(threadId) {
     const normalized = readString(threadId);
     return (
@@ -659,7 +659,7 @@ function createOpenCodeProvider({
     );
   }
 
-  
+
   function syncAuthAndMetaFromListResult(result) {
     if (!result || typeof result !== "object") {
       return;
@@ -695,7 +695,7 @@ function createOpenCodeProvider({
     ctx.cachedAuthConfigured = false;
   }
 
-  
+
   async function resolveAuthCredentialBundle() {
     const { readAuthProviderIds } = require("./opencode-auth-providers");
     const fromFile = readAuthProviderIds();
@@ -728,7 +728,7 @@ function createOpenCodeProvider({
     return { ids, authDiscoveryReasonCode, providerInventoryPartial };
   }
 
-  
+
   async function listModels(options = {}) {
     try {
       await ctx.ensureStarted();
@@ -792,7 +792,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   async function listAgents() {
     try {
       await ctx.ensureStarted();
@@ -804,7 +804,7 @@ function createOpenCodeProvider({
     return agents;
   }
 
-  
+
   async function listCommands(directory) {
     const staticBuiltins = buildStaticSlashCommands();
     try {
@@ -820,7 +820,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   async function listSkills(directory) {
     try {
       await ctx.ensureStarted();
@@ -830,7 +830,7 @@ function createOpenCodeProvider({
     return ctx.client.listSkills(directory);
   }
 
-  
+
   async function ensureStartedWithCap({ onTimeout, capMs } = {}) {
     const resolvedCapMs =
       Number.isFinite(capMs) && capMs > 0
@@ -867,12 +867,12 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   function handleApplicationResponse() {
     return false;
   }
 
-  
+
   async function shutdown() {
     ctx.stopIdleTimer();
     for (const [, unsubscribe] of ctx.eventUnsubscribers) {
@@ -888,7 +888,7 @@ function createOpenCodeProvider({
     ctx.healthy = false;
   }
 
-  
+
   function resetIdleTimer() {
     ctx.stopIdleTimer();
     ctx.idleTimer = setTimeout(() => {
@@ -910,7 +910,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   function stopIdleTimer() {
     if (ctx.idleTimer) {
       clearTimeout(ctx.idleTimer);
@@ -918,7 +918,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   async function restoreSessions() {
     for (const [threadId, entry] of ctx.sessions.entries()) {
       const sessionId =
@@ -948,7 +948,7 @@ function createOpenCodeProvider({
     }
   }
 
-  
+
   function rememberThreadProject(thread, source) {
     if (!ctx.projectRegistry || !thread?.hasProjectCwd) return;
     try {
@@ -960,14 +960,14 @@ function createOpenCodeProvider({
     } catch {}
   }
 
-  
+
   function emit(method, params) {
     ctx.sendApplicationMessage?.(
       JSON.stringify({ method, params: removeUndefinedValues(params || {}) }),
     );
   }
 
-  
+
   function getCatalogAvailability() {
     if (ctx.catalogUnavailable) {
       return { ...ctx.catalogUnavailable };
@@ -985,7 +985,7 @@ function createOpenCodeProvider({
     return runtimeVersion ? { version: runtimeVersion } : null;
   }
 
-  
+
   function getRuntimeStatus(env = process.env) {
     const availability = ctx.getCatalogAvailability();
     return buildOpenCodeRuntimeStatus({
@@ -1005,12 +1005,12 @@ function createOpenCodeProvider({
     });
   }
 
-  
+
   function getLastCatalogAgents() {
     return ctx.lastCatalogAgents;
   }
 
-  
+
   function rememberCatalogAgents(agents) {
     if (Array.isArray(agents) && agents.length > 0) {
       ctx.lastCatalogAgents = agents;
@@ -1032,12 +1032,12 @@ function createOpenCodeProvider({
     return hasPlanAgent ? "plan" : fallbackAgent;
   }
 
-  
+
   function getLastModelListMeta() {
     return ctx.lastModelListMeta ? { ...ctx.lastModelListMeta } : null;
   }
 
-  
+
   async function getHandoffContext(threadId, { sessionId = "", directory = "" } = {}) {
     const normalizedThreadId = readThreadId({ threadId });
     if (!normalizedThreadId) {
@@ -1076,7 +1076,7 @@ function createOpenCodeProvider({
     };
   }
 
-  
+
   async function selectTuiSession(sessionId) {
     const normalizedSessionId = readString(sessionId);
     if (!normalizedSessionId) {
@@ -1089,7 +1089,7 @@ function createOpenCodeProvider({
     return ctx.client.selectTuiSession(normalizedSessionId);
   }
 
-  
+
   function resolveModelContextWindow(modelId) {
     const normalizedModelId = readString(modelId);
     if (!normalizedModelId) {
@@ -1101,7 +1101,7 @@ function createOpenCodeProvider({
     return Number(catalogModel?.contextWindow || catalogModel?.context_window) || 0;
   }
 
-  
+
   async function discoverProjects({ directory } = {}) {
     await ctx.ensureStarted();
     if (!ctx.client || typeof ctx.client.listProjects !== "function") {
@@ -1110,7 +1110,7 @@ function createOpenCodeProvider({
     return ctx.client.listProjects({ directory });
   }
 
-  
+
   async function getUsageStatsForThread(threadId) {
     const thread = await ctx.requireThread(threadId);
     const sessionId = readString(thread.sessionId) || ctx.sessions.get(thread.id);
@@ -1126,7 +1126,7 @@ function createOpenCodeProvider({
     return { sessionId, usage };
   }
 
-  
+
   async function pushThreadUsageUpdate(thread) {
     if (!thread?.id) {
       return;
@@ -1203,7 +1203,7 @@ function createOpenCodeProvider({
   Object.assign(ctx, createOpenCodeThreadOps(ctx));
   Object.assign(ctx, createOpenCodeCommandExecute(ctx));
 
-  
+
   async function handleRequest(request) {
     const method = readString(request?.method);
     switch (method) {

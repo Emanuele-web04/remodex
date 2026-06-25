@@ -6,7 +6,7 @@
 /**
  * Safely parses JSON with prototype pollution protection.
  * Prevents prototype pollution attacks by sanitizing dangerous keys.
- * 
+ *
  * @param {string} input - JSON string to parse
  * @param {function} [reviver] - Optional custom reviver function
  * @returns {object|null} Parsed object or null if parsing fails
@@ -23,18 +23,18 @@ function safeParseJSON(input, reviver) {
 
   try {
     const dangerousKeys = ["__proto__", "constructor", "prototype"];
-    
+
     const safeReviver = (key, value) => {
       // Skip dangerous keys to prevent prototype pollution
       if (dangerousKeys.includes(key)) {
         return undefined;
       }
-      
+
       // Apply custom reviver if provided
       if (reviver) {
         return reviver(key, value);
       }
-      
+
       return value;
     };
 
@@ -47,7 +47,7 @@ function safeParseJSON(input, reviver) {
 /**
  * Creates a null-prototype object to prevent prototype pollution.
  * Use this when creating objects that will hold user-controlled data.
- * 
+ *
  * @returns {object} Object with null prototype
  */
 function createNullObject() {

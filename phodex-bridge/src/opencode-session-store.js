@@ -171,7 +171,7 @@ function createOpenCodeSessionStore({
   }
 
   function entries() {
-    return Object.entries(sessions).map(([threadId, entry]) => [threadId, entry]);
+    return Object.entries(sessions);
   }
 
   return {

@@ -11,7 +11,7 @@ const { validateDirectory } = require("./project-path-policy");
 const { ERROR_CODES, activeTurnError, assertOwnershipPersisted, createOpenCodeSessionExpiredError, formatStructuredError, isInvalidOpenCodeSessionError, isPlanModeRequested, pathNotAllowedError, resolveAllowedDirectory, resolveEnsureStartedServeWakeCapMs, resolveOpenCodeTurnWatchdogMs, threadNotFoundError } = require("./opencode-provider-shared");
 
 function createOpenCodeTurnStream(ctx) {
-  
+
   async function turnStart(request) {
     const params = request.params || {};
     const threadId = readThreadId(params);
@@ -122,7 +122,7 @@ function createOpenCodeTurnStream(ctx) {
     return { turnId, turn: { id: turnId, threadId: thread.id, status: "running" } };
   }
 
-  
+
   function extractLatestAssistantText(messages) {
     if (!Array.isArray(messages)) {
       return "";
@@ -140,7 +140,7 @@ function createOpenCodeTurnStream(ctx) {
     return latest;
   }
 
-  
+
   function extractAssistantTextAfterCurrentPrompt(messages, prompt) {
     if (!Array.isArray(messages)) {
       return "";
@@ -192,18 +192,18 @@ function createOpenCodeTurnStream(ctx) {
     return ctx.extractLatestAssistantText(messages);
   }
 
-  
+
   function assistantAgentItem(active) {
     return active.turn.items.find((item) => item.type === "agentMessage");
   }
 
-  
+
   function isTurnAssistantFinalized(active) {
     const assistantItem = ctx.assistantAgentItem(active);
     return Boolean(assistantItem?.finalized === true && readString(assistantItem.text));
   }
 
-  
+
   function tryCompleteTurnWhenAssistantReady(active, source = "") {
     if (active.completed || !ctx.isTurnAssistantFinalized(active)) {
       return false;
@@ -215,7 +215,7 @@ function createOpenCodeTurnStream(ctx) {
     });
   }
 
-  
+
   function emitAssistantCompletedOnce(active, params, source) {
     const assistantItem = active.turn.items.find((item) => item.type === "agentMessage");
     if (!assistantItem) {
@@ -265,7 +265,7 @@ function createOpenCodeTurnStream(ctx) {
     return true;
   }
 
-  
+
   async function hydrateAssistantFromSessionMessages(active) {
     if (!ctx.client || !readString(active.sessionId) || active.completed) {
       return false;
@@ -341,12 +341,12 @@ function createOpenCodeTurnStream(ctx) {
     return true;
   }
 
-  
+
   function delayMs(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  
+
   async function pollForAssistantCompletion(active) {
     const intervalMs = readString(ctx.env.REMODEX_TEST) === "1" ? 10 : 2000;
     const deadline = Date.now() + resolveOpenCodeTurnWatchdogMs(ctx.env);
@@ -363,7 +363,7 @@ function createOpenCodeTurnStream(ctx) {
     }
   }
 
-  
+
   async function executeTurn(active, model, agent, effort, prompt, parts, cwd, skills = []) {
     const threadId = active.thread.id;
     ctx.inFlightThreadIds.add(threadId);
@@ -666,7 +666,7 @@ function createOpenCodeTurnStream(ctx) {
     }
   }
 
-  
+
   function internalCompleteTurn({
     errorMessage = "",
     errorCode = "",
@@ -758,7 +758,7 @@ function createOpenCodeTurnStream(ctx) {
     return true;
   }
 
-  
+
   async function turnInterrupt(request) {
     const params = request.params || {};
     const turnId = readString(params.turnId || params.turn_id);
@@ -780,7 +780,7 @@ function createOpenCodeTurnStream(ctx) {
     return { success: true, interrupted: true };
   }
 
-  
+
   function findActiveTurnByThread(threadId) {
     for (const [turnId, active] of ctx.activeTurns) {
       if (active.thread.id === threadId) return turnId;

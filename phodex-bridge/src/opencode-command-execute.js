@@ -13,7 +13,7 @@ const {
 } = require("./opencode-provider-shared");
 
 function createOpenCodeCommandExecute(ctx) {
-  
+
   function commandExecuteDedupeKey(threadId, allowlistToken, clientCommandId) {
     const tid = readString(threadId);
     const token = readString(allowlistToken);
@@ -24,7 +24,7 @@ function createOpenCodeCommandExecute(ctx) {
     return `${tid}\0${token}\0${cid}`;
   }
 
-  
+
   function pruneCommandExecuteDedupe(now = Date.now()) {
     for (const [key, seenAt] of ctx.commandExecuteDedupeByKey.entries()) {
       if (now - seenAt >= ctx.COMMAND_EXECUTE_DEDUPE_TTL_MS) {
@@ -33,7 +33,7 @@ function createOpenCodeCommandExecute(ctx) {
     }
   }
 
-  
+
   async function commandExecute(request) {
     const params = request?.params || {};
     const threadId = readThreadId(params);
@@ -234,7 +234,7 @@ function createOpenCodeCommandExecute(ctx) {
     }
   }
 
-  
+
   function logCommandExecute({
     commandToken,
     commandSdk,

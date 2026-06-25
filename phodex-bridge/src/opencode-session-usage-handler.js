@@ -47,19 +47,18 @@ function handleOpenCodeSessionUsageRequest(rawMessage, sendResponse, dependencie
 
 async function sessionGetUsageStats(
   params,
-  { opencodeProvider, ownershipStore, threadOwnershipStore } = {},
+  { opencodeProvider, ownershipStore } = {},
 ) {
   if (isOpenCodeRuntimeDisabled(process.env)) {
     throw sessionUsageError("opencode_disabled", "OpenCode runtime is disabled on this bridge.");
   }
 
-  const ownership = ownershipStore || threadOwnershipStore;
   const threadId = readString(params.threadId || params.thread_id);
   if (!threadId) {
     throw sessionUsageError("missing_thread_id", "session/getUsageStats requires a threadId.");
   }
 
-  if (ownership && !ownership.ownsThread(threadId, OPENCODE_PROVIDER_ID)) {
+  if (ownershipStore && !ownershipStore.ownsThread(threadId, OPENCODE_PROVIDER_ID)) {
     throw sessionUsageError("wrong_provider", "session/getUsageStats is only available for OpenCode threads.");
   }
 

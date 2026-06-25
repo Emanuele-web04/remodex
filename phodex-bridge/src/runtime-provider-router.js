@@ -279,7 +279,6 @@ function createRuntimeProviderRouter({
     if (method === "command/list") {
       respondAsync(parsed, async () => {
         const directory = readString(parsed.params?.directory || parsed.params?.cwd);
-        const opencodeProvider = runtimeProviders.find((p) => p.id === "opencode");
         if (opencodeProvider && typeof opencodeProvider.listCommands === "function") {
           // thin wrap (shape {commands: [...] of {token,title,description}}); full builtins+derived union done in provider/client per RP-CMD-1
           return { commands: await opencodeProvider.listCommands(directory) };
@@ -295,7 +294,6 @@ function createRuntimeProviderRouter({
         if (ownershipMismatch) {
           throw ownershipMismatch;
         }
-        const opencodeProvider = runtimeProviders.find((p) => p.id === OPENCODE_PROVIDER_ID);
         if (!opencodeProvider || typeof opencodeProvider.commandExecute !== "function") {
           return { ok: false, errorCode: "opencode_unavailable" };
         }
@@ -320,7 +318,6 @@ function createRuntimeProviderRouter({
         if (ownershipMismatch) {
           throw ownershipMismatch;
         }
-        const opencodeProvider = runtimeProviders.find((provider) => provider.id === OPENCODE_PROVIDER_ID);
         if (!opencodeProvider || typeof opencodeProvider.handleRequest !== "function") {
           const error = new Error("OpenCode provider unavailable for permission/reply");
           error.errorCode = "opencode_unavailable";

@@ -103,7 +103,7 @@ function extractLogContext(params = {}) {
   if (!params || typeof params !== 'object') {
     return {};
   }
-  
+
   const context = {};
   if (params.threadId || params.thread_id) {
     context.threadId = params.threadId || params.thread_id;
