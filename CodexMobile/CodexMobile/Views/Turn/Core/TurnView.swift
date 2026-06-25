@@ -40,6 +40,7 @@ struct TurnView: View {
     @State private var isShowingMacHandoffConfirm = false
     @State private var worktreeOverlayRoute: TurnWorktreeOverlayRoute?
     @State private var macHandoffErrorMessage: String?
+    @State private var macHandoffSuccessMessage: String?
     @State private var isHandingOffToMac = false
     @State private var isStartingSiblingChat = false
     @State private var isForkingThread = false
@@ -115,7 +116,7 @@ struct TurnView: View {
             requiresIdleThread: false
         )
         let disabledGitActions: Set<TurnGitActionKind> = viewModel.disabledGitActions
-        let onTapMacHandoff: (() -> Void)? = codex.isConnected && codex.supportsDesktopAppHandoff ? {
+        let onTapMacHandoff: (() -> Void)? = canPerformDesktopHandoff ? {
             isShowingMacHandoffConfirm = true
         } : nil
         let onTapWorktreeHandoff: (() -> Void)? = showsGitControls ? {
@@ -252,6 +253,7 @@ struct TurnView: View {
                 gitActionLoadingTitle: viewModel.gitActionLoadingTitle,
                 showsDiscardRuntimeChangesAndSync: viewModel.shouldShowDiscardRuntimeChangesAndSync,
                 gitSyncState: viewModel.gitSyncState,
+                supportsDesktopHandoff: supportsDesktopHandoff,
                 onTapMacHandoff: onTapMacHandoff,
                 onTapWorktreeHandoff: onTapWorktreeHandoff,
                 onTapNewChat: onTapNewChat,
@@ -522,7 +524,9 @@ struct TurnView: View {
             isShowingNothingToCommitAlert: isShowingNothingToCommitAlertBinding,
             gitSyncAlert: gitSyncAlertBinding,
             isShowingMacHandoffConfirm: $isShowingMacHandoffConfirm,
+            macHandoffConfirmMessage: macHandoffConfirmMessage,
             macHandoffErrorMessage: $macHandoffErrorMessage,
+            macHandoffSuccessMessage: $macHandoffSuccessMessage,
             onDeclineApproval: { request in
                 viewModel.decline(request, codex: codex) { didSucceed in
                     if didSucceed {
@@ -651,6 +655,86 @@ struct TurnView: View {
         return false
     }
 
+    private var supportsDesktopHandoff: Bool {
+        codex.supportsDesktopHandoffForTurn(threadId: thread.id)
+    }
+
+    private var macHandoffConfirmMessage: String {
+        TurnViewModel.macHandoffConfirmMessage(for: thread, codex: codex)
+    }
+
+    private var showsComposerDesktopHandoff: Bool {
+        supportsDesktopHandoff
+    }
+
+    private var canPerformDesktopHandoff: Bool {
+        guard codex.isConnected,
+              codex.isDesktopHandoffActionAvailable(forThreadId: thread.id) else {
+            return false
+        }
+
+        let provider = CodexModelOption.normalizedProvider(
+            codex.runtimeModelProviderForTurn(threadId: thread.id)
+        )
+        if provider == "opencode" {
+            return true
+        }
+
+        return codex.supportsDesktopAppHandoff
+    }
+
+    private var openCodeVersionSkewBanner: AnyView? {
+        guard CodexModelOption.normalizedProvider(codex.runtimeModelProviderForTurn(threadId: thread.id)) == "opencode",
+              let runtime = codex.openCodeRuntimeCatalogEntry else {
+            return nil
+        }
+        if runtime.opencode?.versionBelowMinimum == true {
+            let message = ComposerCapabilityCopy.runtimeUnavailableMessage(
+                runtime.unavailableReason,
+                reasonCode: "opencode_version_below_minimum"
+            )
+            return AnyView(openCodeBannerView(title: message.title, hint: message.hint))
+        }
+        if !runtime.enabled, let reason = runtime.unavailableReason, !reason.isEmpty {
+            let message = ComposerCapabilityCopy.runtimeUnavailableMessage(
+                reason,
+                reasonCode: runtime.reasonCode
+            )
+            return AnyView(openCodeBannerView(title: message.title, hint: message.hint))
+        }
+        return nil
+    }
+
+    private func openCodeBannerView(title: String, hint: String?) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(AppFont.subheadline(weight: .semibold))
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(AppFont.subheadline(weight: .semibold))
+                if let hint {
+                    Text(hint)
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .adaptiveGlass(.regular, in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    private var supportsApprovals: Bool {
+        codex.selectedModelOption(threadId: thread.id)?.capabilities.supportsApprovals ?? true
+    }
+
+    private var supportsWorktreeCap: Bool {
+        codex.selectedModelOption(threadId: thread.id)?.capabilities.supportsWorktree ?? false
+    }
+
     // MARK: - Bindings
 
     private var shouldAnchorToAssistantResponseBinding: Binding<Bool> {
@@ -721,8 +805,12 @@ struct TurnView: View {
             defer { isHandingOffToMac = false }
 
             do {
-                let handoffService = DesktopHandoffService(codex: codex)
-                try await handoffService.continueOnDesktopApp(threadId: thread.id)
+                switch try await viewModel.continueOnDesktop(codex: codex, thread: thread) {
+                case .opencode(let result):
+                    macHandoffSuccessMessage = result.userFacingSummary
+                case .codex, .none:
+                    break
+                }
             } catch {
                 macHandoffErrorMessage = error.localizedDescription
             }
@@ -784,7 +872,7 @@ struct TurnView: View {
     }
 
     private func handleSend() {
-        guard !isVoiceInputActive else { return }
+        guard !isVoiceInputActive, !viewModel.isSending else { return }
         viewModel.clearComposerAutocomplete()
         viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
         isInputFocused = false
@@ -914,10 +1002,11 @@ struct TurnView: View {
         isThreadRunning: Bool,
         gitWorkingDirectory: String?
     ) -> Bool {
-        isWorktreeHandoffAvailable(
-            isThreadRunning: isThreadRunning,
-            gitWorkingDirectory: gitWorkingDirectory
-        ) && !viewModel.isCreatingGitWorktree
+        supportsWorktreeCap
+            && isWorktreeHandoffAvailable(
+                isThreadRunning: isThreadRunning,
+                gitWorkingDirectory: gitWorkingDirectory
+            ) && !viewModel.isCreatingGitWorktree
     }
 
     private func handleWorktreeHandoffTap(currentThread: CodexThread) {
@@ -1330,16 +1419,18 @@ struct TurnView: View {
 
     private var reasoningDisplayOptions: [TurnComposerReasoningDisplayOption] {
         TurnComposerMetaMapper.reasoningDisplayOptions(
-            from: codex.supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+            from: codex.supportedReasoningEffortsForSelectedModel(threadId: thread.id).map(\.reasoningEffort)
         )
     }
 
     private var selectedModelTitle: String {
-        if let selectedModel = codex.selectedModelOption() {
+        if let selectedModel = codex.selectedModelOption(threadId: thread.id) {
             return TurnComposerMetaMapper.modelTitle(for: selectedModel)
         }
 
-        return TurnComposerMetaMapper.modelTitle(forIdentifier: codex.selectedModelId)
+        return TurnComposerMetaMapper.modelTitle(
+            forIdentifier: codex.visibleSelectedModelIDForComposer(threadId: thread.id) ?? codex.selectedModelId
+        )
     }
 
     private var approvalForThread: CodexApprovalRequest? {
@@ -1357,6 +1448,11 @@ struct TurnView: View {
     }
 
     private func syncApprovalAlertPresentation() {
+        guard supportsApprovals else {
+            alertApprovalRequest = nil
+            isApprovalAlertPresented = false
+            return
+        }
         alertApprovalRequest = approvalForThread
         isApprovalAlertPresented = alertApprovalRequest != nil
     }
@@ -1413,6 +1509,12 @@ struct TurnView: View {
 
             if isForkingThread {
                 forkLoadingNotice
+                    .padding(.horizontal, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
+            if let skewBanner = openCodeVersionSkewBanner {
+                skewBanner
                     .padding(.horizontal, 12)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -1520,7 +1622,12 @@ struct TurnView: View {
                 voiceRecordingDuration: voiceInput.recordingDuration,
                 onTapVoice: handleVoiceButtonTap,
                 onCancelVoiceRecording: cancelVoiceInputIfNeeded,
-                onSend: handleSend
+                onSend: handleSend,
+                showsComposerDesktopHandoff: showsComposerDesktopHandoff,
+                isDesktopHandoffLoading: isHandingOffToMac,
+                onContinueOnDesktop: canPerformDesktopHandoff
+                    ? { isShowingMacHandoffConfirm = true }
+                    : nil
             )
         }
     }

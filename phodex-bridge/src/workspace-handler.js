@@ -18,6 +18,7 @@ const {
   workspaceCheckpointRestoreApply,
   workspaceCheckpointRestorePreview,
 } = require("./workspace-checkpoints");
+const { safeParseJSON } = require("./safe-json");
 
 const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
@@ -46,10 +47,8 @@ const GIT_EXEC_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
 const repoMutationLocks = new Map();
 
 function handleWorkspaceRequest(rawMessage, sendResponse) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+  const parsed = safeParseJSON(rawMessage);
+  if (!parsed) {
     return false;
   }
 

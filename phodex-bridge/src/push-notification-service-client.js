@@ -4,6 +4,9 @@
 // Exports: createPushNotificationServiceClient
 // Depends on: global fetch
 
+const { readString } = require("./normalize");
+const { safeParseJSON } = require("./safe-json");
+
 const DEFAULT_PUSH_SERVICE_TIMEOUT_MS = 10_000;
 const DEFAULT_PUSH_SERVICE_RETRY_LIMIT = 2;
 const DEFAULT_PUSH_SERVICE_RETRY_BASE_DELAY_MS = 500;
@@ -37,6 +40,24 @@ function createPushNotificationServiceClient({
       deviceToken,
       alertsEnabled,
       apnsEnvironment,
+    });
+  }
+
+  async function notifyPermissionNeeded({
+    threadId,
+    turnId,
+    title,
+    body,
+    dedupeKey,
+  } = {}) {
+    return postJSON("/v1/push/session/notify-permission", {
+      sessionId,
+      notificationSecret,
+      threadId,
+      turnId,
+      title,
+      body,
+      dedupeKey,
     });
   }
 
@@ -134,6 +155,7 @@ function createPushNotificationServiceClient({
   return {
     hasConfiguredBaseUrl: Boolean(normalizedBaseUrl),
     registerDevice,
+    notifyPermissionNeeded,
     notifyCompletion,
     logUnavailable() {
       if (!normalizedBaseUrl) {
@@ -153,7 +175,80 @@ function normalizeBaseUrl(value) {
     return "";
   }
 
-  return trimmed.replace(/\/+$/, "");
+  const normalized = trimmed.replace(/\/+$/, "");
+  
+  // Security: Validate URL against whitelist
+  validatePushServiceUrl(normalized);
+  
+  return normalized;
+}
+
+function validatePushServiceUrl(url) {
+  try {
+    const parsedUrl = new URL(url);
+
+    // Require HTTP or HTTPS protocol for all URLs
+    if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+      throw new Error(
+        `Push service URL must use HTTP or HTTPS protocol. URL: ${url}`
+      );
+    }
+
+    // Allow localhost and loopback for testing.
+    const hostname = parsedUrl.hostname.toLowerCase();
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname === '[::1]'
+    ) {
+      // Allow HTTP for local loopback targets.
+      return;
+    }
+
+    // Require HTTPS for non-localhost
+    if (parsedUrl.protocol !== 'https:') {
+      throw new Error(
+        `Push service URL must use HTTPS for non-localhost domains. URL: ${url}`
+      );
+    }
+
+    // Explicit operator configuration is trusted for non-localhost HTTPS targets.
+    const configuredUrl = readString(process.env.REMODEX_PUSH_SERVICE_URL)
+      || readString(process.env.PHODEX_PUSH_SERVICE_URL);
+    if (configuredUrl) {
+      try {
+        const configuredHost = new URL(configuredUrl).hostname.toLowerCase();
+        if (hostname === configuredHost) {
+          return;
+        }
+      } catch {
+        // Fall through to static whitelist check.
+      }
+    }
+
+    // Optional static whitelist for shared relay infrastructure.
+    const allowedDomains = [];
+
+    if (allowedDomains.length === 0) {
+      throw new Error(
+        `Push service URL hostname is not allowed. Hostname: ${hostname}`
+      );
+    }
+
+    const isAllowed = allowedDomains.some((domain) =>
+      hostname === domain || hostname.endsWith(`.${domain}`));
+
+    if (!isAllowed) {
+      throw new Error(`Push service URL hostname not allowed: ${hostname}`);
+    }
+
+  } catch (error) {
+    if (error.message.includes('Push service URL')) {
+      throw error;
+    }
+    throw new Error(`Invalid push service URL format: ${url} - ${error.message}`);
+  }
 }
 
 function createTimeoutAbortError(timeoutMs) {
@@ -182,17 +277,6 @@ function sleep(delayMs) {
   return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
-function safeParseJSON(value) {
-  if (!value || typeof value !== "string") {
-    return null;
-  }
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
 
 module.exports = {
   createPushNotificationServiceClient,

@@ -9,6 +9,8 @@ const fs = require("fs");
 const path = require("path");
 const { promisify } = require("util");
 const { findRolloutFileForThread, resolveSessionsRoot } = require("./rollout-watch");
+const { continueOpenCodeHandoff } = require("./opencode-handoff");
+const { safeParseJSON } = require("./safe-json");
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_BUNDLE_ID = "com.openai.codex";
@@ -24,10 +26,8 @@ const WINDOWS_BOUNCE_URL = "codex://settings";
 const DESKTOP_THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/;
 
 function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+  const parsed = safeParseJSON(rawMessage);
+  if (!parsed) {
     return false;
   }
 
@@ -46,14 +46,16 @@ function handleDesktopRequest(rawMessage, sendResponse, options = {}) {
     .catch((err) => {
       const errorCode = err.errorCode || "desktop_error";
       const message = err.userMessage || err.message || "Unknown desktop handoff error";
-      sendResponse(JSON.stringify({
-        id,
-        error: {
-          code: -32000,
-          message,
-          data: { errorCode },
-        },
-      }));
+      sendResponse(
+        JSON.stringify({
+          id,
+          error: {
+            code: -32000,
+            message,
+            data: { errorCode },
+          },
+        }),
+      );
     });
 
   return true;
@@ -70,15 +72,17 @@ async function handleDesktopMethod(method, params, options = {}) {
   const sleepFn = options.sleepFn || sleep;
   const appBootWaitMs = options.appBootWaitMs ?? DEFAULT_APP_BOOT_WAIT_MS;
   const relaunchWaitMs = options.relaunchWaitMs ?? DEFAULT_RELAUNCH_WAIT_MS;
-  const threadMaterializeWaitMs = options.threadMaterializeWaitMs ?? DEFAULT_THREAD_MATERIALIZE_WAIT_MS;
-  const threadMaterializePollMs = options.threadMaterializePollMs ?? DEFAULT_THREAD_MATERIALIZE_POLL_MS;
+  const threadMaterializeWaitMs =
+    options.threadMaterializeWaitMs ?? DEFAULT_THREAD_MATERIALIZE_WAIT_MS;
+  const threadMaterializePollMs =
+    options.threadMaterializePollMs ?? DEFAULT_THREAD_MATERIALIZE_POLL_MS;
 
   switch (method) {
     case "desktop/continueOnDesktop":
       if (platform !== "darwin" && platform !== "win32") {
         throw desktopError(
           "unsupported_platform",
-          "Desktop handoff is only available when the bridge is running on macOS or Windows."
+          "Desktop handoff is only available when the bridge is running on macOS or Windows.",
         );
       }
 
@@ -100,7 +104,7 @@ async function handleDesktopMethod(method, params, options = {}) {
       if (platform !== "darwin") {
         throw desktopError(
           "unsupported_platform",
-          "Mac handoff is only available when the bridge is running on macOS."
+          "Mac handoff is only available when the bridge is running on macOS.",
         );
       }
 
@@ -117,6 +121,16 @@ async function handleDesktopMethod(method, params, options = {}) {
         relaunchWaitMs,
         threadMaterializeWaitMs,
         threadMaterializePollMs,
+      });
+    case "desktop/continueOpenCode":
+      return continueOpenCodeHandoff(params, {
+        env,
+        platform,
+        ownershipStore: options.ownershipStore,
+        opencodeProvider: options.opencodeProvider,
+        executor,
+        fsModule,
+        logPrefix: options.logPrefix,
       });
     case "desktop/wakeDisplay":
       return wakeDisplay({
@@ -149,7 +163,7 @@ async function continueOnDesktop(
     relaunchWaitMs,
     threadMaterializeWaitMs,
     threadMaterializePollMs,
-  }
+  },
 ) {
   const threadId = resolveThreadId(params);
   if (!threadId) {
@@ -184,11 +198,7 @@ async function continueOnDesktop(
         await openWindowsDeepLink(targetUrl, { executor, env });
       }
     } catch (error) {
-      throw desktopError(
-        "handoff_failed",
-        "Could not open Codex on this PC.",
-        error
-      );
+      throw desktopError("handoff_failed", "Could not open Codex on this PC.", error);
     }
 
     return {
@@ -200,9 +210,10 @@ async function continueOnDesktop(
     };
   }
 
-  const appRunning = typeof isAppRunning === "function"
-    ? await isAppRunning(appPath)
-    : await detectRunningCodexApp(appPath, executor);
+  const appRunning =
+    typeof isAppRunning === "function"
+      ? await isAppRunning(appPath)
+      : await detectRunningCodexApp(appPath, executor);
 
   // If Codex.app is already open, explicit handoff should still feel like a
   // real device switch: close, reopen, then focus the requested thread.
@@ -224,11 +235,7 @@ async function continueOnDesktop(
         pollMs: threadMaterializePollMs,
       });
     } catch (error) {
-      throw desktopError(
-        "handoff_failed",
-        "Could not open Codex.app on this Mac.",
-        error
-      );
+      throw desktopError("handoff_failed", "Could not open Codex.app on this Mac.", error);
     }
 
     return {
@@ -257,11 +264,7 @@ async function continueOnDesktop(
         pollMs: threadMaterializePollMs,
       });
     } catch (error) {
-      throw desktopError(
-        "handoff_failed",
-        "Could not open Codex.app on this Mac.",
-        error
-      );
+      throw desktopError("handoff_failed", "Could not open Codex.app on this Mac.", error);
     }
 
     return {
@@ -297,7 +300,7 @@ async function continueOnDesktop(
     throw desktopError(
       "handoff_failed",
       "Could not force close and reopen Codex.app on this Mac.",
-      error
+      error,
     );
   }
 
@@ -314,15 +317,15 @@ async function continueOnDesktop(
 // so a sleeping panel has time to relight before the Mac drifts back into idle display sleep.
 async function wakeDisplay({ executor }) {
   try {
-    await executor("/usr/bin/caffeinate", ["-d", "-u", "-t", String(DEFAULT_WAKE_DISPLAY_DURATION_SECONDS)], {
-      timeout: HANDOFF_TIMEOUT_MS,
-    });
-  } catch (error) {
-    throw desktopError(
-      "wake_display_failed",
-      "Could not wake your Mac display right now.",
-      error
+    await executor(
+      "/usr/bin/caffeinate",
+      ["-d", "-u", "-t", String(DEFAULT_WAKE_DISPLAY_DURATION_SECONDS)],
+      {
+        timeout: HANDOFF_TIMEOUT_MS,
+      },
     );
+  } catch (error) {
+    throw desktopError("wake_display_failed", "Could not wake your Mac display right now.", error);
   }
 
   return {
@@ -335,7 +338,7 @@ function readBridgePreferences(options = {}) {
   if (typeof options.readBridgePreferences !== "function") {
     throw desktopError(
       "unsupported_bridge_preferences",
-      "This bridge does not support preference sync yet."
+      "This bridge does not support preference sync yet.",
     );
   }
 
@@ -346,15 +349,12 @@ async function updateBridgePreferences(params, options = {}) {
   if (typeof options.updateBridgePreferences !== "function") {
     throw desktopError(
       "unsupported_bridge_preferences",
-      "This bridge does not support preference sync yet."
+      "This bridge does not support preference sync yet.",
     );
   }
 
   if (!params || typeof params !== "object" || typeof params.keepMacAwake !== "boolean") {
-    throw desktopError(
-      "invalid_bridge_preferences",
-      "The bridge preference payload is invalid."
-    );
+    throw desktopError("invalid_bridge_preferences", "The bridge preference payload is invalid.");
   }
 
   return options.updateBridgePreferences({
@@ -366,7 +366,7 @@ async function updateBridgePackageAndRestart(options = {}) {
   if (typeof options.updateBridgePackageAndRestart !== "function") {
     throw desktopError(
       "unsupported_bridge_update",
-      "This bridge does not support iPhone-triggered bridge updates yet."
+      "This bridge does not support iPhone-triggered bridge updates yet.",
     );
   }
 
@@ -378,10 +378,7 @@ function resolveThreadId(params) {
     return "";
   }
 
-  const candidates = [
-    params.threadId,
-    params.thread_id,
-  ];
+  const candidates = [params.threadId, params.thread_id];
 
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate.trim()) {
@@ -459,13 +456,14 @@ async function openCodexApp({ bundleId, appPath, executor }) {
 }
 
 async function openWindowsDeepLink(targetUrl, { executor, env }) {
-  await executor(env?.SystemRoot ? path.join(env.SystemRoot, "System32", "rundll32.exe") : "rundll32.exe", [
-    "url.dll,FileProtocolHandler",
-    targetUrl,
-  ], {
-    timeout: HANDOFF_TIMEOUT_MS,
-    windowsHide: true,
-  });
+  await executor(
+    env?.SystemRoot ? path.join(env.SystemRoot, "System32", "rundll32.exe") : "rundll32.exe",
+    ["url.dll,FileProtocolHandler", targetUrl],
+    {
+      timeout: HANDOFF_TIMEOUT_MS,
+      windowsHide: true,
+    },
+  );
 }
 
 async function refreshWindowsCodex(targetUrl, { executor, env, sleepFn, settleMs }) {
@@ -478,7 +476,7 @@ async function refreshWindowsCodex(targetUrl, { executor, env, sleepFn, settleMs
 async function openWhenThreadReady(
   threadId,
   targetUrl,
-  { bundleId, appPath, executor, env, fsModule, sleepFn, waitMs, pollMs }
+  { bundleId, appPath, executor, env, fsModule, sleepFn, waitMs, pollMs },
 ) {
   await waitForThreadMaterialization(threadId, {
     env,
@@ -521,9 +519,10 @@ async function waitForAppExit(appPath, executor, isAppRunning) {
   const deadline = Date.now() + HANDOFF_TIMEOUT_MS;
 
   while (Date.now() < deadline) {
-    const isRunning = typeof isAppRunning === "function"
-      ? await isAppRunning(appPath)
-      : await detectRunningCodexApp(appPath, executor);
+    const isRunning =
+      typeof isAppRunning === "function"
+        ? await isAppRunning(appPath)
+        : await detectRunningCodexApp(appPath, executor);
     if (!isRunning) {
       return;
     }
@@ -541,7 +540,7 @@ function hasDesktopRolloutForThread(threadId, { env, fsModule }) {
 
 async function waitForThreadMaterialization(
   threadId,
-  { env, fsModule, sleepFn, timeoutMs, pollMs }
+  { env, fsModule, sleepFn, timeoutMs, pollMs },
 ) {
   if (hasDesktopRolloutForThread(threadId, { env, fsModule })) {
     return true;

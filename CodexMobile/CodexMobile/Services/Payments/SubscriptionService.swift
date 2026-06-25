@@ -4,6 +4,8 @@
 // Exports: SubscriptionService, SubscriptionPackageOption
 // Depends on: Foundation, Observation, RevenueCat
 
+#if !REMODEX_LOCAL_DEVICE
+
 import Foundation
 import Observation
 import RevenueCat
@@ -82,7 +84,7 @@ final class SubscriptionService {
     private static let freeSendLimit = 5
 
     private let defaults: UserDefaults
-    @ObservationIgnored private let customerInfoUpdatesTaskStore = CustomerInfoUpdatesTaskStore()
+    @ObservationIgnored private nonisolated(unsafe) let customerInfoUpdatesTaskStore = CustomerInfoUpdatesTaskStore()
     private var isBootstrapping = false
     private var hasCachedOptimisticAccess = false
 
@@ -405,3 +407,5 @@ private extension SubscriptionService {
         return error.localizedDescription
     }
 }
+
+#endif

@@ -35,6 +35,8 @@ output/
 # Minified JS bundles (not part of this project)
 /main.js
 /links-*.js
+deeplinks-*.js
+main-*.js
 /scheme-*.js
 /initial-route-atom-*.js
 /use-navigate-to-local-conversation-*.js

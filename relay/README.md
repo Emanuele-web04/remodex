@@ -106,7 +106,17 @@ Optional HTTP endpoints:
 
 The trusted-session resolve endpoint is intended for mobile clients that have already completed the first QR bootstrap. It returns the current live session only after signature, nonce, and freshness checks pass.
 
-Push is disabled by default. Enable it only when you are ready to wire APNs and the bridge-side `REMODEX_PUSH_SERVICE_URL`, for example with `REMODEX_ENABLE_PUSH_SERVICE=true`.
+Push uses staged production defaults:
+
+- **`dev` profile** (`NODE_ENV=development`, `NODE_ENV=test`, or `REMODEX_PROFILE=dev`): opt-in only — set `REMODEX_ENABLE_PUSH_SERVICE=true`.
+- **`managed-relay` profile** (APNs credentials present): push routes **auto-enable** when `REMODEX_APNS_*` is complete. Opt out with `REMODEX_ENABLE_PUSH_SERVICE=false`.
+- **`self-hosted` profile**: dark-launch only — when APNs creds are present the relay logs `would_enable_push=true` but keeps routes disabled until you opt in.
+
+Also wire the bridge-side `REMODEX_PUSH_SERVICE_URL` so the Mac bridge can register devices and notify completions.
+
+WebSocket frames are capped at **4 MiB** (`maxPayload` on the relay `WebSocketServer`). Oversize frames close with code `1009`.
+
+Production/self-host installs bind **`127.0.0.1`** by default (`RELAY_BIND_HOST`). Set `RELAY_BIND_HOST=0.0.0.0` only when you intentionally expose the relay on your LAN.
 
 ## Deploy Notes
 
@@ -117,6 +127,15 @@ Push is disabled by default. Enable it only when you are ready to wire APNs and 
 - If you expose the relay under a shared-domain prefix such as `/remodex`, have the proxy strip that prefix before forwarding so the Node server still receives `/relay/...` and `/v1/push/...`.
 - The public repo should document the protocol and code, not your real deployed hostname or deploy defaults.
 
+## Canonical entrypoint
+
+Production and local self-hosting should use:
+
+- **`server.js`** — HTTP server, health, trusted-session resolve, optional push routes; calls `setupRelay(wss)` from **`relay.js`**.
+- **`relay.js`** — WebSocket relay transport (pairing rooms, heartbeat, forwarding, `getRelayStats()`).
+
+`npm start` runs `node ./server.js`. Do not deploy the legacy `phodex-backend-relay.mjs` snapshot; it duplicated heartbeat logic without metrics and was removed to avoid drift.
+
 ## Usage
 
 ```sh
@@ -125,4 +144,4 @@ npm install
 npm start
 ```
 
-`server.js` exports `createRelayServer()`, and `relay.js` exports the lower-level `setupRelay(wss)` transport primitive if you want to embed the relay in your own server.
+`server.js` exports `createRelayServer()`. `relay.js` exports `setupRelay(wss)` and `getRelayStats()` if you embed the relay in your own server.

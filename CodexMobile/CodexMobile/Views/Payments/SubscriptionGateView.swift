@@ -4,7 +4,9 @@
 // Exports: SubscriptionGateView
 // Depends on: StoreKit, SwiftUI, SubscriptionService, RevenueCatPaywallView
 
+#if !REMODEX_LOCAL_DEVICE
 import StoreKit
+#endif
 import SwiftUI
 
 private struct SubscriptionGateFeature: Identifiable {
@@ -21,7 +23,7 @@ private let subscriptionGateFeatures: [SubscriptionGateFeature] = [
     .init(id: 3, icon: "waveform", title: "Voice mode", subtitle: "Speech-to-text transcription for your messages"),
     .init(id: 4, icon: "point.3.connected.trianglepath.dotted", title: "Subagents", subtitle: "Delegate complex tasks to specialized sub-agents"),
     .init(id: 5, icon: "at", title: "$skills /cmds @files", subtitle: "Invoke skills, run slash commands, and mention files inline"),
-    .init(id: 6, icon: "server.rack", title: "Hosted relay", subtitle: "You are paying for the product and the hosted path"),
+    .init(id: 6, icon: "laptopcomputer.and.iphone", title: "Connect to your Mac", subtitle: "Pair your phone with your local Mac bridge"),
     .init(id: 7, icon: "heart", title: "Support development", subtitle: "Help keep Remodex independent and open source"),
 ]
 
@@ -76,9 +78,11 @@ struct SubscriptionGateView: View {
         .fullScreenCover(isPresented: $isPresentingPaywall) {
             RevenueCatPaywallView()
         }
+        #if !REMODEX_LOCAL_DEVICE
         .offerCodeRedemption(isPresented: $isPresentingOfferCodeRedemption) { result in
             handleOfferCodeRedemptionCompletion(result)
         }
+        #endif
     }
 
     private var hero: some View {

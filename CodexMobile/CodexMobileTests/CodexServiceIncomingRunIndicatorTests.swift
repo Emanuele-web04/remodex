@@ -169,6 +169,25 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testTurnCompletedWithoutTurnIDClearsProtectedRunningFallback() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        service.setProtectedRunningFallback(true, for: threadID)
+        XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains(threadID))
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object([
+                "threadId": .string(threadID),
+            ])
+        )
+
+        XCTAssertFalse(service.protectedRunningFallbackThreadIDs.contains(threadID))
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+    }
+
     func testAgentDeltaRestoresActiveTurnIDAfterStaleRunningClear() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -845,12 +864,15 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
             XCTAssertFalse(service.isConnected)
             XCTAssertFalse(service.isInitialized)
             XCTAssertTrue(service.shouldAutoReconnectOnForeground)
-            XCTAssertEqual(service.connectionRecoveryState, .idle)
+            XCTAssertEqual(
+                service.connectionRecoveryState,
+                .retrying(attempt: 0, message: "Reconnecting...")
+            )
             XCTAssertEqual(service.relaySessionId, SecureStore.readString(for: CodexSecureKeys.relaySessionId))
             XCTAssertEqual(service.relayUrl, SecureStore.readString(for: CodexSecureKeys.relayUrl))
             XCTAssertEqual(
                 service.lastErrorMessage,
-                "The Mac was temporarily unavailable and this message could not be delivered. Wait a moment, then try again."
+                "The paired device was temporarily unavailable and this message could not be delivered. Wait a moment, then try again."
             )
         }
     }
@@ -2403,6 +2425,64 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(merged[0].text, currentText)
         XCTAssertEqual(merged[0].itemId, itemID)
         XCTAssertTrue(merged[0].isStreaming)
+    }
+
+    func testConfirmedUserHistoryMergeDoesNotAppendSecondBubble() throws {
+        let service = makeService()
+        let threadID = "thread-user-merge-\(UUID().uuidString)"
+        let turnID = "turn-user-merge-\(UUID().uuidString)"
+        let prompt = "Hey"
+
+        service.appendUserMessage(threadId: threadID, text: prompt, turnId: turnID)
+        service.confirmLatestPendingUserMessage(threadId: threadID, turnId: turnID)
+
+        let existing = service.messages(for: threadID)
+        let history = [
+            CodexMessage(
+                threadId: threadID,
+                role: .user,
+                text: prompt,
+                turnId: turnID,
+                deliveryState: .confirmed,
+                orderIndex: 0
+            ),
+        ]
+
+        let merged = try CodexService.mergeHistoryMessages(
+            existing,
+            history,
+            activeThreadIDs: [threadID],
+            runningThreadIDs: [threadID]
+        )
+
+        XCTAssertEqual(merged.filter { $0.role == .user }.count, 1)
+        XCTAssertEqual(merged.first(where: { $0.role == .user })?.deliveryState, .confirmed)
+    }
+
+    func testDuplicateAssistantCompletionRaceIsDedupedPerTurn() {
+        let service = makeService()
+        let threadID = "thread-dedupe-\(UUID().uuidString)"
+        let turnID = "turn-dedupe-\(UUID().uuidString)"
+        let itemID = "item-dedupe"
+        let answer = "Single canonical assistant answer for this turn."
+
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            text: answer
+        )
+        service.completeAssistantMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            text: answer
+        )
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.text, answer)
+        XCTAssertNotNil(service.assistantCompletionFingerprintByTurn[turnID])
     }
 
     func testRunningHistorySnapshotWithExtraOlderSuffixDoesNotExtendAssistantText() throws {

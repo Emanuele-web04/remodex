@@ -3,8 +3,16 @@
 
 PHODEX_CHATGPT_CALLBACK_SCHEME = phodex
 PHODEX_DEFAULT_RELAY_URL =
-REVENUECAT_PUBLIC_API_KEY = appl_CgHnEgWVRFbTKruYphXzpXeGwIb
+REVENUECAT_PUBLIC_API_KEY =
 REVENUECAT_ENTITLEMENT_NAME = Pro
 REVENUECAT_DEFAULT_OFFERING_ID = default
+
+// Optional local signing (set in gitignored PrivateOverrides.xcconfig).
+REMODEX_MAIN_BUNDLE_ID = com.emanueledipietro.Remodex
+REMODEX_WIDGET_BUNDLE_ID = com.emanueledipietro.Remodex.RemodexWidget
+REMODEX_TESTS_BUNDLE_ID = com.emanueledipietro.CodexMobileTests
+REMODEX_UITESTS_BUNDLE_ID = com.emanueledipietro.CodexMobileUITests
+REMODEX_MENUBAR_BUNDLE_ID = com.emanueledipietro.RemodexMenuBar
+REMODEX_IOS_ENTITLEMENTS = CodexMobile/CodexMobile.entitlements
 
 #include? "PrivateOverrides.xcconfig"

@@ -1,4 +1,15 @@
 // Copy this file to PrivateOverrides.xcconfig and keep the real values local.
 // Xcode will load the private file automatically when it exists.
 
+// Optional: local device install with your Apple Development team (free or paid).
+// DEVELOPMENT_TEAM = YOUR_TEAM_ID
+// REMODEX_MAIN_BUNDLE_ID = com.you.remodex.dev
+// REMODEX_WIDGET_BUNDLE_ID = com.you.remodex.dev.RemodexWidget
+// REMODEX_TESTS_BUNDLE_ID = com.you.remodex.dev.CodexMobileTests
+// REMODEX_UITESTS_BUNDLE_ID = com.you.remodex.dev.CodexMobileUITests
+// REMODEX_MENUBAR_BUNDLE_ID = com.you.remodex.dev.RemodexMenuBar
+
 PHODEX_DEFAULT_RELAY_URL =
+
+// Optional: RevenueCat public API key for local builds.
+// REVENUECAT_PUBLIC_API_KEY = your_revenuecat_public_key

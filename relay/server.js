@@ -14,7 +14,13 @@ const {
   resolvePairingCode,
   resolveTrustedMacSession,
 } = require("./relay");
-const { createPushSessionService } = require("./push-service");
+const {
+  createPushSessionService,
+  resolvePushServiceEnablement,
+} = require("./push-service");
+
+const RELAY_WEBSOCKET_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
+const DEFAULT_RELAY_BIND_HOST = "127.0.0.1";
 
 function createRelayServer({
   enablePushService = false,
@@ -55,6 +61,7 @@ function createRelayServer({
   const wss = new WebSocketServer({
     noServer: true,
     perMessageDeflate: true,
+    maxPayload: RELAY_WEBSOCKET_MAX_PAYLOAD_BYTES,
   });
   setupRelay(wss, relayOptions);
 
@@ -148,6 +155,19 @@ async function handleHTTPRequest(req, res, {
       return writeRateLimitResponse(res);
     }
     return handleJSONRoute(req, res, async (body) => pushSessionService.notifyCompletion(body));
+  }
+
+  if (req.method === "POST" && pathname === "/v1/push/session/notify-permission") {
+    if (!pushEnabled) {
+      return writeJSON(res, 404, {
+        ok: false,
+        error: "Not found",
+      });
+    }
+    if (!pushRateLimiter.allow(`${requestKey}:notify-permission`)) {
+      return writeRateLimitResponse(res);
+    }
+    return handleJSONRoute(req, res, async (body) => pushSessionService.notifyPermission(body));
   }
 
   if (req.method === "POST" && isRelayHTTPAPIPath(pathname, "/v1/trusted/session/resolve")) {
@@ -413,11 +433,21 @@ function createFixedWindowRateLimiter({ windowMs, maxRequests, now = () => Date.
 if (require.main === module) {
   const port = Number(process.env.PORT || 9000);
   const trustProxy = readOptionalBooleanEnv(["REMODEX_TRUST_PROXY", "PHODEX_TRUST_PROXY"]) ?? false;
-  const enablePushService = readOptionalBooleanEnv(
-    ["REMODEX_ENABLE_PUSH_SERVICE", "PHODEX_ENABLE_PUSH_SERVICE"]
-  ) ?? false;
-  const bindHost = process.env.RELAY_BIND_HOST || "0.0.0.0";
-  const { server } = createRelayServer({ enablePushService, trustProxy });
+  const pushDecision = resolvePushServiceEnablement(process.env);
+  const bindHost = process.env.RELAY_BIND_HOST || DEFAULT_RELAY_BIND_HOST;
+  const { server } = createRelayServer({
+    enablePushService: pushDecision.enabled,
+    trustProxy,
+  });
+  if (pushDecision.wouldEnablePush && !pushDecision.enabled) {
+    console.log(
+      `[relay] would_enable_push=true profile=${pushDecision.profile} `
+      + "(dark launch — push routes remain disabled)"
+    );
+  }
+  if (pushDecision.enabled) {
+    console.log(`[relay] push service enabled profile=${pushDecision.profile}`);
+  }
   server.listen(port, bindHost, () => {
     console.log(`[relay] listening on ${bindHost}:${port}`);
   });
@@ -429,4 +459,6 @@ module.exports = {
   clientAddressKey,
   readOptionalBooleanEnv,
   redactRelayPathname,
+  RELAY_WEBSOCKET_MAX_PAYLOAD_BYTES,
+  DEFAULT_RELAY_BIND_HOST,
 };

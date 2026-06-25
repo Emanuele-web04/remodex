@@ -7,6 +7,7 @@
 const fs = require("fs");
 const path = require("path");
 const { resolveCodexHome } = require("./codex-home");
+const { safeParseJSON } = require("./safe-json");
 
 const ATLAS_WIDTH = 1536;
 const ATLAS_HEIGHT = 1872;
@@ -17,10 +18,8 @@ const IMAGE_MIME_TYPES_BY_EXTENSION = new Map([
 ]);
 
 function handlePetRequest(rawMessage, sendResponse) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+  const parsed = safeParseJSON(rawMessage);
+  if (!parsed) {
     return false;
   }
 

@@ -32,6 +32,7 @@ function createBridgeStatusPublisher({
   function startHeartbeat({
     shouldPublish = () => true,
     getLastRelayActivityAt = () => 0,
+    refreshStatus = null,
   } = {}) {
     if (heartbeatTimer) {
       return;
@@ -42,8 +43,12 @@ function createBridgeStatusPublisher({
         return;
       }
 
+      const heartbeatStatus = typeof refreshStatus === "function"
+        ? refreshStatus(lastPublishedBridgeStatus)
+        : lastPublishedBridgeStatus;
+
       onBridgeStatus?.(buildHeartbeatBridgeStatus(
-        lastPublishedBridgeStatus,
+        heartbeatStatus,
         getLastRelayActivityAt(),
         { now: now() }
       ));
@@ -112,11 +117,35 @@ function buildHeartbeatBridgeStatus(
   };
 }
 
+function buildOpenCodeBridgeStatusSection(opencodeProvider, env = process.env) {
+  if (!opencodeProvider) {
+    return undefined;
+  }
+
+  let opencode =
+    typeof opencodeProvider.getRuntimeStatus === "function"
+      ? opencodeProvider.getRuntimeStatus(env)
+      : undefined;
+  if (!opencode) {
+    return undefined;
+  }
+
+  if (typeof opencodeProvider.getObservabilityMetrics === "function") {
+    opencode = {
+      ...opencode,
+      ...opencodeProvider.getObservabilityMetrics(),
+    };
+  }
+
+  return opencode;
+}
+
 module.exports = {
   BRIDGE_STATUS_HEARTBEAT_INTERVAL_MS,
   RELAY_WATCHDOG_STALE_AFTER_MS,
   STALE_RELAY_STATUS_MESSAGE,
   buildHeartbeatBridgeStatus,
+  buildOpenCodeBridgeStatusSection,
   createBridgeStatusPublisher,
   hasRelayConnectionGoneStale,
 };

@@ -176,6 +176,9 @@ extension CodexService {
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
+        if let threadId = resolveThreadID(from: paramsObject, turnIdHint: extractTurnID(from: paramsObject)) {
+            lastIncomingNotificationMethodByThread[threadId] = method
+        }
         noteDesktopMirroredActivityIfNeeded(method: method, paramsObject: paramsObject)
 
         switch method {
@@ -276,6 +279,9 @@ extension CodexService {
         case "thread/tokenUsage/updated":
             handleThreadTokenUsageUpdated(paramsObject)
 
+        case "runtime/auth/error":
+            handleRuntimeAuthError(paramsObject)
+
         case "account/updated":
             handleGPTAccountUpdated(paramsObject)
 
@@ -291,8 +297,11 @@ extension CodexService {
         case "item/started", "codex/event/item_started":
             handleItemStarted(paramsObject)
 
-        case "error", "codex/event/error", "turn/failed":
-            handleErrorNotification(paramsObject)
+        case "turn/failed":
+            handleErrorNotification(paramsObject, isTurnFailed: true)
+
+        case "error", "codex/event/error":
+            handleErrorNotification(paramsObject, isTurnFailed: false)
 
         case "serverRequest/resolved":
             handleServerRequestResolved(paramsObject)
@@ -302,6 +311,12 @@ extension CodexService {
 
         case "terminal/event":
             handleTerminalEvent(paramsObject)
+
+        case "runtime/catalog/updated":
+            handleRuntimeCatalogUpdated(paramsObject)
+
+        case "permission/request":
+            handleOpenCodePermissionRequest(paramsObject: paramsObject)
 
         default:
             if method.hasPrefix("codex/event/"),
@@ -593,7 +608,14 @@ extension CodexService {
             activeTurnId = turnID
         }
 
-        requestImmediateSync(threadId: threadId ?? activeThreadId)
+        if let threadId {
+            requestDeferredSync(threadId: threadId)
+            if isDesktopMirroredTurn {
+                requestImmediateSync(threadId: threadId)
+            }
+        } else {
+            requestImmediateSync(threadId: activeThreadId)
+        }
     }
 
     private func handleTurnCompleted(_ paramsObject: IncomingParamsObject?) {
@@ -601,6 +623,15 @@ extension CodexService {
         let turnFailureMessage = parseTurnFailureMessage(from: paramsObject)
 
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: completedTurnID) {
+            if let completedTurnID, let active = activeTurnID(for: threadId), active != completedTurnID {
+                // Strict late guard (RP-MSG-3): skip + trace if activeTurnID(threadId) != turnId
+                traceAssistantDeltaDrop(
+                    threadId: threadId,
+                    reason: "late_turn_mismatch",
+                    turnId: completedTurnID
+                )
+                return
+            }
             if let completedTurnID {
                 confirmLatestPendingUserMessage(threadId: threadId, turnId: completedTurnID)
             }
@@ -610,6 +641,7 @@ extension CodexService {
                 turnFailureMessage: turnFailureMessage
             )
             recordTurnTerminalState(threadId: threadId, turnId: resolvedTurnID, state: terminalState)
+            clearAssistantCompletionFingerprint(for: resolvedTurnID)
             noteTurnFinished(turnId: resolvedTurnID)
             markTurnCompleted(threadId: threadId, turnId: resolvedTurnID)
             if terminalState == .completed {
@@ -628,6 +660,7 @@ extension CodexService {
             } else {
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
             }
+            cancelDeferredSync(threadId: threadId)
             requestImmediateSync(threadId: threadId)
             requestThreadHistoryReconcile(threadId: threadId)
             if terminalState == .completed {
@@ -651,7 +684,8 @@ extension CodexService {
             return
         }
 
-        finalizeAllStreamingState()
+        // B-11: threadless terminal events must not wipe unrelated running threads.
+        finalizeStreamingPresentationOnly()
 
         guard let turnFailureMessage else {
             return
@@ -675,7 +709,7 @@ extension CodexService {
         }
     }
 
-    private func handleErrorNotification(_ paramsObject: IncomingParamsObject?) {
+    private func handleErrorNotification(_ paramsObject: IncomingParamsObject?, isTurnFailed: Bool = false) {
         if shouldRetryTurnError(from: paramsObject) {
             return
         }
@@ -697,7 +731,13 @@ extension CodexService {
 
         let turnId = extractTurnID(from: paramsObject)
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: turnId) {
+            if isTurnFailed {
+                cancelDeferredSync(threadId: threadId)
+            }
             let resolvedTurnID = turnId ?? activeTurnIdByThread[threadId]
+            if isTurnFailed {
+                clearAssistantCompletionFingerprint(for: resolvedTurnID)
+            }
             if !shouldSuppressErrorMessage {
                 appendSystemMessage(threadId: threadId, text: "Error: \(userFacingErrorMessage)", turnId: turnId)
             }
@@ -708,7 +748,35 @@ extension CodexService {
             markFailedIfUnread(threadId: threadId)
             notifyRunCompletionIfNeeded(threadId: threadId, turnId: resolvedTurnID, result: .failed)
         } else {
-            finalizeAllStreamingState()
+            // B-11: threadless error notifications must not wipe unrelated running threads.
+            finalizeStreamingPresentationOnly()
+        }
+    }
+
+    private func handleRuntimeCatalogUpdated(_ paramsObject: IncomingParamsObject?) {
+        let revision = paramsObject?["catalogRevision"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let revision, !revision.isEmpty else {
+            return
+        }
+        guard revision != lastOpenCodeCatalogRevision else {
+            return
+        }
+
+        debugRuntimeLog(
+            "ios_catalog_revision_changed revision=\(revision) previous=\(lastOpenCodeCatalogRevision ?? "nil")"
+        )
+        scheduleDebouncedCatalogRefetch()
+    }
+
+    private func scheduleDebouncedCatalogRefetch() {
+        catalogRefetchDebounceTask?.cancel()
+        catalogRefetchDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            guard !Task.isCancelled, let self else { return }
+            defer { self.catalogRefetchDebounceTask = nil }
+            guard self.isConnected, self.isInitialized else { return }
+            await self.refreshRuntimeMetadataSequential()
         }
     }
 
@@ -724,6 +792,24 @@ extension CodexService {
 
         guard let usage = extractContextWindowUsage(from: usageObject) else { return }
         contextWindowUsageByThread[threadId] = usage
+    }
+
+    private func handleRuntimeAuthError(_ paramsObject: IncomingParamsObject?) {
+        let message = firstNonEmptyString([
+            firstStringValue(in: paramsObject, keys: ["message"]),
+            firstStringValue(in: envelopeEventObject(from: paramsObject), keys: ["message"]),
+        ]) ?? "OpenCode provider authentication failed on your Mac."
+
+        lastModelListOpenCodeMeta = OpenCodeModelListMeta(
+            reasonCode: "provider_auth_error",
+            connectedProviderIds: nil,
+            fetchedAt: nil,
+            stale: nil,
+            modelCountBeforeCap: nil,
+            modelCountAfterCap: nil
+        )
+        setModelsErrorMessage(message, forProvider: "opencode")
+        debugSyncLog("runtime/auth/error: \(message)")
     }
 
     private func handleThreadStatusChanged(_ paramsObject: IncomingParamsObject?) {

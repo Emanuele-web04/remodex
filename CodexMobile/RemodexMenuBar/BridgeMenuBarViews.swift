@@ -98,10 +98,27 @@ struct BridgeMenuBarContentView: View {
             }
 
             LabelValueRow(label: "Device", value: store.snapshot?.trustedPhoneStatusLabel ?? "Unknown")
+
+            if let opencode = store.snapshot?.bridgeStatus?.opencode {
+                LabelValueRow(label: "OpenCode", value: Self.openCodeStatusDetail(opencode))
+            }
         }
         .padding(12)
         .background(cardFill, in: cardShape)
         .overlay(cardBorder)
+    }
+
+    private static func openCodeStatusDetail(_ opencode: BridgeOpenCodeRuntimeStatus) -> String {
+        let versionLabel = opencode.version?.nonEmptyTrimmed ?? "unknown"
+        let enabledLabel = (opencode.enabled == true) ? "enabled" : "disabled"
+        var detail = "\(enabledLabel) · v\(versionLabel) · \(opencode.sessionCount ?? 0) sessions"
+        if opencode.versionBelowMinimum == true {
+            detail += " · below minimum"
+        }
+        if let lastError = opencode.lastError?.nonEmptyTrimmed {
+            detail += " · \(lastError)"
+        }
+        return detail
     }
 
     // MARK: - Relay
@@ -583,4 +600,11 @@ private struct PairingQRPayloadEnvelope: Encodable {
     let macDeviceId: String
     let macIdentityPublicKey: String
     let expiresAt: Int64
+}
+
+private extension String {
+    var nonEmptyTrimmed: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }

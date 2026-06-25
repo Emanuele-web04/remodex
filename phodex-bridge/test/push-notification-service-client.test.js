@@ -12,7 +12,7 @@ const { createPushNotificationServiceClient } = require("../src/push-notificatio
 test("push service client aborts stalled requests with a timeout error", async () => {
   let attempts = 0;
   const client = createPushNotificationServiceClient({
-    baseUrl: "https://push.example.test",
+    baseUrl: "http://localhost:4321",
     sessionId: "session-timeout",
     notificationSecret: "secret-timeout",
     requestTimeoutMs: 5,
@@ -46,7 +46,7 @@ test("push service client retries transient server failures with exponential del
   const delays = [];
   const payloads = [];
   const client = createPushNotificationServiceClient({
-    baseUrl: "https://push.example.test",
+    baseUrl: "http://localhost:4321",
     sessionId: "session-retry",
     notificationSecret: "secret-retry",
     retryBaseDelayMs: 25,
@@ -81,4 +81,66 @@ test("push service client retries transient server failures with exponential del
   assert.deepEqual(delays, [25, 50]);
   assert.equal(payloads.length, 3);
   assert.equal(new Set(payloads).size, 1);
+});
+
+test("push service client allows IPv6 loopback base URLs", () => {
+  assert.doesNotThrow(() => {
+    const client = createPushNotificationServiceClient({
+      baseUrl: "http://[::1]:4321",
+      sessionId: "session-ipv6",
+      notificationSecret: "secret-ipv6",
+    });
+    assert.equal(client.hasConfiguredBaseUrl, true);
+  });
+});
+
+test("push service client rejects non-HTTP/HTTPS protocols", () => {
+  assert.throws(() => {
+    createPushNotificationServiceClient({
+      baseUrl: "ftp://localhost/x",
+      sessionId: "session-ftp",
+      notificationSecret: "secret-ftp",
+    });
+  }, /must use HTTP or HTTPS protocol/);
+});
+
+test("push service client rejects non-localhost HTTPS when not explicitly configured", () => {
+  const previous = process.env.REMODEX_PUSH_SERVICE_URL;
+  delete process.env.REMODEX_PUSH_SERVICE_URL;
+  try {
+    assert.throws(() => {
+      createPushNotificationServiceClient({
+        baseUrl: "https://evil.example.test",
+        sessionId: "session-remote",
+        notificationSecret: "secret-remote",
+      });
+    }, /hostname is not allowed/);
+  } finally {
+    if (previous === undefined) {
+      delete process.env.REMODEX_PUSH_SERVICE_URL;
+    } else {
+      process.env.REMODEX_PUSH_SERVICE_URL = previous;
+    }
+  }
+});
+
+test("push service client allows configured REMODEX_PUSH_SERVICE_URL hostname", () => {
+  const previous = process.env.REMODEX_PUSH_SERVICE_URL;
+  process.env.REMODEX_PUSH_SERVICE_URL = "https://relay.example";
+  try {
+    assert.doesNotThrow(() => {
+      const client = createPushNotificationServiceClient({
+        baseUrl: "https://relay.example",
+        sessionId: "session-relay",
+        notificationSecret: "secret-relay",
+      });
+      assert.equal(client.hasConfiguredBaseUrl, true);
+    });
+  } finally {
+    if (previous === undefined) {
+      delete process.env.REMODEX_PUSH_SERVICE_URL;
+    } else {
+      process.env.REMODEX_PUSH_SERVICE_URL = previous;
+    }
+  }
 });

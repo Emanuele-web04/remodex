@@ -1,8 +1,8 @@
 // FILE: CodexService+RuntimeConfig.swift
-// Purpose: Runtime model/reasoning/access preferences, per-thread overrides, and model/list loading.
+// Purpose: Per-thread runtime overrides, selection persistence, and thin forwards to RuntimeCoordinator.
 // Layer: Service
 // Exports: CodexService runtime config APIs
-// Depends on: CodexModelOption, CodexReasoningEffortOption, CodexAccessMode
+// Depends on: RuntimeCoordinator, CodexModelOption, CodexReasoningEffortOption, CodexAccessMode
 
 import Foundation
 
@@ -13,22 +13,138 @@ private let runtimeDebugTimestampFormatter: DateFormatter = {
     return formatter
 }()
 
-private enum RuntimeConfigLoadingPolicy {
-    static let modelListTimeoutNanoseconds: UInt64 = 8_000_000_000
+private enum RuntimeReasoningFallback {
+    static let codexEfforts = ["low", "medium", "high", "xhigh"]
 }
 
-private enum RuntimeSelectionDefaults {
-    static let modelId = "gpt-5.5"
-    static let reasoningEffort = "medium"
+private struct RuntimeModelIdentity {
+    let modelId: String
+    let provider: String
+}
 
-    static func reasoningEffort(for unresolvedModelId: String?) -> String? {
-        guard let unresolvedModelId,
-              unresolvedModelId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == modelId else {
-            return nil
-        }
-        return reasoningEffort
+private enum RuntimeProviderPolicy {
+    static let strictThreadProviders: Set<String> = [
+        "opencode",
+    ]
+}
+
+// MARK: - RuntimeCoordinator forwards
+
+extension CodexService {
+    func modelsErrorMessage(forThreadId threadId: String?) -> String? {
+        runtimeCoordinator.modelsErrorMessage(forThreadId: threadId)
+    }
+
+    func setModelsErrorMessage(_ message: String?, forProvider provider: String) {
+        runtimeCoordinator.setModelsErrorMessage(message, forProvider: provider)
+    }
+
+    func clearModelsErrorMessages() {
+        runtimeCoordinator.clearModelsErrorMessages()
+    }
+
+    func loadPersistedModelsErrorMessages() {
+        runtimeCoordinator.loadPersistedModelsErrorMessages()
+    }
+
+    var isLoadingOpenCodeProvider: Bool {
+        runtimeCoordinator.isLoadingOpenCodeProvider
+    }
+
+    var openCodeProviderDiscoveryReasonCode: String? {
+        runtimeCoordinator.openCodeProviderDiscoveryReasonCode
+    }
+
+    var menuCatalogProviderIDs: [String] {
+        runtimeCoordinator.menuCatalogProviderIDs
+    }
+
+    var isOpenCodeRuntimeEnabledInCatalog: Bool {
+        runtimeCoordinator.isOpenCodeRuntimeEnabledInCatalog
+    }
+
+    var shouldAttemptOpenCodeModelLoad: Bool {
+        runtimeCoordinator.shouldAttemptOpenCodeModelLoad
+    }
+
+    var openCodeRuntimeCatalogEntry: RuntimeInfo? {
+        runtimeCoordinator.openCodeRuntimeCatalogEntry
+    }
+
+    var openCodeRuntimeDetails: OpenCodeRuntimeDetails? {
+        runtimeCoordinator.openCodeRuntimeDetails
+    }
+
+    var openCodeCatalogProviders: [OpenCodeCatalogProvider] {
+        runtimeCoordinator.openCodeCatalogProviders
+    }
+
+    var handoffEnvEnabled: Bool {
+        runtimeCoordinator.handoffEnvEnabled
+    }
+
+    func isOpenCodeModelListRetryTerminal() -> Bool {
+        runtimeCoordinator.isOpenCodeModelListRetryTerminal()
+    }
+
+    func listModels(refreshProviders: Bool = false) async throws {
+        try await runtimeCoordinator.listModels(refreshProviders: refreshProviders)
+    }
+
+    func fetchFullOpenCodeModelList(threadId: String?) async throws -> [CodexModelOption] {
+        try await runtimeCoordinator.fetchFullOpenCodeModelList(threadId: threadId)
+    }
+
+    func resetOpenCodeModelsRetry() {
+        runtimeCoordinator.resetOpenCodeModelsRetry()
+    }
+
+    func reconcileOpenCodeModelsAfterList() {
+        runtimeCoordinator.reconcileOpenCodeModelsAfterList()
+    }
+
+    func fetchRuntimeCatalog() async throws {
+        try await runtimeCoordinator.fetchRuntimeCatalog()
+    }
+
+    func refreshRuntimeMetadataSequential() async {
+        await runtimeCoordinator.refreshRuntimeMetadataSequential()
+    }
+
+    func refreshRuntimeMetadataParallel() async {
+        await runtimeCoordinator.refreshRuntimeMetadataParallel()
+    }
+
+    func noteOpenCodeCatalogRevisionAfterFetch() {
+        runtimeCoordinator.noteOpenCodeCatalogRevisionAfterFetch()
+    }
+
+    func supportsStructuredSkillInput(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.supportsStructuredSkillInput(forThreadId: threadId)
+    }
+
+    func supportsSkillFileInjection(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.supportsSkillFileInjection(forThreadId: threadId)
+    }
+
+    func supportsImageAttachments(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.supportsImageAttachments(forThreadId: threadId)
+    }
+
+    func providerCapabilitiesForTurn(threadId: String?) -> ProviderCapabilities {
+        runtimeCoordinator.providerCapabilitiesForTurn(threadId: threadId)
+    }
+
+    func supportsDesktopHandoffForTurn(threadId: String?) -> Bool {
+        runtimeCoordinator.supportsDesktopHandoffForTurn(threadId: threadId)
+    }
+
+    func isDesktopHandoffActionAvailable(forThreadId threadId: String?) -> Bool {
+        runtimeCoordinator.isDesktopHandoffActionAvailable(forThreadId: threadId)
     }
 }
+
+// MARK: - Thread overrides and selection persistence
 
 extension CodexService {
     // Resolves the effective per-chat override record after normalizing the thread id.
@@ -68,50 +184,12 @@ extension CodexService {
         throw lastError ?? CodexServiceError.invalidResponse("\(method) failed with unknown approvalPolicy error")
     }
 
-    func listModels() async throws {
-        isLoadingModels = true
-        defer { isLoadingModels = false }
-
-        do {
-            let response = try await sendRequest(
-                method: "model/list",
-                params: .object([
-                    "cursor": .null,
-                    "limit": .integer(50),
-                    "includeHidden": .bool(false),
-                ]),
-                timeoutNanoseconds: RuntimeConfigLoadingPolicy.modelListTimeoutNanoseconds,
-                timeoutMessage: "model/list timed out while syncing runtime options."
-            )
-
-            guard let resultObject = response.result?.objectValue else {
-                throw CodexServiceError.invalidResponse("model/list response missing payload")
-            }
-
-            let items =
-                resultObject["items"]?.arrayValue
-                ?? resultObject["data"]?.arrayValue
-                ?? resultObject["models"]?.arrayValue
-                ?? []
-
-            let decodedModels = items.compactMap { decodeModel(CodexModelOption.self, from: $0) }
-            availableModels = decodedModels
-            modelsErrorMessage = nil
-            normalizeRuntimeSelectionsAfterModelsUpdate()
-
-            debugRuntimeLog("model/list success count=\(decodedModels.count)")
-        } catch {
-            handleModelListFailure(error)
-            throw error
-        }
-    }
-
     func setSelectedModelId(_ modelId: String?) {
         let normalized = modelId?.trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized?.isEmpty == false {
             selectedModelId = normalized
         } else {
-            selectedModelId = RuntimeSelectionDefaults.modelId
+            selectedModelId = RuntimeSelectionDefaults.selectionKey
             selectedReasoningEffort = RuntimeSelectionDefaults.reasoningEffort
         }
         hasPersistedSelectedModelId = true
@@ -168,7 +246,7 @@ extension CodexService {
             return
         }
 
-        let normalizedServiceTier = normalizedServiceTierForSelectedModel(serviceTier)
+        let normalizedServiceTier = normalizedServiceTierForSelectedModel(serviceTier, threadId: normalizedThreadID)
         mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
             override.serviceTierRawValue = normalizedServiceTier?.rawValue
             override.overridesServiceTier = true
@@ -183,6 +261,30 @@ extension CodexService {
         mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
             override.serviceTierRawValue = nil
             override.overridesServiceTier = false
+        }
+    }
+
+    func setThreadModelOverride(_ model: CodexModelOption, for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.modelId = model.id
+            override.modelProvider = model.modelProvider
+            override.overridesModel = true
+        }
+    }
+
+    func clearThreadModelOverride(for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.modelId = nil
+            override.modelProvider = nil
+            override.overridesModel = false
         }
     }
 
@@ -206,14 +308,111 @@ extension CodexService {
         persistRuntimeSelections()
     }
 
+    func setSelectedAgentOverride(_ agent: String?, for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        let normalized = agent?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalized, !normalized.isEmpty else {
+            clearThreadOpenCodeAgentOverride(for: normalizedThreadID)
+            return
+        }
+
+        setThreadOpenCodeAgentOverride(normalized, for: normalizedThreadID)
+    }
+
+    func setThreadOpenCodeAgentOverride(_ agentId: String, for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        let normalized = agentId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            clearThreadOpenCodeAgentOverride(for: normalizedThreadID)
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.opencodeAgentId = validatedOpenCodeAgentId(normalized) ?? normalized
+            override.overridesAgent = true
+        }
+    }
+
+    func clearThreadOpenCodeAgentOverride(for threadId: String?) {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId) else {
+            return
+        }
+
+        mutateThreadRuntimeOverride(for: normalizedThreadID) { override in
+            override.opencodeAgentId = nil
+            override.overridesAgent = false
+        }
+    }
+
+    func setDefaultOpenCodeAgent(_ agent: String?) {
+        let normalized = agent?.trimmingCharacters(in: .whitespacesAndNewlines)
+        defaultOpenCodeAgentId = (normalized?.isEmpty == false) ? normalized : nil
+        persistRuntimeSelections()
+    }
+
+    // Remodex app drives Mac-started OpenCode session/project discovery via thread/list params.
+    var openCodeExternalDiscoveryEnabled: Bool {
+        if defaults.object(forKey: Self.openCodeExternalDiscoveryDefaultsKey) == nil {
+            return true
+        }
+        return defaults.bool(forKey: Self.openCodeExternalDiscoveryDefaultsKey)
+    }
+
+    func setOpenCodeExternalDiscoveryEnabled(_ enabled: Bool) {
+        defaults.set(enabled, forKey: Self.openCodeExternalDiscoveryDefaultsKey)
+    }
+
     func selectedModelOption() -> CodexModelOption? {
         selectedModelOption(from: availableModels)
     }
 
+    func modelOption(forSelectionKey selectionKey: String?) -> CodexModelOption? {
+        let normalized = selectionKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !normalized.isEmpty else {
+            return nil
+        }
+        return availableModels.first(where: {
+            $0.selectionKey == normalized || $0.id == normalized || $0.model == normalized
+        })
+    }
+
+    func selectedModelOption(threadId: String?) -> CodexModelOption? {
+        if let overrideIdentity = runtimeOverrideModelIdentity(for: threadId) {
+            return modelOption(
+                forThreadModelId: overrideIdentity.modelId,
+                provider: overrideIdentity.provider,
+                in: availableModels
+            )
+        }
+
+        if let threadIdentity = threadModelIdentity(for: threadId) {
+            return modelOption(
+                forThreadModelId: threadIdentity.modelId,
+                provider: threadIdentity.provider,
+                in: availableModels
+            )
+        }
+
+        return selectedModelOption()
+    }
+
     // Composer chrome should not present the canonical fallback as a loaded user choice.
-    func visibleSelectedModelIDForComposer() -> String? {
-        if let selectedModel = selectedModelOption() {
-            return selectedModel.id
+    func visibleSelectedModelIDForComposer(threadId: String? = nil) -> String? {
+        if let selectedModel = selectedModelOption(threadId: threadId) {
+            return selectedModel.selectionKey
+        }
+
+        if let unresolvedIdentity = unresolvedRuntimeModelIdentity(for: threadId) {
+            return CodexModelOption.selectionKey(
+                provider: unresolvedIdentity.provider,
+                modelId: unresolvedIdentity.modelId
+            )
         }
 
         guard hasPersistedSelectedModelId else {
@@ -228,11 +427,20 @@ extension CodexService {
     }
 
     // Keeps the model pill honest while bridge runtime metadata is still in flight.
-    func isRuntimeSelectionLoadingForComposer() -> Bool {
-        guard visibleSelectedModelIDForComposer() == nil else {
+    func isRuntimeSelectionLoadingForComposer(threadId: String? = nil) -> Bool {
+        guard visibleSelectedModelIDForComposer(threadId: threadId) == nil else {
             return false
         }
         return isBootstrappingConnectionSync || isLoadingThreads || isLoadingModels
+    }
+
+    // Blocks composer send/attach until the first catalog or model/list snapshot resolves.
+    func isRuntimeCapabilitiesLoadingForComposer(threadId: String? = nil) -> Bool {
+        _ = threadId
+        guard availableModels.isEmpty else {
+            return false
+        }
+        return isBootstrappingConnectionSync || isLoadingModels || availableRuntimes.isEmpty
     }
 
     func selectedGitWriterModelOption() -> CodexModelOption? {
@@ -240,7 +448,11 @@ extension CodexService {
     }
 
     func selectedModelSupportsServiceTier(_ serviceTier: CodexServiceTier) -> Bool {
-        selectedModelOption()?.supportsServiceTier(serviceTier) == true
+        selectedModelSupportsServiceTier(serviceTier, threadId: nil)
+    }
+
+    func selectedModelSupportsServiceTier(_ serviceTier: CodexServiceTier, threadId: String?) -> Bool {
+        selectedModelOption(threadId: threadId)?.supportsServiceTier(serviceTier) == true
     }
 
     func gitWriterModelIdentifier() -> String? {
@@ -248,7 +460,37 @@ extension CodexService {
     }
 
     func supportedReasoningEffortsForSelectedModel() -> [CodexReasoningEffortOption] {
-        selectedModelOption()?.supportedReasoningEfforts ?? []
+        supportedReasoningEffortsForSelectedModel(threadId: nil)
+    }
+
+    func supportedReasoningEffortsForSelectedModel(threadId: String?) -> [CodexReasoningEffortOption] {
+        let modelEfforts = selectedModelOption(threadId: threadId)?.supportedReasoningEfforts ?? []
+        if !modelEfforts.isEmpty {
+            return modelEfforts
+        }
+
+        guard shouldOfferCodexReasoningFallback(threadId: threadId) else {
+            return []
+        }
+
+        return RuntimeReasoningFallback.codexEfforts.map {
+            CodexReasoningEffortOption(reasoningEffort: $0, description: "")
+        }
+    }
+
+    private func shouldOfferCodexReasoningFallback(threadId: String?) -> Bool {
+        if let model = selectedModelOption(threadId: threadId) {
+            return model.modelProvider == RuntimeSelectionDefaults.provider
+                && (model.capabilities.supportsReasoningEffort || model.supportedReasoningEfforts.isEmpty)
+        }
+
+        if let identity = unresolvedRuntimeModelIdentity(for: threadId) {
+            return identity.provider == RuntimeSelectionDefaults.provider
+        }
+
+        let persistedProvider = CodexModelOption.splitSelectionKey(selectedModelId).provider
+        return selectedModelId == nil
+            || CodexModelOption.normalizedProvider(persistedProvider) == RuntimeSelectionDefaults.provider
     }
 
     func isThreadReasoningEffortOverridden(_ threadId: String?) -> Bool {
@@ -259,7 +501,7 @@ extension CodexService {
         }
 
         let supportedReasoningEfforts = Set(
-            supportedReasoningEffortsForSelectedModel().map(\.reasoningEffort)
+            supportedReasoningEffortsForSelectedModel(threadId: threadId).map(\.reasoningEffort)
         )
         return supportedReasoningEfforts.contains(selectedReasoning)
     }
@@ -269,8 +511,12 @@ extension CodexService {
     }
 
     func selectedReasoningEffortForSelectedModel(threadId: String? = nil) -> String? {
-        guard let model = selectedModelOption() else {
-            return RuntimeSelectionDefaults.reasoningEffort(for: selectedModelId)
+        guard let model = selectedModelOption(threadId: threadId) else {
+            if let unresolvedIdentity = unresolvedRuntimeModelIdentity(for: threadId),
+               unresolvedIdentity.provider != RuntimeSelectionDefaults.provider {
+                return nil
+            }
+            return RuntimeSelectionDefaults.reasoningEffort(for: runtimeModelIdentifierForTurn(threadId: threadId))
                 ?? selectedReasoningEffort
                 ?? RuntimeSelectionDefaults.reasoningEffort
         }
@@ -304,8 +550,64 @@ extension CodexService {
         return model.supportedReasoningEfforts.first?.reasoningEffort
     }
 
-    func runtimeModelIdentifierForTurn() -> String? {
-        selectedModelOption()?.model ?? selectedModelId ?? RuntimeSelectionDefaults.modelId
+    func runtimeModelIdentifierForTurn(threadId: String? = nil) -> String? {
+        if let selectedModel = selectedModelOption(threadId: threadId) {
+            return selectedModel.model
+        }
+        if let unresolvedIdentity = unresolvedRuntimeModelIdentity(for: threadId) {
+            return unresolvedIdentity.modelId
+        }
+        let splitSelection = CodexModelOption.splitSelectionKey(selectedModelId)
+        return splitSelection.modelId ?? RuntimeSelectionDefaults.modelId
+    }
+
+    func runtimeModelProviderForTurn(threadId: String? = nil) -> String {
+        if let enforced = enforcedThreadOwnershipModelProvider(for: threadId) {
+            return enforced
+        }
+        if let selectedModel = selectedModelOption(threadId: threadId) {
+            return selectedModel.modelProvider
+        }
+        if let unresolvedIdentity = unresolvedRuntimeModelIdentity(for: threadId) {
+            return unresolvedIdentity.provider
+        }
+        return CodexModelOption.splitSelectionKey(selectedModelId).provider
+    }
+
+    func runtimeCapabilitiesForTurn(threadId: String? = nil) -> ProviderCapabilities {
+        if let capabilities = selectedModelOption(threadId: threadId)?.capabilities {
+            return capabilities
+        }
+        let provider = CodexModelOption.normalizedProvider(runtimeModelProviderForTurn(threadId: threadId))
+        if isRuntimeCapabilitiesLoadingForComposer(threadId: threadId) {
+            if provider == "opencode", let catalogCapabilities = openCodeRuntimeCatalogEntry?.capabilities {
+                return catalogCapabilities
+            }
+            if let runtime = availableRuntimes.first(where: {
+                CodexModelOption.normalizedProvider($0.id) == provider
+            }) {
+                return runtime.capabilities
+            }
+        }
+        if let runtime = availableRuntimes.first(where: {
+            CodexModelOption.normalizedProvider($0.id) == provider
+        }) {
+            return runtime.capabilities
+        }
+        return provider == "opencode"
+            ? ProviderCapabilities.defaultOpenCode
+            : ProviderCapabilities.defaultCodex
+    }
+
+    // Thread list ownership wins over global composer selection on turn/start wire params.
+    func enforcedThreadOwnershipModelProvider(for threadId: String?) -> String? {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId),
+              let thread = threadByID[normalizedThreadID],
+              let modelProvider = thread.modelProvider else {
+            return nil
+        }
+        let normalizedProvider = CodexModelOption.normalizedProvider(modelProvider)
+        return isStrictRuntimeProvider(normalizedProvider) ? normalizedProvider : nil
     }
 
     func effectiveServiceTier(for threadId: String? = nil) -> CodexServiceTier? {
@@ -320,7 +622,7 @@ extension CodexService {
         guard let candidate else {
             return nil
         }
-        return selectedModelSupportsServiceTier(candidate) ? candidate : nil
+        return selectedModelSupportsServiceTier(candidate, threadId: threadId) ? candidate : nil
     }
 
     func runtimeServiceTierForTurn(threadId: String? = nil) -> String? {
@@ -385,6 +687,16 @@ extension CodexService {
     }
 
     func sendRequestWithSandboxFallback(method: String, baseParams: RPCObject) async throws -> RPCMessage {
+        if method == "turn/start",
+           let threadId = baseParams["threadId"]?.stringValue,
+           CodexModelOption.normalizedProvider(runtimeModelProviderForTurn(threadId: threadId)) == "opencode" {
+            return try await sendRequestWithApprovalPolicyFallback(
+                method: method,
+                baseParams: baseParams,
+                context: "opencode-minimal"
+            )
+        }
+
         var firstAttemptParams = baseParams
         firstAttemptParams["sandboxPolicy"] = runtimeSandboxPolicyObject(for: selectedAccessMode)
 
@@ -426,13 +738,6 @@ extension CodexService {
         )
     }
 
-    func handleModelListFailure(_ error: Error) {
-        let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = message.isEmpty ? "Unable to load models" : message
-        modelsErrorMessage = normalized
-        debugRuntimeLog("model/list failed: \(normalized)")
-    }
-
     func debugRuntimeLog(_ message: String) {
         let entry = "[\(runtimeDebugTimestampFormatter.string(from: Date()))] \(message)"
         runtimeDebugLogEntries.append(entry)
@@ -466,11 +771,14 @@ extension CodexService {
             || message.contains("on-request")
     }
 
-    func normalizedServiceTierForSelectedModel(_ serviceTier: CodexServiceTier?) -> CodexServiceTier? {
+    func normalizedServiceTierForSelectedModel(
+        _ serviceTier: CodexServiceTier?,
+        threadId: String? = nil
+    ) -> CodexServiceTier? {
         guard let serviceTier else {
             return nil
         }
-        guard let selectedModel = selectedModelOption() else {
+        guard let selectedModel = selectedModelOption(threadId: threadId) else {
             return serviceTier
         }
         return selectedModel.supportsServiceTier(serviceTier) ? serviceTier : nil
@@ -488,7 +796,8 @@ private extension CodexService {
         }
 
         let normalizedSelection = selectedModelId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalizedSelection == RuntimeSelectionDefaults.modelId
+        return (normalizedSelection == RuntimeSelectionDefaults.modelId
+            || normalizedSelection == RuntimeSelectionDefaults.selectionKey)
             && (isBootstrappingConnectionSync || isLoadingModels)
     }
 
@@ -498,10 +807,15 @@ private extension CodexService {
         mutate: (inout CodexThreadRuntimeOverride) -> Void
     ) {
         var currentOverride = threadRuntimeOverridesByThreadID[threadId] ?? CodexThreadRuntimeOverride(
+            modelId: nil,
+            modelProvider: nil,
             reasoningEffort: nil,
             serviceTierRawValue: nil,
+            opencodeAgentId: nil,
+            overridesModel: false,
             overridesReasoning: false,
-            overridesServiceTier: false
+            overridesServiceTier: false,
+            overridesAgent: false
         )
 
         mutate(&currentOverride)
@@ -521,11 +835,80 @@ private extension CodexService {
         }
 
         if let selectedModelId,
-           let directMatch = models.first(where: { $0.id == selectedModelId || $0.model == selectedModelId }) {
+           let directMatch = models.first(where: {
+               $0.selectionKey == selectedModelId || $0.id == selectedModelId || $0.model == selectedModelId
+           }) {
             return directMatch
         }
 
         return nil
+    }
+
+    func unresolvedRuntimeModelIdentity(for threadId: String?) -> RuntimeModelIdentity? {
+        runtimeOverrideModelIdentity(for: threadId) ?? threadModelIdentity(for: threadId)
+    }
+
+    func runtimeOverrideModelIdentity(for threadId: String?) -> RuntimeModelIdentity? {
+        guard let threadOverride = threadRuntimeOverride(for: threadId),
+              threadOverride.overridesModel,
+              let modelId = normalizedRuntimeModelId(threadOverride.modelId) else {
+            return nil
+        }
+
+        return RuntimeModelIdentity(
+            modelId: modelId,
+            provider: CodexModelOption.normalizedProvider(threadOverride.modelProvider)
+        )
+    }
+
+    func threadModelIdentity(for threadId: String?) -> RuntimeModelIdentity? {
+        guard let normalizedThreadID = normalizedInterruptIdentifier(threadId),
+              let thread = threadByID[normalizedThreadID],
+              let modelId = normalizedRuntimeModelId(thread.model) else {
+            return nil
+        }
+
+        return RuntimeModelIdentity(
+            modelId: modelId,
+            provider: CodexModelOption.normalizedProvider(thread.modelProvider)
+        )
+    }
+
+    func normalizedRuntimeModelId(_ value: String?) -> String? {
+        let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    // Thread metadata predates runtime providers, so only known runtime providers bypass Codex fallback.
+    func modelOption(
+        forThreadModelId modelId: String,
+        provider: String?,
+        in models: [CodexModelOption]
+    ) -> CodexModelOption? {
+        let normalizedProvider = CodexModelOption.normalizedProvider(provider)
+        if let providerMatch = models.first(where: {
+            $0.modelProvider == normalizedProvider && ($0.id == modelId || $0.model == modelId)
+        }) {
+            return providerMatch
+        }
+
+        if isStrictRuntimeProvider(normalizedProvider) {
+            return nil
+        }
+
+        if let codexMatch = models.first(where: {
+            $0.modelProvider == RuntimeSelectionDefaults.provider && ($0.id == modelId || $0.model == modelId)
+        }) {
+            return codexMatch
+        }
+
+        return models.first(where: {
+            $0.id == modelId || $0.model == modelId
+        })
+    }
+
+    func isStrictRuntimeProvider(_ provider: String) -> Bool {
+        RuntimeProviderPolicy.strictThreadProviders.contains(provider)
     }
 
     func selectedGitWriterModelOption(
@@ -538,26 +921,32 @@ private extension CodexService {
 
         let savedSelection = explicitModelId ?? selectedGitWriterModelId
         if let savedSelection,
-           let directMatch = models.first(where: { $0.id == savedSelection || $0.model == savedSelection }) {
+           let directMatch = models.first(where: {
+               $0.modelProvider == RuntimeSelectionDefaults.provider
+                   && ($0.selectionKey == savedSelection || $0.id == savedSelection || $0.model == savedSelection)
+           }) {
             return directMatch
         }
 
-        if let miniModel = models.first(where: { $0.id == "gpt-5.4-mini" || $0.model == "gpt-5.4-mini" }) {
+        if let miniModel = models.first(where: {
+            $0.modelProvider == RuntimeSelectionDefaults.provider
+                && ($0.id == "gpt-5.4-mini" || $0.model == "gpt-5.4-mini")
+        }) {
             return miniModel
         }
 
-        if let runtimeSelected = selectedModelOption(from: models) {
+        if let runtimeSelected = selectedModelOption(from: models),
+           runtimeSelected.modelProvider == RuntimeSelectionDefaults.provider {
             return runtimeSelected
         }
 
-        return fallbackModel(from: models)
+        return fallbackModel(from: models.filter { $0.modelProvider == RuntimeSelectionDefaults.provider })
     }
 
     func fallbackModel(from models: [CodexModelOption]) -> CodexModelOption? {
-        // Prefer GPT-5.5 when the bridge advertises it; the rest of the app treats
-        // it as the canonical default regardless of the bridge's `isDefault` flag.
         if let preferred = models.first(where: {
-            $0.id.lowercased() == "gpt-5.5" || $0.model.lowercased() == "gpt-5.5"
+            $0.modelProvider == RuntimeSelectionDefaults.provider
+                && ($0.id.lowercased() == "gpt-5.5" || $0.model.lowercased() == "gpt-5.5")
         }) {
             return preferred
         }
@@ -593,6 +982,13 @@ private extension CodexService {
         }
 
         defaults.set(selectedAccessMode.rawValue, forKey: Self.selectedAccessModeDefaultsKey)
+
+        if let defaultOpenCodeAgentId, !defaultOpenCodeAgentId.isEmpty {
+            defaults.set(defaultOpenCodeAgentId, forKey: Self.defaultOpenCodeAgentDefaultsKey)
+        } else {
+            defaults.removeObject(forKey: Self.defaultOpenCodeAgentDefaultsKey)
+        }
+
         persistThreadRuntimeOverrides()
     }
 
@@ -621,7 +1017,7 @@ extension CodexService {
         }
 
         let resolvedModel = selectedModelOption(from: availableModels) ?? fallbackModel(from: availableModels)
-        selectedModelId = resolvedModel?.id
+        selectedModelId = resolvedModel?.selectionKey
         hasPersistedSelectedModelId = resolvedModel != nil
 
         if let resolvedModel {
@@ -651,7 +1047,12 @@ extension CodexService {
 
         if let selectedGitWriterModelId,
            !availableModels.contains(where: {
-               $0.id == selectedGitWriterModelId || $0.model == selectedGitWriterModelId
+               $0.modelProvider == RuntimeSelectionDefaults.provider
+                   && (
+                       $0.selectionKey == selectedGitWriterModelId
+                       || $0.id == selectedGitWriterModelId
+                       || $0.model == selectedGitWriterModelId
+                   )
            }) {
             self.selectedGitWriterModelId = nil
         }

@@ -28,6 +28,11 @@ jobs:
           cache: npm
           cache-dependency-path: phodex-bridge/package-lock.json
 
+      - name: Socket Firewall
+        uses: socketdev/action@v1.3.1
+        with:
+          mode: firewall-free
+
       - name: Install bridge dependencies
         working-directory: phodex-bridge
         run: npm ci --ignore-scripts
@@ -40,6 +45,10 @@ jobs:
       - name: Run bridge tests
         working-directory: phodex-bridge
         run: npm test
+
+      - name: Run OpenCode test suite
+        working-directory: phodex-bridge
+        run: npm run test:opencode
 
   relay-check:
     name: Relay tests

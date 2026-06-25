@@ -121,6 +121,7 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         XCTAssertEqual(skills?.first?.name, "review")
         XCTAssertEqual(skills?.first?.description, "Review recent changes")
         XCTAssertEqual(skills?.first?.scope, "project")
+        XCTAssertEqual(skills?.first?.provider, nil)
         XCTAssertEqual(skills?.first?.enabled, true)
     }
 
@@ -143,6 +144,70 @@ final class CodexSkillsListDecodeTests: XCTestCase {
         XCTAssertEqual(skills?.count, 1)
         XCTAssertEqual(skills?.first?.name, "check-code")
         XCTAssertEqual(skills?.first?.scope, "global")
+        XCTAssertEqual(skills?.first?.provider, nil)
+    }
+
+    func testDecodeSkillsListParsesProvidersArrayFromBridgeMerge() {
+        let service = makeService()
+        let result: JSONValue = .object([
+            "skills": .array([
+                .object([
+                    "name": .string("review"),
+                    "description": .string("Review recent changes"),
+                    "path": .string("/Users/me/work/repo/.agents/skills/review/SKILL.md"),
+                    "scope": .string("project"),
+                    "provider": .string("codex"),
+                    "providers": .array([.string("codex"), .string("opencode")]),
+                    "enabled": .bool(true),
+                ]),
+            ]),
+        ])
+
+        let skills = service.decodeSkillMetadata(from: result)
+
+        XCTAssertEqual(skills?.count, 1)
+        XCTAssertEqual(skills?.first?.name, "review")
+        XCTAssertEqual(skills?.first?.provider, "codex")
+        XCTAssertEqual(skills?.first?.providers, ["codex", "opencode"])
+        XCTAssertEqual(skills?.first?.providerIds, ["codex", "opencode"])
+    }
+
+    func testDecodeSkillsListParsesProviderTagFromBridgeUnion() {
+        let service = makeService()
+        let result: JSONValue = .object([
+            "data": .array([
+                .object([
+                    "cwd": .string("/Users/me/work/repo"),
+                    "skills": .array([
+                        .object([
+                            "name": .string("review"),
+                            "description": .string("Review recent changes"),
+                            "path": .string("/Users/me/work/repo/.agents/skills/review/SKILL.md"),
+                            "scope": .string("project"),
+                            "provider": .string("opencode"),
+                            "enabled": .bool(true),
+                        ]),
+                        .object([
+                            "name": .string("check-code"),
+                            "description": .string("Audit code changes"),
+                            "path": .string("/Users/me/.codex/skills/check-code/SKILL.md"),
+                            "scope": .string("global"),
+                            "provider": .string("codex"),
+                            "enabled": .bool(true),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ])
+
+        let skills = service.decodeSkillMetadata(from: result)
+
+        XCTAssertEqual(skills?.count, 2)
+        XCTAssertEqual(skills?.first?.name, "review")
+        XCTAssertEqual(skills?.first?.scope, "project")
+        XCTAssertEqual(skills?.first?.provider, "opencode")
+        XCTAssertEqual(skills?.last?.name, "check-code")
+        XCTAssertEqual(skills?.last?.provider, "codex")
     }
 
     private func makeService() -> CodexService {

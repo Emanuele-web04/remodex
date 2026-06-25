@@ -4,6 +4,8 @@
 // Exports: createVoiceHandler, resolveVoiceAuth
 // Depends on: global fetch/FormData/Blob, local codex app-server auth via sendCodexRequest
 
+const { safeParseJSON } = require("./safe-json");
+
 const OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions";
 const CHATGPT_TRANSCRIPTIONS_URL = "https://chatgpt.com/backend-api/transcribe";
 const DEFAULT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe";
@@ -20,10 +22,8 @@ function createVoiceHandler({
   env = process.env,
 } = {}) {
   function handleVoiceRequest(rawMessage, sendResponse) {
-    let parsed;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+    const parsed = safeParseJSON(rawMessage);
+    if (!parsed) {
       return false;
     }
 

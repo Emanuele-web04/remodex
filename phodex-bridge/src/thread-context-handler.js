@@ -5,12 +5,13 @@
 // Depends on: ./rollout-watch
 
 const { readLatestContextWindowUsage } = require("./rollout-watch");
+const { OPENCODE_PROVIDER_ID } = require("./opencode-models");
+const { sessionGetUsageStats } = require("./opencode-session-usage-handler");
+const { safeParseJSON } = require("./safe-json");
 
-function handleThreadContextRequest(rawMessage, sendResponse) {
-  let parsed;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+function handleThreadContextRequest(rawMessage, sendResponse, dependencies = {}) {
+  const parsed = safeParseJSON(rawMessage);
+  if (!parsed) {
     return false;
   }
 
@@ -22,7 +23,7 @@ function handleThreadContextRequest(rawMessage, sendResponse) {
   const id = parsed.id;
   const params = parsed.params || {};
 
-  handleThreadContextRead(params)
+  handleThreadContextRead(params, dependencies)
     .then((result) => {
       sendResponse(JSON.stringify({ id, result }));
     })
@@ -45,10 +46,23 @@ function handleThreadContextRequest(rawMessage, sendResponse) {
 }
 
 // Reads the newest rollout-backed usage snapshot and returns it in the app-facing shape.
-async function handleThreadContextRead(params) {
+async function handleThreadContextRead(params, { ownershipStore, opencodeProvider } = {}) {
   const threadId = readString(params.threadId) || readString(params.thread_id);
   if (!threadId) {
     throw threadContextError("missing_thread_id", "thread/contextWindow/read requires a threadId.");
+  }
+
+  if (ownershipStore?.ownsThread(threadId, OPENCODE_PROVIDER_ID)) {
+    const openCodeUsage = await sessionGetUsageStats(params, {
+      ownershipStore,
+      opencodeProvider,
+    });
+    return {
+      threadId,
+      usage: openCodeUsage?.usage ?? null,
+      source: "opencode",
+      sessionId: openCodeUsage?.sessionId ?? null,
+    };
   }
 
   const turnId = readString(params.turnId) || readString(params.turn_id);
@@ -61,6 +75,7 @@ async function handleThreadContextRead(params) {
     threadId,
     usage: result?.usage ?? null,
     rolloutPath: result?.rolloutPath ?? null,
+    source: "codex_rollout",
   };
 }
 

@@ -7,8 +7,8 @@
 import Foundation
 
 enum AssistantReplayDeduper {
-    private static let largeReplayTextByteLimit = 64_000
-    private static let smallWhitespaceScanByteLimit = 512
+    private nonisolated static let largeReplayTextByteLimit = 64_000
+    private nonisolated static let smallWhitespaceScanByteLimit = 512
 
     // Removes assistant rows that are exact replays of assistant bubbles already seen in the same response block.
     nonisolated static func dedupeBlockReplays(in messages: [CodexMessage]) -> [CodexMessage] {

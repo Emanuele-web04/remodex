@@ -140,6 +140,26 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(projectGroups.map(\.id), ["project:/Users/me/work/app"])
     }
 
+    func testMakeGroupsWithChatScopeIncludesProviderFallbackCwdThreads() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let threads = [
+            makeThread(id: "project-thread", updatedAt: now.addingTimeInterval(60), cwd: "/Users/me/work/app"),
+            makeThread(
+                id: "opencode-rootless",
+                updatedAt: now,
+                cwd: "/Users/me/.codex/worktrees/dc28/Remodex",
+                metadata: ["projectCwdSource": .string("fallback")]
+            ),
+        ]
+
+        let chatGroups = SidebarThreadGrouping.makeGroups(from: threads, scope: .chats, now: now)
+        let projectGroups = SidebarThreadGrouping.makeGroups(from: threads, scope: .projects, now: now)
+
+        XCTAssertEqual(chatGroups.map(\.id), ["chats:rootless"])
+        XCTAssertEqual(chatGroups[0].threads.map(\.id), ["opencode-rootless"])
+        XCTAssertEqual(projectGroups.map(\.id), ["project:/Users/me/work/app"])
+    }
+
     func testMakeGroupsWithChatScopeUsesDynamicProjectlessRoots() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let customRoot = "/Volumes/Fast/CodexChats"
@@ -347,6 +367,47 @@ final class SidebarThreadGroupingTests: XCTestCase {
         XCTAssertEqual(labelsByPath["/Users/me/work/Remodex"]?.iconSystemName, "folder")
         XCTAssertEqual(labelsByPath["/Users/me/.codex/worktrees/ce15/Remodex"]?.label, "Remodex 15")
         XCTAssertEqual(labelsByPath["/Users/me/.codex/worktrees/ce15/Remodex"]?.iconSystemName, "arrow.triangle.branch")
+    }
+
+    func testMakeProjectChoicesIncludesKnownProjectsWithoutThreads() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let choices = SidebarThreadGrouping.makeProjectChoices(
+            from: [],
+            knownProjects: [
+                makeKnownProject(path: "/Users/me/work/opencode-only", lastSeenAt: now),
+            ]
+        )
+
+        XCTAssertEqual(choices.map(\.label), ["opencode-only"])
+        XCTAssertEqual(choices.map(\.projectPath), ["/Users/me/work/opencode-only"])
+    }
+
+    func testMakeProjectChoicesDedupesKnownProjectsAgainstLiveThreads() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let choices = SidebarThreadGrouping.makeProjectChoices(
+            from: [
+                makeThread(id: "thread-a", updatedAt: now, cwd: "/Users/me/work/app"),
+            ],
+            knownProjects: [
+                makeKnownProject(path: "/Users/me/work/app", lastSeenAt: now.addingTimeInterval(600)),
+                makeKnownProject(path: "/Users/me/work/site", lastSeenAt: now.addingTimeInterval(-60)),
+            ]
+        )
+
+        XCTAssertEqual(choices.map(\.projectPath), ["/Users/me/work/app", "/Users/me/work/site"])
+        XCTAssertEqual(choices.first?.sortDate, now)
+    }
+
+    func testMakeProjectChoicesSkipsKnownProjectlessRoots() {
+        let choices = SidebarThreadGrouping.makeProjectChoices(
+            from: [],
+            knownProjects: [
+                makeKnownProject(path: macGeneratedCodexProjectlessPath(slug: "rootless-chat")),
+                makeKnownProject(path: "/Users/me/work/app"),
+            ]
+        )
+
+        XCTAssertEqual(choices.map(\.projectPath), ["/Users/me/work/app"])
     }
 
     func testLiveThreadIDsForProjectGroupUsesAllThreadsNotJustFilteredMatches() {
@@ -653,6 +714,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
         id: String,
         updatedAt: Date,
         cwd: String?,
+        metadata: [String: JSONValue]? = nil,
         syncState: CodexThreadSyncState = .live,
         parentThreadId: String? = nil,
         forkedFromThreadId: String? = nil
@@ -662,6 +724,7 @@ final class SidebarThreadGroupingTests: XCTestCase {
             title: id,
             updatedAt: updatedAt,
             cwd: cwd,
+            metadata: metadata,
             forkedFromThreadId: forkedFromThreadId,
             parentThreadId: parentThreadId,
             syncState: syncState
@@ -676,6 +739,21 @@ final class SidebarThreadGroupingTests: XCTestCase {
             sortDate: .distantPast,
             projectPath: id.replacingOccurrences(of: "project:", with: ""),
             threads: []
+        )
+    }
+
+    private func makeKnownProject(
+        path: String,
+        lastSeenAt: Date? = nil
+    ) -> CodexKnownProject {
+        CodexKnownProject(
+            id: path,
+            label: (path as NSString).lastPathComponent,
+            path: path,
+            source: "test",
+            sources: ["test"],
+            providerHints: [],
+            lastSeenAt: lastSeenAt
         )
     }
 

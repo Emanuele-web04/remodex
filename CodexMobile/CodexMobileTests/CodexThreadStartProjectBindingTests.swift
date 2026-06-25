@@ -11,19 +11,58 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
     func testMakeThreadStartParamsIncludesModelAndCwd() {
         let params = CodexThreadStartProjectBinding.makeThreadStartParams(
             modelIdentifier: "gpt-5",
+            modelProvider: "codex",
             preferredProjectPath: "/Users/me/work/project",
             serviceTier: "fast"
         )
 
         XCTAssertEqual(params["model"]?.stringValue, "gpt-5")
+        XCTAssertEqual(params["modelProvider"]?.stringValue, "codex")
         XCTAssertEqual(params["cwd"]?.stringValue, "/Users/me/work/project")
         XCTAssertEqual(params["serviceTier"]?.stringValue, "fast")
+    }
+
+    func testMakeThreadStartParamsIncludesProviderSelection() {
+        let params = CodexThreadStartProjectBinding.makeThreadStartParams(
+            modelIdentifier: "opencode/gpt-5.5",
+            modelProvider: "open-code",
+            preferredProjectPath: nil,
+            serviceTier: nil
+        )
+
+        XCTAssertEqual(params["model"]?.stringValue, "opencode/gpt-5.5")
+        XCTAssertEqual(params["modelProvider"]?.stringValue, "opencode")
+    }
+
+    func testMakeThreadStartParamsIncludesAgentForOpenCodeProvider() {
+        let params = CodexThreadStartProjectBinding.makeThreadStartParams(
+            modelIdentifier: "opencode/gpt-5.5",
+            modelProvider: "opencode",
+            preferredProjectPath: nil,
+            serviceTier: nil,
+            agent: "plan"
+        )
+
+        XCTAssertEqual(params["agent"]?.stringValue, "plan")
+    }
+
+    func testMakeThreadStartParamsOmitsAgentForCodexProvider() {
+        let params = CodexThreadStartProjectBinding.makeThreadStartParams(
+            modelIdentifier: "gpt-5",
+            modelProvider: "codex",
+            preferredProjectPath: nil,
+            serviceTier: nil,
+            agent: "plan"
+        )
+
+        XCTAssertNil(params["agent"])
     }
 
     func testMakeThreadStartParamsSkipsEmptyCwd() {
         let normalized = CodexThreadStartProjectBinding.normalizedProjectPath("   ")
         let params = CodexThreadStartProjectBinding.makeThreadStartParams(
             modelIdentifier: nil,
+            modelProvider: nil,
             preferredProjectPath: normalized,
             serviceTier: nil
         )
@@ -36,6 +75,7 @@ final class CodexThreadStartProjectBindingTests: XCTestCase {
         let normalized = CodexThreadStartProjectBinding.normalizedProjectPath("server")
         let params = CodexThreadStartProjectBinding.makeThreadStartParams(
             modelIdentifier: nil,
+            modelProvider: nil,
             preferredProjectPath: normalized,
             serviceTier: nil
         )

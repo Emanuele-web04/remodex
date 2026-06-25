@@ -27,10 +27,15 @@ extension CodexService {
         return needsContextUsage || needsRateLimits
     }
 
-    // Fetches the latest thread-scoped context usage from the local bridge fallback.
+    // Fetches the latest thread-scoped context usage from OpenCode session stats or Codex rollout fallback.
     func refreshContextWindowUsage(threadId: String) async {
         let trimmedThreadID = threadId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedThreadID.isEmpty else { return }
+
+        if CodexModelOption.normalizedProvider(runtimeModelProviderForTurn(threadId: trimmedThreadID)) == "opencode" {
+            await refreshOpenCodeContextWindowUsage(threadId: trimmedThreadID)
+            return
+        }
 
         var params: RPCObject = ["threadId": .string(trimmedThreadID)]
         if let turnId = activeTurnIdByThread[trimmedThreadID]?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -88,6 +93,51 @@ extension CodexService {
 }
 
 private extension CodexService {
+    // Pulls OpenCode session token counters through session/getUsageStats for the context ring.
+    func refreshOpenCodeContextWindowUsage(threadId: String) async {
+        let params: RPCObject = ["threadId": .string(threadId)]
+
+        do {
+            let response = try await sendRequest(method: "session/getUsageStats", params: .object(params))
+            guard let resultObject = response.result?.objectValue else {
+                throw CodexServiceError.invalidResponse("session/getUsageStats response missing payload")
+            }
+
+            guard let usageObject = resultObject["usage"]?.objectValue,
+                  let usage = extractContextWindowUsage(from: usageObject) else {
+                await refreshContextWindowUsageFromRolloutFallback(threadId: threadId)
+                return
+            }
+
+            contextWindowUsageByThread[threadId] = usage
+        } catch {
+            await refreshContextWindowUsageFromRolloutFallback(threadId: threadId)
+            debugSyncLog("session/getUsageStats failed (non-fatal): \(error.localizedDescription)")
+        }
+    }
+
+    // Keeps OpenCode threads on the legacy rollout reader when session stats are unavailable.
+    func refreshContextWindowUsageFromRolloutFallback(threadId: String) async {
+        var params: RPCObject = ["threadId": .string(threadId)]
+        if let turnId = activeTurnIdByThread[threadId]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !turnId.isEmpty {
+            params["turnId"] = .string(turnId)
+        }
+
+        do {
+            let response = try await sendRequest(method: "thread/contextWindow/read", params: .object(params))
+            guard let resultObject = response.result?.objectValue,
+                  let usageObject = resultObject["usage"]?.objectValue,
+                  let usage = extractContextWindowUsage(from: usageObject) else {
+                setDefaultContextWindowUsageIfNeeded(threadId: threadId)
+                return
+            }
+            contextWindowUsageByThread[threadId] = usage
+        } catch {
+            setDefaultContextWindowUsageIfNeeded(threadId: threadId)
+        }
+    }
+
     // Resolves missing context data so fresh chats show 0 instead of an endless loading state.
     func setDefaultContextWindowUsageIfNeeded(threadId: String) {
         if contextWindowUsageByThread[threadId] == nil {

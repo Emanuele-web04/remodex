@@ -152,16 +152,59 @@ extension CodexService {
     ) async throws -> CodexThread {
         let normalizedPreferredProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
         // Brand-new chats start from app defaults; per-chat overrides are inherited only on continuation.
-        let explicitServiceTier = runtimeOverride?.overridesServiceTier == true
-            ? normalizedServiceTierForSelectedModel(runtimeOverride?.serviceTier)?.rawValue
-            : runtimeServiceTierForTurn()
+        let runtimeOverrideModelOption = runtimeOverride?.overridesModel == true
+            ? modelOption(
+                forSelectionKey: CodexModelOption.selectionKey(
+                    provider: runtimeOverride?.modelProvider,
+                    modelId: runtimeOverride?.modelId
+                )
+            )
+            : nil
+        let explicitModelIdentifier = runtimeOverride?.overridesModel == true
+            ? runtimeOverrideModelOption?.model ?? runtimeOverride?.modelId
+            : runtimeModelIdentifierForTurn()
+        let explicitModelProvider = runtimeOverride?.overridesModel == true
+            ? (
+                runtimeOverrideModelOption?.modelProvider
+                    ?? CodexModelOption.normalizedProvider(runtimeOverride?.modelProvider)
+            )
+            : runtimeModelProviderForTurn()
+        let explicitServiceTier: String? = {
+            guard runtimeOverride?.overridesServiceTier == true else {
+                return runtimeServiceTierForTurn()
+            }
+            guard let serviceTier = runtimeOverride?.serviceTier else {
+                return nil
+            }
+            if let runtimeOverrideModelOption {
+                return runtimeOverrideModelOption.supportsServiceTier(serviceTier) ? serviceTier.rawValue : nil
+            }
+            if runtimeOverride?.overridesModel == true {
+                return serviceTier.rawValue
+            }
+            return normalizedServiceTierForSelectedModel(serviceTier)?.rawValue
+        }()
         var includesServiceTier = explicitServiceTier != nil
+        let explicitOpenCodeAgent: String? = {
+            let normalizedProvider = CodexModelOption.normalizedProvider(explicitModelProvider ?? "codex")
+            guard normalizedProvider != "codex" else {
+                return nil
+            }
+            if runtimeOverride?.overridesAgent == true,
+               let overrideAgent = runtimeOverride?.opencodeAgentId?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !overrideAgent.isEmpty {
+                return overrideAgent
+            }
+            return effectiveOpenCodeAgent(threadId: nil)
+        }()
 
         while true {
             let params = CodexThreadStartProjectBinding.makeThreadStartParams(
-                modelIdentifier: runtimeModelIdentifierForTurn(),
+                modelIdentifier: explicitModelIdentifier,
+                modelProvider: explicitModelProvider,
                 preferredProjectPath: normalizedPreferredProjectPath,
-                serviceTier: includesServiceTier ? explicitServiceTier : nil
+                serviceTier: includesServiceTier ? explicitServiceTier : nil,
+                agent: explicitOpenCodeAgent
             )
 
             do {
@@ -277,6 +320,20 @@ extension CodexService {
         }
 
         let initialThreadId = try await resolveThreadID(threadId)
+        let normalizedOutgoingBody = normalizedOutgoingSendBody(
+            trimmedInput: trimmedInput,
+            skillMentions: skillMentions,
+            mentionMentions: mentionMentions,
+            attachments: attachments
+        )
+        if shouldDebounceDuplicateOutgoingSend(
+            threadId: initialThreadId,
+            normalizedBody: normalizedOutgoingBody
+        ) {
+            debugSyncLog("ios_send_debounced thread=\(initialThreadId) body=\(normalizedOutgoingBody)")
+            return
+        }
+        recordOutgoingSendAttempt(threadId: initialThreadId, normalizedBody: normalizedOutgoingBody)
         let effectiveCollaborationMode = collaborationModeForOutgoingTurn(
             threadId: initialThreadId,
             requestedMode: collaborationMode,
@@ -796,9 +853,10 @@ extension CodexService {
             .compactMap { _, bucket -> CodexSkillMetadata? in
                 bucket.first(where: { $0.enabled }) ?? bucket.first
             }
+
+        return dedupedByName
             .filter { !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        return dedupedByName
     }
 
     // Loads Codex app-server plugins and returns entries usable as `@plugin` mentions.
@@ -1043,13 +1101,22 @@ enum CodexThreadStartProjectBinding {
 
     static func makeThreadStartParams(
         modelIdentifier: String?,
+        modelProvider: String?,
         preferredProjectPath: String?,
-        serviceTier: String?
+        serviceTier: String?,
+        agent: String? = nil
     ) -> RPCObject {
         var params: RPCObject = [:]
 
         if let modelIdentifier {
             params["model"] = .string(modelIdentifier)
+        }
+        let normalizedProvider = modelProvider.map { CodexModelOption.normalizedProvider($0) }
+        if let normalizedProvider {
+            params["modelProvider"] = .string(normalizedProvider)
+            if normalizedProvider != "codex", let agent {
+                params["agent"] = .string(agent)
+            }
         }
 
         if let preferredProjectPath {
@@ -1120,6 +1187,10 @@ extension CodexService {
             if let limit {
                 params["limit"] = .integer(limit)
             }
+            if openCodeExternalDiscoveryEnabled {
+                params["discoverOpenCodeSessions"] = .bool(true)
+                params["discoverOpenCodeProjects"] = .bool(true)
+            }
 
             let response = try await sendRequest(
                 method: "thread/list",
@@ -1131,6 +1202,7 @@ extension CodexService {
             guard let resultObject = response.result?.objectValue else {
                 throw CodexServiceError.invalidResponse("thread/list response missing payload")
             }
+            captureThreadListDiagnostics(from: resultObject)
 
             let page =
                 resultObject["data"]?.arrayValue
@@ -1163,6 +1235,25 @@ extension CodexService {
             "exec",
             "unknown",
         ]
+    }
+
+    // Records bridge-side ghost/materialization diagnostics for sync observability.
+    private func captureThreadListDiagnostics(from resultObject: RPCObject) {
+        guard let meta = resultObject["meta"]?.objectValue else {
+            return
+        }
+
+        let blocked =
+            meta["materializationBlocked"]?.intValue
+            ?? meta["materialization_blocked"]?.intValue
+        guard let blocked else {
+            return
+        }
+
+        lastThreadListMaterializationBlocked = blocked
+        if blocked > 0 {
+            debugSyncLog("thread/list materialization_blocked=\(blocked)")
+        }
     }
 
     // Accepts both modern and legacy cursor field names from thread/list responses.
@@ -1226,7 +1317,7 @@ extension CodexService {
         let requestedSignature = CodexThreadResumeRequestSignature(
             projectPath: CodexThreadStartProjectBinding.normalizedProjectPath(preferredProjectPath)
                 ?? thread(for: threadId)?.gitWorkingDirectory,
-            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn()
+            modelIdentifier: modelIdentifierOverride ?? runtimeModelIdentifierForTurn(threadId: threadId)
         )
         let refreshGeneration = currentPerThreadRefreshGeneration(for: threadId)
         if let existingTask = threadResumeTaskByThreadID[threadId] {
@@ -1256,6 +1347,9 @@ extension CodexService {
             var params: RPCObject = [
                 "threadId": .string(threadId),
             ]
+            if let modelProvider = enforcedThreadOwnershipModelProvider(for: threadId) {
+                params["modelProvider"] = .string(modelProvider)
+            }
             let resolvedProjectPath = requestedSignature.projectPath
             if let workingDirectory = resolvedProjectPath {
                 params["cwd"] = .string(workingDirectory)
@@ -1542,8 +1636,14 @@ extension CodexService {
             messageId: pendingMessageId
         )
 
-        var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
+        var includeStructuredSkillItems = (
+            supportsSkillFileInjection(forThreadId: threadId)
+                || supportsStructuredSkillInput(forThreadId: threadId)
+        ) && !skillMentions.isEmpty
         var includeStructuredMentionItems = supportsStructuredMentionInput && !mentionMentions.isEmpty
+        // When includeStructuredSkillItems, the input[] will contain type:"skill" items; bridge (for OC)
+        // will conditionally include top-level "skills:[]" in the SDK prompt payload (see RP-SKILL-3,
+        // gated on flag + SDK support; currently false for OC, documented "gated pending upstream").
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? collaborationMode : nil
         var didDowngradePlanModeForRuntime = false
@@ -1569,14 +1669,18 @@ extension CodexService {
                     collaborationMode: effectiveCollaborationMode,
                     includeServiceTier: includesServiceTier
                 )
-                // The pre-turn snapshot must settle before the runtime can mutate files.
-                if let messageStartCheckpointTask {
+                traceTurnStartRequest(threadId: threadId, rpcId: nil, params: requestParams)
+                // Defer checkpoint await only when the thread has a validated cwd (B-16 / REV-022).
+                // Rootless chats skip the blocking wait; project threads fire turn/start immediately.
+                if let messageStartCheckpointTask,
+                   !threadHasValidatedWorkingDirectory(for: threadId) {
                     await messageStartCheckpointTask.value
                 }
                 let response = try await sendRequestWithSandboxFallback(
                     method: "turn/start",
                     baseParams: requestParams
                 )
+                traceTurnStartResult(threadId: threadId, rpcId: response.id, error: nil)
                 let resolvedTurnID = handleSuccessfulTurnStartResponse(
                     response,
                     pendingMessageId: pendingMessageId,
@@ -1864,8 +1968,14 @@ extension CodexService {
             throw error
         }
 
-        var includeStructuredSkillItems = supportsStructuredSkillInput && !skillMentions.isEmpty
+        var includeStructuredSkillItems = (
+            supportsSkillFileInjection(forThreadId: threadId)
+                || supportsStructuredSkillInput(forThreadId: threadId)
+        ) && !skillMentions.isEmpty
         var includeStructuredMentionItems = supportsStructuredMentionInput && !mentionMentions.isEmpty
+        // When includeStructuredSkillItems, the input[] will contain type:"skill" items; bridge (for OC)
+        // will conditionally include top-level "skills:[]" in the SDK prompt payload (see RP-SKILL-3,
+        // gated on flag + SDK support; currently false for OC, documented "gated pending upstream").
         var imageURLKey = "url"
         var effectiveCollaborationMode = supportsTurnCollaborationMode ? effectiveRequestedCollaborationMode : nil
         var currentExpectedTurnID = initialTurnID
@@ -2440,8 +2550,15 @@ extension CodexService {
         ]
         // Keep the legacy top-level fields populated so plan-mode turns still honor
         // the user's selected model on runtimes that do not read collaboration settings.
-        if let modelIdentifier = runtimeModelIdentifierForTurn() {
+        let modelProvider = enforcedThreadOwnershipModelProvider(for: threadId)
+            ?? runtimeModelProviderForTurn(threadId: threadId)
+        if let modelIdentifier = runtimeModelIdentifierForTurn(threadId: threadId) {
             params["model"] = .string(modelIdentifier)
+        }
+        params["modelProvider"] = .string(modelProvider)
+        if modelProvider != "codex",
+           let workingDirectory = thread(for: threadId)?.gitWorkingDirectory {
+            params["cwd"] = .string(workingDirectory)
         }
         if let effort = selectedReasoningEffortForSelectedModel(threadId: threadId) {
             params["effort"] = .string(effort)
@@ -2456,6 +2573,9 @@ extension CodexService {
         ) {
             params["collaborationMode"] = collaborationModePayload
         }
+        if modelProvider != "codex" {
+            params["agent"] = .string(effectiveOpenCodeAgent(threadId: threadId))
+        }
         return params
     }
 
@@ -2468,8 +2588,8 @@ extension CodexService {
             return nil
         }
 
-        let resolvedModel = runtimeModelIdentifierForTurn()
-            ?? selectedModelOption()?.model
+        let resolvedModel = runtimeModelIdentifierForTurn(threadId: threadId)
+            ?? selectedModelOption(threadId: threadId)?.model
             ?? availableModels.first?.model
             ?? selectedModelId
         guard let resolvedModel,
@@ -2494,6 +2614,7 @@ extension CodexService {
             "mode": .string(mode.rawValue),
             "settings": .object([
                 "model": .string(resolvedModel),
+                "model_provider": .string(runtimeModelProviderForTurn(threadId: threadId)),
                 "reasoning_effort": selectedReasoningEffortForSelectedModel(
                     threadId: threadId
                 ).map(JSONValue.string) ?? .null,
@@ -2723,8 +2844,10 @@ extension CodexService {
         pendingMessageId: String,
         threadId: String
     ) throws {
+        mirroredRunningSuppressedAfterTurnStartFailureThreadIDs.insert(threadId)
         markMessageDeliveryState(threadId: threadId, messageId: pendingMessageId, state: .failed)
         clearRunningState(for: threadId)
+        traceTurnStartResult(threadId: threadId, rpcId: nil, error: error)
         if shouldTreatAsThreadNotFound(error) {
             throw error
         }
@@ -2766,12 +2889,18 @@ extension CodexService {
             beginAssistantMessage(threadId: threadId, turnId: turnID)
         }
 
+        mirroredRunningSuppressedAfterTurnStartFailureThreadIDs.remove(threadId)
         lastErrorMessage = nil
 
         if let index = threadIndex(for: threadId) {
             threads[index].updatedAt = Date()
             threads[index].syncState = .live
             threads = sortThreads(threads)
+        }
+
+        if resolvedTurnID != nil {
+            restartWebSocketKeepAliveLoopIfNeeded()
+            Task { await probeForegroundConnectionIfNeeded() }
         }
 
         return resolvedTurnID
@@ -3300,5 +3429,58 @@ extension CodexService {
         }
 
         return normalized.isEmpty ? "/" : normalized
+    }
+
+    private static let outgoingSendDebounceInterval: TimeInterval = 0.3
+
+    private func normalizedOutgoingSendBody(
+        trimmedInput: String,
+        skillMentions: [CodexTurnSkillMention],
+        mentionMentions: [CodexTurnMention],
+        attachments: [CodexImageAttachment]
+    ) -> String {
+        var parts: [String] = [trimmedInput]
+        if !attachments.isEmpty {
+            parts.append("__attachments:\(attachments.count)__")
+        }
+        let skillNames = skillMentions
+            .compactMap { mention -> String? in
+                let rawName = mention.name ?? mention.id
+                let normalized = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+                return normalized.isEmpty ? nil : normalized.lowercased()
+            }
+            .sorted()
+        if !skillNames.isEmpty {
+            parts.append("__skills:\(skillNames.joined(separator: "|"))__")
+        }
+        let pluginNames = mentionMentions
+            .map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+            .sorted()
+        if !pluginNames.isEmpty {
+            parts.append("__mentions:\(pluginNames.joined(separator: "|"))__")
+        }
+        return parts
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func shouldDebounceDuplicateOutgoingSend(threadId: String, normalizedBody: String) -> Bool {
+        guard !normalizedBody.isEmpty,
+              let snapshot = lastOutgoingSendDedupeSnapshot,
+              snapshot.threadId == threadId,
+              snapshot.normalizedBody == normalizedBody else {
+            return false
+        }
+        return Date().timeIntervalSince(snapshot.sentAt) < Self.outgoingSendDebounceInterval
+    }
+
+    private func recordOutgoingSendAttempt(threadId: String, normalizedBody: String) {
+        lastOutgoingSendDedupeSnapshot = OutgoingSendDedupeSnapshot(
+            threadId: threadId,
+            normalizedBody: normalizedBody,
+            sentAt: Date()
+        )
     }
 }

@@ -103,7 +103,7 @@ struct ContentView: View {
     private let sidebarGestureLogBucketWidth: CGFloat = 40
     private let sidebarSwipeCommitDistance: CGFloat = 30
     private let sidebarSelectionSuppressionDuration: TimeInterval = 0.35
-    private let whatsNewReleaseVersion = "1.5"
+    private let whatsNewReleaseVersion = "2.0"
     private static let sidebarSpring = Animation.spring(response: 0.35, dampingFraction: 0.85)
     private static var isSidebarDebugLoggingEnabled: Bool { false }
 
@@ -710,7 +710,10 @@ struct ContentView: View {
             statusMessage: codex.lastErrorMessage,
             canForgetPair: codex.hasReconnectCandidate && !codex.isConnected,
             onForgetPair: {
-                codex.forgetReconnectCandidate()
+                Task {
+                    await viewModel.stopAutoReconnectForManualScan(codex: codex)
+                    codex.forgetReconnectCandidate()
+                }
             }
         )
     }
@@ -1891,7 +1894,10 @@ struct ContentView: View {
     // Keeps the destructive saved-pair action visually separate from the reconnect controls.
     private var reconnectFooterAction: some View {
         Button("Forget Pair") {
-            codex.forgetReconnectCandidate()
+            Task {
+                await viewModel.stopAutoReconnectForManualScan(codex: codex)
+                codex.forgetReconnectCandidate()
+            }
         }
         .font(AppFont.caption(weight: .semibold))
         .foregroundStyle(.secondary)

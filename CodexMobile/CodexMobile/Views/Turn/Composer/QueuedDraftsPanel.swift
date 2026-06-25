@@ -9,6 +9,8 @@ import SwiftUI
 struct QueuedDraftsPanel: View {
     let drafts: [QueuedTurnDraft]
     let canSteerDrafts: Bool
+    let showsSteerControl: Bool
+    let steerUnavailableReason: String?
     let canRestoreDrafts: Bool
     let steeringDraftID: String?
     let onRestore: (String) -> Void
@@ -51,14 +53,15 @@ struct QueuedDraftsPanel: View {
                     .disabled(!canRestoreDrafts)
                     .accessibilityLabel("Move draft into input")
 
-                    if canSteerDrafts {
+                    if showsSteerControl {
                         Button {
+                            guard canSteerDrafts else { return }
                             HapticFeedback.shared.triggerImpactFeedback(style: .light)
                             onSteer(draft.id)
                         } label: {
                             Text("Steer")
                                 .font(AppFont.system(size: 12, weight: .medium))
-                                .foregroundStyle(.primary)
+                                .foregroundStyle(canSteerDrafts ? .primary : .tertiary)
                                 .padding(.horizontal, 10)
                                 .frame(height: 24)
                                 .contentShape(Rectangle())
@@ -66,9 +69,15 @@ struct QueuedDraftsPanel: View {
                                     Capsule(style: .continuous)
                                         .fill(.regularMaterial)
                                 )
+                                .opacity(canSteerDrafts ? 1 : ComposerDisabledAppearance.controlOpacity)
                         }
                         .buttonStyle(.plain)
-                        .disabled(steeringDraftID != nil)
+                        .disabled(!canSteerDrafts || steeringDraftID != nil)
+                        .accessibilityLabel(
+                            canSteerDrafts
+                                ? "Steer active turn with this draft"
+                                : (steerUnavailableReason ?? "Steer unavailable")
+                        )
                     }
 
                     Button {
@@ -119,6 +128,8 @@ struct QueuedDraftsPanel: View {
             ),
         ],
         canSteerDrafts: true,
+        showsSteerControl: true,
+        steerUnavailableReason: nil,
         canRestoreDrafts: true,
         steeringDraftID: nil,
         onRestore: { _ in },
@@ -148,6 +159,8 @@ struct QueuedDraftsPanel: View {
             ),
         ],
         canSteerDrafts: true,
+        showsSteerControl: true,
+        steerUnavailableReason: nil,
         canRestoreDrafts: false,
         steeringDraftID: "draft-1",
         onRestore: { _ in },

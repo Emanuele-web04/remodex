@@ -14,6 +14,8 @@ const {
   createPushSessionService,
   createFileBackedPushStateStore,
   resolvePushStateFilePath,
+  isApnsConfiguredFromEnv,
+  resolvePushServiceEnablement,
 } = require("./push-service");
 
 test("push service stores device registration and sends one completion alert", async () => {
@@ -198,6 +200,54 @@ test("push service defaults to a durable state file in the remodex home dir", ()
   assert.equal(resolved, path.join("/tmp/codex-home", "remodex", "push-state.json"));
 });
 
+test("push service stores device registration and sends one permission alert", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-push-state-"));
+  const sent = [];
+  const service = createPushSessionService({
+    apnsClient: {
+      isConfigured: () => true,
+      async sendNotification(payload) {
+        sent.push(payload);
+      },
+    },
+    canRegisterSession: () => true,
+    stateStore: createFileBackedPushStateStore({
+      stateFilePath: path.join(tempDir, "push-state.json"),
+    }),
+  });
+
+  await service.registerDevice({
+    sessionId: "session-perm",
+    notificationSecret: "secret-perm",
+    deviceToken: "11 22 33",
+    alertsEnabled: true,
+    apnsEnvironment: "development",
+  });
+
+  await service.notifyPermission({
+    sessionId: "session-perm",
+    notificationSecret: "secret-perm",
+    threadId: "thread-perm",
+    turnId: "turn-perm",
+    dedupeKey: "permission:thread-perm:perm-1",
+    title: "Deploy fix",
+    body: "OpenCode needs approval for bash.",
+  });
+  await service.notifyPermission({
+    sessionId: "session-perm",
+    notificationSecret: "secret-perm",
+    threadId: "thread-perm",
+    turnId: "turn-perm",
+    dedupeKey: "permission:thread-perm:perm-1",
+  });
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].deviceToken, "112233");
+  assert.equal(sent[0].payload.threadId, "thread-perm");
+  assert.equal(sent[0].payload.result, "permission");
+  assert.equal(sent[0].payload.source, "codex.structuredUserInput");
+});
+
 test("push service keeps working when state persistence fails", async () => {
   const sent = [];
   const service = createPushSessionService({
@@ -237,4 +287,48 @@ test("push service keeps working when state persistence fails", async () => {
 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].deviceToken, "aabbcc");
+});
+
+test("resolvePushServiceEnablement keeps dev profile opt-in", () => {
+  const decision = resolvePushServiceEnablement({
+    NODE_ENV: "development",
+    REMODEX_APNS_TEAM_ID: "TEAM123",
+    REMODEX_APNS_KEY_ID: "KEY123",
+    REMODEX_APNS_BUNDLE_ID: "com.example.app",
+    REMODEX_APNS_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+  });
+
+  assert.equal(decision.enabled, false);
+  assert.equal(decision.wouldEnablePush, true);
+  assert.equal(decision.profile, "dev");
+});
+
+test("resolvePushServiceEnablement auto-enables managed relay when APNs creds are present", () => {
+  const decision = resolvePushServiceEnablement({
+    REMODEX_APNS_TEAM_ID: "TEAM123",
+    REMODEX_APNS_KEY_ID: "KEY123",
+    REMODEX_APNS_BUNDLE_ID: "com.example.app",
+    REMODEX_APNS_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+  });
+
+  assert.equal(decision.enabled, true);
+  assert.equal(decision.wouldEnablePush, true);
+  assert.equal(decision.profile, "managed-relay");
+});
+
+test("resolvePushServiceEnablement honors REMODEX_ENABLE_PUSH_SERVICE=false opt-out", () => {
+  const decision = resolvePushServiceEnablement({
+    REMODEX_ENABLE_PUSH_SERVICE: "false",
+    REMODEX_APNS_TEAM_ID: "TEAM123",
+    REMODEX_APNS_KEY_ID: "KEY123",
+    REMODEX_APNS_BUNDLE_ID: "com.example.app",
+    REMODEX_APNS_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
+  });
+
+  assert.equal(decision.enabled, false);
+  assert.equal(decision.wouldEnablePush, true);
+});
+
+test("isApnsConfiguredFromEnv returns false when credentials are incomplete", () => {
+  assert.equal(isApnsConfiguredFromEnv({ REMODEX_APNS_TEAM_ID: "TEAM123" }), false);
 });

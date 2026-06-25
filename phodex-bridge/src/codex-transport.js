@@ -43,6 +43,9 @@ function createSpawnTransport({ env, appPath, platform, spawnImpl = spawn }) {
       return activeLaunch?.description || launchPlans[0]?.description || "`codex app-server`";
     },
     send(message) {
+      if (!codex?.stdin) {
+        return;
+      }
       if (!codex.stdin.writable || codex.stdin.destroyed || codex.stdin.writableEnded) {
         return;
       }

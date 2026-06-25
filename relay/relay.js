@@ -24,6 +24,9 @@ const relayMetrics = {
   acceptedConnections: 0,
   closedConnections: 0,
   heartbeatTerminations: 0,
+  heartbeatTerminationsByRole: {},
+  acceptedConnectionsByRole: {},
+  closedConnectionsByRole: {},
   macMessagesRelayed: 0,
   mobileMessagesRelayed: 0,
   mobileMessagesRejectedDuringMacAbsence: 0,
@@ -60,29 +63,38 @@ const liveSessionsByPairingCode = new Map();
 const usedResolveNonces = new Map();
 
 // Attaches relay behavior to a ws WebSocketServer instance.
+function isRelayMessageLivenessEnabled() {
+  if (process.env.REMODEX_RELAY_MESSAGE_LIVENESS === "0") {
+    return false;
+  }
+  return true;
+}
+
 function setupRelay(
   wss,
   {
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
     macAbsenceGraceMs = MAC_ABSENCE_GRACE_MS,
+    heartbeatIntervalMs = HEARTBEAT_INTERVAL_MS,
   } = {}
 ) {
   const heartbeat = setInterval(() => {
     for (const ws of wss.clients) {
       if (ws._relayAlive === false) {
         relayMetrics.heartbeatTerminations += 1;
-        console.warn(
-          `[relay] heartbeat terminated ${ws._relayRole || "unknown"} `
-          + `${relaySessionLogLabel(ws._relaySessionId || "")}`
+        incrementRelayRoleCounter(
+          relayMetrics.heartbeatTerminationsByRole,
+          ws._relayRole
         );
+        console.warn(formatHeartbeatTerminateLog(ws));
         ws.terminate();
         continue;
       }
       ws._relayAlive = false;
       ws.ping();
     }
-  }, HEARTBEAT_INTERVAL_MS);
+  }, heartbeatIntervalMs);
   heartbeat.unref?.();
 
   wss.on("close", () => clearInterval(heartbeat));
@@ -93,8 +105,10 @@ function setupRelay(
     const sessionId = match?.[1];
     const role = readRelayRole(req, urlPath);
     relayMetrics.acceptedConnections += 1;
+    incrementRelayRoleCounter(relayMetrics.acceptedConnectionsByRole, role);
     ws._relaySessionId = sessionId;
     ws._relayRole = role;
+    initRelaySocketActivityTimestamps(ws, role);
 
     if (!sessionId || (role !== "mac" && !isRelayMobileRole(role))) {
       ws.close(4000, "Missing sessionId or invalid x-role header/query");
@@ -104,6 +118,7 @@ function setupRelay(
     ws._relayAlive = true;
     ws.on("pong", () => {
       ws._relayAlive = true;
+      touchRelayLastPong(ws);
     });
 
     // Only the Mac host is allowed to create a fresh session room.
@@ -174,6 +189,9 @@ function setupRelay(
 
     ws.on("message", (data) => {
       const msg = typeof data === "string" ? data : data.toString("utf-8");
+      if (isRelayMobileRole(role)) {
+        markRelayMobileInboundLiveness(ws);
+      }
       if (role === "mac" && applyMacRegistrationMessage(session, sessionId, msg)) {
         return;
       }
@@ -183,6 +201,7 @@ function setupRelay(
           if (client.readyState === WebSocket.OPEN) {
             relayMetrics.macMessagesRelayed += 1;
             client.send(msg);
+            markRelayMobileOutboundLiveness(client);
           }
         }
       } else if (session.mac?.readyState === WebSocket.OPEN) {
@@ -197,8 +216,10 @@ function setupRelay(
       }
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code, reasonBuffer) => {
       relayMetrics.closedConnections += 1;
+      incrementRelayRoleCounter(relayMetrics.closedConnectionsByRole, role);
+      const closeReason = reasonBuffer?.toString?.("utf8") ?? "";
       if (role === "mac") {
         if (session.mac === ws) {
           session.mac = null;
@@ -218,6 +239,7 @@ function setupRelay(
         session.clients.delete(ws);
         console.log(
           `[relay] Mobile disconnected (${role}) -> ${relaySessionLogLabel(sessionId)} `
+          + `closeCode=${code} closeReason=${formatRelayCloseReason(closeReason)} `
           + `(${session.clients.size} remaining)`
         );
       }
@@ -320,6 +342,80 @@ function closeSessionClients(session, code, reason) {
       client.close(code, reason);
     }
   }
+}
+
+function initRelaySocketActivityTimestamps(ws, role) {
+  const now = Date.now();
+  ws._relayLastPongAt = now;
+  if (isRelayMobileRole(role)) {
+    ws._relayLastMobileInboundAt = now;
+    ws._relayLastMobileOutboundAt = now;
+  }
+}
+
+function touchRelayLastPong(ws) {
+  ws._relayLastPongAt = Date.now();
+}
+
+function touchRelayLastMobileInbound(ws) {
+  ws._relayLastMobileInboundAt = Date.now();
+}
+
+function touchRelayLastMobileOutbound(ws) {
+  ws._relayLastMobileOutboundAt = Date.now();
+}
+
+function markRelayMobileInboundLiveness(ws) {
+  touchRelayLastMobileInbound(ws);
+  if (isRelayMessageLivenessEnabled()) {
+    ws._relayAlive = true;
+  }
+}
+
+function markRelayMobileOutboundLiveness(ws) {
+  touchRelayLastMobileOutbound(ws);
+  if (isRelayMessageLivenessEnabled()) {
+    ws._relayAlive = true;
+  }
+}
+
+function msSinceRelayActivity(timestamp) {
+  return Number.isFinite(timestamp) ? Date.now() - timestamp : null;
+}
+
+function formatHeartbeatTerminateLog(ws) {
+  const role = ws._relayRole || "unknown";
+  const parts = [
+    "[relay] heartbeat terminated",
+    `ts=${new Date().toISOString()}`,
+    `role=${role}`,
+    relaySessionLogLabel(ws._relaySessionId || ""),
+    `readyState=${ws.readyState}`,
+    `bufferedAmount=${ws.bufferedAmount ?? 0}`,
+    `msSinceLastPong=${formatRelayDiagnosticMs(msSinceRelayActivity(ws._relayLastPongAt))}`,
+  ];
+
+  if (isRelayMobileRole(role)) {
+    parts.push(
+      `msSinceLastMobileInbound=${formatRelayDiagnosticMs(msSinceRelayActivity(ws._relayLastMobileInboundAt))}`,
+      `msSinceLastMobileOutbound=${formatRelayDiagnosticMs(msSinceRelayActivity(ws._relayLastMobileOutboundAt))}`,
+    );
+  }
+
+  return parts.join(" ");
+}
+
+function formatRelayDiagnosticMs(value) {
+  return Number.isFinite(value) ? String(value) : "unknown";
+}
+
+function formatRelayCloseReason(reason) {
+  return reason ? reason : "[empty]";
+}
+
+function incrementRelayRoleCounter(counters, role) {
+  const key = normalizeRelayRole(role) || "unknown";
+  counters[key] = (counters[key] || 0) + 1;
 }
 
 function relaySessionLogLabel(sessionId) {
@@ -498,6 +594,9 @@ function getRelayStats() {
     acceptedConnections: relayMetrics.acceptedConnections,
     closedConnections: relayMetrics.closedConnections,
     heartbeatTerminations: relayMetrics.heartbeatTerminations,
+    heartbeatTerminationsByRole: { ...relayMetrics.heartbeatTerminationsByRole },
+    acceptedConnectionsByRole: { ...relayMetrics.acceptedConnectionsByRole },
+    closedConnectionsByRole: { ...relayMetrics.closedConnectionsByRole },
     macMessagesRelayed: relayMetrics.macMessagesRelayed,
     mobileMessagesRelayed: relayMetrics.mobileMessagesRelayed,
     mobileMessagesRejectedDuringMacAbsence: relayMetrics.mobileMessagesRejectedDuringMacAbsence,

@@ -329,6 +329,7 @@ struct SidebarThreadListView: View {
                     onSelectThread(thread)
                 }
             },
+            showsBetaLabel: codex.showsBetaLabel(forProvider: thread.modelProvider ?? "codex"),
             onRename: onRenameThread.map { handler in { newName in handler(thread, newName) } },
             onPinToggle: onPinToggleThread.map { handler in { handler(thread) } },
             onArchiveToggle: onArchiveToggleThread.map { handler in { handler(thread) } },

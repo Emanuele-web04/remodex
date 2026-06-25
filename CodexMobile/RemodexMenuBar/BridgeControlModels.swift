@@ -28,6 +28,38 @@ struct BridgeDaemonConfig: Codable, Equatable {
     let refreshEnabled: Bool?
 }
 
+struct BridgeOpenCodeConnectedProviderSummary: Codable, Equatable {
+    let id: String
+    let displayName: String
+    let modelCount: Int?
+}
+
+struct BridgeOpenCodeProviderInventoryEntry: Codable, Equatable {
+    let id: String
+    let displayName: String
+    let connectedOnServe: Bool
+    let authenticated: Bool
+    let modelCount: Int?
+}
+
+struct BridgeOpenCodeRuntimeStatus: Codable, Equatable {
+    let enabled: Bool?
+    let serveUrl: String?
+    let version: String?
+    let minVersion: String?
+    let versionBelowMinimum: Bool?
+    let sessionCount: Int?
+    let lastError: String?
+    let command: String?
+    let handoffEnvEnabled: Bool?
+    let authConfigured: Bool?
+    let connectedProviders: [BridgeOpenCodeConnectedProviderSummary]?
+    let providerInventory: [BridgeOpenCodeProviderInventoryEntry]?
+    let providerDiscoveryReasonCode: String?
+    let authDiscoveryReasonCode: String?
+    let providerInventoryPartial: Bool?
+}
+
 struct BridgeRuntimeStatus: Codable, Equatable {
     let state: String?
     let connectionStatus: String?
@@ -36,6 +68,7 @@ struct BridgeRuntimeStatus: Codable, Equatable {
     let updatedAt: String?
     let activeDevice: BridgeActivePhoneSummary?
     let activePhone: BridgeActivePhoneSummary?
+    let opencode: BridgeOpenCodeRuntimeStatus?
 }
 
 struct BridgePairingSession: Codable, Equatable {

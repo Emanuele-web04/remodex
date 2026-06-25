@@ -26,6 +26,60 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         XCTAssertEqual(service.notificationAuthorizationStatus, .authorized)
     }
 
+    func testPushRegistrationFailureSetsSettingsBannerMessage() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let registrar = MockRemoteNotificationRegistrar()
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: registrar
+        )
+        service.isConnected = true
+        service.isInitialized = true
+        service.relaySessionId = "session-push"
+        service.remoteNotificationDeviceToken = "deadbeef"
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "notifications/push/register")
+            throw CodexServiceError.rpcError(RPCError(code: -32000, message: "Push registration failed."))
+        }
+
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+
+        XCTAssertEqual(
+            service.pushRegistrationFailureMessage,
+            CodexService.pushRegistrationUnavailableMessage
+        )
+    }
+
+    func testPushRegistrationSkippedRelayShowsDegradedBannerMessage() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let registrar = MockRemoteNotificationRegistrar()
+        let service = makeService(
+            userNotificationCenter: center,
+            remoteNotificationRegistrar: registrar
+        )
+        service.isConnected = true
+        service.isInitialized = true
+        service.relaySessionId = "session-push"
+        service.remoteNotificationDeviceToken = "deadbeef"
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "notifications/push/register")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["ok": .bool(false), "skipped": .bool(true)]),
+                includeJSONRPC: false
+            )
+        }
+
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+
+        XCTAssertEqual(
+            service.pushRegistrationFailureMessage,
+            CodexService.pushRegistrationUnavailableMessage
+        )
+    }
+
     func testHandleRemoteNotificationDeviceTokenSyncsManagedPushRegistration() async {
         let center = MockUserNotificationCenter(status: .authorized)
         let registrar = MockRemoteNotificationRegistrar()

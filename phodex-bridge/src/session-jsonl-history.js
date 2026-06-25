@@ -4,6 +4,7 @@
 
 const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const { safeParseJSON } = require("./safe-json");
 
 function readThreadTurnsListPageFromSessionJsonl(filePath, {
   threadId = "",
@@ -904,17 +905,6 @@ function firstNonEmptyString(values) {
     }
   }
   return "";
-}
-
-function safeParseJSON(rawValue) {
-  if (!rawValue) {
-    return null;
-  }
-  try {
-    return JSON.parse(rawValue);
-  } catch {
-    return null;
-  }
 }
 
 // Filters desktop transcript internals that are stored as response items but are not chat history.

@@ -55,7 +55,7 @@ struct TurnComposerRuntimeMenuBuilder {
     }
 
     private func makeSpeedMenu() -> UIMenu? {
-        guard runtimeState.supportsFastMode else {
+        guard runtimeState.capabilities.supportsFastMode else {
             return nil
         }
 

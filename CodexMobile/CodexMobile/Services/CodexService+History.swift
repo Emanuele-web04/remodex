@@ -755,6 +755,31 @@ extension CodexService {
                 }
             }
 
+            // Running threads can still receive thread/read duplicates once the live assistant
+            // row has already finalized. Reconcile exact text instead of appending a replay.
+            if message.role == .assistant,
+               let turnId = message.turnId, !turnId.isEmpty,
+               threadIsStillActive {
+                let candidateIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == .assistant
+                        && candidate.turnId == turnId
+                        && !candidate.isStreaming
+                        && historyTextsMatch(candidate.text, message.text)
+                }
+
+                if candidateIndices.count == 1,
+                   let index = candidateIndices.last {
+                    merged[index] = reconcileExistingMessage(
+                        merged[index],
+                        with: message,
+                        activeThreadIDs: activeThreadIDs,
+                        runningThreadIDs: runningThreadIDs
+                    )
+                    continue
+                }
+            }
+
             if message.role == .user,
                let turnId = message.turnId, !turnId.isEmpty,
                let index = uniqueUserHistoryMergeIndex(
@@ -911,7 +936,27 @@ extension CodexService {
                    in: merged,
                    message: message
                ) {
-                merged[pendingIndex] = reconcileExistingMessage(merged[pendingIndex], with: message, activeThreadIDs: activeThreadIDs, runningThreadIDs: runningThreadIDs)
+                let hasConfirmedDuplicate = threadIsStillActive
+                    && merged.contains(where: { candidate in
+                        guard candidate.role == .user,
+                              candidate.deliveryState == .confirmed else {
+                            return false
+                        }
+                        let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+                        let incomingTurnId = normalizedHistoryIdentifier(message.turnId)
+                        return historyTextsMatch(candidate.text, message.text)
+                            && (candidateTurnId == nil
+                                || incomingTurnId == nil
+                                || candidateTurnId == incomingTurnId)
+                    })
+                if !hasConfirmedDuplicate {
+                    merged[pendingIndex] = reconcileExistingMessage(
+                        merged[pendingIndex],
+                        with: message,
+                        activeThreadIDs: activeThreadIDs,
+                        runningThreadIDs: runningThreadIDs
+                    )
+                }
                 continue
             }
 
@@ -1632,7 +1677,15 @@ extension CodexService {
             return true
         }
 
+        if closedAssistantIdentityMismatches(localMessage, serverMessage) {
+            return false
+        }
+
         if localText.count > serverText.count, localText.hasPrefix(serverText) {
+            return false
+        }
+
+        if isSuspiciousClosedAssistantShortReplacement(localText: localText, serverText: serverText) {
             return false
         }
 
@@ -1641,6 +1694,45 @@ extension CodexService {
         }
 
         return true
+    }
+
+    // Reopen/history snapshots are allowed to fill gaps, not rewrite a stable
+    // assistant row into a different provider item.
+    nonisolated static func closedAssistantIdentityMismatches(
+        _ localMessage: CodexMessage,
+        _ serverMessage: CodexMessage
+    ) -> Bool {
+        let localItemId = normalizedHistoryIdentifier(localMessage.itemId)
+        let serverItemId = normalizedHistoryIdentifier(serverMessage.itemId)
+        if let localItemId, let serverItemId, localItemId != serverItemId,
+           hasStableAssistantIdentity(localItemId),
+           hasStableAssistantIdentity(serverItemId) {
+            return true
+        }
+
+        let localTurnId = normalizedHistoryIdentifier(localMessage.turnId)
+        let serverTurnId = normalizedHistoryIdentifier(serverMessage.turnId)
+        if let localTurnId, let serverTurnId, localTurnId != serverTurnId,
+           localTurnId.hasPrefix("opencode-turn-") || serverTurnId.hasPrefix("opencode-turn-") {
+            return true
+        }
+
+        return false
+    }
+
+    // Short OpenCode SDK snapshots like "Hey" are often the user prompt or a stale
+    // prior reply. They must not replace a longer local assistant answer on reopen.
+    nonisolated static func isSuspiciousClosedAssistantShortReplacement(
+        localText: String,
+        serverText: String
+    ) -> Bool {
+        guard localText.count >= 24 else {
+            return false
+        }
+        guard serverText.count <= 16 else {
+            return false
+        }
+        return !localText.hasPrefix(serverText)
     }
 
     // Rejects closed assistant replacements that look like multiple assistant rows
@@ -1751,6 +1843,9 @@ extension CodexService {
             shouldReconcileUserHistoryMessage(merged[index], with: message, turnId: turnId)
         }
 
+        guard !matchingIndices.isEmpty else {
+            return nil
+        }
         if matchingIndices.count == 1 {
             return matchingIndices[0]
         }
@@ -1764,8 +1859,24 @@ extension CodexService {
             return nonFallbackMatches[0]
         }
 
-        // Keep intentionally repeated sends separate when more than one real row fits.
-        return nil
+        let candidatePool = nonFallbackMatches.isEmpty ? matchingIndices : nonFallbackMatches
+        let confirmedIndices = candidatePool.filter { merged[$0].deliveryState == .confirmed }
+        let normalizedTurnId = normalizedHistoryIdentifier(turnId)
+        let sameTurnIndices = candidatePool.filter { index in
+            normalizedHistoryIdentifier(merged[index].turnId) == normalizedTurnId
+        }
+        let candidates: [Int]
+        if !confirmedIndices.isEmpty {
+            candidates = confirmedIndices
+        } else if !sameTurnIndices.isEmpty {
+            candidates = sameTurnIndices
+        } else {
+            candidates = candidatePool
+        }
+        return candidates.min(by: { lhs, rhs in
+            abs(message.createdAt.timeIntervalSince(merged[lhs].createdAt))
+                < abs(message.createdAt.timeIntervalSince(merged[rhs].createdAt))
+        })
     }
 
     nonisolated static func uniquePendingUserHistoryMergeIndex(
@@ -1777,11 +1888,29 @@ extension CodexService {
             shouldReconcilePendingUserHistoryMessage(merged[index], with: message)
         }
 
-        guard matchingIndices.count == 1 else {
+        return preferredPendingUserHistoryMergeIndex(
+            in: merged,
+            matchingIndices: matchingIndices,
+            incoming: message
+        )
+    }
+
+    nonisolated static func preferredPendingUserHistoryMergeIndex(
+        in merged: [CodexMessage],
+        matchingIndices: [Int],
+        incoming: CodexMessage
+    ) -> Int? {
+        guard !matchingIndices.isEmpty else {
             return nil
         }
+        if matchingIndices.count == 1 {
+            return matchingIndices[0]
+        }
 
-        return matchingIndices[0]
+        return matchingIndices.min(by: { lhs, rhs in
+            abs(incoming.createdAt.timeIntervalSince(merged[lhs].createdAt))
+                < abs(incoming.createdAt.timeIntervalSince(merged[rhs].createdAt))
+        })
     }
 
     nonisolated static func fallbackUserHistoryMergeIndices(

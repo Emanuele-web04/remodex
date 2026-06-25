@@ -202,6 +202,16 @@ extension CodexService {
                 lastAppliedBridgeOutboundSeq: lastAppliedBridgeOutboundSeq
             )
         )
+        lastCompletedSecureHandshakeMode = handshakeMode
+    }
+
+    // Runs protected-thread catch-up after trusted reconnect once initialize has finished.
+    func finishTrustedReconnectSessionBootstrapIfNeeded() async {
+        guard lastCompletedSecureHandshakeMode == .trustedReconnect else {
+            return
+        }
+
+        await reconcileProtectedThreadsAfterTrustedReconnect()
     }
 
     // Handles raw relay JSON before any JSON-RPC decoding so secure controls stay separate.
@@ -1433,5 +1443,64 @@ private extension CodexService {
 
     func shortTranscriptDigest(_ data: Data) -> String {
         SHA256.hash(data: data).compactMap { String(format: "%02x", $0) }.joined().prefix(16).description
+    }
+
+}
+
+// MARK: - Trusted Mac Device ID
+
+extension CodexService {
+    func trustedMacRecord(for deviceId: String?) -> CodexTrustedMacRecord? {
+        guard let normalizedDeviceId = deviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .codexNilIfEmpty else {
+            return nil
+        }
+
+        return trustedMacRegistry.records[normalizedDeviceId]
+    }
+
+    func setCurrentTrustedMacDeviceId(_ deviceId: String?) {
+        let normalizedDeviceId = deviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .codexNilIfEmpty
+        currentTrustedMacDeviceId = normalizedDeviceId
+        if let normalizedDeviceId {
+            SecureStore.writeString(normalizedDeviceId, for: CodexSecureKeys.currentTrustedMacDeviceId)
+        } else {
+            SecureStore.deleteValue(for: CodexSecureKeys.currentTrustedMacDeviceId)
+        }
+    }
+
+    func setPreviousTrustedMacDeviceId(_ deviceId: String?) {
+        previousTrustedMacDeviceId = deviceId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .codexNilIfEmpty
+    }
+
+    func clearPreviousTrustedMacDeviceId() {
+        previousTrustedMacDeviceId = nil
+    }
+
+    func migrateCurrentTrustedMacDeviceIdIfNeeded() {
+        if let normalizedCurrentTrustedMacDeviceId,
+           trustedMacRegistry.records[normalizedCurrentTrustedMacDeviceId] != nil {
+            return
+        }
+
+        let bootstrapDeviceId = [
+            normalizedRelayMacDeviceId,
+            normalizedLastTrustedMacDeviceId,
+        ]
+        .compactMap { $0 }
+        .first { trustedMacRegistry.records[$0] != nil }
+
+        setCurrentTrustedMacDeviceId(bootstrapDeviceId)
+    }
+}
+
+private extension String {
+    var codexNilIfEmpty: String? {
+        isEmpty ? nil : self
     }
 }

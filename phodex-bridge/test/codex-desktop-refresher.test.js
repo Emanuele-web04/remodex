@@ -13,6 +13,8 @@ const path = require("node:path");
 const {
   CodexDesktopRefresher,
   readBridgeConfig,
+  resolveBridgeProfile,
+  resolveOpenCodeHandoffEnabled,
 } = require("../src/codex-desktop-refresher");
 const { createThreadRolloutActivityWatcher } = require("../src/rollout-watch");
 
@@ -211,6 +213,50 @@ test("readBridgeConfig preserves reverse-proxy subpaths when deriving push URLs"
   });
 
   assert.equal(config.pushServiceUrl, "https://relay.example/remodex");
+});
+
+test("readBridgeConfig exposes operator profile defaults for handoff", () => {
+  const operatorConfig = readBridgeConfig({
+    env: {},
+    runtimeRoot: "/workspace/phodex-bridge",
+    fsImpl: {
+      existsSync(targetPath) {
+        return targetPath === "/workspace/.git";
+      },
+    },
+  });
+  assert.equal(operatorConfig.bridgeProfile, "operator");
+  assert.equal(operatorConfig.opencodeHandoffEnabled, true);
+
+  const devConfig = readBridgeConfig({
+    env: { REMODEX_PROFILE: "dev" },
+    runtimeRoot: "/workspace/phodex-bridge",
+    fsImpl: {
+      existsSync(targetPath) {
+        return targetPath === "/workspace/.git";
+      },
+    },
+  });
+  assert.equal(devConfig.bridgeProfile, "dev");
+  assert.equal(devConfig.opencodeHandoffEnabled, false);
+
+  const managedConfig = readBridgeConfig({
+    env: { REMODEX_PUSH_SERVICE_URL: "https://relay.example" },
+    runtimeRoot: "/workspace/phodex-bridge",
+    fsImpl: {
+      existsSync() {
+        return false;
+      },
+    },
+  });
+  assert.equal(managedConfig.bridgeProfile, "managed-relay");
+  assert.equal(managedConfig.opencodeHandoffEnabled, true);
+});
+
+test("resolveOpenCodeHandoffEnabled honors explicit opt-out on operator profiles", () => {
+  assert.equal(resolveOpenCodeHandoffEnabled({}), true);
+  assert.equal(resolveOpenCodeHandoffEnabled({ REMODEX_OPENCODE_HANDOFF: "0" }), false);
+  assert.equal(resolveBridgeProfile({ REMODEX_RELAY: "wss://self.example/relay" }), "self-hosted");
 });
 
 test("readBridgeConfig disables managed push defaults when a self-hosted relay override is set", () => {

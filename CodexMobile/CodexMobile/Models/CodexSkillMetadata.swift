@@ -11,6 +11,8 @@ struct CodexSkillMetadata: Decodable, Hashable, Sendable, Identifiable {
     let description: String?
     let path: String?
     let scope: String?
+    let provider: String?
+    let providers: [String]?
     let enabled: Bool
 
     var id: String {
@@ -21,11 +23,18 @@ struct CodexSkillMetadata: Decodable, Hashable, Sendable, Identifiable {
         name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
+    var providerIds: [String] {
+        let ids = (providers?.isEmpty == false ? providers! : [provider ?? "codex"])
+        return ids.sorted()
+    }
+
     private enum CodingKeys: String, CodingKey {
         case name
         case description
         case path
         case scope
+        case provider
+        case providers
         case enabled
     }
 
@@ -34,12 +43,16 @@ struct CodexSkillMetadata: Decodable, Hashable, Sendable, Identifiable {
         description: String?,
         path: String?,
         scope: String?,
+        provider: String? = nil,
+        providers: [String]? = nil,
         enabled: Bool
     ) {
         self.name = name
         self.description = description
         self.path = path
         self.scope = scope
+        self.provider = provider
+        self.providers = providers
         self.enabled = enabled
     }
 
@@ -50,7 +63,29 @@ struct CodexSkillMetadata: Decodable, Hashable, Sendable, Identifiable {
         description = try container.decodeIfPresent(String.self, forKey: .description)
         path = try container.decodeIfPresent(String.self, forKey: .path)
         scope = try container.decodeIfPresent(String.self, forKey: .scope)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        providers = try container.decodeIfPresent([String].self, forKey: .providers)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(description)
+        hasher.combine(path)
+        hasher.combine(scope)
+        hasher.combine(provider)
+        hasher.combine(enabled)
+        hasher.combine(providerIds)
+    }
+
+    static func == (lhs: CodexSkillMetadata, rhs: CodexSkillMetadata) -> Bool {
+        lhs.name == rhs.name
+            && lhs.description == rhs.description
+            && lhs.path == rhs.path
+            && lhs.scope == rhs.scope
+            && lhs.provider == rhs.provider
+            && lhs.enabled == rhs.enabled
+            && lhs.providerIds == rhs.providerIds
     }
 }
 

@@ -40,6 +40,41 @@ final class DesktopHandoffService {
         self.savedPairConnector = savedPairConnector
     }
 
+    func continueOnDesktop(
+        threadId: String,
+        modelProvider: String,
+        sessionId: String? = nil,
+        directory: String? = nil
+    ) async throws -> OpenCodeDesktopHandoffResult? {
+        let normalizedProvider = CodexModelOption.normalizedProvider(modelProvider)
+        if normalizedProvider == "opencode" {
+            return try await continueOnDesktopOpenCode(
+                threadId: threadId,
+                sessionId: sessionId,
+                directory: directory
+            )
+        }
+
+        try await continueOnDesktopApp(threadId: threadId)
+        return nil
+    }
+
+    func continueOnDesktopOpenCode(
+        threadId: String,
+        sessionId: String? = nil,
+        directory: String? = nil
+    ) async throws -> OpenCodeDesktopHandoffResult {
+        do {
+            return try await codex.continueOnDesktopOpenCode(
+                threadId: threadId,
+                sessionId: sessionId,
+                directory: directory
+            )
+        } catch let error as CodexServiceError {
+            throw mapCodexServiceError(error)
+        }
+    }
+
     // Uses the platform-neutral desktop handoff RPC so the same iOS action works with macOS and Windows bridges.
     func continueOnDesktopApp(threadId: String) async throws {
         let trimmedThreadID = threadId.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -61,15 +96,19 @@ final class DesktopHandoffService {
                 throw DesktopHandoffError.invalidResponse
             }
         } catch let error as CodexServiceError {
-            switch error {
-            case .disconnected:
-                throw DesktopHandoffError.disconnected
-            case .rpcError(let rpcError):
-                let errorCode = rpcError.data?.objectValue?["errorCode"]?.stringValue
-                throw DesktopHandoffError.bridgeError(code: errorCode, message: rpcError.message)
-            default:
-                throw DesktopHandoffError.bridgeError(code: nil, message: error.errorDescription)
-            }
+            throw mapCodexServiceError(error)
+        }
+    }
+
+    private func mapCodexServiceError(_ error: CodexServiceError) -> DesktopHandoffError {
+        switch error {
+        case .disconnected:
+            return .disconnected
+        case .rpcError(let rpcError):
+            let errorCode = rpcError.data?.objectValue?["errorCode"]?.stringValue
+            return .bridgeError(code: errorCode, message: rpcError.message)
+        default:
+            return .bridgeError(code: nil, message: error.errorDescription)
         }
     }
 
@@ -222,6 +261,16 @@ private extension DesktopHandoffError {
             return "Desktop app handoff works only when the bridge is running on a supported desktop platform."
         case "handoff_failed":
             return fallback ?? "Could not relaunch Codex.app on this device."
+        case "opencode_handoff_disabled":
+            return fallback ?? "OpenCode handoff is not enabled on this Mac bridge."
+        case "wrong_provider":
+            return fallback ?? "This thread is not owned by OpenCode."
+        case "opencode_session_expired":
+            return fallback ?? "This OpenCode session expired. Start a new thread on your phone."
+        case "opencode_server_unreachable":
+            return fallback ?? "OpenCode is not available on this Mac bridge."
+        case "invalid_thread_id":
+            return fallback ?? "The requested desktop thread id is not valid."
         case "wake_display_failed":
             return fallback ?? "Could not wake this device's display right now."
         case "saved_pair_required":

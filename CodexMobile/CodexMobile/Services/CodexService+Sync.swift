@@ -141,6 +141,29 @@ extension CodexService {
         }
     }
 
+    // Defers thread/read reconciliation until a turn settles so turn/started does not race live rows.
+    func requestDeferredSync(threadId: String, delayNanoseconds: UInt64 = 2_000_000_000) {
+        guard canRunRealtimeSyncLoop else {
+            return
+        }
+
+        deferredSyncTasks[threadId]?.cancel()
+        deferredSyncTasks[threadId] = Task { @MainActor [weak self] in
+            defer { self?.deferredSyncTasks.removeValue(forKey: threadId) }
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+            guard let self, !Task.isCancelled, self.isConnected, self.isInitialized else { return }
+            if self.threadHasActiveOrRunningTurn(threadId) {
+                return
+            }
+            await self.syncActiveThreadState(threadId: threadId)
+        }
+    }
+
+    func cancelDeferredSync(threadId: String) {
+        deferredSyncTasks[threadId]?.cancel()
+        deferredSyncTasks.removeValue(forKey: threadId)
+    }
+
     // Thread opening should refresh the visible chat, not refetch the full sidebar list.
     func requestImmediateActiveThreadSync(threadId: String? = nil, forceHistoryRefresh: Bool = false) {
         guard canRunRealtimeSyncLoop else {
@@ -189,8 +212,30 @@ extension CodexService {
         }
     }
 
+    func shouldSkipBackgroundSyncForDiscoveredExternalThread(threadId: String) -> Bool {
+        if resumedThreadIDs.contains(threadId) {
+            return false
+        }
+
+        if let thread = thread(for: threadId) {
+            return thread.isDiscoveredExternalOpenCodeThread
+        }
+
+        // Unadopted class (e) stubs can appear before local metadata is populated.
+        if threadId.hasPrefix("opencode-session-") {
+            return true
+        }
+
+        return false
+    }
+
     func syncThreadHistory(threadId: String, force: Bool = false) async {
         guard isConnected, isInitialized else {
+            return
+        }
+
+        if shouldSkipBackgroundSyncForDiscoveredExternalThread(threadId: threadId) {
+            debugSyncLog("sync skip discovered external thread=\(threadId)")
             return
         }
 
@@ -250,10 +295,17 @@ extension CodexService {
                 continue
             }
             merged[localThread.id] = localThread
-            if isThreadPinned(localThread.id), !serverThreadIDs.contains(localThread.id) {
+            if isThreadPinned(localThread.id),
+               !serverThreadIDs.contains(localThread.id),
+               !isOpenCodeBareStubThread(localThread) {
                 snapshotOnlyPinnedIDs.insert(localThread.id)
             }
         }
+
+        pruneStaleOpenCodeLocalThreads(
+            merged: &merged,
+            serverThreadIDs: serverThreadIDs
+        )
 
         snapshotOnlyPinnedIDs.formUnion(injectPinnedSnapshotThreads(
             into: &merged,
@@ -284,6 +336,71 @@ extension CodexService {
             Task { @MainActor [weak self] in
                 _ = await self?.routePendingNotificationOpenIfPossible(refreshIfNeeded: false)
             }
+        }
+    }
+
+    // Drops OpenCode title-only ghosts omitted by paginated thread/list while keeping real local chats.
+    private func pruneStaleOpenCodeLocalThreads(
+        merged: inout [String: CodexThread],
+        serverThreadIDs: Set<String>
+    ) {
+        for thread in merged.values where shouldPruneStaleOpenCodeLocalThread(thread, serverThreadIDs: serverThreadIDs) {
+            merged.removeValue(forKey: thread.id)
+            removeEphemeralOpenCodeGhostThreadState(for: thread.id)
+        }
+    }
+
+    private func shouldPruneStaleOpenCodeLocalThread(
+        _ thread: CodexThread,
+        serverThreadIDs: Set<String>
+    ) -> Bool {
+        guard CodexModelOption.normalizedProvider(thread.modelProvider) == "opencode" else {
+            return false
+        }
+        guard !serverThreadIDs.contains(thread.id) else {
+            return false
+        }
+        guard isOpenCodeBareStubThread(thread) else {
+            return false
+        }
+        guard messagesByThread[thread.id]?.isEmpty ?? true else {
+            return false
+        }
+        guard thread.id != activeThreadId else {
+            return false
+        }
+        guard !isThreadPinned(thread.id) else {
+            return false
+        }
+        guard !threadHasActiveOrRunningTurn(thread.id) else {
+            return false
+        }
+        return true
+    }
+
+    private func removeEphemeralOpenCodeGhostThreadState(for threadId: String) {
+        clearRunningState(for: threadId)
+        removeThreadTimelineState(for: threadId)
+        clearOutcomeBadge(for: threadId)
+        messagesByThread.removeValue(forKey: threadId)
+        hydratedThreadIDs.remove(threadId)
+        loadingThreadIDs.remove(threadId)
+        resumedThreadIDs.remove(threadId)
+        streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter { key, _ in
+            !key.hasPrefix("\(threadId)|item:")
+        }
+
+        if let turnId = activeTurnID(for: threadId) {
+            setActiveTurnID(nil, for: threadId)
+            threadIdByTurnID.removeValue(forKey: turnId)
+            if activeTurnId == turnId {
+                activeTurnId = nil
+            }
+        }
+        threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
+
+        if activeThreadId == threadId {
+            activeThreadId = nil
         }
     }
 
@@ -597,6 +714,32 @@ extension CodexService {
         hydratedThreadIDs.removeAll()
         loadingThreadIDs.removeAll()
         cancelAllPerThreadRefreshWork()
+        invalidateSlashCommandCache()
+    }
+
+    // Preserves hydration tickets for threads still marked running during transport-only teardown.
+    func clearHydrationCachesPreservingRunningThreads() {
+        let runningThreadIDs = self.runningThreadIDs
+        hydratedThreadIDs = hydratedThreadIDs.intersection(runningThreadIDs)
+        loadingThreadIDs = loadingThreadIDs.intersection(runningThreadIDs)
+
+        let preservedThreadIDs = runningThreadIDs
+        let threadIDsToCancel = Set(threadHistoryLoadTaskByThreadID.keys)
+            .union(threadResumeTaskByThreadID.keys)
+            .union(turnStateRefreshTaskByThreadID.keys)
+            .union(runningThreadCatchupTaskByThreadID.keys)
+            .union(forcedHistoryLoadThreadIDs)
+            .union(deferHydratedMarkForNotMaterializedThreadIDs)
+            .union(forcedResumeEscalationThreadIDs)
+            .union(forcedRunningCatchupEscalationThreadIDs)
+            .union(threadResumeRequestSignatureByThreadID.keys)
+            .union(lastForcedRunningResumeAtByThread.keys)
+            .union(canonicalHistoryReconcileRetryTaskByThreadID.keys)
+            .subtracting(preservedThreadIDs)
+
+        for threadId in threadIDsToCancel {
+            cancelPerThreadRefreshWork(for: threadId)
+        }
     }
 
     // Bumps the invalidation token used to reject stale async refresh completions.
@@ -673,6 +816,18 @@ extension CodexService {
 
     // Runs the full "running thread catch-up" pipeline once per thread so the
     // display-open, sync-loop, and post-connect flows do not stack duplicate work.
+    // Reconciles mid-turn trusted reconnects without waiting for cold post-connect sync.
+    func reconcileProtectedThreadsAfterTrustedReconnect() async {
+        let threadIDs = protectedRunningFallbackThreadIDs.union(Set(activeTurnIdByThread.keys))
+        guard !threadIDs.isEmpty else {
+            return
+        }
+
+        for threadId in threadIDs.sorted() {
+            _ = await catchUpRunningThreadIfNeeded(threadId: threadId, shouldForceResume: true)
+        }
+    }
+
     func catchUpRunningThreadIfNeeded(
         threadId: String,
         shouldForceResume: Bool,
@@ -681,6 +836,15 @@ extension CodexService {
     ) async -> RunningThreadCatchupOutcome {
         let normalizedThreadID = normalizedInterruptIdentifier(threadId) ?? threadId
         guard !normalizedThreadID.isEmpty else {
+            return RunningThreadCatchupOutcome(
+                didRefreshTurnState: didRefreshTurnState,
+                isRunning: false,
+                didRunForcedResume: false
+            )
+        }
+
+        if shouldSkipBackgroundSyncForDiscoveredExternalThread(threadId: normalizedThreadID) {
+            debugSyncLog("catch-up skip discovered external thread=\(normalizedThreadID)")
             return RunningThreadCatchupOutcome(
                 didRefreshTurnState: didRefreshTurnState,
                 isRunning: false,
@@ -799,11 +963,15 @@ extension CodexService {
     // Preserves locally derived metadata keys (for example repo context) when server payload is sparse.
     func mergedThreadMetadata(
         serverMetadata: [String: JSONValue]?,
-        localMetadata: [String: JSONValue]?
+        localMetadata: [String: JSONValue]?,
+        treatAsServerState: Bool = false
     ) -> [String: JSONValue]? {
         var merged = serverMetadata ?? [:]
         for (key, value) in localMetadata ?? [:] where merged[key] == nil {
             merged[key] = value
+        }
+        if treatAsServerState, serverMetadata?["discoveredExternally"] == nil {
+            merged.removeValue(forKey: "discoveredExternally")
         }
         return merged.isEmpty ? nil : merged
     }
@@ -867,6 +1035,11 @@ extension CodexService {
     // Polls the currently displayed thread even while it is running so missed socket events can recover.
     // If the live snapshot fails, fall back to a history refresh instead of trusting stale running state.
     func syncActiveThreadState(threadId: String) async {
+        if shouldSkipBackgroundSyncForDiscoveredExternalThread(threadId: threadId) {
+            debugSyncLog("active-thread sync skip discovered external thread=\(threadId)")
+            return
+        }
+
         var wasRunning = threadHasActiveOrRunningTurn(threadId)
         var didRunMirroredCatchup = false
         let shouldPreferDeferredClosedHydration = shouldDeferHeavyDisplayHydration(threadId: threadId)
@@ -912,7 +1085,8 @@ extension CodexService {
             )
             didRunMirroredCatchup = outcome.didRunForcedResume
 
-            guard !outcome.didRefreshTurnState || !outcome.isRunning else {
+            // B-20: never force thread/read while live SSE/socket delivery is still running.
+            guard !outcome.isRunning else {
                 return
             }
         }
@@ -935,6 +1109,7 @@ extension CodexService {
                 threadId != activeThreadId
                     && availableThreadIDs.contains(threadId)
                     && runningThreadIDs.contains(threadId)
+                    && !shouldSkipBackgroundSyncForDiscoveredExternalThread(threadId: threadId)
             }
             .prefix(limit)
 

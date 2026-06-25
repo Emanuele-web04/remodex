@@ -16,6 +16,60 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertTrue(state.isSendDisabled)
     }
 
+    func testSendDisabledWhileRuntimeCapabilitiesAreLoading() {
+        let state = makeState(isRuntimeCapabilitiesLoading: true)
+        XCTAssertTrue(state.isSendDisabled)
+    }
+
+    func testSendDisabledWhenRuntimeCatalogNilDuringBootstrap() {
+        let service = makeService()
+        service.isBootstrappingConnectionSync = true
+        service.availableModels = []
+        service.availableRuntimes = []
+
+        XCTAssertTrue(service.isRuntimeCapabilitiesLoadingForComposer())
+    }
+
+    func testSendTurnStartsBeforeCheckpointCaptureWhenValidatedCwdPresent() async {
+        let service = makeService()
+        service.isConnected = true
+        let projectThread = CodexThread(
+            id: "thread-project",
+            title: "Project chat",
+            cwd: "/tmp/remodex-project"
+        )
+        service.threads = [projectThread]
+        XCTAssertTrue(service.threadHasValidatedWorkingDirectory(for: "thread-project"))
+
+        var checkpointCompleted = false
+        var turnStartObservedBeforeCheckpointCompletion = false
+        service.requestTransportOverride = { method, _ in
+            switch method {
+            case "workspace/checkpointCapture":
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                checkpointCompleted = true
+                return self.workspaceCheckpointResponse(kind: "messageStart")
+            case "turn/start":
+                turnStartObservedBeforeCheckpointCompletion = !checkpointCompleted
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object(["turnId": .string("turn-project")]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        let viewModel = TurnViewModel()
+        viewModel.input = "Ship it"
+        viewModel.sendTurn(codex: service, threadID: "thread-project")
+        await waitForSendCompletion(viewModel)
+
+        XCTAssertTrue(turnStartObservedBeforeCheckpointCompletion)
+    }
+
     func testSendDisabledWhenSendingInFlight() {
         let state = makeState(isSending: true)
         XCTAssertTrue(state.isSendDisabled)
@@ -448,7 +502,8 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         hasPluginSelection: Bool = false,
         hasReviewSelection: Bool = false,
         hasPendingReviewSelection: Bool = false,
-        hasSubagentsSelection: Bool = false
+        hasSubagentsSelection: Bool = false,
+        isRuntimeCapabilitiesLoading: Bool = false
     ) -> TurnComposerSendAvailability {
         TurnComposerSendAvailability(
             isSending: isSending,
@@ -460,7 +515,8 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
             hasPluginSelection: hasPluginSelection,
             hasReviewSelection: hasReviewSelection,
             hasPendingReviewSelection: hasPendingReviewSelection,
-            hasSubagentsSelection: hasSubagentsSelection
+            hasSubagentsSelection: hasSubagentsSelection,
+            isRuntimeCapabilitiesLoading: isRuntimeCapabilitiesLoading
         )
     }
 
@@ -476,6 +532,8 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         return TurnComposerAccessoryState(
             queuedDrafts: [],
             canSteerQueuedDrafts: false,
+            showsSteerQueuedDraftControl: false,
+            steerUnavailableReason: nil,
             canRestoreQueuedDrafts: false,
             steeringDraftID: nil,
             composerAttachments: hasAttachment ? [
