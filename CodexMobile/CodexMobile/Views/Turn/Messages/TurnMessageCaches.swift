@@ -23,6 +23,7 @@ enum TurnCacheManager {
         UserBubbleRenderModelCache.reset()
         MessageRowRenderModelCache.reset()
         CommandExecutionStatusCache.reset()
+        ToolActivityRenderCache.reset()
         FileChangeSystemRenderCache.reset()
         FileChangeBlockPresentationCache.reset()
         PerFileDiffChunkCache.reset()
@@ -61,6 +62,14 @@ struct FileChangeRenderState {
     let detailBodyText: String
 }
 
+// Precomputed display fields for a `.toolActivity` row: the cleaned, multi-line
+// summary text and its leading icon. Built once per text revision instead of on
+// every `toolActivitySystemView` body evaluation while activity streams.
+struct ToolActivityRenderModel {
+    let displayText: String
+    let iconSystemName: String
+}
+
 struct MessageRowRenderModel {
     let codeCommentContent: CodeCommentDirectiveContent?
     let mermaidContent: MermaidMarkdownContent?
@@ -73,6 +82,7 @@ struct MessageRowRenderModel {
     let thinkingText: String?
     let thinkingActivityPreview: String?
     let commandStatus: CommandExecutionStatusModel?
+    var toolActivity: ToolActivityRenderModel? = nil
 
     static let empty = MessageRowRenderModel(
         codeCommentContent: nil,
@@ -193,7 +203,20 @@ enum MessageRowRenderModelCache {
                     commandStatus: nil
                 )
             case .toolActivity:
-                return .empty
+                return MessageRowRenderModel(
+                    codeCommentContent: nil,
+                    mermaidContent: nil,
+                    assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
+                    assistantTextWithoutImageSyntax: nil,
+                    fileChangeState: nil,
+                    fileChangeGroups: [],
+                    thinkingContent: nil,
+                    thinkingText: nil,
+                    thinkingActivityPreview: nil,
+                    commandStatus: nil,
+                    toolActivity: ToolActivityRenderCache.model(messageID: message.id, text: displayText)
+                )
             case .commandExecution:
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
@@ -244,6 +267,33 @@ enum CommandExecutionStatusCache {
         default:
             return nil
         }
+    }
+}
+
+enum ToolActivityRenderCache {
+    private static let cache = BoundedCache<String, ToolActivityRenderModel>(maxEntries: 256)
+
+    static func model(messageID: String, text: String) -> ToolActivityRenderModel {
+        let key = TurnTextCacheKey.key(messageID: messageID, kind: "tool-activity", text: text)
+        if let cached = cache.get(key) { return cached }
+        let model = build(text: text)
+        cache.set(key, value: model)
+        return model
+    }
+
+    static func reset() { cache.removeAll() }
+
+    private static func build(text: String) -> ToolActivityRenderModel {
+        let joined = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        // Classify the icon off the first line only so trailing detail lines never
+        // shift the leading glyph mid-stream.
+        let iconSource = joined.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? joined
+        let icon = ToolCallIcon.systemName(forToolActivitySummary: iconSource)
+        return ToolActivityRenderModel(displayText: joined, iconSystemName: icon)
     }
 }
 

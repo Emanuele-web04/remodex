@@ -607,8 +607,26 @@ struct CommandExecutionCardBody: View {
         return info
     }
 
+    // Cached like `display` so the leading-icon classification isn't re-parsed on
+    // every body evaluation while the command streams.
+    private static let iconCache = BoundedCache<String, String>(maxEntries: 128)
+
+    private var iconSystemName: String {
+        if let cached = Self.iconCache.get(command) { return cached }
+        let name = CommandHumanizer.iconSystemName(for: command)
+        Self.iconCache.set(command, value: name)
+        return name
+    }
+
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 6) {
+            RemodexIcon.image(
+                systemName: iconSystemName,
+                size: 17,
+                relativeTo: .body
+            )
+            .foregroundStyle(.secondary)
+
             (
                 Text(display.verb)
                     .font(AppFont.body(weight: .regular))
@@ -616,21 +634,27 @@ struct CommandExecutionCardBody: View {
                 +
                 Text(" " + display.target)
                     .font(AppFont.body(weight: .regular))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
             )
             .lineLimit(1)
             .truncationMode(.tail)
+            .layoutPriority(1)
 
-            Spacer(minLength: 6)
+            // Completed rows already read their state from the past-tense verb,
+            // so the redundant "completed" label is dropped; running/failed still show.
+            if accent != .completed {
+                Text(statusLabel)
+                    .font(AppFont.body(weight: .regular))
+                    .foregroundStyle(accent == .failed ? Color.red : Color.secondary)
+            }
 
-            Text(statusLabel)
-                .font(AppFont.body(weight: .regular))
-                .foregroundStyle(accent == .failed ? Color.red : Color.secondary.opacity(0.5))
-
+            // Keep the disclosure chevron next to the command, not pinned to the far right edge.
             RemodexIcon.image(systemName: "chevron.right")
                 .font(AppFont.system(size: 8, weight: .semibold))
-                .foregroundStyle(.quaternary)
-                .padding(.leading, 4)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 2)
+
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         // Tool rows update often while commands stream; keep the subtree static to avoid whole-row flashing.
@@ -697,6 +721,25 @@ enum CommandHumanizer {
                 verb: isRunning ? "Running" : "Ran",
                 target: command
             )
+        }
+    }
+
+    /// Leading icon (an SF Symbol name resolved to a Central asset by `RemodexIcon`)
+    /// for a humanized command row, following synara's command classification:
+    /// inspect-style commands → magnifying glass, source control → branch,
+    /// everything else → console. (synara uses its filled octocat for git/gh; we
+    /// use a uniform stroke branch glyph so every row tints in a single color.)
+    static func iconSystemName(for raw: String) -> String {
+        let command = unwrapShell(raw)
+        let (tool, _) = splitToolAndArgs(command)
+        switch tool {
+        case "cat", "nl", "head", "tail", "sed", "less", "more",
+             "rg", "grep", "ag", "ack", "find", "fd", "ls":
+            return "magnifyingglass"
+        case "git", "gh", "hub":
+            return "remodex.branch"
+        default:
+            return "terminal"
         }
     }
 

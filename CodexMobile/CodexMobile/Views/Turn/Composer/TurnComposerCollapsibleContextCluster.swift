@@ -1,6 +1,7 @@
 // FILE: TurnComposerCollapsibleContextCluster.swift
-// Purpose: Collapsible Local + branch picker row above the composer. Starts as a
-//          single chevron circle and expands into the existing runtime/git pills.
+// Purpose: Collapsible Local + branch picker above the composer. Starts as a
+//          single chevron circle and expands upward into a floating column of
+//          the runtime/git pills, overlaid so it never resizes the composer.
 // Layer: View Component
 // Exports: TurnComposerCollapsibleContextCluster
 // Depends on: SwiftUI, UIKit, TurnGitBranchSelector, ComposerPillLabel,
@@ -39,6 +40,7 @@ struct TurnComposerCollapsibleContextCluster: View {
     private var branchTextFont: Font { AppFont.subheadline() }
     private let toggleControlSize: CGFloat = 34
     private let toggleChevronSize: CGFloat = 14
+    private let columnSpacing: CGFloat = 10
 
     private var runtimeLabelTitle: String {
         if !hasWorkingDirectory {
@@ -55,21 +57,29 @@ struct TurnComposerCollapsibleContextCluster: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            expandToggleButton
-
-            if isExpanded {
-                expandedPillsRow
-                    .transition(.contextClusterReveal)
+        // The expanded pills float UP out of the chevron as an overlay so they
+        // never participate in the composer's vertical flow. That keeps the
+        // composer (and therefore the chat scroll height) fixed: the column
+        // simply hovers over the messages above, which stay scrollable while the
+        // pickers are open. `.overlay` here is anchored to the chevron's own
+        // 34x34 bounds, so applying `maxWidth: .infinity` afterwards leaves the
+        // chevron pinned to the leading edge without dragging the column with it.
+        expandToggleButton
+            .overlay(alignment: .bottomLeading) {
+                if isExpanded {
+                    expandedPillsColumn
+                        .fixedSize()
+                        .transition(.contextClusterReveal)
+                        // Lift the column entirely clear of the chevron so its
+                        // tap target (collapse) stays unobstructed.
+                        .offset(y: -(toggleControlSize + columnSpacing))
+                }
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var expandedPillsRow: some View {
-        HStack(spacing: 8) {
-            runtimePickerMenu
-
+    private var expandedPillsColumn: some View {
+        VStack(alignment: .leading, spacing: columnSpacing) {
             if showsGitBranchSelector {
                 TurnGitBranchSelector(
                     isEnabled: isGitBranchSelectorEnabled,
@@ -88,6 +98,8 @@ struct TurnComposerCollapsibleContextCluster: View {
                 )
                 .equatable()
             }
+
+            runtimePickerMenu
         }
     }
 
@@ -106,8 +118,11 @@ struct TurnComposerCollapsibleContextCluster: View {
                 isExpanded.toggle()
             }
         } label: {
+            // Quarter-turn from right (collapsed) to up (expanded) so the glyph
+            // sweeps in the same direction the pills travel as they rise out of
+            // the chevron.
             RemodexIcon.image(systemName: "chevron.right", size: toggleChevronSize)
-                .rotationEffect(.degrees(isExpanded ? 180 : 0))
+                .rotationEffect(.degrees(isExpanded ? -90 : 0))
                 .frame(width: toggleControlSize, height: toggleControlSize)
                 .adaptiveGlass(.regular, isInteractive: true, in: Circle())
                 .foregroundStyle(branchLabelColor)
@@ -176,18 +191,16 @@ struct TurnComposerCollapsibleContextCluster: View {
     }
 }
 
-// Scale-from-leading + opacity is applied symmetrically so the pills row
-// shrinks back into the chevron as a single unit when collapsing. An
-// opacity-only removal looked clean for the row itself but let the inner
-// HStack squeeze its two pills together while the parent reflowed, so the
-// runtime and branch chips visibly overlapped mid-animation. Scaling the
-// whole row uniformly keeps the chips' relative geometry intact while they
-// collapse toward the chevron's edge. A small non-zero target scale (0.01)
-// avoids the degenerate scale=0 frame that previously made the spring's
-// midpoint look like the row was sliding across the composer.
+// Scale-from-bottom-leading + opacity is applied symmetrically so the pill
+// column grows up out of the chevron on expand and shrinks back down into it
+// on collapse, as a single unit. Anchoring at `.bottomLeading` keeps the
+// origin at the chevron's near corner so the column appears to emerge from the
+// button rather than slide in from elsewhere. A small non-zero target scale
+// (0.01) avoids the degenerate scale=0 frame that makes the spring's midpoint
+// look like the column is drifting across the composer.
 private extension AnyTransition {
     static var contextClusterReveal: AnyTransition {
-        .scale(scale: 0.01, anchor: .leading).combined(with: .opacity)
+        .scale(scale: 0.01, anchor: .bottomLeading).combined(with: .opacity)
     }
 }
 

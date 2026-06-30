@@ -11,7 +11,8 @@ struct UserMessageBubble: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(UserBubbleColor.storageKey) private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
     private static let bubbleCornerRadius: CGFloat = 22
-    private static let darkColoredBubbleOpacity = 0.7
+    private static let darkColoredBubbleOpacity = 0.4
+    private static let lightColoredBubbleOpacity = 0.1
 
     let message: CodexMessage
     let text: String
@@ -84,17 +85,26 @@ struct UserMessageBubble: View {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
     }
 
-    // Softens saturated palettes in dark mode without muting the neutral/default choices.
+    // Softens saturated palettes into a tint without muting the neutral/default choices.
     private func userBubbleBackground(for bubbleColor: UserBubbleColor) -> Color {
-        guard colorScheme == .dark else {
-            return bubbleColor.bubbleBackground(for: colorScheme)
-        }
-
         switch bubbleColor {
         case .default, .black:
             return bubbleColor.bubbleBackground(for: colorScheme)
         default:
-            return Color(uiColor: bubbleColor.uiColor).opacity(Self.darkColoredBubbleOpacity)
+            let opacity = colorScheme == .dark ? Self.darkColoredBubbleOpacity : Self.lightColoredBubbleOpacity
+            return Color(uiColor: bubbleColor.uiColor).opacity(opacity)
+        }
+    }
+
+    // In light mode the colored bubbles are a soft tint, so the text takes the full saturated color for contrast.
+    private func userBubbleForeground(for bubbleColor: UserBubbleColor) -> Color {
+        switch bubbleColor {
+        case .default, .black:
+            return bubbleColor.bubbleForeground(for: colorScheme)
+        default:
+            return colorScheme == .dark
+                ? bubbleColor.bubbleForeground(for: colorScheme)
+                : Color(uiColor: bubbleColor.uiColor)
         }
     }
 
@@ -127,7 +137,7 @@ struct UserMessageBubble: View {
     private func userBubbleText(_ rawText: String, bubbleColor: UserBubbleColor) -> some View {
         UserBubbleInlineMarkdownText(
             rawText,
-            foreground: bubbleColor.bubbleForeground(for: colorScheme)
+            foreground: userBubbleForeground(for: bubbleColor)
         )
             .font(AppFont.body())
     }

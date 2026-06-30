@@ -56,23 +56,32 @@ struct SystemMessageContentView: View {
     }
 
     private var toolActivitySystemView: some View {
-        let joined = text
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+        // Read the cached display text + icon (built once per text revision) instead
+        // of re-splitting/re-classifying the full text on every body evaluation.
+        let model = renderModel.toolActivity
+            ?? ToolActivityRenderCache.model(messageID: message.id, text: text)
+        let joined = model.displayText
 
         return VStack(alignment: .leading, spacing: 4) {
             if !joined.isEmpty {
-                Text(joined)
-                    .font(AppFont.body(weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    RemodexIcon.image(systemName: model.iconSystemName, size: 17, relativeTo: .body)
+                        .foregroundStyle(.secondary)
+
+                    Text(joined)
+                        .font(AppFont.body(weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
+        // Tool rows update often while activity streams; keep the subtree static to avoid whole-row flashing.
+        .transaction { transaction in
+            transaction.animation = nil
+        }
         .contextMenu {
             selectableTextActions(text: actionText, usesMarkdownSelection: false)
         }
