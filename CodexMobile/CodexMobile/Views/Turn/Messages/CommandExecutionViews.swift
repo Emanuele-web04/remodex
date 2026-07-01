@@ -640,12 +640,11 @@ struct CommandExecutionCardBody: View {
             .truncationMode(.tail)
             .layoutPriority(1)
 
-            // Completed rows already read their state from the past-tense verb,
-            // so the redundant "completed" label is dropped; running/failed still show.
-            if accent != .completed {
-                Text(statusLabel)
-                    .font(AppFont.body(weight: .regular))
-                    .foregroundStyle(accent == .failed ? Color.red : Color.secondary)
+            // No status text: the past-tense verb already conveys running vs done.
+            // A failure is flagged only by a red exclamation badge; running/completed show nothing.
+            if accent == .failed {
+                RemodexIcon.image(systemName: "exclamationmark.circle.fill", size: 15, relativeTo: .body)
+                    .foregroundStyle(.red)
             }
 
             // Keep the disclosure chevron next to the command, not pinned to the far right edge.
