@@ -65,7 +65,7 @@ enum ToolCallIcon {
         // MCP tools keep one icon regardless of the verb they wrap. Require "mcp" as
         // the leading token so file/command names containing "mcp" don't false-match.
         if tokens.first == "mcp" {
-            return tokens.contains("github") ? "remodex.branch" : "remodex.skill"
+            return tokens.contains("github") ? "remodex.github" : "remodex.skill"
         }
 
         let squished = tokens.joined()
@@ -125,9 +125,9 @@ enum ToolCallIcon {
         ("find", "magnifyingglass"),
         ("view", "magnifyingglass"),
         ("list", "magnifyingglass"),
-        // Source control. A uniform stroke glyph (not GitHub's filled mark) keeps the
-        // row tintable in one color; synara uses its octocat brand here instead.
-        ("github", "remodex.branch"),
+        // Source control. GitHub-specific rows use the real octocat mark (template-
+        // tinted so the row stays a single color); bare git keeps the branch glyph.
+        ("github", "remodex.github"),
         ("git", "remodex.branch"),
         // Agents / sub-tasks
         ("subagent", "remodex.agent"),

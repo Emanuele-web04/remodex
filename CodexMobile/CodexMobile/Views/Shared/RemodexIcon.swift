@@ -91,6 +91,8 @@ enum RemodexIcon {
         "slider.horizontal.3": "central-settings-slider-three",
         "speedometer": "central-dashboard-fast",
         "remodex.fork": "central-fork-code",
+        // Real GitHub octocat mark (template-tinted) for GitHub-specific tool rows.
+        "remodex.github": "GitHub_Invertocat_Black",
         "remodex.git-branch": "git-branch",
         "square.and.pencil": "central-compose-pencil",
         "square.stack.3d.up": "central-layers-three",
