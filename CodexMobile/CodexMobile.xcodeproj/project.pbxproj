@@ -17,6 +17,7 @@
 		45ECA26015C46B1F63E84A73 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A932BE773A84EFEA525DF684 /* Assets.xcassets */; };
 		4C0F0D55A5051D8301463C69 /* TurnComposerSendAvailabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74BE370810CFD7A76DC2A25F /* TurnComposerSendAvailabilityTests.swift */; };
 		4CCE0926DAD312571934343A /* TurnTimelineReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4EEB36EBEA2A475AC9B30B1F /* TurnTimelineReducerTests.swift */; };
+		5B10CDE1A2B3C4D5E6F70001 /* StreamingMarkdownBlockSplitterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B10CDE1A2B3C4D5E6F70002 /* StreamingMarkdownBlockSplitterTests.swift */; };
 		516497899B5C9A82CD10D93F /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9A37794F4B32C1952A3770E0 /* Foundation.framework */; };
 		536FE94CCA889CE20A57EC42 /* BridgeControlService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 357D589B8C179934A884F8CC /* BridgeControlService.swift */; };
 		58A8DCFAB9A46F2612782AF8 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FDBD5C45B205BFD7C281AD0D /* SwiftUI.framework */; };
@@ -146,6 +147,7 @@
 		3B1A9C7D5E4F60718293A4B5 /* BuildSupport/Base.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = BuildSupport/Base.xcconfig; sourceTree = SOURCE_ROOT; };
 		4D5C5F38BB3C121F29CA8A40 /* RemodexControlCenterWidget.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexControlCenterWidget.swift; sourceTree = "<group>"; };
 		4EEB36EBEA2A475AC9B30B1F /* TurnTimelineReducerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnTimelineReducerTests.swift; sourceTree = "<group>"; };
+		5B10CDE1A2B3C4D5E6F70002 /* StreamingMarkdownBlockSplitterTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = StreamingMarkdownBlockSplitterTests.swift; sourceTree = "<group>"; };
 		53C1E3E027CF4B98453962A0 /* BridgeMenuBarViews.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BridgeMenuBarViews.swift; sourceTree = "<group>"; };
 		5CE9E263053F9B9545E78ECC /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/WidgetKit.framework; sourceTree = DEVELOPER_DIR; };
 		6880B31C08D19C3D55FC62F0 /* RemodexMenuBar-Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; path = "RemodexMenuBar-Info.plist"; sourceTree = "<group>"; };
@@ -329,6 +331,7 @@
 				A9F1B2C3D4E5F60718293A47 /* CodexStructuredUserInputDecodeTests.swift */,
 				B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */,
 				4EEB36EBEA2A475AC9B30B1F /* TurnTimelineReducerTests.swift */,
+				5B10CDE1A2B3C4D5E6F70002 /* StreamingMarkdownBlockSplitterTests.swift */,
 				E6F1A2B3C4D5E6F708192A50 /* UserBubbleInlineMarkdownRendererTests.swift */,
 			);
 			path = CodexMobileTests;
@@ -742,6 +745,7 @@
 				A9F1B2C3D4E5F60718293A46 /* CodexStructuredUserInputDecodeTests.swift in Sources */,
 				B3C4D5E6F708192A3B4C5D6E /* CodexPlanModeTests.swift in Sources */,
 				4CCE0926DAD312571934343A /* TurnTimelineReducerTests.swift in Sources */,
+				5B10CDE1A2B3C4D5E6F70001 /* StreamingMarkdownBlockSplitterTests.swift in Sources */,
 				E6F1A2B3C4D5E6F708192A51 /* UserBubbleInlineMarkdownRendererTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

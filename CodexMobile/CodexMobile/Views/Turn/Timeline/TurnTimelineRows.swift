@@ -139,7 +139,6 @@ private struct TurnTimelineMessageRow: View {
             planMatchingFingerprint: planMatchingFingerprint,
             showsStreamingAnimations: autoScrollMode == .followBottom
                 && message.id == newestStreamingMessageID,
-            protectsPendingIndicatorAnchor: showsGlobalRunningIndicator,
             inlineCommitAndPushAction: inlineCommitAndPushAction,
             inlineCommitAndPushPhase: inlineCommitAndPushPhase,
             assistantRevertAction: onTapAssistantRevert,
