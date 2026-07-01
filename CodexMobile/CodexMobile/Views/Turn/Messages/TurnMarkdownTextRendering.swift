@@ -49,8 +49,26 @@ private struct UncachedMarkdownParser: MarkupParser {
     }
 }
 
+// Hands an already-parsed AttributedString straight back to RemodexTextKit so a
+// streaming reveal can render a *slice* of a value parsed once per delta, instead
+// of re-parsing a String prefix on every animation frame.
+@MainActor
+private struct IdentityMarkupParser: MarkupParser {
+    let value: AttributedString
+    func attributedString(for input: String) throws -> AttributedString { value }
+}
+
+/// A markdown value parsed once upstream. `revision` must change whenever `value`
+/// changes so `StructuredText`'s `onChange(of:)` re-reads it.
+struct PreparsedMarkdown {
+    let value: AttributedString
+    let revision: String
+}
+
 struct MarkdownTextView: View {
-    let text: String
+    var text: String = ""
+    // When set, renders this pre-parsed AttributedString instead of parsing `text`.
+    var preparsed: PreparsedMarkdown? = nil
     let profile: MarkdownRenderProfile
     var enablesSelection: Bool = false
     var constrainsToAvailableWidth: Bool = false
@@ -62,20 +80,26 @@ struct MarkdownTextView: View {
     private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
 
     var body: some View {
-        let transformed = MarkdownTextFormatter.renderableText(
-            from: text,
-            profile: profile,
-            usesCache: usesCaches
-        )
-        let parser: any MarkupParser = usesCaches
-            ? CachingMarkdownParser.shared
-            : UncachedMarkdownParser.shared
+        let resolved: (markup: String, parser: any MarkupParser) = {
+            if let preparsed {
+                return (preparsed.revision, IdentityMarkupParser(value: preparsed.value))
+            }
+            let markup = MarkdownTextFormatter.renderableText(
+                from: text,
+                profile: profile,
+                usesCache: usesCaches
+            )
+            let parser: any MarkupParser = usesCaches
+                ? CachingMarkdownParser.shared
+                : UncachedMarkdownParser.shared
+            return (markup, parser)
+        }()
         // Keep prose on the app font, but let RemodexTextKit own markdown/code layout to avoid block sizing regressions.
         // RemodexTextKit intentionally keeps the `.textual` namespace for its SwiftUI modifiers.
         // Default code-block overflow to wrap so horizontal ScrollViews
         // inside the timeline do not compete with the sidebar swipe gesture or let
         // the chat feel like a pannable canvas. Modal detail views can opt into scroll.
-        let baseView = StructuredText(transformed, parser: parser)
+        let baseView = StructuredText(resolved.markup, parser: resolved.parser)
             .font(AppFont.body())
             .textual.codeBlockStyle(
                 .default(
@@ -133,18 +157,46 @@ struct StreamingAssistantMarkdownTextView: View {
     let text: String
     var enablesSelection: Bool = false
     var constrainsToAvailableWidth: Bool = false
-    // Lets the parent disable the typewriter reveal when the row isn't the active
-    // follow-bottom row (off-screen / older streaming messages snap instead).
+    // Lets the parent disable the reveal when the row isn't the active follow-bottom
+    // row (off-screen / older streaming messages snap to their full text instead).
     var animatesReveal: Bool = true
     var protectsPendingIndicatorAnchor: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    // Mirrors the styling inputs MarkdownTextView reads, so the Equatable settled view restyles
+    // when the user flips theme or accent mid-stream (otherwise equality would suppress it).
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(UserBubbleColor.storageKey)
+    private var userBubbleColorRawValue = UserBubbleColor.defaultStoredRawValue
+    // Tracks Dynamic Type so the reproduced inter-block seam spacing scales with the body font.
+    @ScaledMetric(relativeTo: .body) private var bodyFontSize: CGFloat = 15
 
-    @State private var displayedText: String
-    @State private var displayedSegments: StreamingMarkdownBlockSegments
-    @State private var targetText: String
+    // The message is split into a stable "settled" prefix (every closed block) and the
+    // single "active" trailing block that is still streaming. Settled is rendered once and
+    // memoized via `Equatable`, so incoming deltas never re-parse or re-measure the history;
+    // only the small active block churns. The active block reveals with a per-character
+    // opacity ramp on its streaming frontier so new words materialize in place. The seam
+    // between the two views reproduces RemodexTextKit's inter-block spacing, which its own
+    // BlockVStack drops at container edges.
+    @State private var settledText: String = ""
+    @State private var activeText: String = ""
+    @State private var activeAttributed: AttributedString
+    @State private var activeParsedCount: Int
+    @State private var activeRevision: Int = 0
+    // Full text that drives append/snap decisions and the settled/active split.
+    @State private var fullText: String
+    // Number of characters revealed within the active block; drives the per-character fade.
+    @State private var revealFrontier: Int
     @State private var revealTask: Task<Void, Never>?
     @State private var textAdoptionTask: Task<Void, Never>?
+    // Memoizes the last faded value so incidental redraws (scroll-follow, neighbour-row
+    // updates, environment changes) at an unchanged frontier reuse it instead of rebuilding.
+    @State private var fadeCache = FrontierFadeCache()
+    // Seam spacing is derived from the adjacent block kinds, which only change when the
+    // active/settled split changes - not on every frontier tick. Cache the multipliers so
+    // `body` (re-run per revealed character) stays O(1) instead of re-scanning the settled text.
+    @State private var seamTopMultiplier: CGFloat
+    @State private var seamBottomMultiplier: CGFloat
 
     init(
         text: String,
@@ -158,40 +210,67 @@ struct StreamingAssistantMarkdownTextView: View {
         self.constrainsToAvailableWidth = constrainsToAvailableWidth
         self.animatesReveal = animatesReveal
         self.protectsPendingIndicatorAnchor = protectsPendingIndicatorAnchor
-        let initialDisplayedText = animatesReveal ? "" : text
-        _displayedText = State(initialValue: initialDisplayedText)
-        _displayedSegments = State(initialValue: StreamingMarkdownBlockSplitter.split(initialDisplayedText))
-        _targetText = State(initialValue: text)
+
+        let split = StreamingAssistantMarkdownTextView.splitSettledActive(text)
+        let activeAttr = StreamingAssistantMarkdownTextView.parse(split.active)
+        let activeCount = activeAttr.characters.count
+        _fullText = State(initialValue: text)
+        _settledText = State(initialValue: split.settled)
+        _activeText = State(initialValue: split.active)
+        _activeAttributed = State(initialValue: activeAttr)
+        _activeParsedCount = State(initialValue: activeCount)
+        // Text already present at mount is shown fully (no reveal on first paint).
+        _revealFrontier = State(initialValue: activeCount)
+        _seamTopMultiplier = State(
+            initialValue: StreamingAssistantMarkdownTextView.topSpacingMultiplier(forBlockStarting: split.active)
+        )
+        _seamBottomMultiplier = State(
+            initialValue: StreamingAssistantMarkdownTextView.bottomSpacingMultiplier(forLastBlockOf: split.settled)
+        )
     }
 
     var body: some View {
+        let resolved = resolvedReveal()
+        let layout = VStack(alignment: .leading, spacing: settledText.isEmpty ? 0 : seamSpacing) {
+            if !settledText.isEmpty {
+                SettledAssistantMarkdownText(
+                    text: settledText,
+                    enablesSelection: enablesSelection,
+                    constrainsToAvailableWidth: constrainsToAvailableWidth,
+                    colorScheme: colorScheme,
+                    userBubbleColorRawValue: userBubbleColorRawValue
+                )
+                .equatable()
+            }
+            if !activeText.isEmpty {
+                MarkdownTextView(
+                    preparsed: PreparsedMarkdown(value: resolved.attributed, revision: resolved.revision),
+                    profile: .assistantProse,
+                    enablesSelection: enablesSelection,
+                    constrainsToAvailableWidth: constrainsToAvailableWidth
+                )
+            }
+        }
+
         Group {
             if constrainsToAvailableWidth {
-                renderedSegments(displayedSegments)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                layout.frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                renderedSegments(displayedSegments)
+                layout
             }
         }
         .onAppear {
-            // Large first chunks should reveal from the beginning; snapping them to full height lets
-            // bottom-follow briefly expose the tail before the thinking row settles underneath.
-            adoptText(text, animated: shouldAnimateInitialReveal(for: text))
+            adoptText(text, animated: false)
         }
         .onChange(of: text) { _, nextText in
-            let shouldSnapFirstVisibleChunk = displayedText
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty
-                && !nextText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                && !shouldAnimateInitialReveal(for: nextText)
             scheduleTextAdoption(
                 nextText,
-                animated: animatesReveal && !reduceMotion && !shouldSnapFirstVisibleChunk
+                animated: animatesReveal && !reduceMotion
             )
         }
         .onChange(of: animatesReveal) { _, isAnimating in
             if !isAnimating {
-                snapToTarget()
+                snapToActive()
             }
         }
         .onDisappear {
@@ -201,32 +280,28 @@ struct StreamingAssistantMarkdownTextView: View {
         }
     }
 
-    @ViewBuilder
-    private func renderedSegments(_ segments: StreamingMarkdownBlockSegments) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(segments.stableChunks) { chunk in
-                MarkdownTextView(
-                    text: chunk.text,
-                    profile: .assistantProse,
-                    enablesSelection: enablesSelection,
-                    constrainsToAvailableWidth: constrainsToAvailableWidth
-                )
-            }
-
-            if !segments.activeMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownTextView(
-                    text: segments.activeMarkdown,
-                    profile: .assistantProse,
-                    enablesSelection: enablesSelection,
-                    constrainsToAvailableWidth: constrainsToAvailableWidth,
-                    usesCaches: false
-                )
-            }
-        }
+    // Reproduces the gap BlockVStack would place between the last settled block and the first
+    // active block (max of the adjacent edges), since each StructuredText drops edge spacing.
+    // Reads cached multipliers, so this stays O(1) on the per-character render path.
+    private var seamSpacing: CGFloat {
+        max(seamTopMultiplier, seamBottomMultiplier) * bodyFontSize
     }
 
-    // Smoothly reveals appended text instead of dropping in throttled bursts.
-    // Snaps for non-append updates and tiny first chunks that do not disturb layout.
+    // Picks between the fully-styled active value and a frontier-faded copy. The revision keys
+    // the rendered value so RemodexTextKit re-reads only when the revealed text changes.
+    private func resolvedReveal() -> (attributed: AttributedString, revision: String) {
+        guard animatesReveal, !reduceMotion, revealFrontier < activeParsedCount else {
+            return (activeAttributed, "full-\(activeRevision)")
+        }
+        let revision = "rev-\(activeRevision)-\(revealFrontier)"
+        if let cached = fadeCache.value(forRevision: activeRevision, frontier: revealFrontier) {
+            return (cached, revision)
+        }
+        let faded = Self.applyFrontierFade(to: activeAttributed, frontier: revealFrontier)
+        fadeCache.store(faded, revision: activeRevision, frontier: revealFrontier)
+        return (faded, revision)
+    }
+
     private func scheduleTextAdoption(_ nextText: String, animated: Bool) {
         textAdoptionTask?.cancel()
         // Streaming text can change repeatedly in one SwiftUI frame. Coalescing the
@@ -241,36 +316,61 @@ struct StreamingAssistantMarkdownTextView: View {
     }
 
     private func adoptText(_ nextText: String, animated: Bool) {
-        targetText = nextText
+        let previousFull = fullText
+        let settledDidChange = setFullText(nextText)
 
         if nextText.isEmpty {
             cancelReveal()
-            if !displayedText.isEmpty {
-                displayedText = ""
-                displayedSegments = StreamingMarkdownBlockSplitter.split("")
-            }
+            revealFrontier = 0
             return
         }
 
-        if !animated
-            || !nextText.hasPrefix(displayedText)
-            || StreamingMarkdownRevealPolicy.shouldSnap(displayedText: displayedText, targetText: nextText) {
-            cancelReveal()
-            guard displayedText != nextText else { return }
-            displayedText = nextText
-            displayedSegments = StreamingMarkdownBlockSplitter.split(nextText)
+        // Snap for the initial mount, reduced motion, and any non-append change
+        // (replay / reconciliation) so the transcript stays exact.
+        let isAppend = nextText.hasPrefix(previousFull)
+        guard animated, isAppend else {
+            snapToActive()
             return
         }
 
-        if displayedText == nextText { return }
+        // A newly closed block restarts the active region; fade the new block from the start.
+        if settledDidChange {
+            revealFrontier = 0
+        }
+        guard revealFrontier < activeParsedCount else { return }
         startRevealIfNeeded()
     }
 
-    private func snapToTarget() {
+    // Updates the split state; returns whether the settled prefix changed (a block closed).
+    @discardableResult
+    private func setFullText(_ nextText: String) -> Bool {
+        guard fullText != nextText else { return false }
+        fullText = nextText
+
+        let split = Self.splitSettledActive(nextText)
+        let settledDidChange = split.settled != settledText
+        if settledDidChange {
+            settledText = split.settled
+            // Last settled block kind drives the seam's bottom edge; recompute only on close.
+            seamBottomMultiplier = Self.bottomSpacingMultiplier(forLastBlockOf: split.settled)
+        }
+        if split.active != activeText {
+            activeText = split.active
+            activeAttributed = Self.parse(split.active)
+            activeParsedCount = activeAttributed.characters.count
+            activeRevision &+= 1
+            // First active block kind drives the seam's top edge; cheap (first line only).
+            seamTopMultiplier = Self.topSpacingMultiplier(forBlockStarting: split.active)
+            if revealFrontier > activeParsedCount {
+                revealFrontier = activeParsedCount
+            }
+        }
+        return settledDidChange
+    }
+
+    private func snapToActive() {
         cancelReveal()
-        guard displayedText != targetText else { return }
-        displayedText = targetText
-        displayedSegments = StreamingMarkdownBlockSplitter.split(targetText)
+        revealFrontier = activeParsedCount
     }
 
     private func cancelReveal() {
@@ -286,167 +386,312 @@ struct StreamingAssistantMarkdownTextView: View {
         }
     }
 
-    private func shouldAnimateInitialReveal(for text: String) -> Bool {
-        animatesReveal
-            && !reduceMotion
-            && (
-                protectsPendingIndicatorAnchor
-                    || StreamingMarkdownRevealPolicy.shouldAnimateInitialReveal(text)
-            )
-    }
-
-    // Ticks displayedText forward at a modest cadence, advancing more characters when the
-    // backlog is large so bursts catch up quickly while trickle streams drip smoothly.
+    // Drains the already-arrived active buffer toward the frontier at a steady, adaptive
+    // velocity. This mirrors Synara's smooth-stream hook: small backlogs trickle, large flushes
+    // catch up quickly, and the loop sleeps completely once caught up. Accumulator + velocity
+    // stay local so per-frame work does not invalidate the view; only whole-character advances
+    // of `revealFrontier` trigger a re-render.
     private func runReveal() async {
-        while !Task.isCancelled {
-            let target = targetText
-            let current = displayedText
+        var revealed = Double(revealFrontier)
+        var velocity = 0.0
+        var lastFrameTime: TimeInterval?
 
-            if !target.hasPrefix(current)
-                || StreamingMarkdownRevealPolicy.shouldSnap(displayedText: current, targetText: target) {
-                if displayedText != target {
-                    displayedText = target
-                    displayedSegments = StreamingMarkdownBlockSplitter.split(target)
+        while !Task.isCancelled {
+            let count = activeParsedCount
+            if revealed > Double(count) {
+                revealed = Double(count)
+            }
+
+            let backlog = Double(count) - revealed
+            if backlog <= 0 {
+                if revealFrontier != count {
+                    revealFrontier = count
                 }
                 return
             }
 
-            let targetCount = target.count
-            let displayedCount = current.count
-            if displayedCount >= targetCount { return }
+            let now = Date.timeIntervalSinceReferenceDate
+            let deltaSeconds = lastFrameTime.map {
+                min(now - $0, StreamingMarkdownRevealPolicy.maximumFrameSeconds)
+            } ?? 0
+            lastFrameTime = now
 
-            let remaining = targetCount - displayedCount
-            let advance = StreamingMarkdownRevealPolicy.advanceSize(forRemainingCharacters: remaining)
-            let take = min(remaining, advance)
-            let endIndex = target.index(target.startIndex, offsetBy: displayedCount + take)
-            let advanced = String(target[..<endIndex])
-            displayedText = advanced
-            displayedSegments = StreamingMarkdownBlockSplitter.split(advanced)
+            let targetVelocity = min(
+                StreamingMarkdownRevealPolicy.maximumCharactersPerSecond,
+                backlog / StreamingMarkdownRevealPolicy.drainWindowSeconds
+            )
+            velocity += (targetVelocity - velocity) * StreamingMarkdownRevealPolicy.velocityLerp
+            revealed = min(Double(count), revealed + velocity * deltaSeconds)
 
-            if advanced.count >= targetCount { return }
+            // Never let more than a short tail stay hidden: on big flushes, pull the frontier up
+            // so the newest visible line stays at the pinned bottom instead of a blank reserve.
+            let minRevealed = Double(max(0, count - StreamingMarkdownRevealPolicy.maxHiddenTailCharacters))
+            if revealed < minRevealed {
+                revealed = minRevealed
+            }
+
+            let nextFrontier = Int(revealed.rounded(.down))
+            if nextFrontier != revealFrontier {
+                revealFrontier = nextFrontier
+            }
+
+            if Double(count) - revealed <= 0 {
+                if revealFrontier != count {
+                    revealFrontier = count
+                }
+                return
+            }
+
             try? await Task.sleep(nanoseconds: StreamingMarkdownRevealPolicy.frameIntervalNanoseconds)
         }
+    }
+
+    @MainActor
+    private static func parse(_ text: String) -> AttributedString {
+        let transformed = MarkdownTextFormatter.renderableText(
+            from: text,
+            profile: .assistantProse,
+            usesCache: true
+        )
+        return (try? CachingMarkdownParser.shared.attributedString(for: transformed))
+            ?? AttributedString(text)
+    }
+
+    // Returns a copy of the parsed value where text past `frontier` is hidden and the
+    // trailing window fades from faint (newest) to opaque, so words materialize in place.
+    // Only the suffix is mutated; the opaque prefix keeps its original markdown styling.
+    private static func applyFrontierFade(to attributed: AttributedString, frontier: Int) -> AttributedString {
+        let total = attributed.characters.count
+        let clampedFrontier = min(max(frontier, 0), total)
+        guard clampedFrontier < total else { return attributed }
+
+        var copy = attributed
+
+        let hiddenStart = copy.index(copy.startIndex, offsetByCharacters: clampedFrontier)
+
+        // Resolve the window start once by walking back from the frontier (O(window)), then
+        // advance one character at a time. This avoids re-resolving each window character index
+        // from startIndex, which would be O(window * frontier) per revealed character. All edits
+        // are length-preserving foreground-color changes, so the indices stay valid as we go.
+        let window = StreamingMarkdownRevealPolicy.fadeWindowCharacters
+        let windowLength = min(window, clampedFrontier)
+        var charStart = copy.index(hiddenStart, offsetByCharacters: -windowLength)
+
+        // Hide everything past the frontier in a single attribute run.
+        copy[hiddenStart..<copy.endIndex].foregroundColor = Color.primary.opacity(0)
+
+        // Fade the trailing window: the closer to the frontier, the fainter.
+        var offset = clampedFrontier - windowLength
+        while offset < clampedFrontier {
+            let charEnd = copy.index(charStart, offsetByCharacters: 1)
+            let distanceFromFrontier = Double(clampedFrontier - offset)
+            let alpha = min(1.0, distanceFromFrontier / Double(window))
+            let existing = copy[charStart..<charEnd].foregroundColor ?? Color.primary
+            copy[charStart..<charEnd].foregroundColor = existing.opacity(alpha)
+            charStart = charEnd
+            offset += 1
+        }
+
+        return copy
+    }
+
+    // Splits the text into the settled prefix (all closed top-level blocks) and the active
+    // trailing block. A blank line outside a code fence ends a block; an open fence keeps its
+    // content in the active block so a still-typing fence never reflows the settled history.
+    static func splitSettledActive(_ text: String) -> (settled: String, active: String) {
+        guard !text.isEmpty else { return ("", "") }
+
+        let lines = text.components(separatedBy: "\n")
+        var insideFence = false
+        var pendingBoundary = false
+        var sawContent = false
+        var lastBlockStartLine = 0
+
+        for (index, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let isFenceMarker = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+
+            if isFenceMarker {
+                if pendingBoundary { lastBlockStartLine = index; pendingBoundary = false }
+                sawContent = true
+                insideFence.toggle()
+                continue
+            }
+
+            if insideFence {
+                if pendingBoundary { lastBlockStartLine = index; pendingBoundary = false }
+                sawContent = true
+                continue
+            }
+
+            if trimmed.isEmpty {
+                if sawContent { pendingBoundary = true }
+            } else {
+                if pendingBoundary { lastBlockStartLine = index; pendingBoundary = false }
+                sawContent = true
+            }
+        }
+
+        guard lastBlockStartLine > 0 else { return ("", text) }
+
+        let settled = lines[0..<lastBlockStartLine].joined(separator: "\n")
+        let active = lines[lastBlockStartLine...].joined(separator: "\n")
+        return (settled, active)
+    }
+
+    private enum BlockKind {
+        case paragraph, heading, code, table, thematicBreak, blockquote, list
+
+        // Font-relative `blockSpacing` from RemodexTextKit's default styles. Single source of
+        // truth for the settled<->active seam, mirroring (grep these if the library changes):
+        //   DefaultParagraphStyle      .blockSpacing(.fontScaled(top: 0.8))
+        //   DefaultHeadingStyle        .blockSpacing(.fontScaled(top: 1.6, bottom: 0.8))
+        //   DefaultCodeBlockStyle      .blockSpacing(.fontScaled(top: 0.88, bottom: 0))
+        //   DefaultTableStyle          .blockSpacing(.fontScaled(top: 1.6, bottom: 1.6))
+        //   DividerThematicBreakStyle  .blockSpacing(.fontScaled(top: 1.6, bottom: 1.6))
+        // Blockquote and list leave `blockSpacing` unset (resolved by surrounding styles), so
+        // their values here are a paragraph-like approximation of the resolved gap.
+        var topMultiplier: CGFloat {
+            switch self {
+            case .paragraph: return 0.8
+            case .heading: return 1.6
+            case .code: return 0.88
+            case .table, .thematicBreak: return 1.6
+            case .blockquote, .list: return 0.8
+            }
+        }
+
+        var bottomMultiplier: CGFloat {
+            switch self {
+            case .paragraph, .code, .blockquote, .list: return 0
+            case .heading: return 0.8
+            case .table, .thematicBreak: return 1.6
+            }
+        }
+    }
+
+    private static func topSpacingMultiplier(forBlockStarting active: String) -> CGFloat {
+        guard let line = firstNonBlankLine(of: active) else { return 0 }
+        return classify(line).topMultiplier
+    }
+
+    private static func bottomSpacingMultiplier(forLastBlockOf settled: String) -> CGFloat {
+        // The last settled block's kind is set by its first line, so reuse the splitter.
+        let lastBlock = splitSettledActive(settled).active
+        guard let line = firstNonBlankLine(of: lastBlock) else { return 0 }
+        return classify(line).bottomMultiplier
+    }
+
+    private static func firstNonBlankLine(of text: String) -> String? {
+        // Scan line by line and stop at the first non-blank one, so a long active block
+        // never materializes its whole line array just to read its leading line.
+        var lineStart = text.startIndex
+        while lineStart < text.endIndex {
+            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
+            let trimmed = text[lineStart..<lineEnd].trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+            lineStart = lineEnd < text.endIndex ? text.index(after: lineEnd) : text.endIndex
+        }
+        return nil
+    }
+
+    private static func classify(_ trimmedLine: String) -> BlockKind {
+        if trimmedLine.hasPrefix("#") { return .heading }
+        if trimmedLine.hasPrefix("```") || trimmedLine.hasPrefix("~~~") { return .code }
+        if trimmedLine.hasPrefix(">") { return .blockquote }
+        if trimmedLine.hasPrefix("|") { return .table }
+        if isThematicBreak(trimmedLine) { return .thematicBreak }
+        if isListMarker(trimmedLine) { return .list }
+        return .paragraph
+    }
+
+    private static func isThematicBreak(_ line: String) -> Bool {
+        let stripped = line.filter { !$0.isWhitespace }
+        guard stripped.count >= 3 else { return false }
+        return stripped.allSatisfy { $0 == "-" } || stripped.allSatisfy { $0 == "*" } || stripped.allSatisfy { $0 == "_" }
+    }
+
+    private static func isListMarker(_ line: String) -> Bool {
+        if line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("+ ") { return true }
+        // Ordered list: digits followed by "." or ")" and a space.
+        var sawDigit = false
+        var index = line.startIndex
+        while index < line.endIndex, line[index].isNumber {
+            sawDigit = true
+            index = line.index(after: index)
+        }
+        guard sawDigit, index < line.endIndex else { return false }
+        let marker = line[index]
+        guard marker == "." || marker == ")" else { return false }
+        let afterMarker = line.index(after: index)
+        return afterMarker < line.endIndex && line[afterMarker] == " "
+    }
+}
+
+// The settled prefix. `Equatable` on its content so streaming deltas to the active block do
+// not re-evaluate (and therefore do not re-parse or re-measure) the message history. Styling
+// inputs that `MarkdownTextView` reads for assistant prose (color scheme + accent that drive
+// the markdown link color) are part of the identity, so a theme/accent change mid-stream still
+// restyles the settled text instead of being suppressed by equality.
+private struct SettledAssistantMarkdownText: View, Equatable {
+    let text: String
+    let enablesSelection: Bool
+    let constrainsToAvailableWidth: Bool
+    let colorScheme: ColorScheme
+    let userBubbleColorRawValue: String
+
+    var body: some View {
+        MarkdownTextView(
+            text: text,
+            profile: .assistantProse,
+            enablesSelection: enablesSelection,
+            constrainsToAvailableWidth: constrainsToAvailableWidth
+        )
+    }
+
+    static func == (lhs: SettledAssistantMarkdownText, rhs: SettledAssistantMarkdownText) -> Bool {
+        lhs.text == rhs.text
+            && lhs.enablesSelection == rhs.enablesSelection
+            && lhs.constrainsToAvailableWidth == rhs.constrainsToAvailableWidth
+            && lhs.colorScheme == rhs.colorScheme
+            && lhs.userBubbleColorRawValue == rhs.userBubbleColorRawValue
+    }
+}
+
+// Single-slot memo for the most recently produced frontier fade. A reference type so it can
+// be updated from within `body` without invalidating SwiftUI state; the reveal is monotonic
+// during streaming, so one slot is enough to absorb the incidental redraws between advances.
+private final class FrontierFadeCache {
+    private var cachedRevision = -1
+    private var cachedFrontier = -1
+    private var cachedValue = AttributedString()
+
+    func value(forRevision revision: Int, frontier: Int) -> AttributedString? {
+        guard cachedRevision == revision, cachedFrontier == frontier else { return nil }
+        return cachedValue
+    }
+
+    func store(_ value: AttributedString, revision: Int, frontier: Int) {
+        cachedRevision = revision
+        cachedFrontier = frontier
+        cachedValue = value
     }
 }
 
 private enum StreamingMarkdownRevealPolicy {
-    // MessageRow already coalesces assistant text, so this view only needs a light reveal.
-    static let frameIntervalNanoseconds: UInt64 = 45_000_000
-    private static let largeInitialRevealCharacterCount = 512
-    private static let minimumAdvanceCharacterCount = 14
-    private static let maximumAdvanceCharacterCount = 96
-    private static let largeBacklogAdvanceCharacterCount = 256
-    private static let hugeBacklogAdvanceCharacterCount = 512
-
-    static func shouldSnap(displayedText: String, targetText: String) -> Bool {
-        !targetText.hasPrefix(displayedText)
-    }
-
-    static func shouldAnimateInitialReveal(_ text: String) -> Bool {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).count > largeInitialRevealCharacterCount
-    }
-
-    static func advanceSize(forRemainingCharacters remaining: Int) -> Int {
-        if remaining >= 4_000 {
-            return hugeBacklogAdvanceCharacterCount
-        }
-        if remaining >= 1_200 {
-            return largeBacklogAdvanceCharacterCount
-        }
-        return max(
-            minimumAdvanceCharacterCount,
-            min(remaining / 2, maximumAdvanceCharacterCount)
-        )
-    }
-}
-
-private struct StreamingMarkdownBlockSegments {
-    let stableChunks: [StreamingMarkdownChunk]
-    let activeMarkdown: String
-}
-
-private struct StreamingMarkdownChunk: Identifiable {
-    let id: Int
-    let text: String
-}
-
-private enum StreamingMarkdownBlockSplitter {
-    private static let stableChunkTargetCharacterCount = 6_000
-
-    static func split(_ text: String) -> StreamingMarkdownBlockSegments {
-        var lineStart = text.startIndex
-        var chunkStart = text.startIndex
-        var isInsideFence = false
-        var stableChunks: [StreamingMarkdownChunk] = []
-
-        while lineStart < text.endIndex {
-            let lineEnd = text[lineStart...].firstIndex(of: "\n") ?? text.endIndex
-            let nextLineStart = lineEnd < text.endIndex ? text.index(after: lineEnd) : text.endIndex
-            let hasLineBreak = lineEnd < text.endIndex
-            let trimmedLine = String(text[lineStart..<lineEnd])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            var stableBoundary: String.Index?
-            if isFenceDelimiter(trimmedLine) {
-                isInsideFence.toggle()
-                if !isInsideFence {
-                    stableBoundary = nextLineStart
-                }
-            } else if !isInsideFence, hasLineBreak {
-                if trimmedLine.isEmpty || isStableSingleLineBlock(trimmedLine) {
-                    stableBoundary = nextLineStart
-                }
-            }
-
-            if let stableBoundary,
-               shouldSealChunk(in: text, from: chunkStart, to: stableBoundary) {
-                appendChunk(in: text, from: chunkStart, to: stableBoundary, into: &stableChunks)
-                chunkStart = stableBoundary
-            }
-
-            lineStart = nextLineStart
-        }
-
-        return StreamingMarkdownBlockSegments(
-            stableChunks: stableChunks,
-            activeMarkdown: String(text[chunkStart...])
-        )
-    }
-
-    // Keep the newest chunk intact so RemodexTextKit can apply native paragraph/list/code spacing
-    // while old chunks stop reparsing during long streaming responses.
-    private static func shouldSealChunk(in text: String, from start: String.Index, to boundary: String.Index) -> Bool {
-        guard boundary < text.endIndex else { return false }
-        return text.distance(from: start, to: boundary) >= stableChunkTargetCharacterCount
-    }
-
-    private static func appendChunk(
-        in text: String,
-        from start: String.Index,
-        to end: String.Index,
-        into chunks: inout [StreamingMarkdownChunk]
-    ) {
-        guard start < end else { return }
-        let chunkText = String(text[start..<end])
-        guard !chunkText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        chunks.append(
-            StreamingMarkdownChunk(
-                id: chunks.count,
-                text: chunkText
-            )
-        )
-    }
-
-    private static func isFenceDelimiter(_ trimmedLine: String) -> Bool {
-        trimmedLine.hasPrefix("```") || trimmedLine.hasPrefix("~~~")
-    }
-
-    private static func isStableSingleLineBlock(_ trimmedLine: String) -> Bool {
-        let headingMarkerCount = trimmedLine.prefix(while: { $0 == "#" }).count
-        let isHeading = (1...6).contains(headingMarkerCount)
-            && trimmedLine.dropFirst(headingMarkerCount).hasPrefix(" ")
-        return isHeading || trimmedLine == "---" || trimmedLine == "***"
-    }
+    static let frameIntervalNanoseconds: UInt64 = 16_000_000
+    static let drainWindowSeconds = 0.16
+    static let maximumCharactersPerSecond = 2_000.0
+    static let velocityLerp = 0.15
+    static let maximumFrameSeconds: TimeInterval = 0.05
+    // How many characters the soft fade-in trailing edge spans.
+    static let fadeWindowCharacters = 18
+    // Upper bound on how many characters may stay hidden past the frontier. Unrevealed text
+    // still reserves layout height (it is only alpha-hidden), so an unbounded backlog would
+    // leave a blank sliver pinned at the bottom during large bursts. Small streaming deltas stay
+    // under this bound and reveal normally; only big flushes are pulled up to keep the newest
+    // visible line near the pinned bottom.
+    static let maxHiddenTailCharacters = 24
 }
 
 enum MarkdownTextFormatter {

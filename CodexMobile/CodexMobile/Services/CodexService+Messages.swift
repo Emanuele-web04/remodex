@@ -45,6 +45,22 @@ private extension Array where Element == CodexMessage {
         }
         return result
     }
+
+    /// Sorts by `orderIndex`, but only when the array isn't already ordered.
+    /// Streaming text deltas and monotonic appends leave `orderIndex` ordered, so
+    /// the common per-flush case is an O(n) check instead of an O(n log n) sort.
+    /// Result is identical to `sort { $0.orderIndex < $1.orderIndex }` (orderIndex
+    /// is unique, so there are no ties whose relative order could differ).
+    mutating func sortByOrderIndexIfNeeded() {
+        guard count > 1 else { return }
+        var isOrdered = true
+        for index in 1..<count where self[index].orderIndex < self[index - 1].orderIndex {
+            isOrdered = false
+            break
+        }
+        guard !isOrdered else { return }
+        sort { $0.orderIndex < $1.orderIndex }
+    }
 }
 
 extension CodexService {
@@ -1365,7 +1381,7 @@ extension CodexService {
             guard didMutate else {
                 return
             }
-            messagesByThread[threadId]?.sort(by: { $0.orderIndex < $1.orderIndex })
+            messagesByThread[threadId]?.sortByOrderIndexIfNeeded()
             persistMessages()
             updateCurrentOutput(for: threadId)
             return
@@ -1540,7 +1556,7 @@ extension CodexService {
                 )
                 // Preserve the row's original timeline slot. The render reducer handles
                 // trailing file-change cards inside their own turn without crossing later users.
-                threadMessages.sort(by: { $0.orderIndex < $1.orderIndex })
+                threadMessages.sortByOrderIndexIfNeeded()
                 messagesByThread[threadId] = threadMessages
                 persistMessages()
                 updateCurrentOutput(for: threadId)
@@ -2280,7 +2296,7 @@ extension CodexService {
                     // Intra-turn rendering still trails them after the assistant answer.
                     finalRawIndex = finalIndex
                 }
-                threadMessages.sort(by: { $0.orderIndex < $1.orderIndex })
+                threadMessages.sortByOrderIndexIfNeeded()
                 finalRawIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) ?? finalRawIndex
                 messagesByThread[threadId] = threadMessages
                 persistMessages()
@@ -4996,7 +5012,7 @@ extension CodexService {
             return
         }
         messagesByThread[message.threadId, default: []].append(normalizedMessage)
-        messagesByThread[message.threadId]?.sort(by: { $0.orderIndex < $1.orderIndex })
+        messagesByThread[message.threadId]?.sortByOrderIndexIfNeeded()
         persistMessages()
         updateCurrentOutput(for: message.threadId)
     }
@@ -5045,9 +5061,21 @@ extension CodexService {
             return cachedIndex
         }
 
-        let rebuiltIndex = Dictionary(
-            uniqueKeysWithValues: messages.enumerated().map { ($0.element.id, $0.offset) }
-        )
+        // Cache miss/stale. A freshly appended row sits at the tail: patch just that
+        // entry in place and keep the rest of the (append-stable) cache — O(1), the
+        // streaming hot path. Any other miss means the array shifted (mid insert/remove)
+        // or the thread has no cache yet, so rebuild the whole index once; that keeps
+        // later lookups in the same operation (e.g. markTurnCompleted's filter loop after
+        // it prunes thinking rows) O(1) hits instead of repeated O(n) self-heals.
+        if messageIndexCacheByThread[threadId] != nil,
+           let last = messages.last,
+           last.id == messageId {
+            let index = messages.count - 1
+            messageIndexCacheByThread[threadId]?[messageId] = index
+            return index
+        }
+
+        let rebuiltIndex = messages.messageIndexByID()
         messageIndexCacheByThread[threadId] = rebuiltIndex
         return rebuiltIndex[messageId]
     }

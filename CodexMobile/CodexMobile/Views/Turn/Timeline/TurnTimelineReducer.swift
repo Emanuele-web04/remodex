@@ -977,14 +977,22 @@ enum TurnTimelineReducer {
     // Keeps only the newest matching file-change card when multiple event channels emit the same diff.
     static func removeDuplicateFileChangeMessages(in messages: [CodexMessage]) -> [CodexMessage] {
         let signatures = messages.map { fileChangeDedupSignature(for: $0) }
+        // Only file-change messages carry a signature, so scan just those positions:
+        // the pairwise supersession check is O(f^2) in the file-change count rather than
+        // O(n^2) over the whole thread. Non-file-change positions never matched before,
+        // so the result is identical.
+        let fileChangeIndices = signatures.indices.filter { signatures[$0] != nil }
+        guard fileChangeIndices.count > 1 else {
+            return messages
+        }
+
         var supersededIndices: Set<Int> = []
+        for olderSlot in fileChangeIndices.indices {
+            let olderIndex = fileChangeIndices[olderSlot]
+            guard let olderSignature = signatures[olderIndex] else { continue }
 
-        for olderIndex in messages.indices {
-            guard let olderSignature = signatures[olderIndex] else {
-                continue
-            }
-
-            for newerIndex in messages.indices where newerIndex > olderIndex {
+            for newerSlot in (olderSlot + 1)..<fileChangeIndices.count {
+                let newerIndex = fileChangeIndices[newerSlot]
                 guard let newerSignature = signatures[newerIndex],
                       fileChangeMessage(newerSignature, supersedes: olderSignature) else {
                     continue
@@ -994,11 +1002,12 @@ enum TurnTimelineReducer {
             }
         }
 
+        guard !supersededIndices.isEmpty else {
+            return messages
+        }
+
         return messages.enumerated().compactMap { index, message in
-            if signatures[index] != nil, supersededIndices.contains(index) {
-                return nil
-            }
-            return message
+            supersededIndices.contains(index) ? nil : message
         }
     }
 

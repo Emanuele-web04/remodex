@@ -402,7 +402,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     }
                     .frame(width: viewport.size.width)
                     .defaultScrollAnchor(initialScrollAnchor, for: .initialOffset)
-                    .defaultScrollAnchor(.top, for: .sizeChanges)
+                    // While following the stream, anchor content-size growth to the bottom so the
+                    // scroll view keeps the newest line pinned natively (GPU-driven, no per-frame
+                    // scrollTo chase). When the user has scrolled up to read, anchor to the top so
+                    // incoming content grows below their position without yanking them around.
+                    .defaultScrollAnchor(sizeChangeScrollAnchor, for: .sizeChanges)
                     .modifier(
                         TurnTimelineScrollObserverModifier(
                             isGeometryTrackingEnabled: shouldTrackScrollGeometry,
@@ -586,6 +590,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private var initialScrollAnchor: UnitPoint {
         .bottom
+    }
+
+    // Native content-growth anchor: bottom while actively following the stream (so growth pins
+    // the newest line without a manual chase), top otherwise so reading history stays put.
+    private var sizeChangeScrollAnchor: UnitPoint {
+        shouldPinTimelineToBottomDuringGeometryChange ? .bottom : .top
     }
 
     private var shouldShowPendingAssistantResponse: Bool {
@@ -1249,8 +1259,20 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             guard autoScrollMode == .followBottom || shouldPinTimelineToBottomDuringGeometryChange else {
                 return
             }
-            proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
+            // With the native bottom size-change anchor doing the heavy lifting, this is a
+            // corrective nudge (usually a no-op when already pinned). Use a momentum-preserving
+            // interpolating spring so, unlike a restarting ease-out, retargeting mid-flight keeps
+            // its velocity and the viewport glides continuously instead of pulsing.
+            withAnimation(Self.followBottomStreamingScrollAnimation) {
+                proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
+            }
         }
+    }
+
+    // Critically damped (bounce: 0) interpolating spring: continuous, overshoot-free, and
+    // velocity-preserving across the per-frame retargets that streaming growth produces.
+    private static var followBottomStreamingScrollAnimation: Animation {
+        .interpolatingSpring(duration: 0.3, bounce: 0)
     }
 
     private var shouldPauseAutomaticScrolling: Bool {
