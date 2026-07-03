@@ -288,6 +288,7 @@ struct PendingSystemStreamingDeltas {
     let turnId: String?
     let itemId: String
     let kind: CodexMessageKind
+    var isReplay: Bool
     var deltas: [String]
 }
 
@@ -506,9 +507,12 @@ final class CodexService {
     @ObservationIgnored var messagePersistenceDebounceTask: Task<Void, Never>?
     // Coalesces high-frequency assistant deltas before they mutate observed timeline state.
     @ObservationIgnored var pendingAssistantDeltaByStreamID: [String: String] = [:]
-    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?)] = [:]
+    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?, isReplay: Bool)] = [:]
     @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
     @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
+    // Scoped while replayed bridge notifications apply so catch-up history cannot
+    // recreate live/streaming UI or mark the sidebar as running.
+    @ObservationIgnored var isApplyingReplayedBridgeEvent = false
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -675,7 +679,8 @@ final class CodexService {
     @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
     var pinnedThreadIDs: [String] = []
     @ObservationIgnored var pinnedThreadSnapshotsByRootID: [String: [CodexThread]] = [:]
-    @ObservationIgnored var snapshotOnlyPinnedThreadIDs: Set<String> = []
+    // Sidebar rows read this directly, so keep it observable even when thread metadata is unchanged.
+    var snapshotOnlyPinnedThreadIDs: Set<String> = []
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
     // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
     @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]

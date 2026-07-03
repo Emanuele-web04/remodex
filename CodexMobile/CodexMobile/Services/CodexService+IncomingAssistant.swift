@@ -28,7 +28,14 @@ extension CodexService {
             eventObject: eventObject
         ) else { return }
 
-        if let directThreadId = extractThreadID(from: paramsObject), !directThreadId.isEmpty {
+        // Late/replayed deltas for finished turns still merge into closed rows via
+        // applyLateTerminalAssistantDelta, but they must never revive running UI.
+        let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
+
+        if let directThreadId = extractThreadID(from: paramsObject),
+           !directThreadId.isEmpty,
+           !isReplayedEvent,
+           turnTerminalState(for: extractTurnID(from: paramsObject)) == nil {
             markThreadAsRunning(directThreadId)
         }
 
@@ -41,12 +48,14 @@ extension CodexService {
             return
         }
 
-        markThreadAsRunning(context.threadId)
-        if activeTurnID(for: context.threadId) == nil {
-            setActiveTurnID(turnId, for: context.threadId)
-            threadIdByTurnID[turnId] = context.threadId
-            activeTurnId = turnId
-            setProtectedRunningFallback(false, for: context.threadId)
+        if !isReplayedEvent, turnTerminalState(for: turnId) == nil {
+            markThreadAsRunning(context.threadId)
+            if activeTurnID(for: context.threadId) == nil {
+                setActiveTurnID(turnId, for: context.threadId)
+                threadIdByTurnID[turnId] = context.threadId
+                activeTurnId = turnId
+                setProtectedRunningFallback(false, for: context.threadId)
+            }
         }
         clearMirroredRunningCatchupNeeded(for: context.threadId)
         appendAssistantDelta(
@@ -54,7 +63,8 @@ extension CodexService {
             turnId: turnId,
             itemId: context.identity.itemId,
             assistantPhase: context.identity.phase,
-            delta: delta
+            delta: delta,
+            isReplay: isReplayedEvent
         )
     }
 
@@ -242,7 +252,19 @@ extension CodexService {
         guard let paramsObject else { return }
         let eventObject = envelopeEventObject(from: paramsObject)
 
-        if let directThreadId = extractThreadID(from: paramsObject), !directThreadId.isEmpty {
+        // Replayed starts are only ordering hints; deltas create closed history rows.
+        if isReplayedBridgeEvent(paramsObject) {
+            return
+        }
+
+        // Replayed item lifecycle events for finished turns must not revive running UI.
+        if turnTerminalState(for: extractTurnID(from: paramsObject)) != nil {
+            return
+        }
+
+        if let directThreadId = extractThreadID(from: paramsObject),
+           !directThreadId.isEmpty,
+           !isReplayedBridgeEvent(paramsObject) {
             markThreadAsRunning(directThreadId)
         }
 

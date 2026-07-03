@@ -618,6 +618,231 @@ test("desktop-origin active runs mirror generated image end events without respo
   assert.equal(outbound[2].params.saved_path, "/tmp/generated event.png");
 });
 
+test("desktop-origin bootstrap does not replay runs ended by turn_aborted", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-aborted",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      userMessage("Please stop midway"),
+      taskStarted("turn-aborted"),
+      agentMessage("Partial answer", "final_answer"),
+      turnAborted("turn-aborted"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-aborted",
+    },
+  }));
+
+  await wait(30);
+
+  assert.deepEqual(outbound, []);
+});
+
+test("desktop-origin bootstrap skips stale active runs whose rollout stopped growing", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-stale",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      userMessage("Long lost run"),
+      taskStarted("turn-stale"),
+      agentMessage("Working on it", "final_answer"),
+    ],
+  });
+  const staleDate = new Date(Date.now() - 60 * 60_000);
+  fs.utimesSync(rolloutPath, staleDate, staleDate);
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+    activityHeartbeatMs: 10,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-stale",
+    },
+  }));
+
+  await wait(30);
+
+  // No replay and no heartbeats: the hydrated-but-stale run must stay silent.
+  assert.deepEqual(outbound, []);
+});
+
+test("desktop-origin stale runs resume live mirroring when the rollout grows again", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-stale-resume",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      userMessage("Long lost run"),
+      taskStarted("turn-stale-resume"),
+    ],
+  });
+  const staleDate = new Date(Date.now() - 60 * 60_000);
+  fs.utimesSync(rolloutPath, staleDate, staleDate);
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 100,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-stale-resume",
+    },
+  }));
+
+  await wait(20);
+  assert.deepEqual(outbound, []);
+
+  appendRolloutLines(rolloutPath, [
+    agentMessage("Back from the dead", "final_answer"),
+    taskComplete("turn-stale-resume"),
+  ]);
+  await wait(30);
+
+  const agentMessageNotification = outbound.find((message) => message.method === "codex/event/agent_message");
+  assert.ok(agentMessageNotification);
+  assert.equal(agentMessageNotification.params.turnId, "turn-stale-resume");
+  const completed = outbound.find((message) => message.method === "turn/completed");
+  assert.ok(completed);
+  assert.equal(completed.params.turnId, "turn-stale-resume");
+});
+
+test("desktop-origin live tail closes mirrored turns on turn_aborted", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-live-abort",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-live-abort"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 100,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-live-abort",
+    },
+  }));
+
+  await wait(20);
+  appendRolloutLines(rolloutPath, [turnAborted("turn-live-abort")]);
+  await wait(30);
+
+  const completed = outbound.find((message) => message.method === "turn/completed");
+  assert.ok(completed);
+  assert.equal(completed.params.turnId, "turn-live-abort");
+  assert.equal(completed.params.status, "aborted");
+});
+
+test("desktop-origin live tail closes mirrored turns on fatal error", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-live-error",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-live-error"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 100,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-live-error",
+    },
+  }));
+
+  await wait(20);
+  appendRolloutLines(rolloutPath, [errorEvent("turn-live-error", "Model stream disconnected")]);
+  await wait(30);
+
+  const completed = outbound.find((message) => message.method === "turn/completed");
+  assert.ok(completed);
+  assert.equal(completed.params.turnId, "turn-live-error");
+  assert.equal(completed.params.status, "failed");
+  assert.equal(completed.params.error.message, "Model stream disconnected");
+});
+
 test("phone-origin rollouts do not emit mirrored updates", async (t) => {
   const { homeDir } = createTemporaryRolloutHome({
     threadId: "thread-phone",
@@ -996,6 +1221,30 @@ function taskComplete(turnId) {
     payload: {
       type: "task_complete",
       turn_id: turnId,
+    },
+  });
+}
+
+function turnAborted(turnId) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:41.000Z",
+    type: "event_msg",
+    payload: {
+      type: "turn_aborted",
+      turn_id: turnId,
+      reason: "user_interrupt",
+    },
+  });
+}
+
+function errorEvent(turnId, message) {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:41.000Z",
+    type: "event_msg",
+    payload: {
+      type: "error",
+      turn_id: turnId,
+      message,
     },
   });
 }

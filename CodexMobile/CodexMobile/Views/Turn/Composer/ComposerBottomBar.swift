@@ -55,6 +55,10 @@ struct ComposerBottomBar: View {
     private let composerActionIconSize: CGFloat = 14
     private let inlineAccessControlSize: CGFloat = 32
     private let inlineAccessControlIconSize: CGFloat = 20
+    // Send stays the primary CTA, so give it a slightly larger tap target than
+    // the neutral composer chrome; the mic sits a notch smaller than the "+".
+    private let sendButtonDiameter: CGFloat = 32
+    private let voiceIconSide: CGFloat = 19
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
@@ -86,7 +90,7 @@ struct ComposerBottomBar: View {
     var body: some View {
         HStack(spacing: 8) {
             attachmentMenu
-                .padding(.leading, 8)
+                .padding(.leading, 6)
             inlineAccessMenuLabel
             Spacer(minLength: 0)
 
@@ -143,13 +147,7 @@ struct ComposerBottomBar: View {
                     HapticFeedback.shared.triggerImpactFeedback()
                     onSend()
                 } label: {
-                    RemodexCircleBadge(
-                        systemName: "arrow.up",
-                        foreground: sendButtonIconColor,
-                        background: sendButtonBackgroundColor,
-                        diameter: composerCircleDiameter,
-                        iconSize: composerActionIconSize
-                    )
+                    sendButtonLabel
                 }
                 .overlay(alignment: .topTrailing) {
                     if queuedCount > 0 {
@@ -157,6 +155,7 @@ struct ComposerBottomBar: View {
                             .offset(x: 8, y: -8)
                     }
                 }
+                .padding(.leading, 3)
                 .disabled(isSendDisabled)
             }
         }
@@ -178,6 +177,18 @@ struct ComposerBottomBar: View {
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
+    }
+
+    // Single SF `arrow.up.circle.fill` glyph (palette-rendered) so the arrow and
+    // its circle are one coherent icon in both the disabled and active states,
+    // instead of an arrow layered over a separately-filled circle badge.
+    private var sendButtonLabel: some View {
+        Image(systemName: "arrow.up.circle.fill")
+            .font(.system(size: sendButtonDiameter, weight: .regular))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(sendButtonIconColor, sendButtonBackgroundColor)
+            .frame(width: sendButtonDiameter, height: sendButtonDiameter)
+            .contentShape(Circle())
     }
 
     private var voiceButtonLabel: some View {
@@ -205,10 +216,10 @@ struct ComposerBottomBar: View {
                 // and renders at the same visual size as the SF `plus` glyph.
                 RemodexIcon.image(
                     systemName: voiceButtonPresentation.systemImageName,
-                    size: composerIconSide
+                    size: voiceIconSide
                 )
                 .foregroundStyle(metaLabelColor)
-                .frame(width: composerIconSide, height: composerIconSide)
+                .frame(width: voiceIconSide, height: voiceIconSide)
                 .contentShape(Rectangle())
             }
         }

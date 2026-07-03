@@ -42,6 +42,29 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(messages.first?.isStreaming == true)
     }
 
+    func testReplayedAssistantDeltaAppliesAsClosedHistory() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            delta: "Historical answer",
+            isReplay: true
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.role, .assistant)
+        XCTAssertEqual(messages.first?.text, "Historical answer")
+        XCTAssertFalse(messages.first?.isStreaming ?? true)
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+    }
+
     func testAssistantDeltaCoalescingMergesCumulativeSnapshotsBeforeFlush() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -91,6 +114,33 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(messages.first?.kind, .thinking)
         XCTAssertEqual(messages.first?.text, "Looking around")
         XCTAssertTrue(messages.first?.isStreaming == true)
+    }
+
+    func testReplayedSystemDeltaAppliesAsClosedHistoryAfterFlush() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "file-change-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/fileChange/outputDelta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "delta": .string("Updated Sources/App.swift"),
+                "remodexReplayedEvent": .bool(true),
+            ])
+        )
+        service.flushAllPendingStreamingDeltas()
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.role, .system)
+        XCTAssertEqual(messages.first?.kind, .fileChange)
+        XCTAssertEqual(messages.first?.text, "Updated Sources/App.swift")
+        XCTAssertFalse(messages.first?.isStreaming ?? true)
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
     }
 
     func testNilTurnSystemDeltasFlushBeforeTurnCompletionClosesRows() {

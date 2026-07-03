@@ -259,7 +259,9 @@ extension CodexService {
             into: &merged,
             deletedThreadIDs: persistedDeletedIDs
         ))
-        snapshotOnlyPinnedThreadIDs = snapshotOnlyPinnedIDs
+        if snapshotOnlyPinnedThreadIDs != snapshotOnlyPinnedIDs {
+            snapshotOnlyPinnedThreadIDs = snapshotOnlyPinnedIDs
+        }
 
         // Local rename intent wins over stale thread/list data, especially for pinned snapshots.
         for threadID in Array(merged.keys) {
@@ -268,11 +270,20 @@ extension CodexService {
             merged[threadID] = thread
         }
 
-        threads = sortThreads(Array(merged.values))
-        assistantRevertStateCacheByThread.removeAll()
+        // Steady-state polls usually reconcile to an identical list; skip the observable
+        // reassignment and full timeline refresh cascade when nothing actually changed.
+        // Revert-state caches are revision-keyed, so they self-invalidate on real changes.
+        let reconciledThreads = sortThreads(Array(merged.values))
+        let didChangeThreads = reconciledThreads != threads
+        if didChangeThreads {
+            threads = reconciledThreads
+            assistantRevertStateCacheByThread.removeAll()
+        }
         refreshBusyRepoRootsAndDependentTimelineStates()
-        // Full reconciliation — always refresh all threads even if busy-roots already hit some.
-        refreshAllThreadTimelineStates()
+        if didChangeThreads {
+            // Full reconciliation — always refresh all threads even if busy-roots already hit some.
+            refreshAllThreadTimelineStates()
+        }
 
         if activeThreadId == nil {
             activeThreadId = firstLiveThreadID()

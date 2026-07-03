@@ -1510,6 +1510,82 @@ test("sanitizeThreadHistoryImagesForRelay restores JSONL cwd without file change
   assert.equal(sanitized.result.thread.turns[0].items.length, 1);
 });
 
+test("sanitizeThreadHistoryImagesForRelay refreshes JSONL cwd when a newer same-thread rollout appears", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-cwd-newer-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-cwd-newer";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "05", "19");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+
+  const writeRollout = (fileName, cwd, mtime) => {
+    const rolloutPath = path.join(sessionsDir, fileName);
+    fs.writeFileSync(
+      rolloutPath,
+      JSON.stringify({
+        type: "session_meta",
+        payload: {
+          id: threadId,
+          cwd,
+        },
+      }),
+      "utf8"
+    );
+    const timestamp = new Date(mtime);
+    fs.utimesSync(rolloutPath, timestamp, timestamp);
+  };
+
+  const readThreadCwd = () => JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-thread-cwd-newer",
+    result: {
+      thread: {
+        id: threadId,
+        cwd: "/tmp/stale",
+        turns: [
+          {
+            id: "turn-cwd-newer",
+            items: [
+              {
+                id: "assistant-cwd-newer",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  }), "thread/read")).result.thread.cwd;
+
+  const firstCwd = "/Users/test/FirstProject";
+  const secondCwd = "/Users/test/SecondProject";
+  assert.equal(readThreadCwd(), "/tmp/stale");
+
+  writeRollout(
+    `rollout-2026-05-19T19-45-00-${threadId}.jsonl`,
+    firstCwd,
+    "2026-05-19T19:45:00.000Z"
+  );
+  assert.equal(readThreadCwd(), firstCwd);
+
+  writeRollout(
+    `rollout-2026-05-19T19-46-00-${threadId}.jsonl`,
+    secondCwd,
+    "2026-05-19T19:46:00.000Z"
+  );
+  assert.equal(readThreadCwd(), secondCwd);
+});
+
 test("sanitizeThreadHistoryImagesForRelay annotates generated image calls with local paths", () => {
   const rawMessage = JSON.stringify({
     id: "req-thread-generated-image",
@@ -2167,6 +2243,54 @@ test("sanitizeThreadHistoryImagesForRelay keeps the newest forty turns when comp
       ...turns.slice(5).map((turn) => turn.id),
     ]
   );
+});
+
+test("sanitizeThreadHistoryImagesForRelay compacts oversized raw histories before sanitizing turns", () => {
+  const imageData = `data:image/png;base64,${"A".repeat(100 * 1024)}`;
+  const turns = Array.from({ length: 50 }, (_, index) => ({
+    id: `turn-${index + 1}`,
+    items: [
+      {
+        id: `item-${index + 1}`,
+        type: "user_message",
+        content: [
+          { type: "input_text", text: `prompt ${index + 1}` },
+          { type: "image", image_url: imageData },
+        ],
+      },
+    ],
+  }));
+  const rawMessage = JSON.stringify({
+    id: "req-thread-pretrim",
+    result: {
+      thread: {
+        id: "thread-pretrim",
+        turns,
+      },
+    },
+  });
+
+  assert.equal(Buffer.byteLength(rawMessage, "utf8") > 4 * 1024 * 1024, true);
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+
+  assert.equal(sanitized.result.thread.historyTailTruncatedForRelay, true);
+  assert.equal(sanitized.result.thread.remodexHistoryCompacted, true);
+  assert.equal(sanitized.result.thread.remodexOmittedTurnCount, 10);
+  assert.equal(sanitized.result.thread.remodexKeptTurnCount, 40);
+  assert.deepEqual(
+    sanitized.result.thread.turns.map((turn) => turn.id),
+    [
+      "remodex-history-compacted-turn-1",
+      ...turns.slice(10).map((turn) => turn.id),
+    ]
+  );
+  assert.deepEqual(sanitized.result.thread.turns[1].items[0].content[1], {
+    type: "image",
+    url: "remodex://history-image-elided",
+  });
 });
 
 test("sanitizeThreadHistoryImagesForRelay truncates the newest oversized text item to its tail", () => {

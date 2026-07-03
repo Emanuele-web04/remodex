@@ -18,7 +18,13 @@ const DEFAULT_POLL_INTERVAL_MS = 700;
 const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_ACTIVITY_HEARTBEAT_MS = 5_000;
+// Bootstrap replay must not resurrect runs whose rollout stopped growing long ago
+// (aborted/killed desktop runs never write task_complete).
+const DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS = 10 * 60_000;
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
+// Any of these event_msg types ends the active run; task_complete is not the only
+// terminal outcome (Stop on desktop writes turn_aborted, fatal failures write error).
+const TERMINAL_TASK_EVENT_TYPES = new Set(["task_complete", "turn_aborted", "error"]);
 
 // Observes desktop-authored rollout files and replays the currently active run as
 // bridge notifications so the phone can render live thinking/tool activity.
@@ -33,6 +39,7 @@ function createRolloutLiveMirrorController({
   lookupTimeoutMs = DEFAULT_LOOKUP_TIMEOUT_MS,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
   activityHeartbeatMs = DEFAULT_ACTIVITY_HEARTBEAT_MS,
+  staleActiveRunMaxAgeMs = DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS,
 } = {}) {
   const mirrorsByThreadId = new Map();
 
@@ -67,6 +74,7 @@ function createRolloutLiveMirrorController({
       lookupTimeoutMs,
       idleTimeoutMs,
       activityHeartbeatMs,
+      staleActiveRunMaxAgeMs,
       onStop() {
         if (mirrorsByThreadId.get(threadId) === mirror) {
           mirrorsByThreadId.delete(threadId);
@@ -103,6 +111,7 @@ function createThreadRolloutLiveMirror({
   lookupTimeoutMs,
   idleTimeoutMs,
   activityHeartbeatMs,
+  staleActiveRunMaxAgeMs,
   onStop = () => {},
 }) {
   const startedAt = now();
@@ -151,6 +160,8 @@ function createThreadRolloutLiveMirror({
           state,
           fsModule,
           sendApplicationResponse,
+          nowMs: currentTime,
+          staleActiveRunMaxAgeMs,
         });
         lastSize = fileSize;
         lastActivityAt = currentTime;
@@ -166,6 +177,8 @@ function createThreadRolloutLiveMirror({
         lastSize = fileSize;
         lastActivityAt = currentTime;
         lastHeartbeatAt = currentTime;
+        // Real growth proves the run is alive again; resume normal mirroring.
+        state.suppressLiveActivityUntilGrowth = false;
         if (!chunk) {
           return;
         }
@@ -186,6 +199,7 @@ function createThreadRolloutLiveMirror({
       if (
         state.isDesktopOrigin !== false
         && state.activeTurnId
+        && !state.suppressLiveActivityUntilGrowth
         && currentTime - lastHeartbeatAt >= activityHeartbeatMs
       ) {
         lastHeartbeatAt = currentTime;
@@ -231,6 +245,8 @@ function bootstrapFromExistingRollout({
   state,
   fsModule,
   sendApplicationResponse,
+  nowMs = Date.now(),
+  staleActiveRunMaxAgeMs = DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS,
 }) {
   const initialContents = readFileSlice(rolloutPath, 0, fileSize, fsModule);
   if (!initialContents) {
@@ -282,7 +298,7 @@ function bootstrapFromExistingRollout({
     }
 
     activeRunLines.push(line);
-    if (taskEventType === "task_complete") {
+    if (TERMINAL_TASK_EVENT_TYPES.has(taskEventType)) {
       insideActiveRun = false;
       activeTurnId = "";
       activeRunLines.length = 0;
@@ -296,7 +312,31 @@ function bootstrapFromExistingRollout({
   }
 
   state.isDesktopOrigin = true;
+
+  // A run with no terminal marker whose rollout stopped growing long ago is dead
+  // (killed process / lost session); replaying it would fake a live stream and
+  // pin the reopened thread in "running" forever. Hydrate the run context
+  // silently instead, so heartbeats stay off but a run that resumes writing can
+  // still mirror its new activity live.
+  if (
+    activeRunLines.length > 0
+    && isRolloutFileStale(rolloutPath, fsModule, nowMs, staleActiveRunMaxAgeMs)
+  ) {
+    state.suppressLiveActivityUntilGrowth = true;
+    processRolloutLines(activeRunLines, state, () => {});
+    return;
+  }
+
   processRolloutLines(activeRunLines, state, sendApplicationResponse);
+}
+
+function isRolloutFileStale(rolloutPath, fsModule, nowMs, staleActiveRunMaxAgeMs) {
+  try {
+    const modifiedAtMs = fsModule.statSync(rolloutPath).mtimeMs;
+    return Number.isFinite(modifiedAtMs) && nowMs - modifiedAtMs >= staleActiveRunMaxAgeMs;
+  } catch {
+    return false;
+  }
 }
 
 function processRolloutLines(lines, state, sendApplicationResponse) {
@@ -404,6 +444,29 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
         turnId,
         id: turnId,
       }));
+      resetRunState(state);
+      return notifications;
+    }
+
+    // Aborted/failed desktop runs never write task_complete; close the mirrored
+    // turn anyway so the phone does not keep the thread pinned as running.
+    if (eventType === "turn_aborted" || eventType === "error") {
+      const turnId = resolveRolloutEventTurnId(state, payload);
+      if (!turnId) {
+        return [];
+      }
+
+      const terminalParams = {
+        threadId: state.threadId,
+        turnId,
+        id: turnId,
+        status: eventType === "error" ? "failed" : "aborted",
+      };
+      const errorMessage = readString(payload.message);
+      if (eventType === "error" && errorMessage) {
+        terminalParams.error = { message: errorMessage };
+      }
+      notifications.push(createNotification("turn/completed", terminalParams));
       resetRunState(state);
       return notifications;
     }
@@ -822,6 +885,9 @@ function createMirrorState(threadId) {
     emittedPatchApplyEndCalls: new Set(),
     pendingUserMessages: [],
     activeTurnIdIsSynthetic: false,
+    // True after a stale bootstrap: run context is hydrated but nothing is
+    // emitted (including heartbeats) until the rollout file grows again.
+    suppressLiveActivityUntilGrowth: false,
   };
 }
 

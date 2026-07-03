@@ -34,12 +34,31 @@ struct RemodexLaunchIntent: OpenIntent {
     }
 }
 
+// Single vocabulary for Live Activity conversation states; the wire format stays
+// String (Codable content state), so coordinator and widget construct/compare
+// through this enum instead of raw literals.
+enum RemodexDisplayIslandConversationState: String, Sendable {
+    case running = "Running"
+    case finishing = "Finishing"
+    case ready = "Ready"
+    case failed = "Failed"
+    case paused = "Paused"
+
+    var isRunningLike: Bool {
+        self == .running || self == .finishing
+    }
+}
+
 struct RemodexDisplayIslandConversation: Codable, Hashable, Identifiable, Sendable {
     let id: String
     let title: String
     let detail: String
     let state: String
     var runningStartedAt: Date?
+
+    var resolvedState: RemodexDisplayIslandConversationState? {
+        RemodexDisplayIslandConversationState(rawValue: state)
+    }
 
     var threadURL: URL? {
         var components = URLComponents()

@@ -107,7 +107,7 @@ struct RemodexLockScreenWidget: Widget {
 struct RemodexDisplayIslandLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: RemodexDisplayIslandAttributes.self) { context in
-            RemodexDisplayIslandLockScreenView(state: context.state)
+            RemodexDisplayIslandLockScreenView(state: context.state, isStale: context.isStale)
                 .activityBackgroundTint(Color(red: 0.05, green: 0.055, blue: 0.06))
                 .activitySystemActionForegroundColor(.white)
                 .widgetURL(context.state.primaryThreadURL)
@@ -116,8 +116,8 @@ struct RemodexDisplayIslandLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.leading) {
                     RemodexDisplayIslandCountView(
                         value: context.state.runningConversations.count,
-                        title: "Running",
-                        tint: .green
+                        title: context.isStale ? "Paused" : "Running",
+                        tint: context.isStale ? .secondary : .green
                     )
                     .padding(.leading, 8)
                 }
@@ -130,17 +130,19 @@ struct RemodexDisplayIslandLiveActivity: Widget {
                     .padding(.trailing, 8)
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    RemodexDisplayIslandExpandedList(state: context.state)
+                    RemodexDisplayIslandExpandedList(state: context.state, isStale: context.isStale)
                         .padding(.horizontal, 8)
                 }
             } compactLeading: {
                 RemodexDisplayIslandMark()
+                    .padding(.vertical, 2)
             } compactTrailing: {
                 Text(compactStatusText(for: context.state))
                     .font(.caption2.weight(.semibold))
                     .monospacedDigit()
             } minimal: {
                 RemodexDisplayIslandMark()
+                    .padding(.vertical, 2)
             }
             .keylineTint(.green)
             .widgetURL(context.state.primaryThreadURL)
@@ -161,25 +163,26 @@ struct RemodexDisplayIslandLiveActivity: Widget {
 
 private struct RemodexDisplayIslandLockScreenView: View {
     let state: RemodexDisplayIslandAttributes.ContentState
+    var isStale: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
                 RemodexDisplayIslandMark()
-                    .frame(width: 32, height: 32)
+                    .frame(width: 24, height: 24)
 
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text("Remodex")
-                        .font(.headline.weight(.semibold))
+                        .font(.subheadline.weight(.semibold))
                     Text(headerSubtitle)
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 0)
             }
 
-            RemodexDisplayIslandExpandedList(state: state)
+            RemodexDisplayIslandExpandedList(state: state, isStale: isStale)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -189,17 +192,20 @@ private struct RemodexDisplayIslandLockScreenView: View {
         let running = state.runningConversations.count
         let completed = state.completedConversations.count
         let failed = state.failedConversations.count
+        // Stale content can no longer vouch for live runs; describe them as paused
+        // to match the row rendering.
+        let runningLabel = isStale ? "paused" : "running"
         if failed > 0, running > 0 {
-            return "\(running) running, \(failed) failed"
+            return "\(running) \(runningLabel), \(failed) failed"
         }
         if failed > 0 {
             return failed == 1 ? "1 conversation failed" : "\(failed) conversations failed"
         }
         if running > 0, completed > 0 {
-            return "\(running) running, \(completed) ready"
+            return "\(running) \(runningLabel), \(completed) ready"
         }
         if running > 0 {
-            return running == 1 ? "1 conversation running" : "\(running) conversations running"
+            return running == 1 ? "1 conversation \(runningLabel)" : "\(running) conversations \(runningLabel)"
         }
         return completed == 1 ? "1 conversation ready" : "\(completed) conversations ready"
     }
@@ -207,16 +213,17 @@ private struct RemodexDisplayIslandLockScreenView: View {
 
 private struct RemodexDisplayIslandExpandedList: View {
     let state: RemodexDisplayIslandAttributes.ContentState
+    var isStale: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(displayRows) { row in
                 if let url = row.threadURL {
                     Link(destination: url) {
-                        RemodexDisplayIslandRow(conversation: row)
+                        RemodexDisplayIslandRow(conversation: row, isStale: isStale)
                     }
                 } else {
-                    RemodexDisplayIslandRow(conversation: row)
+                    RemodexDisplayIslandRow(conversation: row, isStale: isStale)
                 }
             }
         }
@@ -229,6 +236,7 @@ private struct RemodexDisplayIslandExpandedList: View {
 
 private struct RemodexDisplayIslandRow: View {
     let conversation: RemodexDisplayIslandConversation
+    var isStale: Bool = false
 
     var body: some View {
         HStack(spacing: 7) {
@@ -241,7 +249,7 @@ private struct RemodexDisplayIslandRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(conversation.detail.isEmpty ? conversation.state : conversation.detail)
+                Text(conversation.detail.isEmpty ? displayState : conversation.detail)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -249,12 +257,12 @@ private struct RemodexDisplayIslandRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             VStack(alignment: .trailing, spacing: 1) {
-                Text(conversation.state)
+                Text(displayState)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(tint)
                     .lineLimit(1)
 
-                if let runningStartedAt = conversation.runningStartedAt {
+                if let runningStartedAt = conversation.runningStartedAt, !isStaleRunningRow {
                     Text(runningStartedAt, style: .timer)
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -266,11 +274,25 @@ private struct RemodexDisplayIslandRow: View {
         }
     }
 
+    // Without updates from the app (suspended/offline) a "Running" row is only a
+    // guess; stop the ticking timer and show a neutral state instead of faking
+    // live progress.
+    private var isStaleRunningRow: Bool {
+        isStale && conversation.resolvedState?.isRunningLike == true
+    }
+
+    private var displayState: String {
+        isStaleRunningRow ? RemodexDisplayIslandConversationState.paused.rawValue : conversation.state
+    }
+
     private var tint: Color {
-        switch conversation.state {
-        case "Ready":
+        if isStaleRunningRow {
+            return .secondary
+        }
+        switch conversation.resolvedState {
+        case .ready:
             return .cyan
-        case "Failed":
+        case .failed:
             return .orange
         default:
             return .green
@@ -297,7 +319,10 @@ private struct RemodexDisplayIslandCountView: View {
 
 private struct RemodexDisplayIslandMark: View {
     var body: some View {
-        Image("remodex-outline")
+        // Use the same filled Remodex symbol as the in-app logo and the Lock
+        // Screen widget (remodex_symbol_medium) instead of the outline glyph so
+        // the Live Activity stays visually consistent with the rest of the app.
+        Image("remodex_symbol_medium")
             .resizable()
             .renderingMode(.template)
             .scaledToFit()

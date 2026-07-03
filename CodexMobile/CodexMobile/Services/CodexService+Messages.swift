@@ -983,6 +983,17 @@ extension CodexService {
 
         watchRunningThreadIfNeeded(normalizedPrevious)
         clearRunningThreadWatch(normalizedNext)
+        resetThreadTimelineProjectionWindow(for: normalizedPrevious)
+    }
+
+    // Collapses a grown "load earlier" render window once the user leaves the thread, so
+    // recurring timeline refreshes stop paying reducer cost for history nobody is reading.
+    func resetThreadTimelineProjectionWindow(for threadId: String?) {
+        guard let threadId,
+              threadTimelineProjectionLimitByThreadID.removeValue(forKey: threadId) != nil else {
+            return
+        }
+        refreshThreadTimelineState(for: threadId)
     }
 
     // Loads the recent history page once per thread, leaving older pages behind a cursor.
@@ -1489,7 +1500,8 @@ extension CodexService {
         isStreaming: Bool = false
     ) {
         let trimmedText = Self.normalizedMessageText(text)
-        guard Self.hasMeaningfulHistoryText(trimmedText) || isStreaming else {
+        let effectiveIsStreaming = isStreaming && !isApplyingReplayedBridgeEvent
+        guard Self.hasMeaningfulHistoryText(trimmedText) || effectiveIsStreaming else {
             return
         }
         let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
@@ -1541,7 +1553,7 @@ extension CodexService {
                     nextText = mergeAssistantDelta(existingText: existingText, incomingDelta: trimmedText)
                 }
                 threadMessages[targetIndex].text = nextText
-                threadMessages[targetIndex].isStreaming = isStreaming
+                threadMessages[targetIndex].isStreaming = effectiveIsStreaming
                 threadMessages[targetIndex].turnId = resolvedTurnId
                 if threadMessages[targetIndex].itemId == nil {
                     threadMessages[targetIndex].itemId = itemId
@@ -1572,7 +1584,7 @@ extension CodexService {
                 text: trimmedText,
                 turnId: resolvedTurnId,
                 itemId: itemId,
-                isStreaming: isStreaming,
+                isStreaming: effectiveIsStreaming,
                 deliveryState: .confirmed
             )
         )
@@ -2109,6 +2121,7 @@ extension CodexService {
         text: String,
         isStreaming: Bool
     ) {
+        let effectiveIsStreaming = isStreaming && !isApplyingReplayedBridgeEvent
         let resolvedTurnId = turnId ?? activeTurnIdByThread[threadId]
         let key = streamingItemMessageKey(threadId: threadId, itemId: itemId)
         let syntheticItemId = resolvedTurnId.map { syntheticStreamingItemId(turnId: $0, kind: kind) }
@@ -2226,7 +2239,7 @@ extension CodexService {
                     messagesByThread[threadId]?[index].text = mergeToolActivityText(
                         existing: existing,
                         incoming: incoming,
-                        isStreaming: isStreaming
+                        isStreaming: effectiveIsStreaming
                     )
                 } else {
                     if isStreamingPlaceholder(incomingTrimmed, for: kind)
@@ -2236,7 +2249,7 @@ extension CodexService {
                     } else if isStreamingPlaceholder(existingTrimmed, for: kind) {
                         // Replace placeholder labels with real content.
                         messagesByThread[threadId]?[index].text = incoming
-                    } else if !isStreaming || isFileChangeSnapshot {
+                    } else if !effectiveIsStreaming || isFileChangeSnapshot {
                         // Completed item payloads are authoritative snapshots; replace streamed deltas.
                         messagesByThread[threadId]?[index].text = incoming
                     } else {
@@ -2247,7 +2260,7 @@ extension CodexService {
             }
 
             messagesByThread[threadId]?[index].kind = kind
-            messagesByThread[threadId]?[index].isStreaming = isStreaming
+            messagesByThread[threadId]?[index].isStreaming = effectiveIsStreaming
             if let resolvedTurnId, messagesByThread[threadId]?[index].turnId == nil {
                 messagesByThread[threadId]?[index].turnId = resolvedTurnId
             }
@@ -2300,7 +2313,7 @@ extension CodexService {
                 finalRawIndex = threadMessages.indices.first(where: { threadMessages[$0].id == keepID }) ?? finalRawIndex
                 messagesByThread[threadId] = threadMessages
                 persistMessages()
-                if kind == .thinking, isStreaming, let finalRawIndex {
+                if kind == .thinking, effectiveIsStreaming, let finalRawIndex {
                     updateStreamingSystemOutput(for: threadId, messageId: keepID, rawMessageIndex: finalRawIndex)
                 } else {
                     updateCurrentOutput(for: threadId)
@@ -2328,7 +2341,7 @@ extension CodexService {
             text: fallbackText,
             turnId: resolvedTurnId,
             itemId: itemId,
-            isStreaming: isStreaming,
+            isStreaming: effectiveIsStreaming,
             deliveryState: .confirmed
         )
 
@@ -2709,14 +2722,19 @@ extension CodexService {
     ) {
         let key = streamingItemMessageKey(threadId: threadId, itemId: itemId)
         let shouldFlushInitialDeltaQuickly = streamingSystemMessageByItemID[key] == nil
+        let isReplay = isApplyingReplayedBridgeEvent
         if pendingSystemDeltasByKey[key] == nil {
             pendingSystemDeltasByKey[key] = PendingSystemStreamingDeltas(
                 threadId: threadId,
                 turnId: turnId,
                 itemId: itemId,
                 kind: kind,
+                isReplay: isReplay,
                 deltas: []
             )
+        } else {
+            let existingIsReplay = pendingSystemDeltasByKey[key]?.isReplay ?? true
+            pendingSystemDeltasByKey[key]?.isReplay = existingIsReplay && isReplay
         }
         pendingSystemDeltasByKey[key]?.deltas.append(delta)
 
@@ -2732,13 +2750,17 @@ extension CodexService {
     }
 
     private func applyStreamingSystemDeltas(_ pending: PendingSystemStreamingDeltas) {
+        let previousReplayScope = isApplyingReplayedBridgeEvent
+        isApplyingReplayedBridgeEvent = pending.isReplay
+        defer { isApplyingReplayedBridgeEvent = previousReplayScope }
+
         upsertStreamingSystemItemMessage(
             threadId: pending.threadId,
             turnId: pending.turnId,
             itemId: pending.itemId,
             kind: pending.kind,
             text: pending.deltas.joined(),
-            isStreaming: true
+            isStreaming: !pending.isReplay
         )
     }
 
@@ -3055,7 +3077,8 @@ extension CodexService {
         turnId: String,
         itemId: String?,
         assistantPhase: String? = nil,
-        delta: String
+        delta: String,
+        isReplay: Bool = false
     ) {
         guard !delta.isEmpty else {
             return
@@ -3066,7 +3089,8 @@ extension CodexService {
             turnId: turnId,
             itemId: itemId,
             assistantPhase: assistantPhase,
-            delta: delta
+            delta: delta,
+            isReplay: isReplay
         )
     }
 
@@ -3076,11 +3100,17 @@ extension CodexService {
         turnId: String,
         itemId: String?,
         assistantPhase: String?,
-        delta: String
+        delta: String,
+        isReplay: Bool = false
     ) {
         guard !delta.isEmpty else {
             return
         }
+
+        // Replayed batches append catch-up text as closed history, not live output.
+        let previousReplayScope = isApplyingReplayedBridgeEvent
+        isApplyingReplayedBridgeEvent = isReplay
+        defer { isApplyingReplayedBridgeEvent = previousReplayScope }
 
         if applyLateTerminalAssistantDelta(
             threadId: threadId,
@@ -3096,7 +3126,8 @@ extension CodexService {
             threadId: threadId,
             turnId: turnId,
             itemId: itemId,
-            assistantPhase: assistantPhase
+            assistantPhase: assistantPhase,
+            createStreamingMessage: !isReplay
         )
         guard let messageID,
               let messageIndex = findMessageIndex(threadId: threadId, messageId: messageID) else {
@@ -3117,7 +3148,7 @@ extension CodexService {
         }
 
         messagesByThread[threadId]?[messageIndex].text = nextText
-        messagesByThread[threadId]?[messageIndex].isStreaming = true
+        messagesByThread[threadId]?[messageIndex].isStreaming = !isReplay
         applyAssistantPhaseIfNeeded(
             threadId: threadId,
             messageIndex: messageIndex,
@@ -4372,7 +4403,8 @@ extension CodexService {
         turnId: String,
         itemId: String?,
         assistantPhase: String?,
-        delta: String
+        delta: String,
+        isReplay: Bool
     ) {
         let normalizedItemId = normalizedStreamingItemID(itemId)
         let normalizedPhase = normalizedAssistantPhase(assistantPhase)
@@ -4387,11 +4419,15 @@ extension CodexService {
             )
         }
 
+        // A batch stays replay-only if every coalesced delta was replayed; one live
+        // delta makes the whole batch live so running state recovers immediately.
+        let existingIsReplay = pendingAssistantDeltaContextByStreamID[streamID]?.isReplay ?? true
         pendingAssistantDeltaContextByStreamID[streamID] = (
             threadId: threadId,
             turnId: turnId.trimmingCharacters(in: .whitespacesAndNewlines),
             itemId: normalizedItemId,
-            assistantPhase: normalizedPhase
+            assistantPhase: normalizedPhase,
+            isReplay: existingIsReplay && isReplay
         )
         if pendingAssistantDeltaByStreamID[streamID] == nil,
            !pendingAssistantDeltaStreamOrder.contains(streamID) {
@@ -4416,7 +4452,7 @@ extension CodexService {
             return
         }
 
-        let fallbackPhase = pendingAssistantDeltaContextByStreamID[fallbackStreamID]?.assistantPhase
+        let fallbackContext = pendingAssistantDeltaContextByStreamID[fallbackStreamID]
         pendingAssistantDeltaContextByStreamID.removeValue(forKey: fallbackStreamID)
         pendingAssistantDeltaStreamOrder.removeAll { $0 == fallbackStreamID }
         if pendingAssistantDeltaByStreamID[destinationStreamID] == nil,
@@ -4427,11 +4463,13 @@ extension CodexService {
             existingText: pendingAssistantDeltaByStreamID[destinationStreamID] ?? "",
             incomingDelta: fallbackDelta
         )
+        let destinationIsReplay = pendingAssistantDeltaContextByStreamID[destinationStreamID]?.isReplay ?? true
         pendingAssistantDeltaContextByStreamID[destinationStreamID] = (
             threadId: threadId,
             turnId: turnId.trimmingCharacters(in: .whitespacesAndNewlines),
             itemId: normalizedItemId,
-            assistantPhase: fallbackPhase
+            assistantPhase: fallbackContext?.assistantPhase,
+            isReplay: destinationIsReplay && (fallbackContext?.isReplay ?? true)
         )
     }
 
@@ -4537,7 +4575,8 @@ extension CodexService {
                     turnId: context.turnId,
                     itemId: context.itemId,
                     assistantPhase: context.assistantPhase,
-                    delta: delta
+                    delta: delta,
+                    isReplay: context.isReplay
                 )
             }
             pendingAssistantDeltaStreamOrder.removeAll { flushedStreamIDs.contains($0) }
@@ -4991,10 +5030,14 @@ extension CodexService {
 
     func appendMessage(_ message: CodexMessage) {
         var normalizedMessage = message
+        if isApplyingReplayedBridgeEvent {
+            normalizedMessage.isStreaming = false
+        }
         normalizedMessage.proposedPlan = derivedProposedPlan(for: normalizedMessage)
-        if message.isStreaming {
+        if normalizedMessage.isStreaming {
             // Keep sidebar run state independent from timeline scanning cost.
-            markThreadAsRunning(message.threadId)
+            // Replayed catch-up batches append text without reviving running state.
+            markThreadAsRunning(normalizedMessage.threadId)
         }
         if normalizedMessage.role == .assistant,
            let existingIndex = messagesByThread[message.threadId]?.firstIndex(where: { $0.id == normalizedMessage.id }),
@@ -5293,6 +5336,7 @@ extension CodexService {
         isStreaming: Bool,
         promoteTurnFallback: Bool
     ) -> String {
+        let effectiveIsStreaming = isStreaming && !isApplyingReplayedBridgeEvent
         let turnStreamingKey = streamingMessageKey(threadId: threadId, turnId: turnId)
         let itemStreamingKey = itemId.map {
             assistantStreamingMessageKey(threadId: threadId, turnId: turnId, itemId: $0)
@@ -5305,7 +5349,7 @@ extension CodexService {
             text: "",
             turnId: turnId,
             itemId: itemId,
-            isStreaming: isStreaming
+            isStreaming: effectiveIsStreaming
         )
 
         threadIdByTurnID[turnId] = threadId

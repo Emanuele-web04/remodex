@@ -202,8 +202,9 @@ struct TurnComposerView: View {
                         .frame(height: max(composerInputHeight, 34))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.top, accessoryState.topInputPadding + 4)
+                    .padding(.leading, 14)
+                    .padding(.trailing, 16)
+                    .padding(.top, accessoryState.topInputPadding + 6)
                     .padding(.bottom, 4)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -284,7 +285,9 @@ struct TurnComposerView: View {
         }
         .padding(.horizontal, 12)
         .padding(.top, 4)
-        .padding(.bottom, 4)
+        // Keep a little breathing room below the glass so the composer doesn't
+        // sit flush against the keyboard (or the home indicator when at rest).
+        .padding(.bottom, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

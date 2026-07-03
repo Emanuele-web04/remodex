@@ -176,6 +176,12 @@ extension CodexService {
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
         let paramsObject = params?.objectValue
+        let previousReplayScope = isApplyingReplayedBridgeEvent
+        if isReplayedBridgeEvent(paramsObject) {
+            isApplyingReplayedBridgeEvent = true
+        }
+        defer { isApplyingReplayedBridgeEvent = previousReplayScope }
+
         noteDesktopMirroredActivityIfNeeded(method: method, paramsObject: paramsObject)
 
         switch method {
@@ -324,8 +330,7 @@ extension CodexService {
         method: String,
         paramsObject: IncomingParamsObject?
     ) {
-        let isDesktopMirroredEvent = paramsObject?["remodexDesktopMirror"]?.boolValue == true
-            || paramsObject?["remodexRolloutLiveMirror"]?.boolValue == true
+        let isDesktopMirroredEvent = isDesktopMirroredBridgeEvent(paramsObject)
         let isMirrorActivityMethod = method.hasPrefix("item/")
             || method.hasPrefix("codex/event")
             || method == "turn/activity"
@@ -334,6 +339,12 @@ extension CodexService {
 
         guard (isDesktopMirroredEvent || isMirrorActivityMethod),
               let threadId = resolveThreadID(from: paramsObject) else {
+            return
+        }
+
+        // Buffered replay of mirror activity is history, not live desktop work;
+        // it must never mark the thread as running again.
+        if isReplayedBridgeEvent(paramsObject) {
             return
         }
 
@@ -374,12 +385,18 @@ extension CodexService {
         threadId: String,
         turnId: String?
     ) -> Bool {
-        guard method != "turn/started", method != "turn/completed" else {
+        guard method != "turn/completed" else {
             return false
         }
 
+        // A re-delivered turn/started for an already-finished turn is replay noise,
+        // so the terminal-turn check applies to it as well.
         if let turnId, turnTerminalState(for: turnId) != nil {
             return true
+        }
+
+        guard method != "turn/started" else {
+            return false
         }
 
         return turnId == nil
@@ -564,10 +581,16 @@ extension CodexService {
     private func handleTurnStarted(_ paramsObject: IncomingParamsObject?) {
         let threadId = resolveThreadID(from: paramsObject)
         let turnID = extractTurnIDForTurnLifecycleEvent(from: paramsObject)
-        let isDesktopMirroredTurn = paramsObject?["remodexDesktopMirror"]?.boolValue == true
-            || paramsObject?["remodexRolloutLiveMirror"]?.boolValue == true
+        let isDesktopMirroredTurn = isDesktopMirroredBridgeEvent(paramsObject)
 
-        if let threadId {
+        // Replay/mirror paths can re-deliver turn/started for turns that already
+        // ended; never revive running UI for a turn with a known terminal outcome.
+        if turnTerminalState(for: turnID) != nil {
+            return
+        }
+        let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
+
+        if let threadId, !isReplayedEvent {
             markThreadAsRunning(threadId)
             if isDesktopMirroredTurn {
                 markDesktopMirroredRunning(for: threadId)
@@ -576,20 +599,22 @@ extension CodexService {
         }
 
         if let threadId, let turnID {
-            setActiveTurnID(turnID, for: threadId)
             threadIdByTurnID[turnID] = threadId
-            setProtectedRunningFallback(false, for: threadId)
             confirmLatestPendingUserMessage(threadId: threadId, turnId: turnID)
+            if !isReplayedEvent {
+                setActiveTurnID(turnID, for: threadId)
+                setProtectedRunningFallback(false, for: threadId)
+            }
             // Do NOT create the assistant placeholder here.
             // It will be created lazily by ensureStreamingAssistantMessage()
             // when the first agent message delta arrives. Creating it here
             // gives it an orderIndex lower than thinking/reasoning messages
             // that arrive before the actual response, causing wrong visual order.
-        } else if let threadId {
+        } else if let threadId, !isReplayedEvent {
             setProtectedRunningFallback(true, for: threadId)
         }
 
-        if let turnID {
+        if let turnID, !isReplayedEvent {
             activeTurnId = turnID
         }
 
@@ -752,7 +777,11 @@ extension CodexService {
             || normalizedStatusType == "inprogress"
             || normalizedStatusType == "started"
             || normalizedStatusType == "pending" {
-            markThreadAsRunning(threadId)
+            // Replayed status events describe a past moment; a live event or the
+            // server turn-state snapshot must confirm running instead.
+            if !isReplayedBridgeEvent(paramsObject) {
+                markThreadAsRunning(threadId)
+            }
             return
         }
 
@@ -3036,6 +3065,19 @@ extension CodexService {
             .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+    }
+
+    // Bridge-tagged replayed buffer events must never revive running UI; only live
+    // events and server turn-state snapshots may mark a thread as running.
+    func isReplayedBridgeEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexReplayedEvent"]?.boolValue == true
+    }
+
+    // Events synthesized by the bridge from desktop rollout mirroring carry either
+    // mirror flag; treat both as one signal.
+    func isDesktopMirroredBridgeEvent(_ paramsObject: IncomingParamsObject?) -> Bool {
+        paramsObject?["remodexDesktopMirror"]?.boolValue == true
+            || paramsObject?["remodexRolloutLiveMirror"]?.boolValue == true
     }
 
     func extractThreadID(from paramsObject: IncomingParamsObject?) -> String? {

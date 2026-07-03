@@ -84,6 +84,10 @@ const RELAY_TURNS_LIST_SAFE_RETRY_LIMIT = 5;
 const RELAY_JSONL_TURNS_LIST_CACHE_TTL_MS = 30_000;
 const RELAY_JSONL_ARTIFACT_CACHE_TTL_MS = 2_000;
 const RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES = 128;
+// Session cwd is stable for a rollout file, but the same thread can later get a
+// newer rollout with a different cwd; cache entries are validated against file identity.
+const RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS = 5 * 60_000;
+const RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS = 30_000;
 const BRIDGE_PACKAGE_UPDATE_COMMAND = "npm install -g remodex@latest";
 const BRIDGE_PACKAGE_UPDATE_TIMEOUT_MS = 180_000;
 const BRIDGE_RESTART_AFTER_UPDATE_DELAY_MS = 750;
@@ -107,6 +111,7 @@ const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "previous_cursor",
 ];
 const jsonlArtifactItemsCacheByThread = new Map();
+const jsonlThreadCwdCacheByThread = new Map();
 const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
 const JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE = 200;
 
@@ -1052,6 +1057,7 @@ function startBridge({
     evictOldestEntries(jsonlArtifactItemsCacheByThread, RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES);
     evictOldestEntries(jsonlTurnsListRolloutCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
     evictOldestEntries(jsonlTurnsListRolloutMissCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
+    evictOldestEntries(jsonlThreadCwdCacheByThread, JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE);
   }
 
   function safeParseJSON(value) {
@@ -2407,11 +2413,28 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
     || normalizeNonEmptyString(thread.id)
     || normalizeNonEmptyString(thread.threadId)
     || normalizeNonEmptyString(thread.thread_id);
-  const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(thread.turns, threadId);
-  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(thread, threadId);
+
+  // Oversized histories get their turn window trimmed before the per-turn sanitize
+  // and augment passes so full-history work is not spent on turns the payload
+  // budget discards anyway. The byte-budget trim below still enforces the cap.
+  const didPreTrimTurnWindow = Buffer.byteLength(rawMessage, "utf8") > RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES
+    && thread.turns.length > RELAY_HISTORY_RECENT_TURN_TARGET;
+  const workingTurns = didPreTrimTurnWindow
+    ? thread.turns.slice(-RELAY_HISTORY_RECENT_TURN_TARGET)
+    : thread.turns;
+  const workingThread = didPreTrimTurnWindow ? { ...thread, turns: workingTurns } : thread;
+  const trimOptions = didPreTrimTurnWindow
+    ? {
+      preOmittedTurnCount: thread.turns.length - workingTurns.length,
+      compactionIdSource: thread.turns[0],
+    }
+    : {};
+
+  const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(workingTurns, threadId);
+  const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
   const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(sanitizedTurns, threadId);
 
-  if (!didSanitize && !didAugment && !didAugmentThreadMetadata) {
+  if (!didSanitize && !didAugment && !didAugmentThreadMetadata && !didPreTrimTurnWindow) {
     const trimmedPayload = trimThreadPayloadForRelay(parsed, thread);
     return trimmedPayload == null ? rawMessage : trimmedPayload;
   }
@@ -2427,7 +2450,7 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
     },
   });
 
-  return trimThreadPayloadForRelay(parseBridgeJSON(sanitizedPayload), null) ?? sanitizedPayload;
+  return trimThreadPayloadForRelay(parseBridgeJSON(sanitizedPayload), null, trimOptions) ?? sanitizedPayload;
 }
 
 function sanitizeThreadTurnsListForRelay(rawMessage, requestContext = {}) {
@@ -2495,17 +2518,84 @@ function readJsonlThreadCwd(threadId) {
     return "";
   }
 
+  const sessionsRoot = resolveSessionsRoot();
+  const cacheKey = buildJsonlThreadCacheKey(sessionsRoot, normalizedThreadId);
+
   try {
-    const rolloutPath = findRecentRolloutFileForContextRead(resolveSessionsRoot(), { threadId: normalizedThreadId });
+    const rolloutPath = findRecentRolloutFileForContextRead(sessionsRoot, { threadId: normalizedThreadId });
     if (!rolloutPath) {
       return "";
     }
 
-    const metadata = parseSessionJsonlMetadata(fs.readFileSync(rolloutPath, "utf8"));
-    const cwd = normalizeNonEmptyString(metadata?.cwd);
-    return cwd && path.isAbsolute(cwd) ? cwd : "";
+    const cached = readCachedJsonlThreadCwd(cacheKey, rolloutPath);
+    if (cached) {
+      return cached.cwd;
+    }
+
+    return readAndCacheJsonlThreadCwd(cacheKey, rolloutPath);
   } catch {
     return "";
+  }
+}
+
+function readCachedJsonlThreadCwd(cacheKey, rolloutPath) {
+  const cached = jsonlThreadCwdCacheByThread.get(cacheKey);
+  if (!cached || cached.rolloutPath !== rolloutPath) {
+    return null;
+  }
+
+  const stat = statJsonlRollout(rolloutPath);
+  if (!stat) {
+    jsonlThreadCwdCacheByThread.delete(cacheKey);
+    return null;
+  }
+
+  if (stat.mtimeMs !== cached.mtimeMs || stat.size !== cached.size) {
+    return null;
+  }
+
+  const ttl = cached.cwd ? RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS : RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS;
+  if (Date.now() - cached.checkedAt > ttl) {
+    return null;
+  }
+
+  return { cwd: cached.cwd };
+}
+
+function readAndCacheJsonlThreadCwd(cacheKey, rolloutPath, stat = null) {
+  const rolloutStat = stat || statJsonlRollout(rolloutPath);
+  if (!rolloutStat) {
+    jsonlThreadCwdCacheByThread.delete(cacheKey);
+    return "";
+  }
+
+  let cwd = "";
+  try {
+    const metadata = parseSessionJsonlMetadata(fs.readFileSync(rolloutPath, "utf8"));
+    const parsedCwd = normalizeNonEmptyString(metadata?.cwd);
+    cwd = parsedCwd && path.isAbsolute(parsedCwd) ? parsedCwd : "";
+  } catch {
+    cwd = "";
+  }
+
+  rememberJsonlThreadCwdCache(cacheKey, {
+    rolloutPath,
+    cwd,
+    mtimeMs: rolloutStat.mtimeMs,
+    size: rolloutStat.size,
+    checkedAt: Date.now(),
+  });
+  return cwd;
+}
+
+function rememberJsonlThreadCwdCache(cacheKey, entry) {
+  jsonlThreadCwdCacheByThread.set(cacheKey, entry);
+  while (jsonlThreadCwdCacheByThread.size > JSONL_ROLLOUT_PATH_CACHE_MAX_SIZE) {
+    const oldestKey = jsonlThreadCwdCacheByThread.keys().next().value;
+    if (oldestKey == null) {
+      break;
+    }
+    jsonlThreadCwdCacheByThread.delete(oldestKey);
   }
 }
 
@@ -2593,6 +2683,10 @@ function readJsonlArtifactItemsByTurnId(threadId) {
 }
 
 function buildJsonlArtifactItemsCacheKey(sessionsRoot, threadId) {
+  return buildJsonlThreadCacheKey(sessionsRoot, threadId);
+}
+
+function buildJsonlThreadCacheKey(sessionsRoot, threadId) {
   return `${sessionsRoot}\0${threadId}`;
 }
 
@@ -2602,7 +2696,7 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
     return null;
   }
 
-  const stat = statJsonlArtifactRollout(cached.rolloutPath);
+  const stat = statJsonlRollout(cached.rolloutPath);
   if (!stat) {
     jsonlArtifactItemsCacheByThread.delete(cacheKey);
     return null;
@@ -2697,7 +2791,7 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
   return artifactsByTurnId;
 }
 
-function statJsonlArtifactRollout(rolloutPath) {
+function statJsonlRollout(rolloutPath) {
   try {
     return fs.statSync(rolloutPath);
   } catch {
@@ -3197,11 +3291,16 @@ function parseBridgeJSON(value) {
   }
 }
 
-function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
+function trimThreadPayloadForRelay(parsed, explicitThread = undefined, options = {}) {
   const thread = explicitThread ?? parsed?.result?.thread;
   if (!parsed || !thread || typeof thread !== "object" || !Array.isArray(thread.turns)) {
     return null;
   }
+
+  // Callers that pre-trimmed the turn window pass the dropped count and the original
+  // first turn here so compaction markers keep reporting whole-thread numbers.
+  const preOmittedTurnCount = Math.max(0, options.preOmittedTurnCount ?? 0);
+  const compactionIdSource = options.compactionIdSource ?? null;
 
   let workingThread = thread;
   let encoded = encodeRelayThreadPayload(parsed, workingThread);
@@ -3210,7 +3309,16 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   }
 
   if (Buffer.byteLength(encoded, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
-    return explicitThread === undefined ? null : encoded;
+    if (preOmittedTurnCount <= 0) {
+      return explicitThread === undefined ? null : encoded;
+    }
+    const compactedThread = buildRelayHistoryCompactedThread(
+      thread,
+      buildRelayCompactedHistoryTurns(thread.turns, thread.turns, preOmittedTurnCount, compactionIdSource),
+      preOmittedTurnCount,
+      thread.turns.length
+    );
+    return encodeRelayThreadPayload(parsed, compactedThread) ?? encoded;
   }
 
   const turns = thread.turns;
@@ -3223,8 +3331,8 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
     }
     const candidateThread = buildRelayHistoryCompactedThread(
       thread,
-      buildRelayCompactedHistoryTurns(turns, trimmedTurns),
-      Math.max(0, turns.length - trimmedTurns.length),
+      buildRelayCompactedHistoryTurns(turns, trimmedTurns, preOmittedTurnCount, compactionIdSource),
+      preOmittedTurnCount + Math.max(0, turns.length - trimmedTurns.length),
       trimmedTurns.length
     );
     encoded = encodeRelayThreadPayload(parsed, candidateThread);
@@ -3244,9 +3352,9 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   while (trimmedItems.length > 1) {
     trimmedItems = trimmedItems.slice(1);
     const compactedTurnPrefix = buildRelayHistoryCompactionTurn(
-      Math.max(0, turns.length - 1),
+      preOmittedTurnCount + Math.max(0, turns.length - 1),
       1,
-      thread
+      compactionIdSource ?? thread
     );
     const candidateThread = buildRelayHistoryCompactedThread(
       thread,
@@ -3257,7 +3365,7 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
         ...newestTurn,
         items: trimmedItems,
       }],
-      Math.max(0, turns.length - 1),
+      preOmittedTurnCount + Math.max(0, turns.length - 1),
       1
     );
     encoded = encodeRelayThreadPayload(parsed, candidateThread);
@@ -3279,13 +3387,13 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   let candidateThread = buildRelayHistoryCompactedThread(
     thread,
     [
-      ...buildRelayCompactedHistoryTurns(turns, [newestTurn]).slice(0, -1),
+      ...buildRelayCompactedHistoryTurns(turns, [newestTurn], preOmittedTurnCount, compactionIdSource).slice(0, -1),
       {
         ...newestTurn,
         items: [truncatedItem],
       },
     ],
-    Math.max(0, turns.length - 1),
+    preOmittedTurnCount + Math.max(0, turns.length - 1),
     1
   );
   encoded = encodeRelayThreadPayload(parsed, candidateThread);
@@ -3296,13 +3404,13 @@ function trimThreadPayloadForRelay(parsed, explicitThread = undefined) {
   candidateThread = buildRelayHistoryCompactedThread(
     thread,
     [
-      ...buildRelayCompactedHistoryTurns(turns, [newestTurn]).slice(0, -1),
+      ...buildRelayCompactedHistoryTurns(turns, [newestTurn], preOmittedTurnCount, compactionIdSource).slice(0, -1),
       {
         ...newestTurn,
         items: [compactHistoryItemForRelay(mostRecentItem, RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS)],
       },
     ],
-    Math.max(0, turns.length - 1),
+    preOmittedTurnCount + Math.max(0, turns.length - 1),
     1
   );
   return encodeRelayThreadPayload(parsed, candidateThread);
@@ -3368,12 +3476,12 @@ function buildRelayHistoryCompactedThread(thread, turns, omittedTurnCount, keptT
   };
 }
 
-function buildRelayCompactedHistoryTurns(allTurns, keptTurns) {
-  const omittedTurnCount = Math.max(0, allTurns.length - keptTurns.length);
+function buildRelayCompactedHistoryTurns(allTurns, keptTurns, preOmittedTurnCount = 0, idSourceOverride = null) {
+  const omittedTurnCount = preOmittedTurnCount + Math.max(0, allTurns.length - keptTurns.length);
   const compactionTurn = buildRelayHistoryCompactionTurn(
     omittedTurnCount,
     keptTurns.length,
-    allTurns[0]
+    idSourceOverride ?? allTurns[0]
   );
   return compactionTurn ? [compactionTurn, ...keptTurns] : keptTurns;
 }
