@@ -635,6 +635,18 @@ extension CodexService {
         if threadHasActiveOrRunningTurn(threadId) {
             return .running
         }
+        // Goal lifecycle outranks stale ready/failed dots: an active goal keeps
+        // working on its own and attention states need the user to intervene.
+        if let goal = goalByThreadID[threadId] {
+            switch goal.status {
+            case .active:
+                return .goalActive
+            case .blocked, .usageLimited, .budgetLimited:
+                return .goalAttention
+            case .paused, .complete:
+                break
+            }
+        }
         if failedThreadIDs.contains(threadId) {
             return .failed
         }

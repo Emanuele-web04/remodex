@@ -4,14 +4,29 @@
 // Exports: createPushNotificationTracker
 // Depends on: ./push-notification-completion-dedupe
 
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
 const {
   createPushNotificationCompletionDedupe,
 } = require("./push-notification-completion-dedupe");
+
+const DEFAULT_GOAL_PUSH_STATE_PATH = path.join(os.homedir(), ".remodex", "goal-push-state.json");
 
 const DEFAULT_PREVIEW_MAX_CHARS = 160;
 const MAX_THREAD_TITLE_ENTRIES = 200;
 const MAX_TURN_STATE_ENTRIES = 500;
 const MAX_THREAD_ID_BY_TURN_ENTRIES = 500;
+const MAX_GOAL_STATUS_ENTRIES = 500;
+
+// Goal states worth waking the phone for: terminal or needs-user-attention.
+const GOAL_PUSH_BODIES = new Map([
+  ["complete", "Goal complete"],
+  ["blocked", "Goal blocked — Codex needs your input"],
+  ["usageLimited", "Goal stopped — usage limit reached"],
+  ["budgetLimited", "Goal stopped — token budget reached"],
+]);
 
 function createPushNotificationTracker({
   sessionId,
@@ -19,10 +34,14 @@ function createPushNotificationTracker({
   previewMaxChars = DEFAULT_PREVIEW_MAX_CHARS,
   logPrefix = "[remodex]",
   now = () => Date.now(),
+  goalPushStatePath = DEFAULT_GOAL_PUSH_STATE_PATH,
 } = {}) {
   const threadTitleById = new Map();
   const threadIdByTurnId = new Map();
   const turnStateByKey = new Map();
+  // Persisted across bridge restarts so goal transitions that happened while the
+  // bridge was down still notify on the first post-restart snapshot.
+  const goalStatusByThreadId = loadGoalPushState(goalPushStatePath, logPrefix);
   const completionDedupe = createPushNotificationCompletionDedupe({ now });
 
   // ─── ENTRY POINT ─────────────────────────────────────────────
@@ -30,6 +49,18 @@ function createPushNotificationTracker({
   function handleOutbound(rawMessage) {
     const message = parseOutboundMessage(rawMessage);
     if (!message) {
+      return;
+    }
+
+    if (message.method === "thread/goal/updated") {
+      void handleGoalUpdated(message);
+      return;
+    }
+
+    if (message.method === "thread/goal/cleared") {
+      if (message.threadId && goalStatusByThreadId.delete(message.threadId)) {
+        saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
+      }
       return;
     }
 
@@ -70,6 +101,56 @@ function createPushNotificationTracker({
 
     if (method === "turn/completed") {
       void notifyCompletion(threadId, turnId, params, eventObject);
+    }
+  }
+
+  // Pushes goal lifecycle transitions into terminal/attention states so hours-long
+  // background goals still reach the user. Resume snapshots (first observation of a
+  // status) never notify; only live status changes do.
+  async function handleGoalUpdated({ threadId, params }) {
+    const goal = objectValue(params?.goal);
+    const status = readString(goal?.status);
+    const resolvedThreadId = threadId || readString(goal?.threadId);
+    if (!resolvedThreadId || !status) {
+      return;
+    }
+
+    const previousStatus = goalStatusByThreadId.get(resolvedThreadId);
+    if (!goalStatusByThreadId.has(resolvedThreadId) && goalStatusByThreadId.size >= MAX_GOAL_STATUS_ENTRIES) {
+      const oldest = goalStatusByThreadId.keys().next().value;
+      goalStatusByThreadId.delete(oldest);
+    }
+    goalStatusByThreadId.set(resolvedThreadId, status);
+    if (previousStatus !== status) {
+      saveGoalPushState(goalPushStatePath, goalStatusByThreadId, logPrefix);
+    }
+
+    if (!pushServiceClient?.hasConfiguredBaseUrl) {
+      return;
+    }
+    if (previousStatus === undefined || previousStatus === status) {
+      return;
+    }
+
+    const body = GOAL_PUSH_BODIES.get(status);
+    if (!body) {
+      return;
+    }
+
+    const title = normalizePreviewText(threadTitleById.get(resolvedThreadId)) || "New Thread";
+    // The goal objective intentionally stays out of push payloads and logs.
+    try {
+      await pushServiceClient.notifyCompletion({
+        threadId: resolvedThreadId,
+        turnId: null,
+        result: status === "complete" ? "completed" : "failed",
+        title,
+        body,
+        // updatedAt keeps repeated legitimate transitions (blocked -> active -> blocked) notifiable.
+        dedupeKey: [sessionId || "", resolvedThreadId, "goal", status, goal?.updatedAt ?? ""].join("|"),
+      });
+    } catch (error) {
+      console.error(`${logPrefix} goal push notify failed: ${error.message}`);
     }
   }
 
@@ -271,6 +352,42 @@ function createPushNotificationTracker({
   return {
     handleOutbound,
   };
+}
+
+// Best-effort disk persistence for goal statuses; failures must never break the bridge.
+function loadGoalPushState(filePath, logPrefix) {
+  if (!filePath) {
+    return new Map();
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return new Map();
+    }
+    const entries = Object.entries(parsed)
+      .filter(([threadId, status]) => typeof threadId === "string" && typeof status === "string")
+      .slice(-MAX_GOAL_STATUS_ENTRIES);
+    return new Map(entries);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error(`${logPrefix} failed to load goal push state: ${error.message}`);
+    }
+    return new Map();
+  }
+}
+
+function saveGoalPushState(filePath, goalStatusByThreadId, logPrefix) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(Object.fromEntries(goalStatusByThreadId)));
+  } catch (error) {
+    console.error(`${logPrefix} failed to save goal push state: ${error.message}`);
+  }
 }
 
 // Normalizes the message envelope once so downstream helpers can share the same parsed view.

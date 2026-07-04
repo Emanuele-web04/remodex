@@ -32,6 +32,10 @@ struct TurnView: View {
     @State private var isInputFocused = false
     @State private var isShowingThreadPathSheet = false
     @State private var isShowingStatusSheet = false
+    @State private var isShowingGoalSheet = false
+    @State private var goalSheetObjectivePrefill: String?
+    // Composer text consumed as goal prefill; cleared only after the objective is submitted.
+    @State private var goalSheetComposerConsumedInput: String?
     @State private var isLoadingRepositoryDiff = false
     @State private var repositoryDiffPresentation: TurnDiffPresentation?
     @State private var assistantRevertSheetState: AssistantRevertSheetState?
@@ -356,6 +360,7 @@ struct TurnView: View {
                     gitWorkingDirectory: gitWorkingDirectory,
                     showsGitControls: showsGitControls
                 )
+                await refreshThreadGoalSnapshot()
             },
             onInitialAppear: {
                 handleInitialAppear(activeTurnID: activeTurnID)
@@ -493,6 +498,19 @@ struct TurnView: View {
                 isLoadingRateLimits: codex.isLoadingRateLimits,
                 rateLimitsErrorMessage: codex.rateLimitsErrorMessage
             )
+        }
+        .sheet(isPresented: $isShowingGoalSheet, onDismiss: {
+            goalSheetObjectivePrefill = nil
+            goalSheetComposerConsumedInput = nil
+        }) {
+            GoalStatusSheet(
+                threadId: thread.id,
+                initialObjectiveDraft: goalSheetObjectivePrefill,
+                onObjectiveSubmitted: { _ in
+                    consumeComposerDraftAfterGoalSubmission()
+                }
+            )
+            .environment(codex)
         }
         .sheet(isPresented: $voiceInput.isShowingSetupSheet) {
             GPTVoiceSetupSheet()
@@ -713,6 +731,70 @@ struct TurnView: View {
         }
     }
 
+    // Opens the thread goal sheet, optionally prefilled with leftover composer draft text.
+    private func presentGoalSheet(objectivePrefill: String?) {
+        goalSheetObjectivePrefill = objectivePrefill
+        // Remember the composer text backing the prefill so submission can consume it.
+        // Cancelling the sheet leaves the draft untouched.
+        goalSheetComposerConsumedInput = (objectivePrefill?.isEmpty == false) ? viewModel.input : nil
+        isShowingGoalSheet = true
+    }
+
+    // Clears the composer draft once its text became the goal objective, so the same
+    // text cannot be sent again as a normal chat message.
+    private func consumeComposerDraftAfterGoalSubmission() {
+        guard let consumedInput = goalSheetComposerConsumedInput,
+              !consumedInput.isEmpty,
+              viewModel.input == consumedInput else {
+            return
+        }
+        viewModel.input = ""
+        viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
+        goalSheetComposerConsumedInput = nil
+    }
+
+    // Parses `/goal` or `/goal <objective>` typed inline (TUI parity). Returns the
+    // objective remainder, or nil when the draft is not a goal command.
+    static func inlineGoalCommandObjective(in text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/goal") else { return nil }
+        let remainder = trimmed.dropFirst("/goal".count)
+        guard remainder.isEmpty || remainder.first?.isWhitespace == true else { return nil }
+        return remainder.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // Keeps the goal chip accurate on open/resume even when the live
+    // `thread/goal/updated` snapshot was missed (reconnect, mirrored threads).
+    private func refreshThreadGoalSnapshot() async {
+        await codex.refreshThreadGoalMirror(threadId: thread.id)
+    }
+
+    // One-tap resume back to the active goal state from the chip prompt.
+    private func resumeThreadGoal() {
+        updateThreadGoal { try await codex.setThreadGoal(threadId: thread.id, status: .active) }
+    }
+
+    // "Stop" on the chip pauses the goal: continuation halts but state and accounting survive.
+    private func pauseThreadGoal() {
+        updateThreadGoal { try await codex.setThreadGoal(threadId: thread.id, status: .paused) }
+    }
+
+    // "Remove" on the chip clears the goal after the inline confirmation.
+    private func removeThreadGoal() {
+        updateThreadGoal { _ = try await codex.clearThreadGoal(threadId: thread.id) }
+    }
+
+    private func updateThreadGoal(_ operation: @escaping () async throws -> Void) {
+        Task { @MainActor in
+            do {
+                try await operation()
+            } catch {
+                codex.lastErrorMessage = (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+            }
+        }
+    }
+
     private func continueOnDesktopApp() {
         guard !isHandingOffToMac else { return }
         isHandingOffToMac = true
@@ -785,6 +867,19 @@ struct TurnView: View {
 
     private func handleSend() {
         guard !isVoiceInputActive else { return }
+        // `/goal <objective>` typed inline opens the goal sheet with the objective
+        // prefilled instead of sending a chat message (Codex TUI parity).
+        if let objective = Self.inlineGoalCommandObjective(in: viewModel.input) {
+            viewModel.clearComposerAutocomplete()
+            if objective.isEmpty {
+                // A bare `/goal` carries no draft worth preserving; drop the token now.
+                viewModel.input = ""
+                viewModel.saveLocalDraft(codex: codex, threadID: thread.id)
+            }
+            presentGoalSheet(objectivePrefill: objective.isEmpty ? nil : objective)
+            isInputFocused = false
+            return
+        }
         viewModel.clearComposerAutocomplete()
         viewModel.sendTurn(codex: codex, subscriptions: subscriptions, threadID: thread.id)
         isInputFocused = false
@@ -1400,6 +1495,19 @@ struct TurnView: View {
         gitWorkingDirectory: String?
     ) -> some View {
         VStack(spacing: 8) {
+            if let goal = codex.goalByThreadID[thread.id] {
+                GoalStatusChip(
+                    goal: goal,
+                    isThreadRunning: isThreadRunning,
+                    onTap: { presentGoalSheet(objectivePrefill: nil) },
+                    onStop: { pauseThreadGoal() },
+                    onResume: { resumeThreadGoal() },
+                    onRemove: { removeThreadGoal() }
+                )
+                .padding(.horizontal, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             if let parentThread = parentThread {
                 SubagentParentAccessoryCard(
                     parentTitle: parentThread.displayTitle,
@@ -1513,6 +1621,9 @@ struct TurnView: View {
                     ))
                 },
                 onShowStatus: presentStatusSheet,
+                onShowGoal: { objectivePrefill in
+                    presentGoalSheet(objectivePrefill: objectivePrefill)
+                },
                 voiceButtonPresentation: voiceButtonPresentation,
                 isVoiceInputActive: isVoiceInputActive,
                 isVoiceRecording: voiceInput.isRecording,

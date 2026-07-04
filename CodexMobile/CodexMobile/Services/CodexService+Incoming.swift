@@ -282,6 +282,12 @@ extension CodexService {
         case "thread/tokenUsage/updated":
             handleThreadTokenUsageUpdated(paramsObject)
 
+        case "thread/goal/updated":
+            handleThreadGoalUpdated(paramsObject)
+
+        case "thread/goal/cleared":
+            handleThreadGoalCleared(paramsObject)
+
         case "account/updated":
             handleGPTAccountUpdated(paramsObject)
 
@@ -749,6 +755,22 @@ extension CodexService {
 
         guard let usage = extractContextWindowUsage(from: usageObject) else { return }
         contextWindowUsageByThread[threadId] = usage
+    }
+
+    // Mirrors the app-server persisted goal state. Goals are thread-scoped state,
+    // not timeline items, so this never touches the transcript.
+    private func handleThreadGoalUpdated(_ paramsObject: IncomingParamsObject?) {
+        guard let goal = CodexThreadGoal(object: paramsObject?["goal"]?.objectValue) else {
+            return
+        }
+        goalByThreadID[goal.threadId] = goal
+    }
+
+    private func handleThreadGoalCleared(_ paramsObject: IncomingParamsObject?) {
+        guard let threadId = extractThreadID(from: paramsObject), !threadId.isEmpty else {
+            return
+        }
+        goalByThreadID.removeValue(forKey: threadId)
     }
 
     private func handleThreadStatusChanged(_ paramsObject: IncomingParamsObject?) {

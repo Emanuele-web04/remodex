@@ -32,6 +32,9 @@ struct TurnComposerHostView: View {
     let onOpenWorktreeHandoff: () -> Void
     let onOpenFeedbackMail: () -> Void
     let onShowStatus: () -> Void
+    // Opens the thread goal sheet; receives any remaining composer draft as an objective prefill.
+    var allowsGoalCommand: Bool = true
+    var onShowGoal: (String?) -> Void = { _ in }
     let voiceButtonPresentation: TurnComposerVoiceButtonPresentation
     var isVoiceInputActive: Bool = false
     let isVoiceRecording: Bool
@@ -62,7 +65,8 @@ struct TurnComposerHostView: View {
                     hasSubagentsSelection: viewModel.isSubagentsSelectionArmed,
                     isPlanModeArmed: viewModel.isPlanModeArmed
                 )
-                    && !availableForkDestinations.isEmpty
+                    && !availableForkDestinations.isEmpty,
+                allowsGoalCommand: allowsGoalCommand
             ),
             fileAutocompleteItems: viewModel.fileAutocompleteItems,
             isFileAutocompleteVisible: viewModel.isFileAutocompleteVisible,
@@ -247,6 +251,12 @@ struct TurnComposerHostView: View {
                         command,
                         availableForkDestinations: availableForkDestinations
                     )
+                case .goal:
+                    viewModel.onSelectSlashCommand(command)
+                    // No prefill from leftover draft here: unrelated text ending in `/goal`
+                    // must not become an objective. Inline `/goal <text>` (send path) is
+                    // the explicit way to prefill.
+                    onShowGoal(nil)
                 case .status:
                     viewModel.onSelectSlashCommand(command)
                     onShowStatus()

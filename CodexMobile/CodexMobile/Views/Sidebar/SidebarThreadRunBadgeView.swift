@@ -30,6 +30,10 @@ private extension CodexThreadRunBadgeState {
             return .green
         case .failed:
             return .red
+        case .goalActive:
+            return .purple
+        case .goalAttention:
+            return .orange
         }
     }
 }
