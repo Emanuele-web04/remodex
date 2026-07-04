@@ -113,6 +113,7 @@ test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", as
   assert.equal(broadcast.version, 6);
   assert.equal(broadcast.params.conversationId, "thread-live-owner");
   assert.equal(broadcast.params.hostId, "local");
+  assert.equal(broadcast.params.remodexOwnerSource, "desktop-ipc-live-owner");
   assert.equal(broadcast.params.change.type, "snapshot");
   assert.equal(broadcast.params.change.conversationState.id, "thread-live-owner");
   assert.equal(broadcast.params.change.conversationState.turns[0].turnId, "turn-live-owner");
@@ -794,6 +795,82 @@ test("live owner handles discovery and start-turn follower requests for owned th
   }]);
 });
 
+test("live owner normalizes follower start-turn params before app-server requests", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-normalize-");
+  const codexRequests = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    normalizeTurnStartParams(params) {
+      return { ...params, summary: "none" };
+    },
+    async sendCodexRequest(method, params) {
+      codexRequests.push({ method, params });
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-normalize", input: [] },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "start-turn-normalize-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-start-turn",
+    params: {
+      conversationId: "thread-normalize",
+      turnStartParams: {
+        input: [{ type: "text", text: "continue" }],
+        model: "gpt-5.3-codex-spark",
+        summary: "auto",
+      },
+    },
+  });
+
+  const response = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "start-turn-normalize-1"
+  );
+  assert.equal(response.resultType, "success");
+  assert.deepEqual(codexRequests.filter((request) => request.method === "turn/start"), [{
+    method: "turn/start",
+    params: {
+      threadId: "thread-normalize",
+      input: [{ type: "text", text: "continue" }],
+      model: "gpt-5.3-codex-spark",
+      summary: "none",
+    },
+  }]);
+});
+
 test("live owner routes follower approval responses back to app-server", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-approval-");
   const rawCodexMessages = [];
@@ -896,6 +973,78 @@ test("conversation adapter tracks requests and resolved notifications", () => {
   });
   assert.deepEqual(update, { threadId: "thread-adapter", changed: true });
   assert.equal(conversations.get("thread-adapter").requests.length, 0);
+});
+
+test("conversation adapter keeps a stable fallback turn until a real turn id arrives", () => {
+  const conversations = new Map();
+  const fallbackTurnIdsByThreadId = new Map();
+  const owned = new Set(["thread-turnless"]);
+  let timestamp = 100;
+  const now = () => {
+    timestamp += 1;
+    return timestamp;
+  };
+
+  let update = applyAppServerMessageToConversationState({
+    conversations,
+    fallbackTurnIdsByThreadId,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-turnless",
+        turn: {
+          items: [],
+          status: "inProgress",
+          error: null,
+          startedAt: 1,
+        },
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-turnless", changed: true });
+  const syntheticTurnId = conversations.get("thread-turnless").turns[0].turnId;
+  assert.match(syntheticTurnId, /^remodex-live-turn:thread-turnless:/);
+
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    fallbackTurnIdsByThreadId,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-turnless",
+        itemId: "assistant-turnless",
+        delta: "Hello",
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-turnless", changed: true });
+  assert.equal(conversations.get("thread-turnless").turns.length, 1);
+  assert.equal(conversations.get("thread-turnless").turns[0].items[0].text, "Hello");
+
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    fallbackTurnIdsByThreadId,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-turnless",
+        turnId: "turn-real",
+        itemId: "assistant-turnless",
+        delta: " world",
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-turnless", changed: true });
+  const turns = conversations.get("thread-turnless").turns;
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].turnId, "turn-real");
+  assert.equal(turns[0].items[0].text, "Hello world");
 });
 
 function attachFrameReader(socket, onFrame) {

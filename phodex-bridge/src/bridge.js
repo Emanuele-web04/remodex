@@ -264,6 +264,7 @@ function startBridge({
       enabled: config.desktopIpcLiveSyncEnabled !== false,
       sendCodexRequest,
       sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
       snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
@@ -1697,6 +1698,17 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
       summary: "none",
     },
   });
+}
+
+function normalizeTurnStartParamsForCodex(params) {
+  const normalizedRawMessage = disableUnsupportedReasoningSummaryForTurnStart(JSON.stringify({
+    method: "turn/start",
+    params,
+  }));
+  const parsed = parseBridgeJSON(normalizedRawMessage);
+  return parsed?.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : params;
 }
 
 function readTurnStartModel(params) {

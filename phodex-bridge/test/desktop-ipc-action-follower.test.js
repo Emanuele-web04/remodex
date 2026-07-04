@@ -1265,6 +1265,84 @@ test("desktop IPC follower mirrors live assistant text growth from desktop state
   });
 });
 
+test("desktop IPC follower ignores Remodex-owned live owner broadcasts", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-owner-echo-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-owner-broadcast" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "remodex-owner",
+    version: 6,
+    params: {
+      conversationId: "thread-owner-broadcast",
+      remodexOwnerSource: "desktop-ipc-live-owner",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-owner-broadcast",
+            items: [{
+              id: "assistant-owner-broadcast",
+              type: "agentMessage",
+              text: "This is already phone-bound through app-server.",
+            }],
+          }],
+          requests: [{
+            id: "req-owner-broadcast",
+            method: "item/fileChange/requestApproval",
+            params: {
+              threadId: "thread-owner-broadcast",
+              turnId: "turn-owner-broadcast",
+              itemId: "file-owner-broadcast",
+            },
+          }],
+        },
+      },
+    },
+  });
+
+  await wait(50);
+  assert.deepEqual(outbound, []);
+});
+
 function attachFrameReader(socket, onFrame) {
   let buffer = Buffer.alloc(0);
   socket.on("data", (chunk) => {

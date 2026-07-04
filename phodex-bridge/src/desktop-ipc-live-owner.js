@@ -21,6 +21,7 @@ const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_000;
 const THREAD_STREAM_STATE_CHANGED = "thread-stream-state-changed";
 const CLIENT_STATUS_CHANGED = "client-status-changed";
 const LOCAL_HOST_ID = "local";
+const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 
 const METHOD_VERSION_BY_NAME = new Map([
   ["initialize", 1],
@@ -100,6 +101,7 @@ function createDesktopIpcLiveOwner({
   hostId = LOCAL_HOST_ID,
   sendCodexRequest,
   sendRawCodexMessage,
+  normalizeTurnStartParams = (params) => params,
   socketPath = resolveDefaultIpcSocketPath(),
   snapshotDebounceMs = DEFAULT_SNAPSHOT_DEBOUNCE_MS,
   maxPatchCount = DEFAULT_MAX_PATCH_COUNT,
@@ -121,6 +123,7 @@ function createDesktopIpcLiveOwner({
   const pendingThreadHydrationsByThreadId = new Map();
   const cachedThreadsByThreadId = new Map();
   const lastBroadcastStatesByThreadId = new Map();
+  const fallbackTurnIdsByThreadId = new Map();
   const dirtyThreadIds = new Set();
   let snapshotTimer = null;
 
@@ -220,6 +223,7 @@ function createDesktopIpcLiveOwner({
 
     const update = applyAppServerMessageToConversationState({
       conversations,
+      fallbackTurnIdsByThreadId,
       message,
       hostId,
       now,
@@ -245,6 +249,7 @@ function createDesktopIpcLiveOwner({
     pendingThreadHydrationsByThreadId.clear();
     cachedThreadsByThreadId.clear();
     lastBroadcastStatesByThreadId.clear();
+    fallbackTurnIdsByThreadId.clear();
     ownedThreadIds.clear();
     conversations.clear();
     ipc.close();
@@ -269,6 +274,7 @@ function createDesktopIpcLiveOwner({
     cachedThreadsByThreadId.delete(normalizedThreadId);
     pendingThreadHydrationsByThreadId.delete(normalizedThreadId);
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
+    fallbackTurnIdsByThreadId.delete(normalizedThreadId);
     dirtyThreadIds.delete(normalizedThreadId);
   }
 
@@ -399,6 +405,7 @@ function createDesktopIpcLiveOwner({
       if (patches && ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
         hostId,
         conversationId: threadId,
+        remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
         change: {
           type: "patches",
           patches,
@@ -412,6 +419,7 @@ function createDesktopIpcLiveOwner({
     if (ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
       hostId,
       conversationId: threadId,
+      remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
       change: {
         type: "snapshot",
         conversationState: currentState,
@@ -504,8 +512,12 @@ function createDesktopIpcLiveOwner({
       ...rawTurnStartParams,
       threadId: conversationId,
     });
+    const normalizedParams = await Promise.resolve(normalizeTurnStartParams(cloneJSON(codexParams)));
+    const nextCodexParams = normalizedParams && typeof normalizedParams === "object" && !Array.isArray(normalizedParams)
+      ? normalizedParams
+      : codexParams;
     markOwnedThread(conversationId);
-    return await sendCodexRequest("turn/start", codexParams);
+    return await sendCodexRequest("turn/start", nextCodexParams);
   }
 
   async function handleFollowerSteerTurn(conversationId, params) {
@@ -605,8 +617,90 @@ function createDisabledDesktopIpcLiveOwner() {
   };
 }
 
+function resolveTurnForConversation({
+  conversation,
+  turn,
+  method,
+  fallbackTurnIdsByThreadId,
+  now = () => Date.now(),
+} = {}) {
+  const explicitTurnId = readTurnIdFromTurn(turn);
+  if (explicitTurnId) {
+    promoteFallbackTurnId(conversation, fallbackTurnIdsByThreadId, explicitTurnId);
+    return turn;
+  }
+
+  const fallbackTurnId = readFallbackTurnId(conversation?.id, fallbackTurnIdsByThreadId)
+    || (method === "turn/started" ? createSyntheticTurnId(conversation?.id, now) : "");
+  if (!fallbackTurnId) {
+    return turn;
+  }
+  fallbackTurnIdsByThreadId?.set(conversation.id, fallbackTurnId);
+  if (method === "turn/completed") {
+    fallbackTurnIdsByThreadId?.delete(conversation.id);
+  }
+
+  // Some app-server builds start turns before they know the canonical turn id.
+  // Keep one stable row alive until a later event can promote it to the real id.
+  return {
+    ...turn,
+    id: fallbackTurnId,
+    turnId: fallbackTurnId,
+    remodexSyntheticTurnId: true,
+  };
+}
+
+function resolveTurnIdForParams({
+  conversation,
+  params,
+  fallbackTurnIdsByThreadId,
+} = {}) {
+  const explicitTurnId = readTurnIdFromParams(params);
+  if (explicitTurnId) {
+    promoteFallbackTurnId(conversation, fallbackTurnIdsByThreadId, explicitTurnId);
+    return explicitTurnId;
+  }
+  const fallbackTurnId = readFallbackTurnId(conversation?.id, fallbackTurnIdsByThreadId);
+  if (fallbackTurnId) {
+    return fallbackTurnId;
+  }
+  return "";
+}
+
+function promoteFallbackTurnId(conversation, fallbackTurnIdsByThreadId, explicitTurnId) {
+  const conversationId = readString(conversation?.id);
+  const fallbackTurnId = readFallbackTurnId(conversationId, fallbackTurnIdsByThreadId);
+  if (!conversationId || !fallbackTurnId || !explicitTurnId || fallbackTurnId === explicitTurnId) {
+    fallbackTurnIdsByThreadId?.delete(conversationId);
+    return;
+  }
+
+  const fallbackTurn = conversation.turns.find((candidate) => (
+    readString(candidate?.turnId) || readString(candidate?.id)
+  ) === fallbackTurnId);
+  if (fallbackTurn) {
+    fallbackTurn.id = explicitTurnId;
+    fallbackTurn.turnId = explicitTurnId;
+    delete fallbackTurn.remodexSyntheticTurnId;
+  }
+  fallbackTurnIdsByThreadId?.delete(conversationId);
+}
+
+function readFallbackTurnId(threadId, fallbackTurnIdsByThreadId) {
+  const normalizedThreadId = readString(threadId);
+  return normalizedThreadId && fallbackTurnIdsByThreadId instanceof Map
+    ? readString(fallbackTurnIdsByThreadId.get(normalizedThreadId))
+    : "";
+}
+
+function createSyntheticTurnId(threadId, now = () => Date.now()) {
+  const normalizedThreadId = readString(threadId) || "thread";
+  return `remodex-live-turn:${normalizedThreadId}:${now()}:${randomUUID()}`;
+}
+
 function applyAppServerMessageToConversationState({
   conversations,
+  fallbackTurnIdsByThreadId = null,
   message,
   hostId = LOCAL_HOST_ID,
   now = () => Date.now(),
@@ -692,7 +786,13 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      upsertTurn(conversation, turn, { now });
+      upsertTurn(conversation, resolveTurnForConversation({
+        conversation,
+        turn,
+        method,
+        fallbackTurnIdsByThreadId,
+        now,
+      }), { now });
       conversation.updatedAt = now();
       return { threadId, changed: true };
     }
@@ -702,7 +802,12 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      const turn = ensureTurn(conversation, resolveTurnIdForParams({
+        conversation,
+        params: message.params,
+        fallbackTurnIdsByThreadId,
+        now,
+      }), { now });
       if (turn) {
         turn.diff = readString(message.params?.diff) || "";
       }
@@ -715,7 +820,12 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      const turn = ensureTurn(conversation, resolveTurnIdForParams({
+        conversation,
+        params: message.params,
+        fallbackTurnIdsByThreadId,
+        now,
+      }), { now });
       if (turn) {
         upsertItem(turn, {
           id: `todo-list-${message.params?.turnId || now()}`,
@@ -734,7 +844,12 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      const turn = ensureTurn(conversation, resolveTurnIdForParams({
+        conversation,
+        params: message.params,
+        fallbackTurnIdsByThreadId,
+        now,
+      }), { now });
       if (turn && message.params?.item) {
         upsertItem(turn, cloneJSON(message.params.item));
         if (message.params.item.type === "agentMessage" && method === "item/started") {
@@ -758,7 +873,10 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      applyDeltaNotification(conversation, method, message.params || {}, { now });
+      applyDeltaNotification(conversation, method, message.params || {}, {
+        fallbackTurnIdsByThreadId,
+        now,
+      });
       conversation.updatedAt = now();
       return { threadId, changed: true };
     }
@@ -768,7 +886,12 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      const turn = ensureTurn(conversation, resolveTurnIdForParams({
+        conversation,
+        params: message.params,
+        fallbackTurnIdsByThreadId,
+        now,
+      }), { now });
       if (turn) {
         upsertItem(turn, {
           type: "fileChange",
@@ -797,7 +920,12 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      const turn = ensureTurn(conversation, message.params?.turnId || message.params?.turn_id, { now });
+      const turn = ensureTurn(conversation, resolveTurnIdForParams({
+        conversation,
+        params: message.params,
+        fallbackTurnIdsByThreadId,
+        now,
+      }), { now });
       if (turn) {
         turn.items.push({
           id: `error-${now()}`,
@@ -1102,8 +1230,16 @@ function upsertRequest(conversation, request) {
   }
 }
 
-function applyDeltaNotification(conversation, method, params, { now = () => Date.now() } = {}) {
-  const turn = ensureTurn(conversation, params.turnId || params.turn_id, { now });
+function applyDeltaNotification(conversation, method, params, {
+  fallbackTurnIdsByThreadId = null,
+  now = () => Date.now(),
+} = {}) {
+  const turn = ensureTurn(conversation, resolveTurnIdForParams({
+    conversation,
+    params,
+    fallbackTurnIdsByThreadId,
+    now,
+  }), { now });
   if (!turn) {
     return;
   }
@@ -2068,6 +2204,20 @@ function readThreadIdFromParams(params) {
     || readString(params?.turn?.threadId)
     || readString(params?.turn?.thread_id)
     || readString(params?.thread?.id);
+}
+
+function readTurnIdFromParams(params) {
+  return readString(params?.turnId)
+    || readString(params?.turn_id)
+    || readString(params?.turn?.id)
+    || readString(params?.turn?.turnId)
+    || readString(params?.turn?.turn_id);
+}
+
+function readTurnIdFromTurn(turn) {
+  return readString(turn?.id)
+    || readString(turn?.turnId)
+    || readString(turn?.turn_id);
 }
 
 function readConversationIdFromFollowerParams(params) {

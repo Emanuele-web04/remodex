@@ -12,6 +12,7 @@ const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
+const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
 const DESKTOP_FOLLOWER_REQUEST_METHODS = new Set([
   "turn/start",
@@ -119,6 +120,9 @@ function createDesktopIpcActionFollower({
     }
 
     const params = envelope.params || {};
+    if (isRemodexLiveOwnerBroadcast(params)) {
+      return;
+    }
     const threadId = readString(params.conversationId) || readString(params.conversation_id);
     if (!threadId || !activeThreadIds.has(threadId)) {
       return;
@@ -814,6 +818,10 @@ function applyConversationStateChange(previousState, change) {
 
 function isPatchChange(change) {
   return change?.type === "patches" || change?.type === "Patches";
+}
+
+function isRemodexLiveOwnerBroadcast(params) {
+  return readString(params?.remodexOwnerSource) === REMODEX_LIVE_OWNER_SOURCE;
 }
 
 function seedConversationStateFromThreadRead(response) {
