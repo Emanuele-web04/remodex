@@ -125,6 +125,8 @@ function createDesktopIpcLiveOwner({
   const lastBroadcastStatesByThreadId = new Map();
   const fallbackTurnIdsByThreadId = new Map();
   const pendingTurnStartParamsByThreadId = new Map();
+  const pendingTurnStartEntriesByRequestId = new Map();
+  const followerRuntimeOverridesByThreadId = new Map();
   const dirtyThreadIds = new Set();
   let snapshotTimer = null;
 
@@ -185,7 +187,7 @@ function createDesktopIpcLiveOwner({
     const hadCachedThread = cachedThreadsByThreadId.has(threadId);
     markOwnedThread(threadId);
     if (method === "turn/start") {
-      rememberPendingTurnStart(threadId, message?.params);
+      rememberPendingTurnStart(threadId, message?.params, message?.id);
     }
     seedOwnedConversation(threadId, {
       cwd: readString(message?.params?.cwd),
@@ -203,6 +205,9 @@ function createDesktopIpcLiveOwner({
     }
 
     const responseId = message.id == null ? "" : String(message.id);
+    if (responseId && !message.method) {
+      resolvePendingTurnStartResponse(responseId, message);
+    }
     if (responseId && pendingThreadReadRequestIds.has(responseId)) {
       pendingThreadReadRequestIds.delete(responseId);
       const thread = readThreadFromResponse(message);
@@ -256,6 +261,8 @@ function createDesktopIpcLiveOwner({
     lastBroadcastStatesByThreadId.clear();
     fallbackTurnIdsByThreadId.clear();
     pendingTurnStartParamsByThreadId.clear();
+    pendingTurnStartEntriesByRequestId.clear();
+    followerRuntimeOverridesByThreadId.clear();
     ownedThreadIds.clear();
     conversations.clear();
     ipc.close();
@@ -263,19 +270,58 @@ function createDesktopIpcLiveOwner({
 
   // Phone-origin prompts only exist in the inbound turn/start params, so cache
   // them for the matching turn/started snapshot instead of losing the user row.
-  function rememberPendingTurnStart(threadId, params) {
+  // Entries are FIFO per thread so rapid consecutive starts keep their own prompt,
+  // and failed starts are discarded so stale input never attaches to a later turn.
+  function rememberPendingTurnStart(threadId, params, requestId) {
     const normalizedThreadId = readString(threadId);
     if (!normalizedThreadId) {
-      return;
+      return null;
     }
     const input = Array.isArray(params?.input) ? params.input : [];
     if (input.length === 0) {
+      return null;
+    }
+    const entry = { params: sanitizeTurnStartParams(cloneJSON(params)) };
+    const queue = pendingTurnStartParamsByThreadId.get(normalizedThreadId) || [];
+    queue.push(entry);
+    pendingTurnStartParamsByThreadId.set(normalizedThreadId, queue);
+    const normalizedRequestId = requestIdKey(requestId);
+    if (normalizedRequestId) {
+      pendingTurnStartEntriesByRequestId.set(normalizedRequestId, {
+        threadId: normalizedThreadId,
+        entry,
+      });
+    }
+    return entry;
+  }
+
+  function discardPendingTurnStartEntry(threadId, entry) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId || !entry) {
       return;
     }
-    pendingTurnStartParamsByThreadId.set(
-      normalizedThreadId,
-      sanitizeTurnStartParams(cloneJSON(params))
-    );
+    const queue = pendingTurnStartParamsByThreadId.get(normalizedThreadId);
+    if (!queue) {
+      return;
+    }
+    const index = queue.indexOf(entry);
+    if (index >= 0) {
+      queue.splice(index, 1);
+    }
+    if (queue.length === 0) {
+      pendingTurnStartParamsByThreadId.delete(normalizedThreadId);
+    }
+  }
+
+  function resolvePendingTurnStartResponse(responseId, message) {
+    const pending = pendingTurnStartEntriesByRequestId.get(responseId);
+    if (!pending) {
+      return;
+    }
+    pendingTurnStartEntriesByRequestId.delete(responseId);
+    if (message.error) {
+      discardPendingTurnStartEntry(pending.threadId, pending.entry);
+    }
   }
 
   function markOwnedThread(threadId) {
@@ -299,6 +345,12 @@ function createDesktopIpcLiveOwner({
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
     fallbackTurnIdsByThreadId.delete(normalizedThreadId);
     pendingTurnStartParamsByThreadId.delete(normalizedThreadId);
+    followerRuntimeOverridesByThreadId.delete(normalizedThreadId);
+    for (const [requestId, pending] of Array.from(pendingTurnStartEntriesByRequestId.entries())) {
+      if (pending.threadId === normalizedThreadId) {
+        pendingTurnStartEntriesByRequestId.delete(requestId);
+      }
+    }
     dirtyThreadIds.delete(normalizedThreadId);
   }
 
@@ -542,7 +594,9 @@ function createDesktopIpcLiveOwner({
       case "thread-follower-set-collaboration-mode":
         return applyFollowerCollaborationMode(conversationId, params);
       case "thread-follower-set-queued-follow-ups-state":
-        return { ok: true };
+        // Refuse instead of acknowledging: silently dropping queued follow-ups
+        // would make Desktop believe they will run after the current turn.
+        throw new Error("thread-follower-set-queued-follow-ups-state is not supported by Remodex yet.");
       case "thread-follower-edit-last-user-turn":
         throw new Error("thread-follower-edit-last-user-turn is not supported by Remodex yet.");
       default:
@@ -555,17 +609,22 @@ function createDesktopIpcLiveOwner({
       || params.turn_start_params
       || params.turnStart
       || params;
-    const codexParams = sanitizeTurnStartParams({
+    const codexParams = mergeFollowerRuntimeOverrides(conversationId, sanitizeTurnStartParams({
       ...rawTurnStartParams,
       threadId: conversationId,
-    });
+    }));
     const normalizedParams = await Promise.resolve(normalizeTurnStartParams(cloneJSON(codexParams)));
     const nextCodexParams = normalizedParams && typeof normalizedParams === "object" && !Array.isArray(normalizedParams)
       ? normalizedParams
       : codexParams;
     markOwnedThread(conversationId);
-    rememberPendingTurnStart(conversationId, nextCodexParams);
-    return await sendCodexRequest("turn/start", nextCodexParams);
+    const pendingEntry = rememberPendingTurnStart(conversationId, nextCodexParams);
+    try {
+      return await sendCodexRequest("turn/start", nextCodexParams);
+    } catch (error) {
+      discardPendingTurnStartEntry(conversationId, pendingEntry);
+      throw error;
+    }
   }
 
   async function handleFollowerSteerTurn(conversationId, params) {
@@ -631,27 +690,64 @@ function createDesktopIpcLiveOwner({
     return { ok: true };
   }
 
+  // Desktop runtime option changes are persisted as per-thread overrides and
+  // merged into later Desktop-origin turn starts, so acknowledging them is honest
+  // instead of a cosmetic broadcast-only update.
   function applyFollowerModelAndReasoning(conversationId, params) {
+    const overrides = followerRuntimeOverridesByThreadId.get(conversationId) || {};
     const conversation = conversations.get(conversationId);
+    if (Object.prototype.hasOwnProperty.call(params, "model")) {
+      overrides.model = readString(params.model);
+      if (conversation) {
+        conversation.latestModel = overrides.model;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(params, "reasoningEffort")) {
+      overrides.effort = params.reasoningEffort || null;
+      if (conversation) {
+        conversation.latestReasoningEffort = overrides.effort;
+      }
+    }
+    followerRuntimeOverridesByThreadId.set(conversationId, overrides);
     if (conversation) {
-      if (Object.prototype.hasOwnProperty.call(params, "model")) {
-        conversation.latestModel = params.model || "";
-      }
-      if (Object.prototype.hasOwnProperty.call(params, "reasoningEffort")) {
-        conversation.latestReasoningEffort = params.reasoningEffort || null;
-      }
       scheduleSnapshot(conversationId);
     }
     return { ok: true };
   }
 
   function applyFollowerCollaborationMode(conversationId, params) {
+    if (!params.collaborationMode) {
+      return { ok: true };
+    }
+    const overrides = followerRuntimeOverridesByThreadId.get(conversationId) || {};
+    overrides.collaborationMode = cloneJSON(params.collaborationMode);
+    followerRuntimeOverridesByThreadId.set(conversationId, overrides);
     const conversation = conversations.get(conversationId);
-    if (conversation && params.collaborationMode) {
-      conversation.latestCollaborationMode = params.collaborationMode;
+    if (conversation) {
+      conversation.latestCollaborationMode = cloneJSON(params.collaborationMode);
       scheduleSnapshot(conversationId);
     }
     return { ok: true };
+  }
+
+  // Fills follower turn-start params with Desktop-selected runtime overrides when
+  // the request itself does not specify them. Phone-origin turns are untouched.
+  function mergeFollowerRuntimeOverrides(conversationId, params) {
+    const overrides = followerRuntimeOverridesByThreadId.get(conversationId);
+    if (!overrides) {
+      return params;
+    }
+    const merged = { ...params };
+    if (overrides.model && !readString(merged.model)) {
+      merged.model = overrides.model;
+    }
+    if (overrides.effort != null && merged.effort == null) {
+      merged.effort = overrides.effort;
+    }
+    if (overrides.collaborationMode && merged.collaborationMode == null) {
+      merged.collaborationMode = cloneJSON(overrides.collaborationMode);
+    }
+    return merged;
   }
 
   function activeTurnIdForConversation(conversationId) {
@@ -1212,17 +1308,22 @@ function buildConversationTurn(turn, {
 
 // Reattaches the cached turn/start prompt to a just-started turn so Desktop
 // followers still see the user message when turn/started arrives with no items.
+// Pending prompts are consumed FIFO so rapid consecutive starts stay matched.
 function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsByThreadId) {
   if (!turn || !(pendingTurnStartParamsByThreadId instanceof Map)) {
     return;
   }
   const threadId = readString(conversation?.id);
-  const pendingParams = threadId ? pendingTurnStartParamsByThreadId.get(threadId) : null;
+  const queue = threadId ? pendingTurnStartParamsByThreadId.get(threadId) : null;
+  const pendingEntry = Array.isArray(queue) ? queue.shift() : null;
+  if (Array.isArray(queue) && queue.length === 0) {
+    pendingTurnStartParamsByThreadId.delete(threadId);
+  }
+  const pendingParams = pendingEntry?.params;
   if (!pendingParams) {
     return;
   }
 
-  pendingTurnStartParamsByThreadId.delete(threadId);
   const input = Array.isArray(pendingParams.input) ? cloneJSON(pendingParams.input) : [];
   if (input.length === 0) {
     return;
@@ -1239,6 +1340,7 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
   turn.items.unshift({
     id: `user-message-${turnId}`,
     type: "userMessage",
+    remodexSyntheticUserMessage: true,
     content: input.map(userMessageContentFromTurnInput).filter(Boolean),
   });
 }
@@ -1253,9 +1355,10 @@ function isUserMessageItem(item) {
     || (type === "message" && normalizeToken(item?.role) === "user");
 }
 
-function isSyntheticUserMessageItem(turn, item) {
-  const turnId = readString(turn?.turnId) || readString(turn?.id) || "turn";
-  return isUserMessageItem(item) && readString(item?.id) === `user-message-${turnId}`;
+// Matched via an explicit marker instead of the item id so the synthetic row is
+// still recognized after a fallback turn id gets promoted to the real turn id.
+function isSyntheticUserMessageItem(item) {
+  return isUserMessageItem(item) && item?.remodexSyntheticUserMessage === true;
 }
 
 function userMessageContentFromTurnInput(entry) {
@@ -1342,9 +1445,13 @@ function upsertItem(turn, item) {
     return;
   }
   if (isUserMessageItem(item)) {
-    turn.items = turn.items.filter((candidate) => (
-      !isSyntheticUserMessageItem(turn, candidate)
-    ));
+    // Replace the synthetic prompt row in place so the canonical user message
+    // keeps its position instead of jumping below already-streamed items.
+    const syntheticIndex = turn.items.findIndex((candidate) => isSyntheticUserMessageItem(candidate));
+    if (syntheticIndex >= 0) {
+      turn.items[syntheticIndex] = cloneJSON(item);
+      return;
+    }
   }
   turn.items.push(cloneJSON(item));
 }

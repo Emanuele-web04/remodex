@@ -556,6 +556,7 @@ test("live owner keeps phone turn input in snapshots when turn/started has no it
   assert.deepEqual(turn.items[0], {
     id: "user-message-turn-user-input",
     type: "userMessage",
+    remodexSyntheticUserMessage: true,
     content: [{ type: "text", text: "build the feature" }],
   });
 });
@@ -1080,6 +1081,151 @@ test("live owner normalizes follower start-turn params before app-server request
   }]);
 });
 
+test("live owner applies Desktop runtime overrides to later follower turn starts", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-runtime-overrides-");
+  const codexRequests = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    async sendCodexRequest(method, params) {
+      codexRequests.push({ method, params });
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-overrides", input: [] },
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "set-model-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-set-model-and-reasoning",
+    params: {
+      conversationId: "thread-overrides",
+      model: "gpt-desktop-pick",
+      reasoningEffort: "high",
+    },
+  });
+  const setModelResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "set-model-1"
+  );
+  assert.equal(setModelResponse.resultType, "success");
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "start-turn-overrides-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-start-turn",
+    params: {
+      conversationId: "thread-overrides",
+      turnStartParams: {
+        input: [{ type: "text", text: "use my desktop model" }],
+      },
+    },
+  });
+  const startResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "start-turn-overrides-1"
+  );
+  assert.equal(startResponse.resultType, "success");
+  assert.deepEqual(codexRequests.filter((request) => request.method === "turn/start"), [{
+    method: "turn/start",
+    params: {
+      threadId: "thread-overrides",
+      input: [{ type: "text", text: "use my desktop model" }],
+      model: "gpt-desktop-pick",
+      effort: "high",
+    },
+  }]);
+});
+
+test("live owner refuses queued follow-ups instead of silently dropping them", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-queued-followups-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-queued", input: [] },
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "queued-followups-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-set-queued-follow-ups-state",
+    params: {
+      conversationId: "thread-queued",
+      queuedFollowUps: [{ input: [{ type: "text", text: "later" }] }],
+    },
+  });
+  const response = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "queued-followups-1"
+  );
+  assert.equal(response.resultType, "error");
+  assert.match(response.error, /not supported/i);
+});
+
 test("live owner keeps ownership when peer sends non-owner patch broadcasts", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-peer-patch-");
   const codexRequests = [];
@@ -1573,11 +1719,13 @@ test("conversation adapter replaces synthetic user prompt with canonical userMes
   const conversations = new Map();
   const pendingTurnStartParamsByThreadId = new Map([[
     "thread-canonical-user",
-    {
-      threadId: "thread-canonical-user",
-      input: [{ type: "input_text", text: "build the canonical path" }],
-      cwd: "/tmp/canonical-user",
-    },
+    [{
+      params: {
+        threadId: "thread-canonical-user",
+        input: [{ type: "input_text", text: "build the canonical path" }],
+        cwd: "/tmp/canonical-user",
+      },
+    }],
   ]]);
   const owned = new Set(["thread-canonical-user"]);
   const now = () => 42;
@@ -1607,6 +1755,27 @@ test("conversation adapter replaces synthetic user prompt with canonical userMes
     ["user-message-turn-canonical-user"]
   );
 
+  // A reasoning item streams in before the canonical user message arrives.
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/started",
+      params: {
+        threadId: "thread-canonical-user",
+        turnId: "turn-canonical-user",
+        item: {
+          id: "reasoning-1",
+          type: "reasoning",
+          summary: [],
+          content: [],
+        },
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-canonical-user", changed: true });
+
   update = applyAppServerMessageToConversationState({
     conversations,
     now,
@@ -1625,6 +1794,12 @@ test("conversation adapter replaces synthetic user prompt with canonical userMes
     },
   });
   assert.deepEqual(update, { threadId: "thread-canonical-user", changed: true });
+  // The canonical user message replaces the synthetic row in place, keeping the
+  // prompt above the already-streamed reasoning item.
+  assert.deepEqual(
+    conversations.get("thread-canonical-user").turns[0].items.map((item) => item.id),
+    ["canonical-user-message", "reasoning-1"]
+  );
   const userMessages = conversations.get("thread-canonical-user").turns[0].items
     .filter((item) => item.type === "userMessage");
   assert.deepEqual(userMessages, [{
@@ -1632,6 +1807,119 @@ test("conversation adapter replaces synthetic user prompt with canonical userMes
     type: "userMessage",
     content: [{ type: "text", text: "build the canonical path" }],
   }]);
+});
+
+test("conversation adapter dedupes synthetic user prompt after fallback turn id promotion", () => {
+  const conversations = new Map();
+  const fallbackTurnIdsByThreadId = new Map();
+  const pendingTurnStartParamsByThreadId = new Map([[
+    "thread-promoted-user",
+    [{
+      params: {
+        threadId: "thread-promoted-user",
+        input: [{ type: "input_text", text: "prompt before promotion" }],
+      },
+    }],
+  ]]);
+  const owned = new Set(["thread-promoted-user"]);
+  const now = () => 7;
+
+  // turn/started arrives without a usable turn id, so the turn and the synthetic
+  // user message are created under a fallback turn id.
+  applyAppServerMessageToConversationState({
+    conversations,
+    fallbackTurnIdsByThreadId,
+    pendingTurnStartParamsByThreadId,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-promoted-user",
+        turn: {
+          items: [],
+          status: "inProgress",
+          error: null,
+          startedAt: 1,
+        },
+      },
+    },
+  });
+  const syntheticItems = conversations.get("thread-promoted-user").turns[0].items;
+  assert.equal(syntheticItems.length, 1);
+  assert.equal(syntheticItems[0].type, "userMessage");
+
+  // A later event promotes the fallback turn to its real id, then the canonical
+  // user message arrives; the synthetic row must still be replaced.
+  applyAppServerMessageToConversationState({
+    conversations,
+    fallbackTurnIdsByThreadId,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/started",
+      params: {
+        threadId: "thread-promoted-user",
+        turnId: "turn-promoted-real",
+        item: {
+          id: "canonical-promoted-user-message",
+          type: "userMessage",
+          content: [{ type: "text", text: "prompt before promotion" }],
+        },
+      },
+    },
+  });
+
+  const turn = conversations.get("thread-promoted-user").turns[0];
+  assert.equal(turn.turnId, "turn-promoted-real");
+  const userMessages = turn.items.filter((item) => item.type === "userMessage");
+  assert.deepEqual(userMessages, [{
+    id: "canonical-promoted-user-message",
+    type: "userMessage",
+    content: [{ type: "text", text: "prompt before promotion" }],
+  }]);
+});
+
+test("conversation adapter consumes pending turn starts FIFO for rapid consecutive turns", () => {
+  const conversations = new Map();
+  const pendingTurnStartParamsByThreadId = new Map([[
+    "thread-fifo",
+    [
+      { params: { threadId: "thread-fifo", input: [{ type: "input_text", text: "first prompt" }] } },
+      { params: { threadId: "thread-fifo", input: [{ type: "input_text", text: "second prompt" }] } },
+    ],
+  ]]);
+  const owned = new Set(["thread-fifo"]);
+  const now = () => 11;
+
+  for (const turnId of ["turn-fifo-1", "turn-fifo-2"]) {
+    applyAppServerMessageToConversationState({
+      conversations,
+      pendingTurnStartParamsByThreadId,
+      now,
+      shouldOwnThread: (threadId) => owned.has(threadId),
+      message: {
+        method: "turn/started",
+        params: {
+          threadId: "thread-fifo",
+          turn: {
+            id: turnId,
+            items: [],
+            status: "inProgress",
+            error: null,
+            startedAt: 1,
+          },
+        },
+      },
+    });
+  }
+
+  const turns = conversations.get("thread-fifo").turns;
+  assert.deepEqual(
+    turns.map((turn) => turn.items[0].content[0].text),
+    ["first prompt", "second prompt"]
+  );
+  assert.equal(pendingTurnStartParamsByThreadId.has("thread-fifo"), false);
 });
 
 test("conversation adapter keeps a stable fallback turn until a real turn id arrives", () => {

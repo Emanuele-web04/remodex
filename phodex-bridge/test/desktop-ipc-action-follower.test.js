@@ -1174,7 +1174,7 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
   }
 });
 
-test("desktop IPC follower falls back locally when Desktop follower routing fails", async (t) => {
+test("desktop IPC follower falls back locally when no Desktop client can handle the request", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-local-fallback-");
   const serverFrames = [];
   const localForwards = [];
@@ -1194,13 +1194,15 @@ test("desktop IPC follower falls back locally when Desktop follower routing fail
           result: { clientId: "remodex-test" },
         });
       } else if (frame.method === "thread-follower-start-turn") {
+        // Router-style no-handler error: the request never reached any client,
+        // so retrying it locally is safe.
         writeFrame(socket, {
           type: "response",
           requestId: frame.requestId,
           resultType: "error",
           method: frame.method,
-          handledByClientId: "desktop",
-          error: "Desktop follower is gone",
+          handledByClientId: "",
+          error: "No Codex IPC client can handle thread-follower-start-turn.",
         });
       }
     });
@@ -1272,6 +1274,109 @@ test("desktop IPC follower falls back locally when Desktop follower routing fail
     serverFrames.filter((frame) => frame.method === "thread-follower-start-turn").length,
     1
   );
+});
+
+test("desktop IPC follower does not rerun ambiguous Desktop failures locally", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-ambiguous-error-");
+  const localForwards = [];
+  let serverSocket = null;
+  let respondWithTimeout = false;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.method === "thread-follower-start-turn" && !respondWithTimeout) {
+        // Explicit Desktop-side error: the request reached the owner, so the
+        // bridge must not rerun the same turn on the local app-server.
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "error",
+          method: frame.method,
+          handledByClientId: "desktop",
+          error: "Desktop rejected the turn",
+        });
+      }
+      // When respondWithTimeout is set, never answer so the request times out.
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 150,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-ambiguous-error" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: "thread-ambiguous-error",
+      change: {
+        type: "snapshot",
+        conversationState: { turns: [], requests: [] },
+      },
+    },
+  });
+  await wait(25);
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-desktop-error",
+    method: "turn/start",
+    params: {
+      threadId: "thread-ambiguous-error",
+      input: [{ type: "input_text", text: "explicit desktop error" }],
+    },
+  }));
+  assert.equal(handled, true);
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-desktop-error"));
+  const errorResponse = outbound.find((message) => message.id === "phone-turn-start-desktop-error");
+  assert.equal(errorResponse.error.code, -32000);
+  assert.deepEqual(localForwards, []);
+
+  respondWithTimeout = true;
+  const handledTimeout = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-desktop-timeout",
+    method: "turn/start",
+    params: {
+      threadId: "thread-ambiguous-error",
+      input: [{ type: "input_text", text: "desktop timeout" }],
+    },
+  }));
+  assert.equal(handledTimeout, true);
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-desktop-timeout"), 1_000);
+  const timeoutResponse = outbound.find((message) => message.id === "phone-turn-start-desktop-timeout");
+  assert.equal(timeoutResponse.error.code, -32000);
+  assert.deepEqual(localForwards, []);
 });
 
 test("desktop IPC follower mirrors live assistant text growth from desktop state", async (t) => {

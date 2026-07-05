@@ -470,7 +470,10 @@ function createDesktopIpcActionFollower({
       })
       .catch((error) => {
         console.warn(`${logPrefix} desktop follower request failed: ${error.message}`);
-        if (typeof forwardToLocalCodex === "function") {
+        // Only rerun the request locally when we know Desktop never received it.
+        // Timeouts and explicit remote errors stay errors: the turn may already be
+        // running on Desktop, and executing it again locally would duplicate it.
+        if (typeof forwardToLocalCodex === "function" && isDeliveryFailureError(error)) {
           const threadId = readString(route.threadId) || readString(route.params?.conversationId);
           if (threadId) {
             releaseDesktopThreadState(threadId);
@@ -642,7 +645,7 @@ function createDesktopIpcClient({
   function sendRequest(method, params) {
     ensureConnected();
     if (!socket || socket.destroyed) {
-      return Promise.reject(new Error("Desktop IPC is not connected."));
+      return Promise.reject(markDeliveryFailureError(new Error("Desktop IPC is not connected.")));
     }
 
     const requestId = `remodex-${now().toString(36)}-${Math.random().toString(16).slice(2)}`;
@@ -675,7 +678,7 @@ function createDesktopIpcClient({
 
         clearTimeout(timeout);
         pendingRequests.delete(requestId);
-        reject(error);
+        reject(markDeliveryFailureError(error));
       });
     });
   }
@@ -769,7 +772,13 @@ function createDesktopIpcClient({
       pendingRequests.delete(requestId);
       clearTimeout(waiter.timeout);
       if (envelope.resultType === "error") {
-        waiter.reject(new Error(envelope.error || `Desktop IPC request failed: ${waiter.method}`));
+        const error = new Error(envelope.error || `Desktop IPC request failed: ${waiter.method}`);
+        // A no-handler routing error means the request never reached any client,
+        // so callers may safely retry it against the local app-server.
+        if (/no codex ipc client can handle/i.test(error.message)) {
+          markDeliveryFailureError(error);
+        }
+        waiter.reject(error);
         return;
       }
 
@@ -1060,6 +1069,15 @@ function isPatchChange(change) {
 
 function isRemodexLiveOwnerBroadcast(params) {
   return readString(params?.remodexOwnerSource) === REMODEX_LIVE_OWNER_SOURCE;
+}
+
+function markDeliveryFailureError(error) {
+  error.remodexDeliveryFailed = true;
+  return error;
+}
+
+function isDeliveryFailureError(error) {
+  return error?.remodexDeliveryFailed === true;
 }
 
 function seedConversationStateFromThreadRead(response) {
