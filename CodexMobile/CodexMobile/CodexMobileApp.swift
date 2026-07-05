@@ -38,6 +38,9 @@ struct CodexMobileApp: App {
                 }
                 .onOpenURL { url in
                     Task { @MainActor in
+                        guard !routeRemodexDeepLink(url) else {
+                            return
+                        }
                         guard CodexService.legacyGPTLoginCallbackEnabled else {
                             return
                         }
@@ -56,6 +59,53 @@ struct CodexMobileApp: App {
                     TurnCacheManager.resetAll()
                 }
         }
+    }
+
+    @discardableResult
+    private func routeRemodexDeepLink(_ url: URL) -> Bool {
+        guard url.scheme?.caseInsensitiveCompare("phodex") == .orderedSame else {
+            return false
+        }
+
+        let threadId = Self.remodexDeepLinkThreadID(from: url)
+
+        let decodedThreadId = threadId?.removingPercentEncoding ?? threadId
+        guard let normalizedThreadId = decodedThreadId?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalizedThreadId.isEmpty else {
+            return false
+        }
+
+        codexService.handleNotificationOpen(threadId: normalizedThreadId, turnId: nil)
+        return true
+    }
+
+    private static func remodexDeepLinkThreadID(from url: URL) -> String? {
+        let host = url.host?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pathComponents = url.pathComponents
+            .dropFirst()
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        if let host, isThreadRouteComponent(host) {
+            return pathComponents.first
+        }
+        if host?.isEmpty != false,
+           let route = pathComponents.first,
+           Self.isThreadRouteComponent(route) {
+            return pathComponents.dropFirst().first
+        }
+
+        let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return queryItems.first { item in
+            item.name.caseInsensitiveCompare("threadId") == .orderedSame
+                || item.name.caseInsensitiveCompare("thread") == .orderedSame
+        }?.value
+    }
+
+    private static func isThreadRouteComponent(_ value: String) -> Bool {
+        value.caseInsensitiveCompare("thread") == .orderedSame
+            || value.caseInsensitiveCompare("threads") == .orderedSame
     }
 
     // Configures RevenueCat once at launch using the client-safe public SDK key.

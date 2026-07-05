@@ -415,10 +415,18 @@ function createBridgeSecureTransport({
       includeCurrentSessionEntries: true,
     });
     activeSession.isResumed = true;
+    let replayedHistoricalBacklog = false;
     for (const entry of missingEntries) {
-      if (!sendBufferedEntry(entry, activeSession.sendWireMessage)) {
-        break;
+      const outboundEntry = replayTaggedEntryIfHistorical(entry);
+      if (!sendBufferedEntry(outboundEntry, activeSession.sendWireMessage)) {
+        return;
       }
+      if (outboundEntry !== entry) {
+        replayedHistoricalBacklog = true;
+      }
+    }
+    if (replayedHistoricalBacklog) {
+      sendBufferedReplayCompleteMarker(activeSession.sendWireMessage);
     }
   }
 
@@ -553,11 +561,82 @@ function createBridgeSecureTransport({
       return;
     }
 
+    let replayedHistoricalBacklog = false;
     for (const entry of replayableOutboundEntries(lastRelayedBridgeOutboundSeq)) {
-      if (!sendBufferedEntry(entry, activeSession.sendWireMessage)) {
-        break;
+      const outboundEntry = replayTaggedEntryIfHistorical(entry);
+      if (!sendBufferedEntry(outboundEntry, activeSession.sendWireMessage)) {
+        return;
+      }
+      if (outboundEntry !== entry) {
+        replayedHistoricalBacklog = true;
       }
     }
+    if (replayedHistoricalBacklog) {
+      sendBufferedReplayCompleteMarker(activeSession.sendWireMessage);
+    }
+  }
+
+  // Closes a replayed-backlog burst deterministically: the phone batches tagged
+  // catch-up events and settles its timeline once on this marker instead of
+  // waiting out a debounce. Sent transiently (no bridgeOutboundSeq, never
+  // buffered) so it cannot occupy replay-buffer space or be replayed itself.
+  function sendBufferedReplayCompleteMarker(sendWireMessage) {
+    if (!activeSession?.isResumed || typeof sendWireMessage !== "function") {
+      return;
+    }
+
+    const envelope = encryptEnvelopePayload(
+      {
+        payloadText: JSON.stringify({
+          method: "remodex/bufferedReplay/completed",
+          params: { remodexBufferedReplayComplete: true },
+        }),
+      },
+      activeSession.macToPhoneKey,
+      SECURE_SENDER_MAC,
+      activeSession.nextOutboundCounter,
+      sessionId,
+      activeSession.keyEpoch
+    );
+    activeSession.nextOutboundCounter += 1;
+    sendWireMessage(JSON.stringify(envelope));
+  }
+
+  // Only prior secure-session backlog is catch-up history; same-session retries
+  // may be the phone's first delivery of a still-live turn.
+  function replayTaggedEntryIfHistorical(entry) {
+    if (
+      !activeSession
+      || entry.bridgeOutboundSeq >= activeSession.firstOutboundSeq
+    ) {
+      return entry;
+    }
+
+    return replayTaggedEntry(entry);
+  }
+
+  // Marks replayed notifications so the phone applies them as catch-up content
+  // instead of live activity; replay must never revive running/streaming UI.
+  // RPC responses (id-bearing) and non-object params pass through untouched.
+  function replayTaggedEntry(entry) {
+    const parsed = safeParseJSON(entry.payloadText);
+    if (
+      !parsed
+      || typeof parsed.method !== "string"
+      || parsed.id !== undefined
+      || !parsed.params
+      || typeof parsed.params !== "object"
+      || Array.isArray(parsed.params)
+    ) {
+      return entry;
+    }
+
+    parsed.params.remodexReplayedEvent = true;
+    return {
+      bridgeOutboundSeq: entry.bridgeOutboundSeq,
+      payloadText: JSON.stringify(parsed),
+      sizeBytes: entry.sizeBytes,
+    };
   }
 
   return {

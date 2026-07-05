@@ -218,6 +218,12 @@ extension CodexService {
                 kind: .turnEnd,
                 workingDirectory: gitWorkingDirectory(for: threadId)
             )
+        } catch {
+            debugRuntimeLog("workspace checkpoint turnEnd skipped thread=\(threadId) turn=\(turnId): \(error.localizedDescription)")
+            return
+        }
+
+        do {
             let diffResult = try await diffWorkspaceCheckpointsForTurn(
                 threadId: threadId,
                 turnId: turnId,
@@ -229,7 +235,13 @@ extension CodexService {
                 diff: diffResult.diff
             )
         } catch {
-            debugRuntimeLog("workspace checkpoint turnEnd skipped thread=\(threadId) turn=\(turnId): \(error.localizedDescription)")
+            // A missing start/end checkpoint only means the optional change-set
+            // preview is unavailable; the settled turn-end checkpoint still exists.
+            if isWorkspaceCheckpointMissingError(error) {
+                debugRuntimeLog("workspace checkpoint turnEnd diff skipped thread=\(threadId) turn=\(turnId): checkpoint unavailable")
+            } else {
+                debugRuntimeLog("workspace checkpoint turnEnd diff skipped thread=\(threadId) turn=\(turnId): \(error.localizedDescription)")
+            }
         }
     }
 
@@ -363,5 +375,12 @@ extension CodexService {
     private func normalizedCheckpointIdentifier(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
+    private func isWorkspaceCheckpointMissingError(_ error: Error) -> Bool {
+        guard case CodexServiceError.rpcError(let rpcError) = error else {
+            return false
+        }
+        return rpcError.data?.objectValue?["errorCode"]?.stringValue == "checkpoint_missing"
     }
 }

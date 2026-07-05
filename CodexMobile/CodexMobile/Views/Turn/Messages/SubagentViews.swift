@@ -60,7 +60,10 @@ struct SubagentActionCard: View {
     // MARK: - Header
 
     private var headerRow: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
+            RemodexIcon.image(systemName: "remodex.agent", size: 14, relativeTo: .caption)
+                .foregroundStyle(.secondary)
+
             Text(action.summaryText)
                 .font(AppFont.caption())
                 .foregroundStyle(.secondary)

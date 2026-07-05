@@ -15,6 +15,22 @@ private enum ThreadListHydrationPolicy {
     static let requestTimeoutNanoseconds: UInt64 = 12_000_000_000
 }
 
+private enum StaleInterruptResolution: Equatable {
+    case none
+    case completed
+    case terminalUnknown
+    case startingWithoutTurnID
+
+    var shouldClearRunningState: Bool {
+        switch self {
+        case .completed, .terminalUnknown:
+            return true
+        case .none, .startingWithoutTurnID:
+            return false
+        }
+    }
+}
+
 struct CodexPreAppendedTurnMessage: Sendable {
     let messageID: String
     let automaticTitleSeed: String?
@@ -563,9 +579,25 @@ extension CodexService {
             }
         }
 
+        // A synthetic placeholder id would be rejected by the app-server; resolve
+        // the real in-flight turn id first and keep the placeholder only as a
+        // last resort (the refresh-retry below still covers that path).
+        if let placeholderTurnID = normalizedTurnID,
+           Self.isSyntheticPlaceholderTurnID(placeholderTurnID),
+           let placeholderThreadID = normalizedThreadID
+                ?? threadIdByTurnID[placeholderTurnID]
+                ?? normalizedInterruptIdentifier(activeThreadId),
+           let refreshedTurnID = try? await resolveInFlightTurnID(threadId: placeholderThreadID),
+           let refreshedNormalizedTurnID = normalizedInterruptIdentifier(refreshedTurnID),
+           !Self.isSyntheticPlaceholderTurnID(refreshedNormalizedTurnID) {
+            normalizedTurnID = refreshedNormalizedTurnID
+            setActiveTurnID(refreshedNormalizedTurnID, for: placeholderThreadID)
+        }
+
         guard let normalizedTurnID else {
             throw CodexServiceError.invalidInput("turn/interrupt requires a non-empty turnId")
         }
+        var latestAttemptedTurnID = normalizedTurnID
 
         let resolvedThreadID = normalizedThreadID
             ?? threadIdByTurnID[normalizedTurnID]
@@ -600,27 +632,16 @@ extension CodexService {
             }
 
             if let resolvedThreadID,
-               shouldRetryInterruptWithRefreshedTurnID(finalError),
-               let refreshedTurnID = try await resolveInFlightTurnID(threadId: resolvedThreadID),
-               refreshedTurnID != normalizedTurnID {
+               shouldRetryInterruptWithRefreshedTurnID(finalError) {
                 do {
-                    try await sendInterruptRequest(
-                        turnId: refreshedTurnID,
-                        threadId: resolvedThreadID,
-                        useSnakeCaseParams: false
-                    )
-                    setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
-                    threadIdByTurnID[refreshedTurnID] = resolvedThreadID
-                    lastErrorMessage = nil
-                    return
-                } catch {
-                    finalError = error
-                    if shouldRetryInterruptWithSnakeCaseParams(error) {
+                    if let refreshedTurnID = try await resolveInFlightTurnID(threadId: resolvedThreadID),
+                       refreshedTurnID != normalizedTurnID {
+                        latestAttemptedTurnID = refreshedTurnID
                         do {
                             try await sendInterruptRequest(
                                 turnId: refreshedTurnID,
                                 threadId: resolvedThreadID,
-                                useSnakeCaseParams: true
+                                useSnakeCaseParams: false
                             )
                             setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
                             threadIdByTurnID[refreshedTurnID] = resolvedThreadID
@@ -628,9 +649,49 @@ extension CodexService {
                             return
                         } catch {
                             finalError = error
+                            if shouldRetryInterruptWithSnakeCaseParams(error) {
+                                do {
+                                    try await sendInterruptRequest(
+                                        turnId: refreshedTurnID,
+                                        threadId: resolvedThreadID,
+                                        useSnakeCaseParams: true
+                                    )
+                                    setActiveTurnID(refreshedTurnID, for: resolvedThreadID)
+                                    threadIdByTurnID[refreshedTurnID] = resolvedThreadID
+                                    lastErrorMessage = nil
+                                    return
+                                } catch {
+                                    finalError = error
+                                }
+                            }
                         }
                     }
+                } catch {
+                    let refreshResolution = staleInterruptResolution(for: error)
+                    if refreshResolution == .startingWithoutTurnID {
+                        preserveStartingRunAfterStaleInterrupt(
+                            threadId: resolvedThreadID,
+                            staleTurnId: latestAttemptedTurnID
+                        )
+                        lastErrorMessage = userFacingTurnErrorMessageForFooter(from: error)
+                        throw error
+                    }
+                    if staleInterruptResolution(for: finalError) == .none {
+                        finalError = error
+                    }
                 }
+            }
+
+            let staleResolution = staleInterruptResolution(for: finalError)
+            if let resolvedThreadID,
+               staleResolution.shouldClearRunningState {
+                clearRunningStateAfterStaleInterrupt(
+                    threadId: resolvedThreadID,
+                    turnId: latestAttemptedTurnID,
+                    resolution: staleResolution
+                )
+                lastErrorMessage = nil
+                return
             }
 
             lastErrorMessage = userFacingTurnErrorMessageForFooter(from: finalError)
@@ -1374,6 +1435,22 @@ extension CodexService {
                     return false
                 }
 
+                if let runningTurnID = snapshot.interruptibleTurnID,
+                   turnTerminalState(for: runningTurnID) != nil {
+                    clearRunningState(for: normalizedThreadID)
+                    setProtectedRunningFallback(false, for: normalizedThreadID)
+                    if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                        setActiveTurnID(nil, for: normalizedThreadID)
+                        if threadIdByTurnID[existingTurnID] == normalizedThreadID {
+                            threadIdByTurnID.removeValue(forKey: existingTurnID)
+                        }
+                        if activeTurnId == existingTurnID {
+                            activeTurnId = nil
+                        }
+                    }
+                    return true
+                }
+
                 if let runningTurnID = snapshot.interruptibleTurnID {
                     markThreadAsRunning(normalizedThreadID)
                     noteDesktopMirroredRunningActivity(for: normalizedThreadID)
@@ -1787,6 +1864,18 @@ extension CodexService {
             pendingMessageId = ""
         }
         var resolvedExpectedTurnID = normalizedInterruptIdentifier(expectedTurnId)
+        // Bridge-synthesized placeholder ids are not valid expectedTurnId values;
+        // resolve the real in-flight turn just like the missing-id path (the
+        // refresh-retry below stays as the fallback if resolution fails).
+        if let placeholderTurnID = resolvedExpectedTurnID,
+           Self.isSyntheticPlaceholderTurnID(placeholderTurnID) {
+            if let refreshedTurnID = try? await resolveInFlightTurnID(threadId: normalizedThreadID),
+               let refreshedNormalizedTurnID = normalizedInterruptIdentifier(refreshedTurnID),
+               !Self.isSyntheticPlaceholderTurnID(refreshedNormalizedTurnID) {
+                resolvedExpectedTurnID = refreshedNormalizedTurnID
+                setActiveTurnID(refreshedNormalizedTurnID, for: normalizedThreadID)
+            }
+        }
         if resolvedExpectedTurnID == nil {
             do {
                 resolvedExpectedTurnID = try await resolveInFlightTurnID(threadId: normalizedThreadID)
@@ -2028,6 +2117,57 @@ extension CodexService {
             || normalizedMessage.contains("not in progress")
             || normalizedMessage.contains("not running")
             || normalizedMessage.contains("not active")
+    }
+
+    // Classifies stale Stop outcomes so cleanup does not invent success for generic terminal messages.
+    private func staleInterruptResolution(for error: Error) -> StaleInterruptResolution {
+        if let serviceError = error as? CodexServiceError,
+           case .invalidInput(let message) = serviceError,
+           message.lowercased().contains("not published an interruptible turn id") {
+            return .startingWithoutTurnID
+        }
+
+        guard let normalizedMessage = rawRPCMessage(from: error)?.lowercased() else {
+            return .none
+        }
+
+        if normalizedMessage.contains("already completed") {
+            return .completed
+        }
+        if isStaleTurnRuntimeMessage(normalizedMessage) {
+            return .terminalUnknown
+        }
+        return .none
+    }
+
+    // Drops the stale turn id while keeping the thread marked as starting/running.
+    func preserveStartingRunAfterStaleInterrupt(threadId: String, staleTurnId: String?) {
+        if let staleTurnId,
+           activeTurnID(for: threadId) == staleTurnId {
+            setActiveTurnID(nil, for: threadId)
+        }
+        if let staleTurnId,
+           threadIdByTurnID[staleTurnId] == threadId {
+            threadIdByTurnID.removeValue(forKey: staleTurnId)
+        }
+        if activeTurnId == staleTurnId {
+            activeTurnId = nil
+        }
+        setProtectedRunningFallback(true, for: threadId)
+        demoteVisibleRunningStateToProtectedFallback(for: threadId)
+    }
+
+    // Collapses a stale Stop attempt without showing an error after the runtime says the run ended.
+    private func clearRunningStateAfterStaleInterrupt(
+        threadId: String,
+        turnId: String?,
+        resolution: StaleInterruptResolution
+    ) {
+        if resolution == .completed {
+            recordTurnTerminalState(threadId: threadId, turnId: turnId, state: .completed)
+        }
+        noteTurnFinished(turnId: turnId)
+        markTurnCompleted(threadId: threadId, turnId: turnId)
     }
 
     func isInternalRuntimeCompatibilityMessage(_ normalizedMessage: String) -> Bool {
@@ -2896,6 +3036,14 @@ extension CodexService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    // Bridge-synthesized placeholder turn ids ("turn-line-<n>" from JSONL history
+    // fallback, "rollout-…" from the rollout live mirror) group history rows and
+    // keep running state visible, but they are not real app-server turn ids:
+    // acting with one gets rejected ("expected active turn id … but found …").
+    nonisolated static func isSyntheticPlaceholderTurnID(_ turnId: String) -> Bool {
+        turnId.hasPrefix("turn-line-") || turnId.hasPrefix("rollout-")
+    }
+
     // Resolves the currently interruptible turn id from the latest turn page when local state is stale.
     // If the runtime reports "running" without an id yet, surface that instead of falling
     // back to the latest completed turn and interrupting the wrong run.
@@ -3138,7 +3286,11 @@ extension CodexService {
             "no such turn",
             "not active",
             "does not exist",
-            "cannot interrupt"
+            "cannot interrupt",
+            // Codex rejects actions whose turn id does not match the live turn
+            // (e.g. a stale or bridge-synthesized placeholder id):
+            // "expected active turn id <x> but found <y>".
+            "expected active turn"
         ]
         return hints.contains { message.contains($0) }
     }

@@ -155,7 +155,9 @@ struct TurnConversationContainerView: View {
                 PlanExecutionAccessory(message: pinnedTaskPlanMessage) {
                     isShowingPinnedPlanSheet = true
                 }
-                .padding(.horizontal, 12)
+                // Align the pill's leading edge with the resting/closed composer
+                // capsule, which is inset 20pt (12 outer + 8 collapse inset).
+                .padding(.horizontal, 20)
                 .padding(.top, 8)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }

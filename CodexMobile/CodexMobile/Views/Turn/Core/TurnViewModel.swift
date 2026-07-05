@@ -57,8 +57,6 @@ struct TurnComposerAttachmentIntakePlan {
 
 struct QueuedTurnDraft: Identifiable {
     let id: String
-    // Points at the optimistic timeline bubble shown while this draft waits behind a running turn.
-    let preAppendedMessageID: String?
     let text: String
     let attachments: [CodexImageAttachment]
     let skillMentions: [CodexTurnSkillMention]
@@ -76,7 +74,6 @@ struct QueuedTurnDraft: Identifiable {
 
     init(
         id: String,
-        preAppendedMessageID: String? = nil,
         text: String,
         attachments: [CodexImageAttachment],
         skillMentions: [CodexTurnSkillMention],
@@ -91,7 +88,6 @@ struct QueuedTurnDraft: Identifiable {
         createdAt: Date
     ) {
         self.id = id
-        self.preAppendedMessageID = preAppendedMessageID
         self.text = text
         self.attachments = attachments
         self.skillMentions = skillMentions
@@ -104,26 +100,6 @@ struct QueuedTurnDraft: Identifiable {
         self.rawAttachments = rawAttachments
         self.rawSubagentsSelectionArmed = rawSubagentsSelectionArmed
         self.createdAt = createdAt
-    }
-
-    // Carries the optimistic row id without rebuilding queue payloads at call sites.
-    func withPreAppendedMessageID(_ messageID: String?) -> QueuedTurnDraft {
-        QueuedTurnDraft(
-            id: id,
-            preAppendedMessageID: messageID,
-            text: text,
-            attachments: attachments,
-            skillMentions: skillMentions,
-            mentionMentions: mentionMentions,
-            collaborationMode: collaborationMode,
-            rawInput: rawInput,
-            rawFileMentions: rawFileMentions,
-            rawSkillMentions: rawSkillMentions,
-            rawPluginMentions: rawPluginMentions,
-            rawAttachments: rawAttachments,
-            rawSubagentsSelectionArmed: rawSubagentsSelectionArmed,
-            createdAt: createdAt
-        )
     }
 }
 
@@ -548,16 +524,11 @@ final class TurnViewModel {
     func removeQueuedDraft(
         id: String,
         codex: CodexService,
-        threadID: String,
-        removeOptimisticMessage: Bool = true
+        threadID: String
     ) {
         var drafts = queuedDrafts(codex: codex, threadID: threadID)
-        let removedDraft = drafts.first { $0.id == id }
         drafts.removeAll { $0.id == id }
         setQueuedDrafts(drafts, codex: codex, threadID: threadID)
-        if removeOptimisticMessage {
-            removeQueuedDraftOptimisticMessageIfNeeded(removedDraft, codex: codex, threadID: threadID)
-        }
     }
 
     // Moves one queued row back into the composer so the user can edit/resend it manually.
@@ -573,7 +544,6 @@ final class TurnViewModel {
 
         let draft = drafts.remove(at: draftIndex)
         setQueuedDrafts(drafts, codex: codex, threadID: threadID)
-        removeQueuedDraftOptimisticMessageIfNeeded(draft, codex: codex, threadID: threadID)
         restoreComposerState(from: draft)
         clearComposerAutocomplete()
         shouldAnchorToAssistantResponse = false
@@ -1392,16 +1362,11 @@ final class TurnViewModel {
             return
         }
 
-        let initialQueuedDraft = pendingSend.rawReviewSelection == nil
+        let queuedDraft = pendingSend.rawReviewSelection == nil
             ? makeQueuedDraft(from: pendingSend)
             : nil
         let threadBusy = isThreadBusy(codex: codex, threadID: threadID)
         let queuePaused = isQueuePaused(codex: codex, threadID: threadID)
-        // Busy-state refresh may wait on the runtime. Publish the queued bubble
-        // before any await so follow-ups appear above the first assistant block.
-        let queuedDraft = threadBusy
-            ? initialQueuedDraft.map { preAppendQueuedDraftMessageIfNeeded($0, codex: codex, threadID: threadID) }
-            : initialQueuedDraft
 
         subscriptions?.consumeFreeSendAttemptIfNeeded()
         isSending = true
@@ -1423,9 +1388,6 @@ final class TurnViewModel {
                 return
             }
 
-            let preAppendedMessage = queuedDraft?.preAppendedMessageID.map {
-                CodexPreAppendedTurnMessage(messageID: $0, automaticTitleSeed: nil)
-            }
             if queuePaused, let queuedDraft {
                 appendQueuedDraft(queuedDraft, codex: codex, threadID: threadID)
                 clearLocalDraft(codex: codex, threadID: threadID, persistToDisk: true)
@@ -1437,8 +1399,7 @@ final class TurnViewModel {
             await performTurnSend(
                 pendingSend,
                 codex: codex,
-                threadID: threadID,
-                preAppendedMessage: preAppendedMessage
+                threadID: threadID
             )
         }
     }
@@ -1732,8 +1693,6 @@ final class TurnViewModel {
                     skillMentions: nextDraft.skillMentions,
                     mentionMentions: nextDraft.mentionMentions,
                     fileMentions: confirmedFileMentionPaths(from: nextDraft.rawFileMentions),
-                    shouldAppendUserMessage: nextDraft.preAppendedMessageID == nil,
-                    preAppendedUserMessageID: nextDraft.preAppendedMessageID,
                     collaborationMode: nextDraft.collaborationMode
                 )
                 codex.lastErrorMessage = nil
@@ -1788,11 +1747,9 @@ final class TurnViewModel {
                         skillMentions: draft.skillMentions,
                         mentionMentions: draft.mentionMentions,
                         fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
-                        shouldAppendUserMessage: draft.preAppendedMessageID == nil,
-                        preAppendedUserMessageID: draft.preAppendedMessageID,
                         collaborationMode: draft.collaborationMode
                     )
-                    removeQueuedDraft(id: id, codex: codex, threadID: threadID, removeOptimisticMessage: false)
+                    removeQueuedDraft(id: id, codex: codex, threadID: threadID)
                     return
                 }
 
@@ -1808,14 +1765,16 @@ final class TurnViewModel {
                     skillMentions: draft.skillMentions,
                     mentionMentions: draft.mentionMentions,
                     fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
-                    shouldAppendUserMessage: draft.preAppendedMessageID == nil,
-                    preAppendedUserMessageID: draft.preAppendedMessageID,
                     collaborationMode: draft.collaborationMode
                 )
-                removeQueuedDraft(id: id, codex: codex, threadID: threadID, removeOptimisticMessage: false)
+                removeQueuedDraft(id: id, codex: codex, threadID: threadID)
             } catch {
                 shouldAnchorToAssistantResponse = false
-                clearQueuedDraftOptimisticMessage(id: id, draft: draft, codex: codex, threadID: threadID)
+                codex.removeLatestFailedUserMessage(
+                    threadId: threadID,
+                    matchingText: draft.text,
+                    matchingAttachments: draft.attachments
+                )
                 codex.lastErrorMessage = codex.userFacingTurnErrorMessageForFooter(from: error)
             }
         }
@@ -1825,6 +1784,15 @@ final class TurnViewModel {
         setQueuePauseState(.active, codex: codex, threadID: threadID)
         if codex.lastErrorMessage?.hasPrefix("Queue paused:") == true {
             codex.lastErrorMessage = nil
+        }
+        if isSending {
+            // Resume can be triggered inside sendTurn before its defer clears isSending;
+            // yield one actor turn so the normal queue gate can open.
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.flushQueueIfPossible(codex: codex, threadID: threadID)
+            }
+            return
         }
         flushQueueIfPossible(codex: codex, threadID: threadID)
     }
@@ -2593,11 +2561,7 @@ final class TurnViewModel {
 
         isPlanModeArmed = false
         shouldAnchorToAssistantResponse = true
-        appendQueuedDraft(
-            preAppendQueuedDraftMessageIfNeeded(queuedDraft, codex: codex, threadID: threadID),
-            codex: codex,
-            threadID: threadID
-        )
+        appendQueuedDraft(queuedDraft, codex: codex, threadID: threadID)
         clearLocalDraft(codex: codex, threadID: threadID, persistToDisk: true)
     }
 
@@ -2605,15 +2569,13 @@ final class TurnViewModel {
     private func performTurnSend(
         _ pendingSend: PendingTurnSend,
         codex: CodexService,
-        threadID: String,
-        preAppendedMessage: CodexPreAppendedTurnMessage? = nil
+        threadID: String
     ) async {
         do {
             try await dispatchPendingSend(
                 pendingSend,
                 codex: codex,
-                threadID: threadID,
-                preAppendedMessage: preAppendedMessage
+                threadID: threadID
             )
             clearLocalDraft(codex: codex, threadID: threadID, persistToDisk: true)
         } catch {
@@ -2709,85 +2671,9 @@ final class TurnViewModel {
         setQueuedDrafts(drafts, codex: codex, threadID: threadID)
     }
 
-    // Shows queued follow-ups in the transcript immediately, then reuses the same row
-    // when the queue flushes so the bubble does not duplicate at assistant completion.
-    private func preAppendQueuedDraftMessageIfNeeded(
-        _ draft: QueuedTurnDraft,
-        codex: CodexService,
-        threadID: String
-    ) -> QueuedTurnDraft {
-        guard draft.preAppendedMessageID == nil else {
-            return draft
-        }
-
-        let messageID = codex.appendUserMessage(
-            threadId: threadID,
-            text: draft.text,
-            attachments: draft.attachments,
-            fileMentions: confirmedFileMentionPaths(from: draft.rawFileMentions),
-            skillMentions: draft.skillMentions.compactMap {
-                let rawName = $0.name ?? $0.id
-                let normalized = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
-                return normalized.isEmpty ? nil : normalized
-            },
-            pluginMentions: draft.mentionMentions.compactMap {
-                let normalized = $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                return normalized.isEmpty ? nil : normalized
-            }
-        )
-
-        return messageID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? draft
-            : draft.withPreAppendedMessageID(messageID)
-    }
-
-    private func removeQueuedDraftOptimisticMessageIfNeeded(
-        _ draft: QueuedTurnDraft?,
-        codex: CodexService,
-        threadID: String
-    ) {
-        guard let messageID = draft?.preAppendedMessageID else {
-            return
-        }
-        _ = codex.removeUserMessage(threadId: threadID, messageId: messageID)
-    }
-
-    private func clearQueuedDraftOptimisticMessage(
-        id: String,
-        draft: QueuedTurnDraft,
-        codex: CodexService,
-        threadID: String
-    ) {
-        if let messageID = draft.preAppendedMessageID {
-            _ = codex.removeUserMessage(threadId: threadID, messageId: messageID)
-            replaceQueuedDraft(id: id, with: draft.withPreAppendedMessageID(nil), codex: codex, threadID: threadID)
-            return
-        }
-
-        codex.removeLatestFailedUserMessage(
-            threadId: threadID,
-            matchingText: draft.text,
-            matchingAttachments: draft.attachments
-        )
-    }
-
     private func prependQueuedDraft(_ draft: QueuedTurnDraft, codex: CodexService, threadID: String) {
         var drafts = queuedDrafts(codex: codex, threadID: threadID)
         drafts.insert(draft, at: 0)
-        setQueuedDrafts(drafts, codex: codex, threadID: threadID)
-    }
-
-    private func replaceQueuedDraft(
-        id: String,
-        with replacement: QueuedTurnDraft,
-        codex: CodexService,
-        threadID: String
-    ) {
-        var drafts = queuedDrafts(codex: codex, threadID: threadID)
-        guard let index = drafts.firstIndex(where: { $0.id == id }) else {
-            return
-        }
-        drafts[index] = replacement
         setQueuedDrafts(drafts, codex: codex, threadID: threadID)
     }
 
@@ -2812,39 +2698,42 @@ final class TurnViewModel {
         }
     }
 
+    // These reset helpers run on every keystroke; @Observable fires invalidations even for
+    // same-value writes, and TurnView's body reads the visibility flags, so unguarded writes
+    // would re-render the whole timeline per keystroke (very costly mid-stream).
     private func resetFileAutocompleteState() {
         fileAutocompleteDebounceTask?.cancel()
         fileAutocompleteDebounceTask = nil
-        fileAutocompleteItems = []
-        isFileAutocompleteVisible = false
-        isFileAutocompleteLoading = false
-        fileAutocompleteQuery = ""
+        if !fileAutocompleteItems.isEmpty { fileAutocompleteItems = [] }
+        if isFileAutocompleteVisible { isFileAutocompleteVisible = false }
+        if isFileAutocompleteLoading { isFileAutocompleteLoading = false }
+        if !fileAutocompleteQuery.isEmpty { fileAutocompleteQuery = "" }
     }
 
     private func resetSkillAutocompleteState() {
         skillAutocompleteDebounceTask?.cancel()
         skillAutocompleteDebounceTask = nil
-        skillAutocompleteItems = []
-        isSkillAutocompleteVisible = false
-        isSkillAutocompleteLoading = false
-        skillAutocompleteQuery = ""
-        skillAutocompleteTrigger = "$"
+        if !skillAutocompleteItems.isEmpty { skillAutocompleteItems = [] }
+        if isSkillAutocompleteVisible { isSkillAutocompleteVisible = false }
+        if isSkillAutocompleteLoading { isSkillAutocompleteLoading = false }
+        if !skillAutocompleteQuery.isEmpty { skillAutocompleteQuery = "" }
+        if skillAutocompleteTrigger != "$" { skillAutocompleteTrigger = "$" }
     }
 
     private func resetPluginAutocompleteState() {
         pluginAutocompleteDebounceTask?.cancel()
         pluginAutocompleteDebounceTask = nil
-        pluginAutocompleteItems = []
-        isPluginAutocompleteVisible = false
-        isPluginAutocompleteLoading = false
-        pluginAutocompleteQuery = ""
+        if !pluginAutocompleteItems.isEmpty { pluginAutocompleteItems = [] }
+        if isPluginAutocompleteVisible { isPluginAutocompleteVisible = false }
+        if isPluginAutocompleteLoading { isPluginAutocompleteLoading = false }
+        if !pluginAutocompleteQuery.isEmpty { pluginAutocompleteQuery = "" }
     }
 
     private func resetSlashCommandState(
         clearPendingSelection: Bool = false,
         clearConfirmedSelection: Bool = false
     ) {
-        slashCommandPanelState = .hidden
+        if slashCommandPanelState != .hidden { slashCommandPanelState = .hidden }
         if clearConfirmedSelection {
             composerReviewSelection = nil
             return

@@ -127,6 +127,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         try? await Task.sleep(nanoseconds: 30_000_000)
 
         XCTAssertEqual(service.pendingNotificationOpenThreadID, "thread-pending")
+        XCTAssertEqual(service.externalThreadOpenRequest?.threadId, "thread-pending")
         XCTAssertNil(service.activeThreadId)
 
         service.threads = [CodexThread(id: "thread-pending", title: "Pending thread")]
@@ -203,6 +204,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
         )
         service.isConnected = true
         service.pendingNotificationOpenThreadID = "thread-deleted"
+        service.externalThreadOpenRequest = CodexExternalThreadOpenRequest(threadId: "thread-deleted")
         service.threads = [
             CodexThread(id: "thread-deleted", title: "Deleted thread", syncState: .archivedLocal),
             CodexThread(id: "thread-live", title: "Live thread"),
@@ -212,6 +214,7 @@ final class CodexPushNotificationRegistrationTests: XCTestCase {
 
         XCTAssertFalse(routed)
         XCTAssertNil(service.pendingNotificationOpenThreadID)
+        XCTAssertNil(service.externalThreadOpenRequest)
         XCTAssertEqual(service.activeThreadId, "thread-live")
         XCTAssertEqual(service.missingNotificationThreadPrompt?.threadId, "thread-deleted")
     }

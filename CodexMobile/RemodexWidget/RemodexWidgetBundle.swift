@@ -12,6 +12,7 @@ struct RemodexWidgetBundle: WidgetBundle {
     @WidgetBundleBuilder
     var body: some Widget {
         RemodexLockScreenWidget()
+        RemodexDisplayIslandLiveActivity()
         if #available(iOS 18.0, *) {
             RemodexLaunchControl()
         }

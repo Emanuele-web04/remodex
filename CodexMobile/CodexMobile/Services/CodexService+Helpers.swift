@@ -910,7 +910,11 @@ extension CodexService {
         value.sorted { lhs, rhs in
             let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? Date.distantPast
             let rhsDate = rhs.updatedAt ?? rhs.createdAt ?? Date.distantPast
-            return lhsDate > rhsDate
+            if lhsDate != rhsDate {
+                return lhsDate > rhsDate
+            }
+            // Deterministic tie-break keeps reconciled lists identical across sync polls.
+            return lhs.id < rhs.id
         }
     }
 

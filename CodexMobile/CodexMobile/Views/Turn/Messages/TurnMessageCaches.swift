@@ -23,6 +23,7 @@ enum TurnCacheManager {
         UserBubbleRenderModelCache.reset()
         MessageRowRenderModelCache.reset()
         CommandExecutionStatusCache.reset()
+        ToolActivityRenderCache.reset()
         FileChangeSystemRenderCache.reset()
         FileChangeBlockPresentationCache.reset()
         PerFileDiffChunkCache.reset()
@@ -61,6 +62,20 @@ struct FileChangeRenderState {
     let detailBodyText: String
 }
 
+// Precomputed display fields for a `.toolActivity` row: one line per tool call,
+// each with its own leading icon so merged activity rows render like the regular
+// humanized command rows. Built once per text revision instead of on every
+// `toolActivitySystemView` body evaluation while activity streams.
+struct ToolActivityRenderModel {
+    struct Line: Identifiable, Equatable {
+        let id: Int
+        let text: String
+        let iconSystemName: String
+    }
+
+    let lines: [Line]
+}
+
 struct MessageRowRenderModel {
     let codeCommentContent: CodeCommentDirectiveContent?
     let mermaidContent: MermaidMarkdownContent?
@@ -73,6 +88,7 @@ struct MessageRowRenderModel {
     let thinkingText: String?
     let thinkingActivityPreview: String?
     let commandStatus: CommandExecutionStatusModel?
+    var toolActivity: ToolActivityRenderModel? = nil
 
     static let empty = MessageRowRenderModel(
         codeCommentContent: nil,
@@ -193,7 +209,20 @@ enum MessageRowRenderModelCache {
                     commandStatus: nil
                 )
             case .toolActivity:
-                return .empty
+                return MessageRowRenderModel(
+                    codeCommentContent: nil,
+                    mermaidContent: nil,
+                    assistantImageReferences: [],
+                    assistantInlineContentSegments: [],
+                    assistantTextWithoutImageSyntax: nil,
+                    fileChangeState: nil,
+                    fileChangeGroups: [],
+                    thinkingContent: nil,
+                    thinkingText: nil,
+                    thinkingActivityPreview: nil,
+                    commandStatus: nil,
+                    toolActivity: ToolActivityRenderCache.model(messageID: message.id, text: displayText)
+                )
             case .commandExecution:
                 return MessageRowRenderModel(
                     codeCommentContent: nil,
@@ -244,6 +273,39 @@ enum CommandExecutionStatusCache {
         default:
             return nil
         }
+    }
+}
+
+enum ToolActivityRenderCache {
+    private static let cache = BoundedCache<String, ToolActivityRenderModel>(maxEntries: 256)
+
+    static func model(messageID: String, text: String) -> ToolActivityRenderModel {
+        let key = TurnTextCacheKey.key(messageID: messageID, kind: "tool-activity", text: text)
+        if let cached = cache.get(key) { return cached }
+        let model = build(text: text)
+        cache.set(key, value: model)
+        return model
+    }
+
+    static func reset() { cache.removeAll() }
+
+    private static func build(text: String) -> ToolActivityRenderModel {
+        // Merged activity rows carry one tool call per line; classify each line's
+        // icon independently so every call keeps its own glyph, matching the
+        // humanized command rows.
+        let lines = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .enumerated()
+            .map { index, line in
+                ToolActivityRenderModel.Line(
+                    id: index,
+                    text: line,
+                    iconSystemName: ToolCallIcon.systemName(forToolActivitySummary: line)
+                )
+            }
+        return ToolActivityRenderModel(lines: lines)
     }
 }
 

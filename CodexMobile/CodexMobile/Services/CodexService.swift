@@ -179,6 +179,11 @@ struct CodexMissingNotificationThreadPrompt: Identifiable, Equatable, Sendable {
     let threadId: String
 }
 
+struct CodexExternalThreadOpenRequest: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let threadId: String
+}
+
 enum CodexThreadRunBadgeState: Hashable, Sendable {
     case running
     case ready
@@ -283,6 +288,7 @@ struct PendingSystemStreamingDeltas {
     let turnId: String?
     let itemId: String
     let kind: CodexMessageKind
+    var isReplay: Bool
     var deltas: [String]
 }
 
@@ -413,6 +419,7 @@ final class CodexService {
     var modelsErrorMessage: String?
     var notificationAuthorizationStatus: UNAuthorizationStatus = .notDetermined
     var pendingNotificationOpenThreadID: String?
+    var externalThreadOpenRequest: CodexExternalThreadOpenRequest?
     var supportsStructuredSkillInput = true
     var supportsStructuredMentionInput = true
     // Runtime compatibility flag for `turn/start.collaborationMode` plan turns.
@@ -421,6 +428,7 @@ final class CodexService {
     var supportsServiceTier = true
     // Runtime compatibility flag for the bridge-owned voice transcription flow.
     var supportsBridgeVoiceTranscription = true
+    var supportedBridgeVoiceTranscriptionFormats: Set<String> = ["wav"]
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
     // Runtime compatibility flag for `thread/turns/list` and `excludeTurns`.
@@ -500,9 +508,32 @@ final class CodexService {
     @ObservationIgnored var messagePersistenceDebounceTask: Task<Void, Never>?
     // Coalesces high-frequency assistant deltas before they mutate observed timeline state.
     @ObservationIgnored var pendingAssistantDeltaByStreamID: [String: String] = [:]
-    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?)] = [:]
+    @ObservationIgnored var pendingAssistantDeltaContextByStreamID: [String: (threadId: String, turnId: String, itemId: String?, assistantPhase: String?, isReplay: Bool)] = [:]
     @ObservationIgnored var pendingAssistantDeltaStreamOrder: [String] = []
     @ObservationIgnored var pendingAssistantDeltaFlushTask: Task<Void, Never>?
+    // Scoped while replayed bridge notifications apply so catch-up history cannot
+    // recreate live/streaming UI or mark the sidebar as running.
+    @ObservationIgnored var isApplyingReplayedBridgeEvent = false
+    // Threads receiving a catch-up burst (rollout-mirror bootstrap replay or
+    // buffered reconnect replay): timeline refreshes and derived-output cache
+    // syncs are deferred and flushed once when the bridge's bootstrap-complete
+    // marker arrives (or the debounce fallback fires), so reopening the app onto
+    // a running desktop thread settles in one pass instead of replaying every
+    // past event visually.
+    @ObservationIgnored var timelineCatchUpBurstThreadIDs: Set<String> = []
+    @ObservationIgnored var timelineCatchUpFlushTaskByThreadID: [String: Task<Void, Never>] = [:]
+    // Subset of the burst threads that are applying *replayed history* (bootstrap
+    // or buffered reconnect replay). Only these gate the assistant/system
+    // streaming fast paths: live-mirror micro-bursts defer just the reducer
+    // rebuild so text keeps streaming into the visible snapshot per event.
+    @ObservationIgnored var replayCatchUpBurstThreadIDs: Set<String> = []
+
+    // The two catch-up burst flavors: replayed history applies fully closed in
+    // one settle, live-mirror micro-bursts only coalesce the reducer rebuild.
+    enum TimelineCatchUpBurstKind {
+        case replay
+        case liveMirror
+    }
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.
@@ -669,7 +700,8 @@ final class CodexService {
     @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
     var pinnedThreadIDs: [String] = []
     @ObservationIgnored var pinnedThreadSnapshotsByRootID: [String: [CodexThread]] = [:]
-    @ObservationIgnored var snapshotOnlyPinnedThreadIDs: Set<String> = []
+    // Sidebar rows read this directly, so keep it observable even when thread metadata is unchanged.
+    var snapshotOnlyPinnedThreadIDs: Set<String> = []
     @ObservationIgnored var stoppedTurnIDsByThread: [String: Set<String>] = [:]
     // Lazily rebuilt id->index maps keep hot-path message lookups out of repeated linear scans.
     @ObservationIgnored var messageIndexCacheByThread: [String: [String: Int]] = [:]

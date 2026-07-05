@@ -19,7 +19,8 @@ enum TurnTimelineReducer {
     // Applies all render-only timeline transforms in one pass.
     static func project(messages: [CodexMessage]) -> TurnTimelineProjection {
         let visibleMessages = removeHiddenSystemMarkers(in: messages)
-        let reordered = enforceIntraTurnOrder(in: visibleMessages)
+        let anchored = anchorLateFileChangesToOwningTurn(in: visibleMessages)
+        let reordered = enforceIntraTurnOrder(in: anchored)
         let collapsedThinking = collapseThinkingMessages(in: reordered)
         let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
         let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandThinkingEchoes)
@@ -210,6 +211,84 @@ enum TurnTimelineReducer {
         case .thinking, .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
             return false
         }
+    }
+
+    // Turn-end file-change snapshots can land after the user already sent the next
+    // message: the append gives them a tail orderIndex, so the diff card would render
+    // glued to the start of the NEW turn. enforceIntraTurnOrder cannot fix this (it
+    // only reorders within a turn's own slots), so relocate the card back to the end
+    // of its owning turn whenever another turn already started after it.
+    static func anchorLateFileChangesToOwningTurn(in messages: [CodexMessage]) -> [CodexMessage] {
+        // Last non-fileChange row per turn: the anchor the card should trail.
+        var lastContentIndexByTurn: [String: Int] = [:]
+        for (index, message) in messages.enumerated() {
+            guard let turnId = message.turnId, !turnId.isEmpty,
+                  !(message.role == .system && message.kind == .fileChange) else {
+                continue
+            }
+            lastContentIndexByTurn[turnId] = index
+        }
+        guard !lastContentIndexByTurn.isEmpty else {
+            return messages
+        }
+
+        // Collect misplaced cards: a fileChange sitting past its turn's last content
+        // row with a different turn (or a new optimistic user prompt) in between.
+        var relocatedIndicesByAnchor: [Int: [Int]] = [:]
+        var relocatedIndices = Set<Int>()
+        for (index, message) in messages.enumerated() {
+            guard message.role == .system,
+                  message.kind == .fileChange,
+                  let turnId = message.turnId, !turnId.isEmpty,
+                  let anchorIndex = lastContentIndexByTurn[turnId],
+                  anchorIndex < index else {
+                continue
+            }
+
+            // Only a confirmed different turnId proves the next turn started. A
+            // nil-turnId user row can still be an in-flight steer of the SAME
+            // running turn (turn ids attach on turn/started); relocating on it
+            // would bounce the card around during live steering.
+            let crossesIntoLaterTurn = messages[(anchorIndex + 1)..<index].contains { between in
+                guard let betweenTurnId = between.turnId, !betweenTurnId.isEmpty else {
+                    return false
+                }
+                return betweenTurnId != turnId
+            }
+            guard crossesIntoLaterTurn else {
+                continue
+            }
+
+            // Preserve any existing same-turn file-change card ahead of the newer
+            // late snapshot so the following dedupe pass still treats late as newest.
+            let insertionAnchorIndex = (0..<index).reversed().first { priorIndex in
+                guard !relocatedIndices.contains(priorIndex),
+                      let priorTurnId = messages[priorIndex].turnId,
+                      !priorTurnId.isEmpty else {
+                    return false
+                }
+                return priorTurnId == turnId
+            } ?? anchorIndex
+
+            relocatedIndicesByAnchor[insertionAnchorIndex, default: []].append(index)
+            relocatedIndices.insert(index)
+        }
+        guard !relocatedIndices.isEmpty else {
+            return messages
+        }
+
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+        for (index, message) in messages.enumerated() {
+            if relocatedIndices.contains(index) {
+                continue
+            }
+            result.append(message)
+            if let lateCards = relocatedIndicesByAnchor[index] {
+                result.append(contentsOf: lateCards.map { messages[$0] })
+            }
+        }
+        return result
     }
 
     // Mac-started rollout mirrors can interleave many assistant/tool rows before the
@@ -977,14 +1056,22 @@ enum TurnTimelineReducer {
     // Keeps only the newest matching file-change card when multiple event channels emit the same diff.
     static func removeDuplicateFileChangeMessages(in messages: [CodexMessage]) -> [CodexMessage] {
         let signatures = messages.map { fileChangeDedupSignature(for: $0) }
+        // Only file-change messages carry a signature, so scan just those positions:
+        // the pairwise supersession check is O(f^2) in the file-change count rather than
+        // O(n^2) over the whole thread. Non-file-change positions never matched before,
+        // so the result is identical.
+        let fileChangeIndices = signatures.indices.filter { signatures[$0] != nil }
+        guard fileChangeIndices.count > 1 else {
+            return messages
+        }
+
         var supersededIndices: Set<Int> = []
+        for olderSlot in fileChangeIndices.indices {
+            let olderIndex = fileChangeIndices[olderSlot]
+            guard let olderSignature = signatures[olderIndex] else { continue }
 
-        for olderIndex in messages.indices {
-            guard let olderSignature = signatures[olderIndex] else {
-                continue
-            }
-
-            for newerIndex in messages.indices where newerIndex > olderIndex {
+            for newerSlot in (olderSlot + 1)..<fileChangeIndices.count {
+                let newerIndex = fileChangeIndices[newerSlot]
                 guard let newerSignature = signatures[newerIndex],
                       fileChangeMessage(newerSignature, supersedes: olderSignature) else {
                     continue
@@ -994,11 +1081,12 @@ enum TurnTimelineReducer {
             }
         }
 
+        guard !supersededIndices.isEmpty else {
+            return messages
+        }
+
         return messages.enumerated().compactMap { index, message in
-            if signatures[index] != nil, supersededIndices.contains(index) {
-                return nil
-            }
-            return message
+            supersededIndices.contains(index) ? nil : message
         }
     }
 

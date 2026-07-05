@@ -138,6 +138,38 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertNil(service.lastErrorMessage)
     }
 
+    func testSendTurnWhileQueuePausedResumesAndFlushesAfterSendTaskClears() async {
+        let service = makeService()
+        service.isConnected = true
+        service.queuePauseStateByThread["thread-queue"] = .paused(errorMessage: "temporary")
+        service.lastErrorMessage = "Queue paused: temporary"
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            XCTAssertEqual(method, "turn/start")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("turn-resumed")]),
+                includeJSONRPC: false
+            )
+        }
+
+        let viewModel = makeViewModel()
+        viewModel.input = "resume and send"
+
+        viewModel.sendTurn(codex: service, threadID: "thread-queue")
+        for _ in 0..<160 where recordedMethods.isEmpty || viewModel.isSending {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(recordedMethods, ["turn/start"])
+        XCTAssertFalse(viewModel.isQueuePaused(codex: service, threadID: "thread-queue"))
+        XCTAssertEqual(viewModel.queuedCount(codex: service, threadID: "thread-queue"), 0)
+        XCTAssertEqual(service.activeTurnID(for: "thread-queue"), "turn-resumed")
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
     func testQueuedDraftsPersistAcrossViewModelRecreationForSameThread() {
         let service = makeService()
         service.isConnected = true
@@ -540,6 +572,58 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? false)
     }
 
+    func testSteerQueuedDraftResolvesRealTurnIDWhenActiveTurnIsSyntheticPlaceholder() async {
+        let service = makeService()
+        service.isConnected = true
+        service.supportsTurnPagination = false
+        service.runningThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-line-13319"
+        service.activeTurnId = "turn-line-13319"
+
+        var recordedMethods: [String] = []
+        var expectedTurnIDs: [String] = []
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            if method == "thread/read" {
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "turns": .array([
+                                .object([
+                                    "id": .string("bd96a02b-698f-411f-9d48-c95615b75ed7"),
+                                    "status": .string("in_progress"),
+                                ])
+                            ])
+                        ])
+                    ]),
+                    includeJSONRPC: false
+                )
+            }
+            expectedTurnIDs.append(params?.objectValue?["expectedTurnId"]?.stringValue ?? "")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["turnId": .string("bd96a02b-698f-411f-9d48-c95615b75ed7")]),
+                includeJSONRPC: false
+            )
+        }
+
+        let viewModel = makeViewModel()
+        let draft = makeDraft(text: "queued")
+        service.queuedTurnDraftsByThread["thread-queue"] = [draft]
+
+        viewModel.steerQueuedDraft(id: draft.id, codex: service, threadID: "thread-queue")
+        await waitForSteerCompletion(viewModel)
+
+        XCTAssertEqual(recordedMethods, ["thread/read", "turn/steer"])
+        XCTAssertEqual(expectedTurnIDs, ["bd96a02b-698f-411f-9d48-c95615b75ed7"])
+        XCTAssertEqual(
+            service.activeTurnIdByThread["thread-queue"],
+            "bd96a02b-698f-411f-9d48-c95615b75ed7"
+        )
+        XCTAssertTrue(service.queuedTurnDraftsByThread["thread-queue"]?.isEmpty ?? false)
+    }
+
     func testSteerQueuedDraftStartsTurnWhenRunningFlagRefreshClearsStaleBusyState() async {
         let service = makeService()
         service.isConnected = true
@@ -652,6 +736,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         let service = makeService()
         service.isConnected = true
         service.isInitialized = true
+        service.supportsTurnPagination = false
         service.runningThreadIDs.insert("thread-queue")
         service.activeTurnIdByThread["thread-queue"] = "turn-old"
         service.activeTurnId = "turn-old"
@@ -689,6 +774,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         let service = makeService()
         service.isConnected = true
         service.isInitialized = true
+        service.supportsTurnPagination = false
         service.runningThreadIDs.insert("thread-queue")
         service.activeTurnIdByThread["thread-queue"] = "turn-old"
         service.activeTurnId = "turn-old"
@@ -722,6 +808,50 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(service.activeTurnId, "turn-latest")
     }
 
+    func testRefreshInFlightTurnStateDoesNotReviveKnownTerminalTurnWhenStatusIsMissing() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = false
+        service.runningThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-old"
+        service.activeTurnId = "turn-old"
+        service.recordTurnTerminalState(
+            threadId: "thread-queue",
+            turnId: "turn-latest",
+            state: .completed
+        )
+
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/read")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "turns": .array([
+                            .object([
+                                "id": .string("turn-old"),
+                                "status": .string("in_progress"),
+                            ]),
+                            .object([
+                                "id": .string("turn-latest"),
+                            ]),
+                        ])
+                    ])
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let didRefresh = await service.refreshInFlightTurnState(threadId: "thread-queue")
+
+        XCTAssertTrue(didRefresh)
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn("thread-queue"))
+        XCTAssertNil(service.activeTurnIdByThread["thread-queue"])
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertEqual(service.turnTerminalState(for: "turn-latest"), .completed)
+    }
+
     func testRefreshInFlightTurnStatePreservesDesktopMirroredRunOnlyOnceWhenSnapshotIsStale() async {
         let service = makeService()
 
@@ -736,6 +866,7 @@ final class TurnViewModelQueueTests: XCTestCase {
 
         service.isConnected = true
         service.isInitialized = true
+        service.supportsTurnPagination = false
         service.requestTransportOverride = { method, _ in
             XCTAssertEqual(method, "thread/read")
             return RPCMessage(
@@ -813,6 +944,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         let service = makeService()
         service.isConnected = true
         service.isInitialized = true
+        service.supportsTurnPagination = false
         service.runningThreadIDs.insert("thread-queue")
         service.protectedRunningFallbackThreadIDs.insert("thread-queue")
 
@@ -851,6 +983,61 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(recordedMethods, ["thread/read"])
         XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
         XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains("thread-queue"))
+    }
+
+    // Bridge JSONL history can leave a synthetic "turn-line-<n>" id as the active
+    // turn for desktop-mirrored threads; Stop must resolve the real in-flight turn
+    // instead of sending the placeholder (Codex rejects it with "expected active
+    // turn id … but found …").
+    func testInterruptTurnResolvesRealTurnIDWhenActiveTurnIsSyntheticPlaceholder() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.supportsTurnPagination = false
+        service.runningThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-line-13319"
+        service.activeTurnId = "turn-line-13319"
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, params in
+            recordedMethods.append(method)
+            switch method {
+            case "thread/read":
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, "thread-queue")
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "turns": .array([
+                                .object([
+                                    "id": .string("bd96a02b-698f-411f-9d48-c95615b75ed7"),
+                                    "status": .string("in_progress"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            case "turn/interrupt":
+                XCTAssertEqual(
+                    params?.objectValue?["turnId"]?.stringValue,
+                    "bd96a02b-698f-411f-9d48-c95615b75ed7"
+                )
+                XCTAssertEqual(params?.objectValue?["threadId"]?.stringValue, "thread-queue")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        try await service.interruptTurn(turnId: nil, threadId: "thread-queue")
+
+        XCTAssertEqual(recordedMethods, ["thread/read", "turn/interrupt"])
+        XCTAssertEqual(
+            service.activeTurnIdByThread["thread-queue"],
+            "bd96a02b-698f-411f-9d48-c95615b75ed7"
+        )
+        XCTAssertNil(service.lastErrorMessage)
     }
 
     func testInterruptTurnFallsBackToThreadReadWhenFreshThreadTurnsListIsNotMaterialized() async throws {
@@ -903,6 +1090,108 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertEqual(recordedMethods, ["thread/turns/list", "thread/read", "turn/interrupt"])
         XCTAssertTrue(service.supportsTurnPagination)
         XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testInterruptTurnClearsRunningStateWhenRuntimeSaysRunAlreadyFinished() async throws {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = false
+        service.runningThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-finished"
+        service.activeTurnId = "turn-finished"
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            switch method {
+            case "turn/interrupt":
+                throw CodexServiceError.rpcError(
+                    RPCError(code: -32000, message: "turn already finished")
+                )
+            case "thread/read":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "turns": .array([]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        try await service.interruptTurn(turnId: "turn-finished", threadId: "thread-queue")
+
+        XCTAssertEqual(recordedMethods, ["turn/interrupt", "thread/read"])
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn("thread-queue"))
+        XCTAssertNil(service.activeTurnIdByThread["thread-queue"])
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertNil(service.lastErrorMessage)
+        XCTAssertNil(service.turnTerminalState(for: "turn-finished"))
+    }
+
+    func testInterruptTurnKeepsStartingRunWhenStaleTurnAlreadyFinished() async {
+        let service = makeService()
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = false
+        service.runningThreadIDs.insert("thread-queue")
+        service.protectedRunningFallbackThreadIDs.insert("thread-queue")
+        service.activeTurnIdByThread["thread-queue"] = "turn-finished"
+        service.activeTurnId = "turn-finished"
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            switch method {
+            case "turn/interrupt":
+                throw CodexServiceError.rpcError(
+                    RPCError(code: -32000, message: "turn already finished")
+                )
+            case "thread/read":
+                return RPCMessage(
+                    id: .string(UUID().uuidString),
+                    result: .object([
+                        "thread": .object([
+                            "turns": .array([
+                                .object([
+                                    "status": .string("in_progress"),
+                                ]),
+                                .object([
+                                    "id": .string("turn-finished"),
+                                    "status": .string("completed"),
+                                ]),
+                            ]),
+                        ]),
+                    ]),
+                    includeJSONRPC: false
+                )
+            default:
+                XCTFail("Unexpected method \(method)")
+                return RPCMessage(id: .string(UUID().uuidString), result: .object([:]), includeJSONRPC: false)
+            }
+        }
+
+        do {
+            try await service.interruptTurn(turnId: "turn-finished", threadId: "thread-queue")
+            XCTFail("interruptTurn should keep the starting run protected until it has a turn id")
+        } catch {
+            XCTAssertTrue(
+                service.userFacingTurnErrorMessage(from: error).contains("interruptible turn ID")
+            )
+        }
+
+        XCTAssertEqual(recordedMethods, ["turn/interrupt", "thread/read", "thread/read", "thread/read"])
+        XCTAssertTrue(service.threadHasActiveOrRunningTurn("thread-queue"))
+        XCTAssertFalse(service.runningThreadIDs.contains("thread-queue"))
+        XCTAssertTrue(service.protectedRunningFallbackThreadIDs.contains("thread-queue"))
+        XCTAssertNil(service.activeTurnIdByThread["thread-queue"])
+        XCTAssertNil(service.activeTurnId)
     }
 
     func testSteerQueuedDraftIsNoOpWhenThreadIsNotRunning() async {

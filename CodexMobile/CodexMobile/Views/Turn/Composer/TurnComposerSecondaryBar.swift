@@ -8,6 +8,10 @@ import SwiftUI
 
 struct TurnComposerSecondaryBar: View {
     let isInputFocused: Bool
+    // At rest the composer collapses to a capsule; keep only the worktree/branch
+    // chevron floating above it (no file-change capsule, no focus gate) so the
+    // picker stays reachable without expanding the composer.
+    var isComposerCollapsed: Bool = false
     let isEmptyThread: Bool
     let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
@@ -34,30 +38,17 @@ struct TurnComposerSecondaryBar: View {
 
     var body: some View {
         Group {
-            if !isInputFocused {
+            if isComposerCollapsed {
                 HStack(spacing: 0) {
-                    TurnComposerCollapsibleContextCluster(
-                        isEmptyThread: isEmptyThread,
-                        hasWorkingDirectory: hasWorkingDirectory,
-                        isWorktreeProject: isWorktreeProject,
-                        showsGitBranchSelector: showsGitBranchSelector,
-                        isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
-                        availableGitBranchTargets: availableGitBranchTargets,
-                        gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
-                        gitWorktreePathsByBranch: gitWorktreePathsByBranch,
-                        selectedGitBaseBranch: selectedGitBaseBranch,
-                        currentGitBranch: currentGitBranch,
-                        gitDefaultBranch: gitDefaultBranch,
-                        isLoadingGitBranchTargets: isLoadingGitBranchTargets,
-                        isSwitchingGitBranch: isSwitchingGitBranch,
-                        isCreatingGitWorktree: isCreatingGitWorktree,
-                        onSelectGitBranch: onSelectGitBranch,
-                        onCreateGitBranch: onCreateGitBranch,
-                        onSelectGitBaseBranch: onSelectGitBaseBranch,
-                        onRefreshGitBranches: onRefreshGitBranches,
-                        canHandOffToWorktree: canHandOffToWorktree,
-                        onTapCreateWorktree: onTapCreateWorktree
-                    )
+                    contextCluster
+
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(.opacity)
+            } else if !isInputFocused {
+                HStack(spacing: 0) {
+                    contextCluster
 
                     Spacer(minLength: 12)
 
@@ -71,5 +62,30 @@ struct TurnComposerSecondaryBar: View {
                 .animation(.spring(response: 0.28, dampingFraction: 0.88), value: activeFileChangeStatus)
             }
         }
+    }
+
+    private var contextCluster: some View {
+        TurnComposerCollapsibleContextCluster(
+            isEmptyThread: isEmptyThread,
+            hasWorkingDirectory: hasWorkingDirectory,
+            isWorktreeProject: isWorktreeProject,
+            showsGitBranchSelector: showsGitBranchSelector,
+            isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
+            availableGitBranchTargets: availableGitBranchTargets,
+            gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
+            gitWorktreePathsByBranch: gitWorktreePathsByBranch,
+            selectedGitBaseBranch: selectedGitBaseBranch,
+            currentGitBranch: currentGitBranch,
+            gitDefaultBranch: gitDefaultBranch,
+            isLoadingGitBranchTargets: isLoadingGitBranchTargets,
+            isSwitchingGitBranch: isSwitchingGitBranch,
+            isCreatingGitWorktree: isCreatingGitWorktree,
+            onSelectGitBranch: onSelectGitBranch,
+            onCreateGitBranch: onCreateGitBranch,
+            onSelectGitBaseBranch: onSelectGitBaseBranch,
+            onRefreshGitBranches: onRefreshGitBranches,
+            canHandOffToWorktree: canHandOffToWorktree,
+            onTapCreateWorktree: onTapCreateWorktree
+        )
     }
 }

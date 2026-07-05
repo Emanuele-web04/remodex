@@ -23,11 +23,11 @@ function composeAccountStatus({
     normalizeString(authStatus?.authMethod),
     normalizeString(account?.type),
   ]) || null;
-  const tokenReady = Boolean(authToken);
+  // Voice transcription now uses ChatGPT session auth only; API-key tokens must not advertise voice readiness.
+  const tokenReady = Boolean(authToken) && isChatGPTAuthMethod(authMethod);
   const requiresOpenaiAuth = Boolean(accountRead?.requiresOpenaiAuth || authStatus?.requiresOpenaiAuth);
   const hasPriorLoginContext = hasAccountLogin || Boolean(authMethod);
-  const hasUsableChatGPTToken = tokenReady && isChatGPTAuthMethod(authMethod);
-  const needsReauth = !loginInFlight && requiresOpenaiAuth && hasPriorLoginContext && !hasUsableChatGPTToken;
+  const needsReauth = !loginInFlight && requiresOpenaiAuth && hasPriorLoginContext && !tokenReady;
   const isAuthenticated = !needsReauth && (tokenReady || hasAccountLogin);
   const status = isAuthenticated
     ? "authenticated"
@@ -55,7 +55,8 @@ function composeAccountStatus({
 }
 
 function isChatGPTAuthMethod(authMethod) {
-  return authMethod === "chatgpt" || authMethod === "chatgptAuthTokens";
+  const normalized = normalizeString(authMethod).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalized === "chatgpt" || normalized === "chatgptauthtokens";
 }
 
 // Removes any token-bearing fields before the bridge sends auth state to the phone.

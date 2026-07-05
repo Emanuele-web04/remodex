@@ -266,6 +266,7 @@ extension CodexService {
         }
 
         pendingNotificationOpenThreadID = normalizedThreadId
+        externalThreadOpenRequest = CodexExternalThreadOpenRequest(threadId: normalizedThreadId)
         Task { @MainActor [weak self] in
             guard let self else { return }
 
@@ -367,6 +368,9 @@ private extension CodexService {
 
         if pendingNotificationOpenThreadID == threadId {
             pendingNotificationOpenThreadID = nil
+        }
+        if externalThreadOpenRequest?.threadId == threadId {
+            externalThreadOpenRequest = nil
         }
         if activeThreadId == nil || activeThreadId == threadId {
             activeThreadId = firstLiveThreadID()

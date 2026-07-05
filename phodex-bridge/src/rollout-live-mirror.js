@@ -13,11 +13,23 @@ const {
 } = require("./rollout-watch");
 const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const {
+  TERMINAL_TASK_EVENT_TYPES,
+  terminalEventClosesTrackedTurn,
+} = require("./rollout-turn-semantics");
 
-const DEFAULT_POLL_INTERVAL_MS = 700;
+// The phone batches each poll tick's notifications and settles its timeline
+// ~80ms after the batch ends (CodexService liveMirrorBatchFlushNanoseconds).
+// Keep this interval comfortably above that settle window, or lower both
+// together, so consecutive ticks never merge into one batch.
+const DEFAULT_POLL_INTERVAL_MS = 250;
 const DEFAULT_LOOKUP_TIMEOUT_MS = 5_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
 const DEFAULT_ACTIVITY_HEARTBEAT_MS = 5_000;
+// Bootstrap replay must not resurrect runs whose rollout stopped growing long ago
+// (aborted/killed desktop runs never write task_complete).
+const DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS = 10 * 60_000;
+const DEFAULT_SYNTHETIC_TERMINAL_GRACE_MS = 1_000;
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
 
 // Observes desktop-authored rollout files and replays the currently active run as
@@ -33,6 +45,8 @@ function createRolloutLiveMirrorController({
   lookupTimeoutMs = DEFAULT_LOOKUP_TIMEOUT_MS,
   idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
   activityHeartbeatMs = DEFAULT_ACTIVITY_HEARTBEAT_MS,
+  staleActiveRunMaxAgeMs = DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS,
+  syntheticTerminalGraceMs = DEFAULT_SYNTHETIC_TERMINAL_GRACE_MS,
 } = {}) {
   const mirrorsByThreadId = new Map();
 
@@ -67,6 +81,8 @@ function createRolloutLiveMirrorController({
       lookupTimeoutMs,
       idleTimeoutMs,
       activityHeartbeatMs,
+      staleActiveRunMaxAgeMs,
+      syntheticTerminalGraceMs,
       onStop() {
         if (mirrorsByThreadId.get(threadId) === mirror) {
           mirrorsByThreadId.delete(threadId);
@@ -103,6 +119,8 @@ function createThreadRolloutLiveMirror({
   lookupTimeoutMs,
   idleTimeoutMs,
   activityHeartbeatMs,
+  staleActiveRunMaxAgeMs,
+  syntheticTerminalGraceMs,
   onStop = () => {},
 }) {
   const startedAt = now();
@@ -113,6 +131,10 @@ function createThreadRolloutLiveMirror({
   let lastSize = 0;
   let partialLine = "";
   let lastActivityAt = startedAt;
+  // Rollout growth only: heartbeats deliberately never refresh this clock, so a
+  // desktop process that died mid-run (no terminal event, file frozen) cannot
+  // keep the mirror heartbeating "running" forever.
+  let lastGrowthAt = startedAt;
   let lastHeartbeatAt = 0;
   let didBootstrap = false;
 
@@ -151,9 +173,12 @@ function createThreadRolloutLiveMirror({
           state,
           fsModule,
           sendApplicationResponse,
+          nowMs: currentTime,
+          staleActiveRunMaxAgeMs,
         });
         lastSize = fileSize;
         lastActivityAt = currentTime;
+        lastGrowthAt = currentTime;
         lastHeartbeatAt = currentTime;
         if (state.isDesktopOrigin === false) {
           stop();
@@ -161,11 +186,27 @@ function createThreadRolloutLiveMirror({
         return;
       }
 
+      if (fileSize < lastSize) {
+        // Rollout files can be rewritten/truncated by desktop recovery. The
+        // rewritten contents are a different history, not live growth: reset the
+        // cursor and re-run the bootstrap path (tagged catch-up / terminal
+        // catch-up) instead of replaying the whole file as untagged live events.
+        lastSize = 0;
+        partialLine = "";
+        didBootstrap = false;
+        resetRunState(state);
+        lastGrowthAt = currentTime;
+        return;
+      }
+
       if (fileSize > lastSize) {
         const chunk = readFileSlice(rolloutPath, lastSize, fileSize, fsModule);
         lastSize = fileSize;
         lastActivityAt = currentTime;
+        lastGrowthAt = currentTime;
         lastHeartbeatAt = currentTime;
+        // Real growth proves the run is alive again; resume normal mirroring.
+        state.suppressLiveActivityUntilGrowth = false;
         if (!chunk) {
           return;
         }
@@ -179,16 +220,43 @@ function createThreadRolloutLiveMirror({
           searchStart = nlIndex + 1;
         }
         partialLine = searchStart < combined.length ? combined.substring(searchStart) : "";
-        processRolloutLines(lines, state, sendApplicationResponse);
+        processRolloutLines(lines, state, sendApplicationResponse, { nowMs: currentTime });
+        return;
+      }
+
+      const syntheticTerminalNotifications = finalizePendingSyntheticTerminalIfReady(
+        state,
+        currentTime,
+        syntheticTerminalGraceMs
+      );
+      if (syntheticTerminalNotifications.length > 0) {
+        for (const notification of syntheticTerminalNotifications) {
+          sendApplicationResponse(JSON.stringify(notification));
+        }
+        lastActivityAt = currentTime;
+        lastHeartbeatAt = currentTime;
+        return;
+      }
+
+      // A frozen rollout with a still-open turn means the desktop process died
+      // mid-run (crash / kill: no terminal event will ever arrive). Stop before
+      // heartbeating so the phone is not kept in "running" forever.
+      if (state.activeTurnId && currentTime - lastGrowthAt >= staleActiveRunMaxAgeMs) {
+        stop();
         return;
       }
 
       if (
         state.isDesktopOrigin !== false
         && state.activeTurnId
+        && !state.suppressLiveActivityUntilGrowth
         && currentTime - lastHeartbeatAt >= activityHeartbeatMs
       ) {
         lastHeartbeatAt = currentTime;
+        // Heartbeats keep the idle timeout from killing a quiet-but-alive run
+        // (long thinking stretches legitimately exceed the 60s idle window);
+        // the growth-stale guard above still bounds crashed runs.
+        lastActivityAt = currentTime;
         sendApplicationResponse(JSON.stringify(createNotification("turn/activity", {
           threadId: state.threadId,
           turnId: state.activeTurnId,
@@ -214,8 +282,19 @@ function createThreadRolloutLiveMirror({
       return;
     }
 
+    // Mark stopped and clear the interval first: a throwing send during the
+    // final partial-line flush must never leak the poll interval.
     isStopped = true;
     clearIntervalFn(intervalId);
+    if (partialLine) {
+      const flushLine = partialLine;
+      partialLine = "";
+      try {
+        processRolloutLines([flushLine], state, sendApplicationResponse, { nowMs: now() });
+      } catch (error) {
+        console.warn(`${logPrefix} rollout live mirror final flush failed for ${threadId}: ${error.message}`);
+      }
+    }
     onStop();
   }
 
@@ -231,6 +310,8 @@ function bootstrapFromExistingRollout({
   state,
   fsModule,
   sendApplicationResponse,
+  nowMs = Date.now(),
+  staleActiveRunMaxAgeMs = DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS,
 }) {
   const initialContents = readFileSlice(rolloutPath, 0, fileSize, fsModule);
   if (!initialContents) {
@@ -242,6 +323,7 @@ function bootstrapFromExistingRollout({
   let insideActiveRun = false;
   let activeTurnId = null;
   let pendingUserPreludeLine = null;
+  let latestTerminalRun = null;
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -269,6 +351,7 @@ function bootstrapFromExistingRollout({
       activeTurnId = readString(parsed?.payload?.turn_id)
         || readString(parsed?.payload?.turnId)
         || "";
+      latestTerminalRun = null;
       activeRunLines.length = 0;
       if (pendingUserPreludeLine) {
         activeRunLines.push(pendingUserPreludeLine);
@@ -282,11 +365,18 @@ function bootstrapFromExistingRollout({
     }
 
     activeRunLines.push(line);
-    if (taskEventType === "task_complete") {
-      insideActiveRun = false;
-      activeTurnId = "";
-      activeRunLines.length = 0;
-      pendingUserPreludeLine = null;
+    if (TERMINAL_TASK_EVENT_TYPES.has(taskEventType)) {
+      // A sibling parallel turn's terminal event must not close the newest
+      // run's window; its own terminal event is still honored later.
+      const terminalTurnId = readString(parsed?.payload?.turn_id)
+        || readString(parsed?.payload?.turnId);
+      if (terminalEventClosesTrackedTurn(terminalTurnId, activeTurnId)) {
+        latestTerminalRun = terminalRunFromEvent(parsed, activeTurnId);
+        insideActiveRun = false;
+        activeTurnId = "";
+        activeRunLines.length = 0;
+        pendingUserPreludeLine = null;
+      }
     }
   }
 
@@ -296,13 +386,104 @@ function bootstrapFromExistingRollout({
   }
 
   state.isDesktopOrigin = true;
-  processRolloutLines(activeRunLines, state, sendApplicationResponse);
+
+  if (activeRunLines.length === 0 && latestTerminalRun) {
+    sendApplicationResponse(JSON.stringify(terminalCatchUpNotification(state.threadId, latestTerminalRun)));
+    return;
+  }
+
+  // A run with no terminal marker whose rollout stopped growing long ago is dead
+  // (killed process / lost session); replaying it would fake a live stream and
+  // pin the reopened thread in "running" forever. Hydrate the run context
+  // silently instead, so heartbeats stay off but a run that resumes writing can
+  // still mirror its new activity live.
+  if (
+    activeRunLines.length > 0
+    && isRolloutFileStale(rolloutPath, fsModule, nowMs, staleActiveRunMaxAgeMs)
+  ) {
+    state.suppressLiveActivityUntilGrowth = true;
+    processRolloutLines(activeRunLines, state, () => {});
+    return;
+  }
+
+  // Bootstrap replay is catch-up history, not live streaming: tag it so the
+  // phone can batch-apply it, then close the burst with an explicit marker so
+  // the run still reads as active without waiting for the next heartbeat.
+  processRolloutLines(activeRunLines, state, sendApplicationResponse, {
+    tagBootstrapReplay: true,
+  });
+  if (activeRunLines.length > 0 && state.activeTurnId) {
+    sendApplicationResponse(JSON.stringify(createNotification("turn/activity", {
+      threadId: state.threadId,
+      turnId: state.activeTurnId,
+      id: state.activeTurnId,
+      remodexRolloutBootstrapComplete: true,
+    })));
+  }
 }
 
-function processRolloutLines(lines, state, sendApplicationResponse) {
+function isRolloutFileStale(rolloutPath, fsModule, nowMs, staleActiveRunMaxAgeMs) {
+  try {
+    const modifiedAtMs = fsModule.statSync(rolloutPath).mtimeMs;
+    return Number.isFinite(modifiedAtMs) && nowMs - modifiedAtMs >= staleActiveRunMaxAgeMs;
+  } catch {
+    return false;
+  }
+}
+
+function terminalRunFromEvent(entry, fallbackTurnId = "") {
+  const payload = entry?.payload || {};
+  const eventType = readString(payload.type);
+  if (!TERMINAL_TASK_EVENT_TYPES.has(eventType)) {
+    return null;
+  }
+
+  const turnId = readString(payload.turn_id)
+    || readString(payload.turnId)
+    || readString(fallbackTurnId);
+  if (!turnId) {
+    return null;
+  }
+
+  return {
+    eventType,
+    turnId,
+    message: readString(payload.message),
+  };
+}
+
+function terminalCatchUpNotification(threadId, terminalRun) {
+  const params = {
+    threadId,
+    turnId: terminalRun.turnId,
+    id: terminalRun.turnId,
+    remodexRolloutTerminalCatchUp: true,
+  };
+  if (terminalRun.eventType === "turn_aborted") {
+    params.status = "aborted";
+  } else if (terminalRun.eventType === "error") {
+    params.status = "failed";
+    if (terminalRun.message) {
+      params.error = { message: terminalRun.message };
+    }
+  }
+  return createNotification("turn/completed", params);
+}
+
+function processRolloutLines(lines, state, sendApplicationResponse, {
+  tagBootstrapReplay = false,
+  nowMs = Date.now(),
+} = {}) {
   if (!Array.isArray(lines) || lines.length === 0) {
     return;
   }
+
+  const emitNotification = (notification) => {
+    if (tagBootstrapReplay && notification.params && typeof notification.params === "object") {
+      notification.params.remodexRolloutBootstrapReplay = true;
+    }
+    sendApplicationResponse(JSON.stringify(notification));
+  };
 
   for (const rawLine of lines) {
     const line = rawLine.trim();
@@ -315,14 +496,14 @@ function processRolloutLines(lines, state, sendApplicationResponse) {
       continue;
     }
 
-    const notifications = synthesizeNotificationsFromRolloutEntry(parsed, state);
+    const notifications = synthesizeNotificationsFromRolloutEntry(parsed, state, { nowMs });
     for (const notification of notifications) {
-      sendApplicationResponse(JSON.stringify(notification));
+      emitNotification(notification);
     }
   }
 }
 
-function synthesizeNotificationsFromRolloutEntry(entry, state) {
+function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.now() } = {}) {
   if (entry?.type === "session_meta") {
     populateSessionMetaState(state, entry.payload);
     if (!isDesktopRolloutOrigin(state.sessionMeta)) {
@@ -344,6 +525,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
     const eventType = readString(payload.type);
 
     if (eventType === "task_started") {
+      notifications.push(...finalizePendingSyntheticTerminal(state));
       const explicitTurnId = readString(payload.turn_id) || readString(payload.turnId);
       const turnId = explicitTurnId || buildSyntheticTurnId(state, entry);
       state.activeTurnId = turnId;
@@ -365,6 +547,10 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
       notifications.push(...flushPendingUserMessageNotifications(state, turnId));
       notifications.push(...ensureThinkingNotifications(state));
       return notifications;
+    }
+
+    if (eventType && !TERMINAL_TASK_EVENT_TYPES.has(eventType)) {
+      clearPendingSyntheticTerminal(state);
     }
 
     if (eventType === "user_message") {
@@ -393,18 +579,54 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
     }
 
     if (eventType === "task_complete") {
-      const turnId = resolveRolloutEventTurnId(state, payload);
+      const turnId = resolveRolloutEventTurnId(state, payload, { allowSyntheticPromotion: false });
       if (!turnId) {
         return [];
       }
 
-      notifications.push(...turnFileChangeSnapshotNotifications(state, turnId));
+      // Desktop runs parallel turns in one rollout: a sibling turn finishing
+      // must not wipe the tracked state of the turn that is still streaming.
+      const closesActiveRun = terminalEventClosesTrackedTurn(turnId, state.activeTurnId);
+      if (closesActiveRun) {
+        notifications.push(...turnFileChangeSnapshotNotifications(state, turnId));
+      }
       notifications.push(createNotification("turn/completed", {
         threadId: state.threadId,
         turnId,
         id: turnId,
       }));
-      resetRunState(state);
+      if (closesActiveRun) {
+        resetRunState(state);
+      } else if (isSyntheticTerminalMismatch(state, turnId)) {
+        markPendingSyntheticTerminal(state, { status: "completed" }, nowMs);
+      }
+      return notifications;
+    }
+
+    // Aborted/failed desktop runs never write task_complete; close the mirrored
+    // turn anyway so the phone does not keep the thread pinned as running.
+    if (eventType === "turn_aborted" || eventType === "error") {
+      const turnId = resolveRolloutEventTurnId(state, payload, { allowSyntheticPromotion: false });
+      if (!turnId) {
+        return [];
+      }
+
+      const terminalParams = {
+        threadId: state.threadId,
+        turnId,
+        id: turnId,
+        status: eventType === "error" ? "failed" : "aborted",
+      };
+      const errorMessage = readString(payload.message);
+      if (eventType === "error" && errorMessage) {
+        terminalParams.error = { message: errorMessage };
+      }
+      notifications.push(createNotification("turn/completed", terminalParams));
+      if (terminalEventClosesTrackedTurn(turnId, state.activeTurnId)) {
+        resetRunState(state);
+      } else if (isSyntheticTerminalMismatch(state, turnId)) {
+        markPendingSyntheticTerminal(state, terminalParams, nowMs);
+      }
       return notifications;
     }
 
@@ -423,18 +645,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
     }
 
     if (eventType === "agent_message") {
-      const message = readString(payload.message) || readString(payload.text);
-      if (!message || !shouldMirrorAgentMessage(payload)) {
-        return [];
-      }
-      const turnId = resolveRolloutEventTurnId(state, payload);
-
-      notifications.push(createNotification("codex/event/agent_message", {
-        threadId: state.threadId,
-        turnId,
-        itemId: buildAgentMessageItemId(state.threadId, turnId, entry, message),
-        message,
-      }));
+      notifications.push(...agentMessageNotifications(state, entry, payload));
       return notifications;
     }
 
@@ -457,8 +668,15 @@ function synthesizeNotificationsFromRolloutEntry(entry, state) {
     return [];
   }
 
+  clearPendingSyntheticTerminal(state);
+
   const payload = entry.payload || {};
   const itemType = normalizeRolloutItemType(payload.type);
+
+  if (itemType === "message") {
+    notifications.push(...responseItemMessageNotifications(state, entry, payload));
+    return notifications;
+  }
 
   if (itemType === "reasoning") {
     notifications.push(...reasoningNotifications(state, extractReasoningText(payload)));
@@ -509,6 +727,69 @@ function reasoningNotifications(state, text) {
   ];
 }
 
+function responseItemMessageNotifications(state, entry, payload) {
+  const role = readString(payload?.role).toLowerCase();
+  if (role && role !== "assistant") {
+    return [];
+  }
+
+  const message = extractResponseItemMessageText(payload);
+  if (!message) {
+    return [];
+  }
+
+  return agentMessageNotifications(state, entry, {
+    message,
+    phase: payload?.phase,
+    itemId: readString(payload?.id),
+    turn_id: readString(payload?.turn_id) || readString(payload?.internal_chat_message_metadata_passthrough?.turn_id),
+    turnId: readString(payload?.turnId) || readString(payload?.internal_chat_message_metadata_passthrough?.turnId),
+  });
+}
+
+function agentMessageNotifications(state, entry, payload) {
+  const message = readString(payload?.message) || readString(payload?.text);
+  if (!message) {
+    return [];
+  }
+
+  const turnId = resolveRolloutEventTurnId(state, payload);
+  const dedupeKey = agentMessageDedupeKey(turnId, message);
+  if (state.emittedAgentMessageKeys.has(dedupeKey)) {
+    return [];
+  }
+  state.emittedAgentMessageKeys.add(dedupeKey);
+
+  // Commentary (interleaved progress prose) is mirrored too: desktop renders it
+  // between tool calls, and dropping it would glue every tool row into one burst
+  // on the phone. The phase rides along so the app can keep commentary rows
+  // distinct from the final answer.
+  const params = {
+    threadId: state.threadId,
+    turnId,
+    itemId: readString(payload?.itemId) || buildAgentMessageItemId(state.threadId, turnId, entry, message),
+    message,
+  };
+  const phase = readString(payload?.phase);
+  if (phase) {
+    params.phase = phase;
+  }
+
+  return [createNotification("codex/event/agent_message", params)];
+}
+
+function extractResponseItemMessageText(payload) {
+  if (!payload || typeof payload !== "object") {
+    return "";
+  }
+
+  const content = Array.isArray(payload.content) ? payload.content : [];
+  const parts = content
+    .map((part) => readString(part?.text) || readString(part?.content) || readString(part?.message))
+    .filter(Boolean);
+  return parts.join("\n");
+}
+
 function toolStartNotifications(state, payload) {
   if (!state.activeTurnId) {
     return [];
@@ -525,6 +806,40 @@ function toolStartNotifications(state, payload) {
     return [
       ...ensureThinkingNotifications(state),
       ...planUpdateNotifications(state, argumentsObject),
+    ];
+  }
+
+  if (readString(toolName).toLowerCase() === "apply_patch") {
+    const item = buildApplyPatchFileChangeItem({
+      callId,
+      patch: readString(argumentsObject.patch) || readString(argumentsObject.input) || readString(payload.input),
+      status: readString(payload.status) || "completed",
+      idFallback: buildSyntheticItemId("file-change", state.threadId, state.activeTurnId, callId),
+    });
+    const notifications = [...ensureThinkingNotifications(state)];
+    if (!item) {
+      return [
+        ...notifications,
+        createNotification("codex/event/background_event", {
+          threadId: state.threadId,
+          turnId: state.activeTurnId,
+          call_id: callId,
+          message: genericToolActivityMessage(toolName),
+        }),
+      ];
+    }
+    state.applyPatchCalls.set(callId, item);
+    return [
+      ...notifications,
+      createNotification("codex/event/patch_apply_begin", {
+        threadId: state.threadId,
+        turnId: state.activeTurnId,
+        id: state.activeTurnId,
+        call_id: callId,
+        itemId: item.id,
+        status: "inProgress",
+        changes: item.changes,
+      }),
     ];
   }
 
@@ -689,8 +1004,15 @@ function toolOutputNotifications(state, payload) {
   }
 
   if (!isCommandToolName(toolCall.toolName)) {
+    const notifications = [...ensureThinkingNotifications(state)];
+    notifications.push(createNotification("codex/event/background_event", {
+      threadId: state.threadId,
+      turnId: state.activeTurnId,
+      call_id: callId,
+      message: genericToolCompletionMessage(toolCall.toolName),
+    }));
     state.commandCalls.delete(callId);
-    return [];
+    return notifications;
   }
 
   const output = readString(payload.output);
@@ -789,6 +1111,75 @@ function itemCompletedNotifications(state, payload) {
   ];
 }
 
+// Synthetic turn ids are a temporary stand-in; close them if a terminal event
+// had no later activity proving it belonged to a sibling parallel run.
+function markPendingSyntheticTerminal(state, terminalParams = {}, nowMs = Date.now()) {
+  if (state.activeTurnIdIsSynthetic && state.activeTurnId) {
+    state.pendingSyntheticTerminalTurnId = state.activeTurnId;
+    state.pendingSyntheticTerminalStartedAt = nowMs;
+    state.pendingSyntheticTerminalStatus = readString(terminalParams.status) || "";
+    state.pendingSyntheticTerminalErrorMessage = readString(terminalParams.error?.message) || "";
+  }
+}
+
+function clearPendingSyntheticTerminal(state) {
+  state.pendingSyntheticTerminalTurnId = null;
+  state.pendingSyntheticTerminalStartedAt = 0;
+  state.pendingSyntheticTerminalStatus = "";
+  state.pendingSyntheticTerminalErrorMessage = "";
+}
+
+function isSyntheticTerminalMismatch(state, terminalTurnId) {
+  return Boolean(
+    state.activeTurnIdIsSynthetic
+    && state.activeTurnId
+    && terminalTurnId
+    && terminalTurnId !== state.activeTurnId
+  );
+}
+
+function finalizePendingSyntheticTerminal(state) {
+  const turnId = state.pendingSyntheticTerminalTurnId;
+  if (!turnId) {
+    return [];
+  }
+
+  const terminalParams = {
+    threadId: state.threadId,
+    turnId,
+    id: turnId,
+  };
+  if (state.pendingSyntheticTerminalStatus) {
+    terminalParams.status = state.pendingSyntheticTerminalStatus;
+  }
+  if (state.pendingSyntheticTerminalErrorMessage) {
+    terminalParams.error = { message: state.pendingSyntheticTerminalErrorMessage };
+  }
+
+  const notifications = [
+    ...turnFileChangeSnapshotNotifications(state, turnId),
+    createNotification("turn/completed", terminalParams),
+  ];
+  resetRunState(state);
+  return notifications;
+}
+
+function finalizePendingSyntheticTerminalIfReady(state, nowMs, graceMs) {
+  if (!state.pendingSyntheticTerminalTurnId) {
+    return [];
+  }
+  const startedAt = Number.isFinite(state.pendingSyntheticTerminalStartedAt)
+    ? state.pendingSyntheticTerminalStartedAt
+    : nowMs;
+  const resolvedGraceMs = Number.isFinite(graceMs)
+    ? Math.max(0, graceMs)
+    : DEFAULT_SYNTHETIC_TERMINAL_GRACE_MS;
+  if (nowMs - startedAt < resolvedGraceMs) {
+    return [];
+  }
+  return finalizePendingSyntheticTerminal(state);
+}
+
 function ensureThinkingNotifications(state) {
   if (!state.activeTurnId || state.hasThinking) {
     return [];
@@ -820,8 +1211,16 @@ function createMirrorState(threadId) {
     commandCalls: new Map(),
     applyPatchCalls: new Map(),
     emittedPatchApplyEndCalls: new Set(),
+    emittedAgentMessageKeys: new Set(),
     pendingUserMessages: [],
+    pendingSyntheticTerminalTurnId: null,
+    pendingSyntheticTerminalStartedAt: 0,
+    pendingSyntheticTerminalStatus: "",
+    pendingSyntheticTerminalErrorMessage: "",
     activeTurnIdIsSynthetic: false,
+    // True after a stale bootstrap: run context is hydrated but nothing is
+    // emitted (including heartbeats) until the rollout file grows again.
+    suppressLiveActivityUntilGrowth: false,
   };
 }
 
@@ -969,9 +1368,8 @@ function genericToolActivityMessage(toolName) {
   }
 }
 
-function shouldMirrorAgentMessage(payload) {
-  const phase = readString(payload?.phase).toLowerCase();
-  return phase !== "commentary";
+function genericToolCompletionMessage(toolName) {
+  return `Completed ${readString(toolName)}`;
 }
 
 function createNotification(method, params = {}) {
@@ -1031,11 +1429,36 @@ function buildSyntheticTurnId(state, entry) {
   return `rollout-turn:${state.threadId}:${timestamp}`;
 }
 
-function resolveRolloutEventTurnId(state, payload = {}) {
+function resolveRolloutEventTurnId(state, payload = {}, { allowSyntheticPromotion = true } = {}) {
+  const explicitTurnId = readString(payload.turn_id) || readString(payload.turnId);
   if (state.activeTurnIdIsSynthetic && state.activeTurnId) {
+    if (explicitTurnId) {
+      // Terminal events must not promote: with parallel turns, a sibling's
+      // terminal explicit id would hijack the synthetic run and wipe it. The
+      // active run's real id is adopted from its own non-terminal events.
+      if (allowSyntheticPromotion) {
+        promoteSyntheticTurnId(state, explicitTurnId);
+      }
+      return explicitTurnId;
+    }
     return state.activeTurnId;
   }
-  return readString(payload.turn_id) || readString(payload.turnId) || state.activeTurnId || "";
+  return explicitTurnId || state.activeTurnId || "";
+}
+
+function promoteSyntheticTurnId(state, explicitTurnId) {
+  const oldTurnId = state.activeTurnId;
+  if (!oldTurnId || oldTurnId === explicitTurnId) {
+    state.activeTurnId = explicitTurnId;
+    state.activeTurnIdIsSynthetic = false;
+    return;
+  }
+
+  state.activeTurnId = explicitTurnId;
+  state.activeTurnIdIsSynthetic = false;
+  if (state.reasoningItemId === buildSyntheticItemId("thinking", state.threadId, oldTurnId)) {
+    state.reasoningItemId = buildSyntheticItemId("thinking", state.threadId, explicitTurnId);
+  }
 }
 
 function buildAgentMessageItemId(threadId, turnId, entry, message) {
@@ -1051,6 +1474,20 @@ function buildAgentMessageItemId(threadId, turnId, entry, message) {
     turnId || "turnless",
     `${timestamp}:${messageHash}`
   );
+}
+
+// Keyed on turn + text only: the same assistant text often arrives twice per
+// turn (event_msg agent_message and response_item message), and only one side
+// carries `phase`, so phase must stay out of the key for them to collide.
+// Legitimately repeated identical prose in one turn is rare and the phone's
+// item-scoped dedup covers the remainder.
+function agentMessageDedupeKey(turnId, message) {
+  const messageHash = crypto
+    .createHash("sha256")
+    .update(readString(message))
+    .digest("hex")
+    .slice(0, 16);
+  return `${turnId || "turnless"}:${messageHash}`;
 }
 
 function generatedImagePathForRolloutItem(threadId, callId) {
@@ -1074,7 +1511,12 @@ function resetRunState(state) {
   state.commandCalls.clear();
   state.applyPatchCalls.clear();
   state.emittedPatchApplyEndCalls.clear();
+  state.emittedAgentMessageKeys.clear();
   state.pendingUserMessages.length = 0;
+  state.pendingSyntheticTerminalTurnId = null;
+  state.pendingSyntheticTerminalStartedAt = 0;
+  state.pendingSyntheticTerminalStatus = "";
+  state.pendingSyntheticTerminalErrorMessage = "";
   state.activeTurnIdIsSynthetic = false;
 }
 

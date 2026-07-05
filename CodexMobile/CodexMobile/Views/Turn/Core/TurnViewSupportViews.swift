@@ -60,7 +60,7 @@ struct SubagentParentAccessoryCard: View {
         } header: {
             HStack(alignment: .center, spacing: 6) {
                 Text("Subagent")
-                    .font(AppFont.mono(.caption2))
+                    .font(AppFont.caption2())
                     .foregroundStyle(.secondary)
 
                 Circle()

@@ -402,7 +402,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     }
                     .frame(width: viewport.size.width)
                     .defaultScrollAnchor(initialScrollAnchor, for: .initialOffset)
-                    .defaultScrollAnchor(.top, for: .sizeChanges)
+                    // While following the stream, anchor content-size growth to the bottom so the
+                    // scroll view keeps the newest line pinned natively (GPU-driven, no per-frame
+                    // scrollTo chase). When the user has scrolled up to read, anchor to the top so
+                    // incoming content grows below their position without yanking them around.
+                    .defaultScrollAnchor(sizeChangeScrollAnchor, for: .sizeChanges)
                     .modifier(
                         TurnTimelineScrollObserverModifier(
                             isGeometryTrackingEnabled: shouldTrackScrollGeometry,
@@ -434,6 +438,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                     }
                     .onDisappear {
                         debugTimelineLog("onDisappear threadID=\(threadID)")
+                        StreamingUIInteractionMonitor.setScrollInteractionActive(false)
                         cancelScrollTasks()
                     }
                 }
@@ -586,6 +591,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private var initialScrollAnchor: UnitPoint {
         .bottom
+    }
+
+    // Native content-growth anchor: bottom while actively following the stream (so growth pins
+    // the newest line without a manual chase), top otherwise so reading history stays put.
+    private var sizeChangeScrollAnchor: UnitPoint {
+        shouldPinTimelineToBottomDuringGeometryChange ? .bottom : .top
     }
 
     private var shouldShowPendingAssistantResponse: Bool {
@@ -898,6 +909,16 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             return
         }
 
+        // A reopened running thread hydrates as one batched bootstrap flush and is
+        // already pinned at the bottom; one snap suffices. Re-arming the multi-snap
+        // sequence here would fight live tail growth with extra scroll corrections.
+        if isThreadRunning,
+           isScrolledToBottom,
+           initialRecoverySnapPendingThreadID == nil {
+            scrollToBottom(using: proxy, animated: false)
+            return
+        }
+
         initialRecoverySnapTask?.cancel()
         initialRecoverySnapTask = nil
         initialRecoverySnapPendingThreadID = threadID
@@ -1098,6 +1119,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     // Mirrors user-driven scroll phases without pausing auto-follow during programmatic animations.
     private func handleScrollPhaseChange(from oldPhase: ScrollPhase, to newPhase: ScrollPhase) {
+        updateStreamingInteractionMonitor(from: oldPhase, to: newPhase)
         switch newPhase {
         case .tracking, .interacting:
             handleUserScrollDragChanged()
@@ -1115,6 +1137,25 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             return
         @unknown default:
             return
+        }
+    }
+
+    // Heavy streaming row flushes back off while a user drag/flick owns the main thread.
+    // Deceleration keeps the backoff (hitches are just as visible there); programmatic
+    // animations and idle release it.
+    private func updateStreamingInteractionMonitor(from oldPhase: ScrollPhase, to newPhase: ScrollPhase) {
+        switch newPhase {
+        case .tracking, .interacting:
+            StreamingUIInteractionMonitor.setScrollInteractionActive(true)
+        case .decelerating:
+            let wasUserTouchingScroll = oldPhase == .tracking || oldPhase == .interacting
+            if !wasUserTouchingScroll {
+                StreamingUIInteractionMonitor.setScrollInteractionActive(false)
+            }
+        case .idle, .animating:
+            StreamingUIInteractionMonitor.setScrollInteractionActive(false)
+        @unknown default:
+            StreamingUIInteractionMonitor.setScrollInteractionActive(false)
         }
     }
 
@@ -1249,8 +1290,20 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             guard autoScrollMode == .followBottom || shouldPinTimelineToBottomDuringGeometryChange else {
                 return
             }
-            proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
+            // With the native bottom size-change anchor doing the heavy lifting, this is a
+            // corrective nudge (usually a no-op when already pinned). Use a momentum-preserving
+            // interpolating spring so, unlike a restarting ease-out, retargeting mid-flight keeps
+            // its velocity and the viewport glides continuously instead of pulsing.
+            withAnimation(Self.followBottomStreamingScrollAnimation) {
+                proxy.scrollTo(scrollBottomAnchorID, anchor: .bottom)
+            }
         }
+    }
+
+    // Critically damped (bounce: 0) and short: the scroll correction should keep
+    // up with streaming growth instead of visibly walking behind each text burst.
+    private static var followBottomStreamingScrollAnimation: Animation {
+        .interpolatingSpring(duration: 0.12, bounce: 0)
     }
 
     private var shouldPauseAutomaticScrolling: Bool {

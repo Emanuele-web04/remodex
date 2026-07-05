@@ -50,21 +50,20 @@ struct ComposerBottomBar: View {
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
-    private let composerIconSide: CGFloat = 22
     private let composerCircleDiameter: CGFloat = 30
     private let composerActionIconSize: CGFloat = 14
     private let inlineAccessControlSize: CGFloat = 32
     private let inlineAccessControlIconSize: CGFloat = 20
+    // Send stays the primary CTA, so give it a slightly larger tap target than
+    // the neutral composer chrome.
+    private let sendButtonDiameter: CGFloat = 32
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default
     }
 
-    // The send button is a CTA: treat the neutral "Default" palette the same
-    // as the "Primary" (.black) palette so it stays a bold label-colored circle
-    // regardless of which neutral the user picked.
     private var sendButtonPaletteColor: UserBubbleColor {
-        selectedUserBubbleColor == .default ? .black : selectedUserBubbleColor
+        selectedUserBubbleColor.ctaPalette
     }
 
     private var sendButtonIconColor: Color {
@@ -84,9 +83,18 @@ struct ComposerBottomBar: View {
     // MARK: - Body
 
     var body: some View {
-        HStack(spacing: 8) {
-            attachmentMenu
-                .padding(.leading, 8)
+        HStack(spacing: 6) {
+            ComposerAttachmentMenu(
+                isPlanModeArmed: isPlanModeArmed,
+                runtimeState: runtimeState,
+                runtimeActions: runtimeActions,
+                remainingAttachmentSlots: remainingAttachmentSlots,
+                isInteractionLocked: isComposerInteractionLocked,
+                onSetPlanModeArmed: onSetPlanModeArmed,
+                onTapAddImage: onTapAddImage,
+                onTapTakePhoto: onTapTakePhoto
+            )
+            .padding(.leading, 6)
             inlineAccessMenuLabel
             Spacer(minLength: 0)
 
@@ -108,34 +116,19 @@ struct ComposerBottomBar: View {
                 .accessibilityLabel("Resume queued messages")
             }
 
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback()
-                onTapVoice()
-            } label: {
-                voiceButtonLabel
-            }
-            .disabled(voiceButtonPresentation.isDisabled)
-            .accessibilityLabel(voiceButtonPresentation.accessibilityLabel)
+            ComposerVoiceButton(
+                presentation: voiceButtonPresentation,
+                onTap: onTapVoice
+            )
 
-            if showsStopButton && isSending && activeTurnID == nil {
-                ProgressView()
-                    .tint(Color(.label))
-                    .frame(width: composerCircleDiameter, height: composerCircleDiameter)
-                    .accessibilityLabel("Starting run")
-            } else if showsStopButton {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onStopTurn(activeTurnID)
-                } label: {
-                    RemodexCircleBadge(
-                        systemName: "stop.fill",
-                        foreground: sendButtonPaletteColor.bubbleForeground(for: colorScheme),
-                        background: sendButtonPaletteColor.bubbleBackground(for: colorScheme),
-                        diameter: composerCircleDiameter,
-                        iconSize: composerActionIconSize
-                    )
-                }
-                .accessibilityLabel("Stop current run")
+            if showsStopButton {
+                ComposerStopControl(
+                    activeTurnID: activeTurnID,
+                    isSending: isSending,
+                    onStopTurn: onStopTurn,
+                    diameter: composerCircleDiameter,
+                    iconSize: composerActionIconSize
+                )
             }
 
             if showsSendButton {
@@ -143,13 +136,7 @@ struct ComposerBottomBar: View {
                     HapticFeedback.shared.triggerImpactFeedback()
                     onSend()
                 } label: {
-                    RemodexCircleBadge(
-                        systemName: "arrow.up",
-                        foreground: sendButtonIconColor,
-                        background: sendButtonBackgroundColor,
-                        diameter: composerCircleDiameter,
-                        iconSize: composerActionIconSize
-                    )
+                    sendButtonLabel
                 }
                 .overlay(alignment: .topTrailing) {
                     if queuedCount > 0 {
@@ -157,6 +144,7 @@ struct ComposerBottomBar: View {
                             .offset(x: 8, y: -8)
                     }
                 }
+                .padding(.leading, 3)
                 .disabled(isSendDisabled)
             }
         }
@@ -180,38 +168,16 @@ struct ComposerBottomBar: View {
         }
     }
 
-    private var voiceButtonLabel: some View {
-        Group {
-            if voiceButtonPresentation.showsProgress {
-                CircularIconBadge(
-                    foreground: voiceButtonPresentation.foregroundColor,
-                    background: voiceButtonPresentation.backgroundColor,
-                    diameter: composerCircleDiameter
-                ) {
-                    ProgressView()
-                }
-            } else if voiceButtonPresentation.hasCircleBackground {
-                // Keep circular voice states on the same icon pipeline as the
-                // rest of the composer chrome.
-                RemodexCircleBadge(
-                    systemName: voiceButtonPresentation.systemImageName,
-                    foreground: voiceButtonPresentation.foregroundColor,
-                    background: voiceButtonPresentation.backgroundColor,
-                    diameter: composerCircleDiameter
-                )
-            } else {
-                // Use explicit size so the Central mic artwork compensates for
-                // its internal padding (glyph fills ~77% of the SVG viewBox)
-                // and renders at the same visual size as the SF `plus` glyph.
-                RemodexIcon.image(
-                    systemName: voiceButtonPresentation.systemImageName,
-                    size: composerIconSide
-                )
-                .foregroundStyle(metaLabelColor)
-                .frame(width: composerIconSide, height: composerIconSide)
-                .contentShape(Rectangle())
-            }
-        }
+    // Single SF `arrow.up.circle.fill` glyph (palette-rendered) so the arrow and
+    // its circle are one coherent icon in both the disabled and active states,
+    // instead of an arrow layered over a separately-filled circle badge.
+    private var sendButtonLabel: some View {
+        Image(systemName: "arrow.up.circle.fill")
+            .font(.system(size: sendButtonDiameter, weight: .regular))
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(sendButtonIconColor, sendButtonBackgroundColor)
+            .frame(width: sendButtonDiameter, height: sendButtonDiameter)
+            .contentShape(Circle())
     }
 
     // MARK: - Menus
@@ -271,70 +237,6 @@ struct ComposerBottomBar: View {
             progressColorOverride: .primary,
             onRefreshStatus: onRefreshUsageStatus
         )
-    }
-
-    private var attachmentMenu: some View {
-        Menu {
-            // `RemodexIcon.menuLabel` keeps Central artwork in SwiftUI Menus
-            // by routing through `Label(_, image:)` for mapped assets and
-            // falling back to `Label(_, systemImage:)` for plain SF Symbols.
-            Toggle(isOn: Binding(
-                get: { isPlanModeArmed },
-                set: { newValue in
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    onSetPlanModeArmed(newValue)
-                }
-            )) {
-                RemodexIcon.menuLabel("Plan mode", systemName: "remodex.plan-mode")
-            }
-
-            if runtimeState.supportsFastMode {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                    toggleFastMode()
-                } label: {
-                    // Native SF bolt on purpose so the menu item matches the
-                    // speed badge / Speed submenu icon used elsewhere.
-                    Label("Fast Mode", systemImage: fastModePlusMenuIconName)
-                }
-            }
-
-            Section {
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapAddImage()
-                } label: {
-                    RemodexIcon.menuLabel("Photo library", systemName: "photo")
-                }
-                .disabled(remainingAttachmentSlots == 0)
-
-                Button {
-                    HapticFeedback.shared.triggerImpactFeedback()
-                    onTapTakePhoto()
-                } label: {
-                    RemodexIcon.menuLabel("Take a photo", systemName: "camera.fill")
-                }
-                .disabled(remainingAttachmentSlots == 0)
-            }
-        } label: {
-            RemodexIcon.image(systemName: "plus")
-                .font(AppFont.title3(weight: .regular))
-                .foregroundStyle(Color.primary)
-                .frame(width: composerIconSide, height: composerIconSide)
-                .contentShape(Capsule())
-        }
-        .tint(metaLabelColor)
-        .disabled(isComposerInteractionLocked)
-        .accessibilityLabel("Composer options")
-    }
-
-    // Toggling Fast Mode from the plus menu mirrors the runtime speed menu without adding another visible pill.
-    private func toggleFastMode() {
-        runtimeActions.selectServiceTier(runtimeState.isSelectedServiceTier(.fast) ? nil : .fast)
-    }
-
-    private var fastModePlusMenuIconName: String {
-        runtimeState.isSelectedServiceTier(.fast) ? "bolt.fill" : "bolt"
     }
 
     // Mirrors the bridge-provided runtime capability instead of guessing from the model name.

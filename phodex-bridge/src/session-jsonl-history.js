@@ -4,6 +4,7 @@
 
 const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
+const { terminalEventClosesTrackedTurn } = require("./rollout-turn-semantics");
 
 function readThreadTurnsListPageFromSessionJsonl(filePath, {
   threadId = "",
@@ -82,6 +83,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   const turns = [];
   const turnsById = new Map();
   let activeTurnId = "";
+  let pendingSyntheticTerminal = null;
   let sessionThreadId = normalizeString(threadId);
   let sessionCwd = "";
   let sessionTimeZone = "";
@@ -144,6 +146,11 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       const payload = objectValue(entry.payload);
       const eventType = normalizeString(payload?.type);
       if (eventType === "task_started") {
+        if (pendingSyntheticTerminal) {
+          closeSyntheticHistoryTurn(turnsById, pendingSyntheticTerminal);
+          pendingSyntheticTerminal = null;
+          activeTurnId = "";
+        }
         activeTurnId = normalizeString(payload?.turn_id)
           || normalizeString(payload?.turnId)
           || activeTurnId
@@ -154,18 +161,36 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         continue;
       }
 
-      if (eventType === "task_complete") {
-        const turn = ensureTurn(
-          turns,
-          turnsById,
-          normalizeString(payload?.turn_id) || normalizeString(payload?.turnId) || activeTurnId || `turn-line-${index + 1}`,
-          sessionThreadId,
-          entry.timestamp
-        );
-        applyHistoryTimeZone(turn, sessionTimeZone);
-        turn.status = "completed";
-        activeTurnId = "";
+      if (eventType === "task_complete" || eventType === "turn_aborted" || eventType === "error") {
+        const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
+        const terminalTurnId = explicitTurnId || activeTurnId;
+        if (terminalTurnId) {
+          const turn = ensureTurn(turns, turnsById, terminalTurnId, sessionThreadId, entry.timestamp);
+          applyHistoryTimeZone(turn, sessionTimeZone);
+          // Aborted/failed runs never write task_complete; without a terminal
+          // status here the history page would report them as still running.
+          turn.status = eventType === "task_complete"
+            ? "completed"
+            : (eventType === "error" ? "failed" : "aborted");
+        }
+        // Desktop interleaves parallel turns in one rollout. A sibling turn's
+        // terminal event must not orphan the still-running turn's context:
+        // keeping activeTurnId prevents later turn-less items from spawning
+        // synthetic "turn-line-N" running turns that pin the thread as active.
+        if (terminalEventClosesTrackedTurn(explicitTurnId, activeTurnId)) {
+          activeTurnId = "";
+          pendingSyntheticTerminal = null;
+        } else if (isSyntheticHistoryTurnId(activeTurnId) && explicitTurnId) {
+          pendingSyntheticTerminal = {
+            turnId: activeTurnId,
+            status: terminalStatusForEventType(eventType),
+          };
+        }
         continue;
+      }
+
+      if (eventType) {
+        pendingSyntheticTerminal = null;
       }
 
       if (eventType === "item_completed") {
@@ -219,6 +244,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
     }
 
     if (entry?.type === "response_item") {
+      pendingSyntheticTerminal = null;
       const payload = objectValue(entry.payload);
       if (!payload) {
         continue;
@@ -256,7 +282,32 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
     }
   }
 
+  if (pendingSyntheticTerminal) {
+    closeSyntheticHistoryTurn(turnsById, pendingSyntheticTerminal);
+  }
+
   return turns.filter((turn) => turn.items.length > 0);
+}
+
+function closeSyntheticHistoryTurn(turnsById, terminal) {
+  const turn = turnsById.get(terminal.turnId);
+  if (turn) {
+    turn.status = terminal.status || "completed";
+  }
+}
+
+function terminalStatusForEventType(eventType) {
+  if (eventType === "turn_aborted") {
+    return "aborted";
+  }
+  if (eventType === "error") {
+    return "failed";
+  }
+  return "completed";
+}
+
+function isSyntheticHistoryTurnId(turnId) {
+  return /^turn-line-\d+$/.test(normalizeString(turnId));
 }
 
 function createUserMessageHistoryItem(payload, lineNumber, timestamp) {

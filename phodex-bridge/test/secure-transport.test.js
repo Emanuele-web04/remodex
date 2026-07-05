@@ -450,6 +450,165 @@ test("rebinding the relay socket replays bridge output from the last phone ack",
   );
 });
 
+test("same-session relay replays keep live notifications untagged", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const phoneEphemeral = createOkpKeyPair("x25519");
+  const secureTransport = createTestBridgeSecureTransport({
+    sessionId: "session-replay-tag",
+    relayUrl: "wss://relay.example/relay",
+    deviceState: {
+      macDeviceId: "mac-replay-tag",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+
+  const { serverHello, transcriptBytes } = finishHandshake({
+    secureTransport,
+    sessionId: "session-replay-tag",
+    macDeviceId: "mac-replay-tag",
+    phoneDeviceId: "phone-replay-tag",
+    macIdentity,
+    phoneIdentity,
+    phoneEphemeral,
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
+    lastAppliedBridgeOutboundSeq: 0,
+  });
+
+  const macToPhoneKey = deriveMacToPhoneKey({
+    sessionId: "session-replay-tag",
+    macDeviceId: "mac-replay-tag",
+    phoneDeviceId: "phone-replay-tag",
+    phoneEphemeral,
+    serverHello,
+    transcriptBytes,
+  });
+
+  const liveWireMessages = [];
+  secureTransport.bindLiveSendWireMessage((message) => {
+    liveWireMessages.push(message);
+    return true;
+  });
+
+  secureTransport.queueOutboundApplicationMessage(
+    JSON.stringify({ method: "turn/started", params: { threadId: "thread-live" } }),
+    () => false
+  );
+  secureTransport.queueOutboundApplicationMessage(
+    JSON.stringify({ id: "response-live", result: { ok: true } }),
+    () => false
+  );
+
+  assert.equal(liveWireMessages.length, 2);
+  const livePayload = decryptEnvelope(JSON.parse(liveWireMessages[0]), macToPhoneKey);
+  assert.equal(
+    JSON.parse(livePayload.payloadText).params.remodexReplayedEvent,
+    undefined
+  );
+
+  const replayWireMessages = [];
+  secureTransport.bindLiveSendWireMessage((message) => {
+    replayWireMessages.push(message);
+    return true;
+  });
+
+  assert.equal(replayWireMessages.length, 2);
+  const replayedNotification = decryptEnvelope(JSON.parse(replayWireMessages[0]), macToPhoneKey);
+  const replayedNotificationPayload = JSON.parse(replayedNotification.payloadText);
+  assert.equal(replayedNotificationPayload.method, "turn/started");
+  assert.equal(replayedNotificationPayload.params.threadId, "thread-live");
+  assert.equal(replayedNotificationPayload.params.remodexReplayedEvent, undefined);
+
+  const replayedResponse = decryptEnvelope(JSON.parse(replayWireMessages[1]), macToPhoneKey);
+  assert.equal(
+    replayedResponse.payloadText,
+    JSON.stringify({ id: "response-live", result: { ok: true } })
+  );
+});
+
+test("previous-session replayed notifications are tagged as catch-up history", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const phoneEphemeral = createOkpKeyPair("x25519");
+  const secureTransport = createTestBridgeSecureTransport({
+    sessionId: "session-previous-replay-tag",
+    relayUrl: "wss://relay.example/relay",
+    deviceState: {
+      macDeviceId: "mac-previous-replay-tag",
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+
+  finishHandshake({
+    secureTransport,
+    sessionId: "session-previous-replay-tag",
+    macDeviceId: "mac-previous-replay-tag",
+    phoneDeviceId: "phone-previous-replay-tag",
+    macIdentity,
+    phoneIdentity,
+    phoneEphemeral,
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP,
+    lastAppliedBridgeOutboundSeq: 0,
+  });
+
+  let captureReplay = false;
+  const replayWireMessages = [];
+  secureTransport.bindLiveSendWireMessage((message) => {
+    if (captureReplay) {
+      replayWireMessages.push(message);
+    }
+    return true;
+  });
+
+  secureTransport.queueOutboundApplicationMessage(
+    JSON.stringify({ method: "turn/started", params: { threadId: "thread-previous-session" } }),
+    () => false
+  );
+
+  const reconnectEphemeral = createOkpKeyPair("x25519");
+  captureReplay = true;
+  const { serverHello, transcriptBytes } = finishHandshake({
+    secureTransport,
+    sessionId: "session-previous-replay-tag",
+    macDeviceId: "mac-previous-replay-tag",
+    phoneDeviceId: "phone-previous-replay-tag",
+    macIdentity,
+    phoneIdentity,
+    phoneEphemeral: reconnectEphemeral,
+    handshakeMode: HANDSHAKE_MODE_TRUSTED_RECONNECT,
+    lastAppliedBridgeOutboundSeq: 0,
+  });
+
+  const macToPhoneKey = deriveMacToPhoneKey({
+    sessionId: "session-previous-replay-tag",
+    macDeviceId: "mac-previous-replay-tag",
+    phoneDeviceId: "phone-previous-replay-tag",
+    phoneEphemeral: reconnectEphemeral,
+    serverHello,
+    transcriptBytes,
+  });
+  // Historical backlog replay closes with a transient completion marker so the
+  // phone can settle its catch-up burst deterministically.
+  assert.equal(replayWireMessages.length, 2);
+  const replayedNotification = decryptEnvelope(JSON.parse(replayWireMessages[0]), macToPhoneKey);
+  const replayedNotificationPayload = JSON.parse(replayedNotification.payloadText);
+  assert.equal(replayedNotificationPayload.method, "turn/started");
+  assert.equal(replayedNotificationPayload.params.threadId, "thread-previous-session");
+  assert.equal(replayedNotificationPayload.params.remodexReplayedEvent, true);
+
+  const completionMarker = decryptEnvelope(JSON.parse(replayWireMessages[1]), macToPhoneKey);
+  // Transient marker: no bridgeOutboundSeq, so it never advances the phone ack
+  // cursor and is never re-replayed from the buffer.
+  assert.equal(completionMarker.bridgeOutboundSeq, undefined);
+  const completionMarkerPayload = JSON.parse(completionMarker.payloadText);
+  assert.equal(completionMarkerPayload.method, "remodex/bufferedReplay/completed");
+  assert.equal(completionMarkerPayload.params.remodexBufferedReplayComplete, true);
+});
+
 test("resume replay does not advance the replay watermark before a phone ack", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const phoneIdentity = createOkpKeyPair("ed25519");

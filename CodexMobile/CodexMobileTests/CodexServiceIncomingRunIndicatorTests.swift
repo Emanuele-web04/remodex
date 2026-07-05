@@ -42,6 +42,29 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(messages.first?.isStreaming == true)
     }
 
+    func testReplayedAssistantDeltaAppliesAsClosedHistory() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            delta: "Historical answer",
+            isReplay: true
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.role, .assistant)
+        XCTAssertEqual(messages.first?.text, "Historical answer")
+        XCTAssertFalse(messages.first?.isStreaming ?? true)
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+    }
+
     func testAssistantDeltaCoalescingMergesCumulativeSnapshotsBeforeFlush() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -91,6 +114,33 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(messages.first?.kind, .thinking)
         XCTAssertEqual(messages.first?.text, "Looking around")
         XCTAssertTrue(messages.first?.isStreaming == true)
+    }
+
+    func testReplayedSystemDeltaAppliesAsClosedHistoryAfterFlush() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "file-change-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/fileChange/outputDelta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "delta": .string("Updated Sources/App.swift"),
+                "remodexReplayedEvent": .bool(true),
+            ])
+        )
+        service.flushAllPendingStreamingDeltas()
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.role, .system)
+        XCTAssertEqual(messages.first?.kind, .fileChange)
+        XCTAssertEqual(messages.first?.text, "Updated Sources/App.swift")
+        XCTAssertFalse(messages.first?.isStreaming ?? true)
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
     }
 
     func testNilTurnSystemDeltasFlushBeforeTurnCompletionClosesRows() {
@@ -603,6 +653,95 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(service.readyThreadIDs.isEmpty)
         XCTAssertTrue(service.failedThreadIDs.isEmpty)
         XCTAssertNil(service.threadRunBadgeState(for: threadID))
+    }
+
+    func testDeletingRunningThreadClearsRuntimeState() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        service.threads = [
+            CodexThread(id: threadID, title: "Running chat", cwd: "/tmp/remodex"),
+        ]
+        service.runningThreadIDs.insert(threadID)
+        service.activeTurnIdByThread[threadID] = turnID
+        service.threadIdByTurnID[turnID] = threadID
+        service.activeTurnId = turnID
+        service.latestTurnTerminalStateByThread[threadID] = .completed
+        service.readyThreadIDs.insert(threadID)
+
+        service.deleteThreadLocally(threadID)
+
+        XCTAssertFalse(service.runningThreadIDs.contains(threadID))
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertNil(service.threadIdByTurnID[turnID])
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertNil(service.latestTurnTerminalState(for: threadID))
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+        XCTAssertFalse(service.threads.contains { $0.id == threadID })
+    }
+
+    func testDisplayIslandDoesNotMarkDisconnectedRunReadyWithoutTerminalState() {
+        let service = makeService()
+        let coordinator = RemodexDisplayIslandCoordinator()
+        let threadID = "thread-\(UUID().uuidString)"
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        service.threads = [
+            CodexThread(id: threadID, title: "Running chat", cwd: "/tmp/remodex"),
+        ]
+        service.runningThreadIDs.insert(threadID)
+
+        let runningSnapshot = coordinator.makeReconciledSnapshot(codex: service, now: startedAt)
+        XCTAssertEqual(runningSnapshot.runningConversations.map(\.id), [threadID])
+
+        service.runningThreadIDs.remove(threadID)
+        let disconnectedSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertTrue(disconnectedSnapshot.runningConversations.isEmpty)
+        XCTAssertTrue(disconnectedSnapshot.completedConversations.isEmpty)
+        XCTAssertTrue(disconnectedSnapshot.failedConversations.isEmpty)
+
+        service.latestTurnTerminalStateByThread[threadID] = .completed
+        let completedSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(2)
+        )
+        XCTAssertEqual(completedSnapshot.completedConversations.map(\.id), [threadID])
+    }
+
+    func testDisplayIslandDoesNotMarkActiveRunReadyAfterCompletion() {
+        let service = makeService()
+        let coordinator = RemodexDisplayIslandCoordinator()
+        let threadID = "thread-\(UUID().uuidString)"
+        let startedAt = Date(timeIntervalSince1970: 1_000)
+        service.threads = [
+            CodexThread(id: threadID, title: "Active chat", cwd: "/tmp/remodex"),
+        ]
+        service.activeThreadId = threadID
+        service.runningThreadIDs.insert(threadID)
+
+        let runningSnapshot = coordinator.makeReconciledSnapshot(codex: service, now: startedAt)
+        XCTAssertEqual(runningSnapshot.runningConversations.map(\.id), [threadID])
+
+        service.runningThreadIDs.remove(threadID)
+        service.latestTurnTerminalStateByThread[threadID] = .completed
+        let activeCompletedSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(1)
+        )
+
+        XCTAssertTrue(activeCompletedSnapshot.runningConversations.isEmpty)
+        XCTAssertTrue(activeCompletedSnapshot.completedConversations.isEmpty)
+        XCTAssertTrue(activeCompletedSnapshot.failedConversations.isEmpty)
+
+        service.activeThreadId = nil
+        let laterInactiveSnapshot = coordinator.makeReconciledSnapshot(
+            codex: service,
+            now: startedAt.addingTimeInterval(2)
+        )
+        XCTAssertTrue(laterInactiveSnapshot.completedConversations.isEmpty)
     }
 
     func testThreadHasActiveOrRunningTurnUsesRunningFallback() {

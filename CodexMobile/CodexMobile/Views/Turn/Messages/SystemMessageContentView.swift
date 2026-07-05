@@ -56,23 +56,33 @@ struct SystemMessageContentView: View {
     }
 
     private var toolActivitySystemView: some View {
-        let joined = text
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+        // Read the cached per-line models (built once per text revision) instead
+        // of re-splitting/re-classifying the full text on every body evaluation.
+        let model = renderModel.toolActivity
+            ?? ToolActivityRenderCache.model(messageID: message.id, text: text)
 
-        return VStack(alignment: .leading, spacing: 4) {
-            if !joined.isEmpty {
-                Text(joined)
-                    .font(AppFont.body(weight: .regular))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        // One icon + label row per tool call, spaced and aligned exactly like the
+        // humanized command rows so merged activity never reads as a text blob.
+        return VStack(alignment: .leading, spacing: 14) {
+            ForEach(model.lines) { line in
+                HStack(spacing: 6) {
+                    RemodexIcon.image(systemName: line.iconSystemName, size: 17, relativeTo: .body)
+                        .foregroundStyle(.secondary)
+
+                    Text(line.text)
+                        .font(AppFont.body(weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
-
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        // Tool rows update often while activity streams; keep the subtree static to avoid whole-row flashing.
+        .transaction { transaction in
+            transaction.animation = nil
+        }
         .contextMenu {
             selectableTextActions(text: actionText, usesMarkdownSelection: false)
         }

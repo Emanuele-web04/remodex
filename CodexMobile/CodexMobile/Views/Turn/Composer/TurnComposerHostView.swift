@@ -43,6 +43,9 @@ struct TurnComposerHostView: View {
     // Pass-through for the New Chat draft surface; defaults to true so every
     // existing call site keeps its meta bar.
     var showsSecondaryBar: Bool = true
+    // Composer surfaces collapse to a capsule when the keyboard is closed;
+    // call sites may opt out for constrained hosts.
+    var allowsCollapsedComposer: Bool = true
 
     // ─── ENTRY POINT ─────────────────────────────────────────────
     var body: some View {
@@ -306,7 +309,8 @@ struct TurnComposerHostView: View {
                 viewModel.removeQueuedDraft(id: draftID, codex: codex, threadID: thread.id)
             },
             onSend: onSend,
-            showsSecondaryBar: showsSecondaryBar
+            showsSecondaryBar: showsSecondaryBar,
+            allowsCollapsedComposer: allowsCollapsedComposer
         )
     }
 }

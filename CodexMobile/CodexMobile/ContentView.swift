@@ -82,6 +82,7 @@ struct ContentView: View {
     @State private var sidebarSelectionSuppressedUntil: Date?
     @State private var activeNewChatDraftRoute: NewChatDraftRoute?
     @State private var isOpeningNewChatFromSidebar = false
+    @State private var pendingQuickAction: RemodexQuickAction?
     @State private var threadIDsPendingInitialAssistantAnchor: Set<String> = []
     // Settings is presented as a `fullScreenCover` instead of being pushed
     // onto `navigationPath` so the gear button works even when the sidebar
@@ -90,6 +91,7 @@ struct ContentView: View {
     // inside the bar.
     @State private var isShowingSettingsCover = false
     @State private var isShowingDevicesSettingsSheet = false
+    @State private var displayIslandCoordinator = RemodexDisplayIslandCoordinator()
     @AppStorage("codex.hasSeenOnboarding") private var hasSeenOnboarding = false
     @AppStorage("codex.whatsNew.lastPresentedVersion") private var lastPresentedWhatsNewVersion = ""
 
@@ -112,6 +114,10 @@ struct ContentView: View {
     // Splits lifecycle wiring from presentation modifiers so SwiftUI does not have to type-check one giant body chain.
     private var rootContentWithLifecycleObservers: some View {
         rootContent
+            .task {
+                RemodexQuickActionCenter.updateShortcutItems(for: codex.threads)
+                routePendingQuickActionIfNeeded()
+            }
             // Only resume saved-pairing recovery after onboarding is done and the manual scanner is not in control.
             .task {
                 guard hasSeenOnboarding, !isShowingManualScanner else {
@@ -127,6 +133,9 @@ struct ContentView: View {
             }
             .task(id: rootSheetPresentationFingerprint) {
                 syncRootSheetPresentationIfNeeded()
+            }
+            .task(id: codex.externalThreadOpenRequest?.id) {
+                routeExternalThreadOpenIfNeeded()
             }
             .onChange(of: isSidebarOpen) { wasOpen, isOpen in
                 debugSidebarLog(
@@ -151,6 +160,10 @@ struct ContentView: View {
                     to: thread?.id
                 )
                 codex.activeThreadId = thread?.id
+                if let thread {
+                    clearDisplayIslandOutcome(for: thread.id)
+                    syncDisplayIsland()
+                }
                 if thread != nil {
                     suppressAutomaticThreadSelection = false
                 }
@@ -166,13 +179,20 @@ struct ContentView: View {
             }
             .onChange(of: codex.threads) { _, threads in
                 debugSidebarLog("threads changed count=\(threads.count) sidebarOpen=\(isSidebarOpen) prewarmed=\(isSidebarPrewarmed)")
+                RemodexQuickActionCenter.updateShortcutItems(for: threads)
                 syncSelectedThread(with: threads)
+                routeExternalThreadOpenIfNeeded()
+                routePendingQuickActionIfNeeded()
                 scheduleSidebarPrewarmIfNeeded()
+                syncDisplayIsland()
             }
             .onChange(of: scenePhase) { _, phase in
                 debugSidebarLog("scenePhase changed phase=\(String(describing: phase))")
                 codex.setForegroundState(phase != .background)
+                syncDisplayIsland()
                 if phase == .active {
+                    RemodexQuickActionCenter.updateShortcutItems(for: codex.threads)
+                    routePendingQuickActionIfNeeded()
                     Task {
                         async let subscriptionRefresh: Void = subscriptions.refreshCustomerInfoSilently()
 
@@ -190,6 +210,9 @@ struct ContentView: View {
                     resetSavedMacWakeRecoveryState()
                     teardownSidebarPrewarm()
                 }
+            }
+            .onChange(of: horizontalSizeClass) { _, _ in
+                routePendingQuickActionIfNeeded()
             }
             .onChange(of: codex.shouldAutoReconnectOnForeground) { _, shouldReconnect in
                 guard shouldReconnect else {
@@ -213,7 +236,29 @@ struct ContentView: View {
                 resetSavedMacWakeRecoveryState()
             }
             .onChange(of: codex.threadCompletionBanner) { _, banner in
+                displayIslandCoordinator.rememberCompletion(from: banner, codex: codex)
                 scheduleThreadCompletionBannerDismiss(for: banner)
+                syncDisplayIsland()
+            }
+            .onChange(of: codex.runningThreadIDs) { _, _ in
+                syncDisplayIsland()
+            }
+            .onChange(of: displayIslandTimelineFingerprint) { _, _ in
+                syncDisplayIsland()
+            }
+            .onChange(of: codex.activeTurnIdByThread) { _, _ in
+                syncDisplayIsland()
+            }
+            .onChange(of: codex.latestTurnTerminalStateByThread) { _, _ in
+                syncDisplayIsland()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: RemodexQuickActionCenter.didReceiveQuickAction)) { notification in
+                _ = RemodexQuickActionCenter.consumePendingAction()
+                guard let action = notification.userInfo?["action"] as? RemodexQuickAction else {
+                    return
+                }
+                pendingQuickAction = action
+                routePendingQuickActionIfNeeded()
             }
     }
 
@@ -1141,6 +1186,8 @@ struct ContentView: View {
         selectedThread = thread
         codex.activeThreadId = thread.id
         codex.markThreadAsViewed(thread.id)
+        clearDisplayIslandOutcome(for: thread.id)
+        syncDisplayIsland()
         if shouldPresentSidebarAsNavigation {
             navigationPath = [.thread(id: thread.id)]
         }
@@ -1160,6 +1207,85 @@ struct ContentView: View {
 
             codex.requestImmediateActiveThreadSync(threadId: thread.id, forceHistoryRefresh: true)
         }
+    }
+
+    private func routeExternalThreadOpenIfNeeded() {
+        guard let request = codex.externalThreadOpenRequest else {
+            return
+        }
+
+        let threadId = request.threadId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !threadId.isEmpty else {
+            return
+        }
+        let thread: CodexThread
+        if let existingThread = codex.threads.first(where: { $0.id == threadId }) {
+            guard existingThread.syncState != .archivedLocal else {
+                return
+            }
+            thread = existingThread
+        } else {
+            thread = CodexThread(id: threadId, title: CodexThread.defaultDisplayTitle)
+            codex.upsertThread(thread)
+        }
+
+        activeNewChatDraftRoute = nil
+        isOpeningNewChatFromSidebar = false
+        selectedThread = thread
+        codex.activeThreadId = thread.id
+        codex.markThreadAsViewed(thread.id)
+        clearDisplayIslandOutcome(for: thread.id)
+        syncDisplayIsland()
+        if shouldPresentSidebarAsNavigation {
+            navigationPath = [.thread(id: thread.id)]
+        }
+        codex.externalThreadOpenRequest = nil
+    }
+
+    private func routePendingQuickActionIfNeeded() {
+        if pendingQuickAction == nil {
+            pendingQuickAction = RemodexQuickActionCenter.consumePendingAction()
+        }
+
+        guard let action = pendingQuickAction else {
+            return
+        }
+
+        // Shortcut callbacks can arrive before SwiftUI has resolved the size class.
+        // Routing too early chooses drawer mode on iPhone and leaves the user at the sidebar root.
+        guard horizontalSizeClass != nil else {
+            return
+        }
+
+        pendingQuickAction = nil
+        handleQuickAction(action)
+    }
+
+    private func handleQuickAction(_ action: RemodexQuickAction) {
+        switch action {
+        case .newChat:
+            openNewChatDraftFromSidebar(source: .generalChat, preferredProjectPath: nil)
+        case .thread(let threadId):
+            if let thread = codex.threads.first(where: { $0.id == threadId && $0.syncState == .live }) {
+                sidebarSelectionSuppressedUntil = nil
+                openThreadFromSidebar(thread)
+            } else {
+                routeQuickActionThreadPlaceholder(threadId: threadId)
+            }
+        }
+    }
+
+    private func routeQuickActionThreadPlaceholder(threadId: String) {
+        let normalizedThreadId = threadId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedThreadId.isEmpty else {
+            return
+        }
+
+        let thread = codex.threads.first(where: { $0.id == normalizedThreadId })
+            ?? CodexThread(id: normalizedThreadId, title: CodexThread.defaultDisplayTitle)
+        codex.upsertThread(thread)
+        sidebarSelectionSuppressedUntil = nil
+        openThreadFromSidebar(thread)
     }
 
     // Keeps sidebar chat creation compose-first while preserving which affordance
@@ -1194,6 +1320,8 @@ struct ContentView: View {
         selectedThread = thread
         codex.activeThreadId = thread.id
         codex.markThreadAsViewed(thread.id)
+        clearDisplayIslandOutcome(for: thread.id)
+        syncDisplayIsland()
 
         if shouldPresentSidebarAsNavigation {
             Task { @MainActor in
@@ -1894,6 +2022,8 @@ struct ContentView: View {
     private func openCompletedThreadFromBanner(_ banner: CodexThreadCompletionBanner) {
         threadCompletionBannerDismissTask?.cancel()
         codex.threadCompletionBanner = nil
+        clearDisplayIslandOutcome(for: banner.threadId)
+        syncDisplayIsland()
 
         guard let thread = codex.threads.first(where: { $0.id == banner.threadId }) else {
             return
@@ -1903,8 +2033,27 @@ struct ContentView: View {
     }
 
     private func dismissThreadCompletionBanner() {
+        if let banner = codex.threadCompletionBanner {
+            clearDisplayIslandOutcome(for: banner.threadId)
+        }
         threadCompletionBannerDismissTask?.cancel()
         codex.threadCompletionBanner = nil
+        syncDisplayIsland()
+    }
+
+    private func clearDisplayIslandOutcome(for threadId: String) {
+        displayIslandCoordinator.clearOutcome(
+            for: threadId,
+            terminalState: codex.latestTurnTerminalState(for: threadId)
+        )
+    }
+
+    private func syncDisplayIsland() {
+        displayIslandCoordinator.sync(codex: codex)
+    }
+
+    private var displayIslandTimelineFingerprint: String {
+        displayIslandCoordinator.timelineFingerprint(codex: codex)
     }
 
     // Keeps selected thread coherent with server list updates.

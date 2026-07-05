@@ -259,7 +259,9 @@ extension CodexService {
             into: &merged,
             deletedThreadIDs: persistedDeletedIDs
         ))
-        snapshotOnlyPinnedThreadIDs = snapshotOnlyPinnedIDs
+        if snapshotOnlyPinnedThreadIDs != snapshotOnlyPinnedIDs {
+            snapshotOnlyPinnedThreadIDs = snapshotOnlyPinnedIDs
+        }
 
         // Local rename intent wins over stale thread/list data, especially for pinned snapshots.
         for threadID in Array(merged.keys) {
@@ -268,11 +270,20 @@ extension CodexService {
             merged[threadID] = thread
         }
 
-        threads = sortThreads(Array(merged.values))
-        assistantRevertStateCacheByThread.removeAll()
+        // Steady-state polls usually reconcile to an identical list; skip the observable
+        // reassignment and full timeline refresh cascade when nothing actually changed.
+        // Revert-state caches are revision-keyed, so they self-invalidate on real changes.
+        let reconciledThreads = sortThreads(Array(merged.values))
+        let didChangeThreads = reconciledThreads != threads
+        if didChangeThreads {
+            threads = reconciledThreads
+            assistantRevertStateCacheByThread.removeAll()
+        }
         refreshBusyRepoRootsAndDependentTimelineStates()
-        // Full reconciliation — always refresh all threads even if busy-roots already hit some.
-        refreshAllThreadTimelineStates()
+        if didChangeThreads {
+            // Full reconciliation — always refresh all threads even if busy-roots already hit some.
+            refreshAllThreadTimelineStates()
+        }
 
         if activeThreadId == nil {
             activeThreadId = firstLiveThreadID()
@@ -550,9 +561,15 @@ extension CodexService {
 
     // Centralizes local-only thread cleanup so repo-group deletion can reuse it safely.
     private func removeThreadLocally(_ threadId: String, persistAsDeleted: Bool, persistMessages: Bool = true) {
-        clearRunningState(for: threadId)
-        removeThreadTimelineState(for: threadId)
+        if let turnId = activeTurnID(for: threadId) {
+            setActiveTurnID(nil, for: threadId)
+            threadIdByTurnID.removeValue(forKey: turnId)
+            if activeTurnId == turnId { activeTurnId = nil }
+        }
+        threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
+
         clearOutcomeBadge(for: threadId)
+        latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         persistThreadRename(nil, for: threadId)
 
         // Drop local-only runtime overrides once a chat is fully removed from the device.
@@ -560,6 +577,10 @@ extension CodexService {
         clearThreadServiceTierOverride(for: threadId)
 
         threads.removeAll { $0.id == threadId }
+
+        clearRunningState(for: threadId)
+        removeThreadTimelineState(for: threadId)
+
         messagesByThread.removeValue(forKey: threadId)
         if persistMessages {
             persistCurrentMacMessages()
@@ -571,13 +592,6 @@ extension CodexService {
         streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter { key, _ in
             !key.hasPrefix("\(threadId)|item:")
         }
-
-        if let turnId = activeTurnID(for: threadId) {
-            setActiveTurnID(nil, for: threadId)
-            threadIdByTurnID.removeValue(forKey: turnId)
-            if activeTurnId == turnId { activeTurnId = nil }
-        }
-        threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
 
         if activeThreadId == threadId { activeThreadId = nil }
 

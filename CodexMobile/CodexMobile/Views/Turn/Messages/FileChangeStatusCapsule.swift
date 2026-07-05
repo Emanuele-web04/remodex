@@ -165,7 +165,7 @@ struct FileChangeStatusCapsule: View {
     }
 
     private var capsuleContent: some View {
-        HStack(spacing: 8) {
+        GlassStatusPill {
             Image("changes")
                 .renderingMode(.template)
                 .resizable()
@@ -186,14 +186,6 @@ struct FileChangeStatusCapsule: View {
                     .layoutPriority(1)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 8)
-        .adaptiveGlass(.regular, in: Capsule())
-        .overlay {
-            Capsule()
-                .stroke(Color.white.opacity(0.22), lineWidth: 0.5)
-        }
-        .contentShape(Capsule())
         .accessibilityElement(children: .combine)
     }
 }
