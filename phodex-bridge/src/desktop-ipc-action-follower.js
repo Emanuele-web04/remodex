@@ -158,12 +158,20 @@ function createDesktopIpcActionFollower({
       }
       return;
     }
-    if (!threadId || !activeThreadIds.has(threadId)) {
+    if (!threadId) {
       return;
     }
-    liveOwnerThreadIds.delete(threadId);
-    ownershipProbeDeadlinesByThreadId.delete(threadId);
-    desktopOwnedByProbeThreadIds.delete(threadId);
+    const peerOwnershipSnapshot = isPeerOwnershipSnapshot(params);
+    if (peerOwnershipSnapshot) {
+      liveOwnerThreadIds.delete(threadId);
+      ownershipProbeDeadlinesByThreadId.delete(threadId);
+      desktopOwnedByProbeThreadIds.delete(threadId);
+    } else if (liveOwnerThreadIds.has(threadId)) {
+      return;
+    }
+    if (!activeThreadIds.has(threadId)) {
+      return;
+    }
 
     if (recoveringThreadIds.has(threadId)) {
       queueThreadChange(threadId, params.change);
@@ -353,6 +361,11 @@ function createDesktopIpcActionFollower({
   function routeExpiredHeldRequestThroughBus(rawMessage) {
     const message = safeParseJSON(rawMessage);
     const route = message ? buildDesktopFollowerRoute(message) : null;
+    if (route) {
+      // The request is being routed definitively now, so a late discovery answer
+      // must not retroactively mark the thread Desktop-owned.
+      pendingOwnershipProbeTokensByThreadId.delete(route.threadId);
+    }
     if (!route || liveOwnerThreadIds.has(route.threadId)) {
       forwardToLocalCodex(rawMessage);
       return;
@@ -1154,6 +1167,10 @@ function isPatchChange(change) {
 
 function isRemodexLiveOwnerBroadcast(params) {
   return readString(params?.remodexOwnerSource) === REMODEX_LIVE_OWNER_SOURCE;
+}
+
+function isPeerOwnershipSnapshot(params) {
+  return !isRemodexLiveOwnerBroadcast(params) && normalizeToken(params?.change?.type) === "snapshot";
 }
 
 function markDeliveryFailureError(error) {

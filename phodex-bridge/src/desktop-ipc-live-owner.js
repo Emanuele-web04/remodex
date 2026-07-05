@@ -2,13 +2,14 @@
 // Purpose: Exposes bridge-owned Codex app-server streams to Codex Desktop/VSCode over the local IPC bus.
 // Layer: CLI helper
 // Exports: createDesktopIpcLiveOwner, buildConversationStateFromThread, applyAppServerMessageToConversationState
-// Depends on: crypto, net, os, path
+// Depends on: crypto, fs, net, path, ./desktop-ipc-action-follower
 
 const { randomUUID } = require("crypto");
 const fs = require("fs");
 const net = require("net");
-const os = require("os");
 const path = require("path");
+
+const { resolveDefaultIpcSocketPath } = require("./desktop-ipc-action-follower");
 
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
@@ -118,7 +119,9 @@ function createDesktopIpcLiveOwner({
 
   const conversations = new Map();
   const ownedThreadIds = new Set();
-  const pendingThreadStartRequestIds = new Set();
+  // Pending local thread/start requests in FIFO order, keyed by request id with
+  // the requested cwd so notification-only thread/started events pair correctly.
+  const pendingThreadStartRequestIds = new Map();
   const pendingThreadReadRequestIds = new Set();
   const pendingThreadHydrationsByThreadId = new Map();
   const cachedThreadsByThreadId = new Map();
@@ -167,7 +170,7 @@ function createDesktopIpcLiveOwner({
 
     if (method === "thread/start") {
       if (message?.id != null) {
-        pendingThreadStartRequestIds.add(String(message.id));
+        pendingThreadStartRequestIds.set(String(message.id), readString(message?.params?.cwd));
       }
       ipc.ensureConnected();
       return;
@@ -333,21 +336,27 @@ function createDesktopIpcLiveOwner({
     ipc.ensureConnected();
   }
 
-  // Notification-only thread/start paths do not echo a request id, so consume one
-  // pending local start before accepting the matching thread/started snapshot.
+  // Notification-only thread/start paths do not echo a request id, so consume the
+  // oldest pending local start whose cwd matches the started thread. Requiring a
+  // cwd match keeps overlapping starts from claiming threads created elsewhere.
   function claimStartedThreadForPendingLocalStart(message) {
     if (readString(message?.method) !== "thread/started" || pendingThreadStartRequestIds.size === 0) {
       return;
     }
-    const threadId = readString(message?.params?.thread?.id);
+    const thread = message?.params?.thread;
+    const threadId = readString(thread?.id);
     if (!threadId || ownedThreadIds.has(threadId)) {
       return;
     }
-    const pendingRequestId = pendingThreadStartRequestIds.values().next().value;
-    if (pendingRequestId != null) {
+    const threadCwd = readString(thread?.cwd);
+    for (const [pendingRequestId, pendingCwd] of pendingThreadStartRequestIds) {
+      if (pendingCwd && threadCwd && pendingCwd !== threadCwd) {
+        continue;
+      }
       pendingThreadStartRequestIds.delete(pendingRequestId);
+      markOwnedThread(threadId);
+      return;
     }
-    markOwnedThread(threadId);
   }
 
   function removeOwnedThread(threadId) {
@@ -594,18 +603,19 @@ function createDesktopIpcLiveOwner({
       case "thread-follower-interrupt-turn":
         return await handleFollowerInterruptTurn(conversationId, params);
       case "thread-follower-command-approval-decision":
-        return sendServerRequestResponse(params.requestId, { decision: params.decision });
+        return sendServerRequestResponse(conversationId, params.requestId, { decision: params.decision });
       case "thread-follower-file-approval-decision":
         return sendServerRequestResponse(
+          conversationId,
           params.requestId,
           followerApprovalResultForRequest(conversationId, params)
         );
       case "thread-follower-permissions-request-approval-response":
-        return sendServerRequestResponse(params.requestId, params.response);
+        return sendServerRequestResponse(conversationId, params.requestId, params.response);
       case "thread-follower-submit-user-input":
-        return sendServerRequestResponse(params.requestId, params.response);
+        return sendServerRequestResponse(conversationId, params.requestId, params.response);
       case "thread-follower-submit-mcp-server-elicitation-response":
-        return sendServerRequestResponse(params.requestId, params.response);
+        return sendServerRequestResponse(conversationId, params.requestId, params.response);
       case "thread-follower-set-model-and-reasoning":
         return applyFollowerModelAndReasoning(conversationId, params);
       case "thread-follower-set-collaboration-mode":
@@ -695,13 +705,17 @@ function createDesktopIpcLiveOwner({
     };
   }
 
-  function sendServerRequestResponse(requestId, result) {
+  function sendServerRequestResponse(conversationId, requestId, result) {
     const normalizedRequestId = requestIdKey(requestId);
     if (!normalizedRequestId) {
       throw new Error("Missing requestId for follower server response.");
     }
+    // Desktop may echo a coerced (stringified) request id; reply with the exact
+    // id the app-server used so the pending server request actually resolves.
+    const pendingRequest = (conversations.get(conversationId)?.requests || [])
+      .find((request) => requestIdKey(request?.id) === normalizedRequestId);
     sendRawCodexMessage(JSON.stringify({
-      id: requestId,
+      id: pendingRequest ? pendingRequest.id : requestId,
       result: result || {},
     }));
     return { ok: true };
@@ -2543,14 +2557,6 @@ function writeFrame(socket, payload) {
   const header = Buffer.alloc(FRAME_HEADER_BYTES);
   header.writeUInt32LE(body.length, 0);
   socket.write(Buffer.concat([header, body]));
-}
-
-function resolveDefaultIpcSocketPath() {
-  if (process.platform === "win32") {
-    return "\\\\.\\pipe\\codex-ipc";
-  }
-  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
 }
 
 module.exports = {

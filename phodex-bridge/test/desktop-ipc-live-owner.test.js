@@ -1689,6 +1689,167 @@ test("live owner routes follower approval responses back to app-server", async (
   }]);
 });
 
+test("live owner replies to follower approvals with the original app-server id", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-approval-id-");
+  const rawCodexMessages = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage(rawMessage) {
+      rawCodexMessages.push(JSON.parse(rawMessage));
+    },
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-approval-id", input: [] },
+  }));
+  // The app-server issued this pending approval with a numeric JSON-RPC id.
+  owner.observeOutbound(JSON.stringify({
+    id: 42,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "thread-approval-id",
+      turnId: "turn-approval-id",
+      itemId: "item-approval-id",
+      command: "git status",
+    },
+  }));
+  await waitFor(() => serverSocket);
+
+  // Desktop echoes the id back as a string.
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "approval-id-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-command-approval-decision",
+    params: {
+      conversationId: "thread-approval-id",
+      requestId: "42",
+      decision: "accept",
+    },
+  });
+  const response = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "approval-id-1"
+  );
+  assert.equal(response.resultType, "success");
+  assert.deepEqual(rawCodexMessages.at(-1), {
+    id: 42,
+    result: { decision: "accept" },
+  });
+});
+
+test("live owner pairs notification-only thread starts by requested cwd", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-start-cwd-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "start-a",
+    method: "thread/start",
+    params: { cwd: "/tmp/project-a" },
+  }));
+
+  // A thread/started from a different cwd must not consume the pending start.
+  owner.observeOutbound(JSON.stringify({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "thread-other-cwd",
+        cwd: "/tmp/project-other",
+        createdAt: 1,
+        updatedAt: 1,
+        turns: [],
+      },
+    },
+  }));
+  await wait(50);
+  assert.equal(
+    frames.some((frame) => frame.type === "broadcast"
+      && frame.params?.conversationId === "thread-other-cwd"),
+    false
+  );
+
+  owner.observeOutbound(JSON.stringify({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "thread-matching-cwd",
+        cwd: "/tmp/project-a",
+        createdAt: 1,
+        updatedAt: 1,
+        turns: [],
+      },
+    },
+  }));
+  const broadcast = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-matching-cwd"
+      && frame.params?.change?.type === "snapshot"
+  );
+  assert.equal(broadcast.params.change.conversationState.id, "thread-matching-cwd");
+});
+
 test("live owner converts desktop permission approvals into grant payloads", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-permissions-");
   const rawCodexMessages = [];
