@@ -674,7 +674,7 @@ function createDesktopIpcLiveOwner({
       permissions: grantsRequestedPermissions && isPlainJSONObject(requestedPermissions)
         ? cloneJSON(requestedPermissions)
         : {},
-      scope: "turn",
+      scope: decision === "acceptForSession" ? "session" : "turn",
     };
   }
 

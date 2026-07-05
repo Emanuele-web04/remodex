@@ -78,8 +78,9 @@ function createDesktopIpcActionFollower({
   const liveOwnerThreadIds = new Set();
   const heldFollowerRequestsByThreadId = new Map();
   const ownershipProbeDeadlinesByThreadId = new Map();
-  const pendingOwnershipProbeThreadIds = new Set();
+  const pendingOwnershipProbeTokensByThreadId = new Map();
   const desktopOwnedByProbeThreadIds = new Set();
+  let nextOwnershipProbeToken = 0;
 
   function observeInbound(rawMessage) {
     const message = safeParseJSON(rawMessage);
@@ -129,7 +130,7 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     liveOwnerThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
-    pendingOwnershipProbeThreadIds.clear();
+    pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
     for (const queue of heldFollowerRequestsByThreadId.values()) {
       for (const entry of queue) {
@@ -204,7 +205,7 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     liveOwnerThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
-    pendingOwnershipProbeThreadIds.clear();
+    pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
     for (const threadId of Array.from(heldFollowerRequestsByThreadId.keys())) {
       releaseHeldFollowerRequests(threadId, { toDesktop: false });
@@ -216,6 +217,7 @@ function createDesktopIpcActionFollower({
   function releaseDesktopThreadState(threadId) {
     liveOwnerThreadIds.add(threadId);
     ownershipProbeDeadlinesByThreadId.delete(threadId);
+    pendingOwnershipProbeTokensByThreadId.delete(threadId);
     desktopOwnedByProbeThreadIds.delete(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
@@ -249,17 +251,24 @@ function createDesktopIpcActionFollower({
   // as soon as possible instead of waiting out the full post-resume window.
   function probeDesktopOwnership(route) {
     const threadId = route.threadId;
-    if (pendingOwnershipProbeThreadIds.has(threadId)) {
+    if (pendingOwnershipProbeTokensByThreadId.has(threadId)) {
       return;
     }
-    pendingOwnershipProbeThreadIds.add(threadId);
+    const probeToken = ++nextOwnershipProbeToken;
+    pendingOwnershipProbeTokensByThreadId.set(threadId, probeToken);
     ipc.sendDiscoveryRequest({
       type: "request",
       method: route.method,
       params: route.params,
     }, ownershipProbeTimeoutMs)
       .then((canHandle) => {
-        pendingOwnershipProbeThreadIds.delete(threadId);
+        if (pendingOwnershipProbeTokensByThreadId.get(threadId) !== probeToken) {
+          return;
+        }
+        pendingOwnershipProbeTokensByThreadId.delete(threadId);
+        if (liveOwnerThreadIds.has(threadId)) {
+          return;
+        }
         if (canHandle === true) {
           desktopOwnedByProbeThreadIds.add(threadId);
           releaseHeldFollowerRequests(threadId, { toDesktop: true });
@@ -274,7 +283,8 @@ function createDesktopIpcActionFollower({
   }
 
   function isDesktopRoutableThread(threadId) {
-    return rawStatesByThreadId.has(threadId) || desktopOwnedByProbeThreadIds.has(threadId);
+    return !liveOwnerThreadIds.has(threadId)
+      && (rawStatesByThreadId.has(threadId) || desktopOwnedByProbeThreadIds.has(threadId));
   }
 
   function holdFollowerRequest(threadId, rawMessage) {

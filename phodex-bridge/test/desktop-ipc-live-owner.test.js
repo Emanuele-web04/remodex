@@ -1660,12 +1660,38 @@ test("live owner converts desktop permission approvals into grant payloads", asy
     params: {
       conversationId: "thread-permissions",
       requestId: "permission-request-1",
+      decision: "acceptForSession",
+    },
+  });
+  const acceptForSessionResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "permission-approval-2"
+  );
+  assert.equal(acceptForSessionResponse.resultType, "success");
+  assert.deepEqual(rawCodexMessages.at(-1), {
+    id: "permission-request-1",
+    result: {
+      permissions: {
+        network: { enabled: true },
+      },
+      scope: "session",
+    },
+  });
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "permission-approval-3",
+    sourceClientId: "desktop",
+    method: "thread-follower-file-approval-decision",
+    params: {
+      conversationId: "thread-permissions",
+      requestId: "permission-request-1",
       decision: "decline",
     },
   });
   const declineResponse = await waitForFrame(
     serverSocket,
-    (frame) => frame.type === "response" && frame.requestId === "permission-approval-2"
+    (frame) => frame.type === "response" && frame.requestId === "permission-approval-3"
   );
   assert.equal(declineResponse.resultType, "success");
   assert.deepEqual(rawCodexMessages.at(-1), {
