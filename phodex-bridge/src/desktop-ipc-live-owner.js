@@ -135,8 +135,7 @@ function createDesktopIpcLiveOwner({
   const pendingTurnStartParamsByThreadId = new Map();
   const pendingTurnStartEntriesByRequestId = new Map();
   const followerRuntimeOverridesByThreadId = new Map();
-  const pendingThreadArchiveBroadcastsByThreadId = new Map();
-  const pendingThreadUnarchiveBroadcastIds = new Set();
+  const pendingThreadArchiveMetadataByThreadId = new Map();
   const dirtyThreadIds = new Set();
   let snapshotTimer = null;
 
@@ -148,8 +147,7 @@ function createDesktopIpcLiveOwner({
     reconnectMs,
     logPrefix,
     onConnected() {
-      flushPendingThreadArchiveBroadcasts();
-      flushPendingThreadUnarchiveBroadcasts();
+      flushPendingThreadArchiveMetadataBroadcasts();
       broadcastAllOwnedSnapshots();
     },
     onBroadcast(envelope) {
@@ -190,7 +188,16 @@ function createDesktopIpcLiveOwner({
       return;
     }
 
-    if (method === "thread/archive" || method === "thread/unsubscribe") {
+    if (method === "thread/archive") {
+      broadcastThreadArchived(threadId, readArchiveCwd(threadId, message?.params));
+      removeOwnedThread(threadId, {
+        broadcastRemoval: true,
+        reason: method,
+        skipArchiveMetadataBroadcast: true,
+      });
+      return;
+    }
+    if (method === "thread/unsubscribe") {
       removeOwnedThread(threadId, { broadcastRemoval: true, reason: method });
       return;
     }
@@ -279,8 +286,7 @@ function createDesktopIpcLiveOwner({
     pendingTurnStartParamsByThreadId.clear();
     pendingTurnStartEntriesByRequestId.clear();
     followerRuntimeOverridesByThreadId.clear();
-    pendingThreadArchiveBroadcastsByThreadId.clear();
-    pendingThreadUnarchiveBroadcastIds.clear();
+    pendingThreadArchiveMetadataByThreadId.clear();
     ownedThreadIds.clear();
     conversations.clear();
     ipc.close();
@@ -378,13 +384,16 @@ function createDesktopIpcLiveOwner({
     }
   }
 
-  function removeOwnedThread(threadId, { broadcastRemoval = false, reason = "" } = {}) {
+  function removeOwnedThread(threadId, { broadcastRemoval = false, reason = "", skipArchiveMetadataBroadcast = false } = {}) {
     const normalizedThreadId = readString(threadId);
     if (!normalizedThreadId) {
       return;
     }
     if (broadcastRemoval && ownedThreadIds.has(normalizedThreadId)) {
-      broadcastRemovedConversationState(normalizedThreadId, reason);
+      broadcastRemovedConversationState(normalizedThreadId, {
+        reason,
+        skipArchiveMetadataBroadcast,
+      });
     }
     ownedThreadIds.delete(normalizedThreadId);
     conversations.delete(normalizedThreadId);
@@ -402,11 +411,11 @@ function createDesktopIpcLiveOwner({
     dirtyThreadIds.delete(normalizedThreadId);
   }
 
-  function broadcastRemovedConversationState(threadId, reason = "") {
+  function broadcastRemovedConversationState(threadId, { reason = "", skipArchiveMetadataBroadcast = false } = {}) {
     const previousState = conversations.get(threadId)
       || lastBroadcastStatesByThreadId.get(threadId)
       || createEmptyConversationState(threadId, { hostId, now });
-    if (reason === "thread/archive") {
+    if (reason === "thread/archive" && !skipArchiveMetadataBroadcast) {
       broadcastThreadArchived(threadId, readString(previousState?.cwd));
     }
     const removedState = {
@@ -437,50 +446,48 @@ function createDesktopIpcLiveOwner({
   }
 
   function broadcastThreadArchived(threadId, cwd) {
-    const normalizedThreadId = readString(threadId);
-    if (!normalizedThreadId) {
-      return;
-    }
-    pendingThreadArchiveBroadcastsByThreadId.set(normalizedThreadId, {
-      cwd: readString(cwd),
-    });
-    ipc.ensureConnected();
-    flushPendingThreadArchiveBroadcasts();
+    queueThreadArchiveMetadataBroadcast(THREAD_ARCHIVED, threadId, { cwd });
   }
 
   function broadcastThreadUnarchived(threadId) {
+    queueThreadArchiveMetadataBroadcast(THREAD_UNARCHIVED, threadId);
+  }
+
+  // Archive/unarchive are list metadata updates; keep only the final per-thread
+  // state while IPC reconnects so rapid toggles cannot flush out of order.
+  function queueThreadArchiveMetadataBroadcast(method, threadId, { cwd } = {}) {
     const normalizedThreadId = readString(threadId);
     if (!normalizedThreadId) {
       return;
     }
-    pendingThreadUnarchiveBroadcastIds.add(normalizedThreadId);
+    pendingThreadArchiveMetadataByThreadId.set(normalizedThreadId, {
+      method,
+      cwd: readString(cwd),
+    });
     ipc.ensureConnected();
-    flushPendingThreadUnarchiveBroadcasts();
+    flushPendingThreadArchiveMetadataBroadcasts();
   }
 
-  function flushPendingThreadArchiveBroadcasts() {
-    for (const [threadId, pending] of pendingThreadArchiveBroadcastsByThreadId) {
-      if (!ipc.sendBroadcast(THREAD_ARCHIVED, {
+  function flushPendingThreadArchiveMetadataBroadcasts() {
+    for (const [threadId, pending] of pendingThreadArchiveMetadataByThreadId) {
+      const params = {
         hostId,
         conversationId: threadId,
-        cwd: pending.cwd,
-      })) {
+      };
+      if (pending.method === THREAD_ARCHIVED) {
+        params.cwd = pending.cwd;
+      }
+      if (!ipc.sendBroadcast(pending.method, params)) {
         return;
       }
-      pendingThreadArchiveBroadcastsByThreadId.delete(threadId);
+      pendingThreadArchiveMetadataByThreadId.delete(threadId);
     }
   }
 
-  function flushPendingThreadUnarchiveBroadcasts() {
-    for (const threadId of pendingThreadUnarchiveBroadcastIds) {
-      if (!ipc.sendBroadcast(THREAD_UNARCHIVED, {
-        hostId,
-        conversationId: threadId,
-      })) {
-        return;
-      }
-      pendingThreadUnarchiveBroadcastIds.delete(threadId);
-    }
+  function readArchiveCwd(threadId, params) {
+    return readString(params?.cwd)
+      || readString(conversations.get(threadId)?.cwd)
+      || readString(lastBroadcastStatesByThreadId.get(threadId)?.cwd);
   }
 
   function maybeYieldOwnedThreadForPeerArchive(envelope) {
