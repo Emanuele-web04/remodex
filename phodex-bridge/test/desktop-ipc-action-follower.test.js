@@ -2124,10 +2124,12 @@ test("desktop IPC follower routes held phone turns once discovery confirms deskt
           result: { clientId: "remodex-test" },
         });
       } else if (frame.type === "client-discovery-request") {
+        // Codex Desktop only invokes handlers when the nested request version
+        // matches the method version, so a missing version must read as false.
         writeFrame(socket, {
           type: "client-discovery-response",
           requestId: frame.requestId,
-          response: { canHandle: true },
+          response: { canHandle: frame.request?.version === 1 },
         });
       } else if (frame.method === "thread-follower-start-turn") {
         writeFrame(socket, {

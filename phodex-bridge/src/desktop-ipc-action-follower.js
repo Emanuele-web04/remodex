@@ -270,6 +270,9 @@ function createDesktopIpcActionFollower({
     ipc.sendDiscoveryRequest({
       type: "request",
       method: route.method,
+      // Codex Desktop rejects discovery unless the nested request version matches
+      // the method version, so mirror the normal request envelope here.
+      version: METHOD_VERSION_BY_NAME.get(route.method) || 1,
       params: route.params,
     }, ownershipProbeTimeoutMs)
       .then((canHandle) => {
