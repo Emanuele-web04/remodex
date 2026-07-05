@@ -516,6 +516,7 @@ function createDesktopIpcActionFollower({
         method: "thread-follower-start-turn",
         params: {
           conversationId: threadId,
+          senderRequestId: requestId,
           turnStartParams: params,
         },
       };

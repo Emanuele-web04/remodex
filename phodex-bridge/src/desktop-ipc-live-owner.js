@@ -182,7 +182,7 @@ function createDesktopIpcLiveOwner({
     }
 
     if (method === "thread/archive" || method === "thread/unsubscribe") {
-      removeOwnedThread(threadId);
+      removeOwnedThread(threadId, { broadcastRemoval: true, reason: method });
       return;
     }
 
@@ -280,6 +280,11 @@ function createDesktopIpcLiveOwner({
     if (!normalizedThreadId) {
       return null;
     }
+    const normalizedRequestId = requestIdKey(requestId);
+    const existingPending = normalizedRequestId ? pendingTurnStartEntriesByRequestId.get(normalizedRequestId) : null;
+    if (existingPending?.threadId === normalizedThreadId) {
+      return existingPending.entry;
+    }
     const input = Array.isArray(params?.input) ? params.input : [];
     if (input.length === 0) {
       return null;
@@ -288,7 +293,6 @@ function createDesktopIpcLiveOwner({
     const queue = pendingTurnStartParamsByThreadId.get(normalizedThreadId) || [];
     queue.push(entry);
     pendingTurnStartParamsByThreadId.set(normalizedThreadId, queue);
-    const normalizedRequestId = requestIdKey(requestId);
     if (normalizedRequestId) {
       pendingTurnStartEntriesByRequestId.set(normalizedRequestId, {
         threadId: normalizedThreadId,
@@ -359,10 +363,13 @@ function createDesktopIpcLiveOwner({
     }
   }
 
-  function removeOwnedThread(threadId) {
+  function removeOwnedThread(threadId, { broadcastRemoval = false, reason = "" } = {}) {
     const normalizedThreadId = readString(threadId);
     if (!normalizedThreadId) {
       return;
+    }
+    if (broadcastRemoval && ownedThreadIds.has(normalizedThreadId)) {
+      broadcastRemovedConversationState(normalizedThreadId, reason);
     }
     ownedThreadIds.delete(normalizedThreadId);
     conversations.delete(normalizedThreadId);
@@ -378,6 +385,36 @@ function createDesktopIpcLiveOwner({
       }
     }
     dirtyThreadIds.delete(normalizedThreadId);
+  }
+
+  function broadcastRemovedConversationState(threadId, reason = "") {
+    const previousState = conversations.get(threadId)
+      || lastBroadcastStatesByThreadId.get(threadId)
+      || createEmptyConversationState(threadId, { hostId, now });
+    const removedState = {
+      ...cloneJSON(previousState),
+      id: threadId,
+      hostId,
+      turns: [],
+      requests: [],
+      hasUnreadTurn: false,
+      unreadMessageCount: 0,
+      updatedAt: now(),
+      remodexRemoved: true,
+      remodexRemovalReason: reason || null,
+      archived: reason === "thread/archive" || Boolean(previousState?.archived),
+      unsubscribed: reason === "thread/unsubscribe" || Boolean(previousState?.unsubscribed),
+    };
+    ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
+      hostId,
+      conversationId: threadId,
+      remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
+      remodexOwnerReleased: true,
+      change: {
+        type: "snapshot",
+        conversationState: removedState,
+      },
+    });
   }
 
   function upsertConversationFromThread(thread) {
@@ -649,7 +686,11 @@ function createDesktopIpcLiveOwner({
       ? normalizedParams
       : codexParams;
     markOwnedThread(conversationId);
-    const pendingEntry = rememberPendingTurnStart(conversationId, nextCodexParams);
+    const pendingEntry = rememberPendingTurnStart(
+      conversationId,
+      nextCodexParams,
+      params.senderRequestId || params.sender_request_id
+    );
     try {
       return await sendCodexRequest("turn/start", nextCodexParams);
     } catch (error) {

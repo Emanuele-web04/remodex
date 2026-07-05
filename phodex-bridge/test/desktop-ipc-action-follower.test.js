@@ -1100,6 +1100,7 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
   assert.equal(turnStartFrame.version, 1);
   assert.deepEqual(turnStartFrame.params, {
     conversationId: "thread-desktop-owned",
+    senderRequestId: "phone-turn-start-1",
     turnStartParams: {
       threadId: "thread-desktop-owned",
       input: [{ type: "input_text", text: "continue from phone" }],

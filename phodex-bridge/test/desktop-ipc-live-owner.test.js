@@ -1227,6 +1227,201 @@ test("live owner handles discovery and start-turn follower requests for owned th
   }]);
 });
 
+test("live owner dedupes held phone turn starts routed back through follower IPC", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-held-dedupe-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    async sendCodexRequest(method) {
+      if (method === "turn/start") {
+        return { turn: { id: "turn-from-held-follower" } };
+      }
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  const input = [{ type: "input_text", text: "held prompt" }];
+  owner.observeInbound(JSON.stringify({
+    id: "phone-held-start",
+    method: "turn/start",
+    params: {
+      threadId: "thread-held-dedupe",
+      cwd: "/tmp/held-dedupe",
+      input,
+    },
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "start-held-dedupe",
+    sourceClientId: "desktop",
+    method: "thread-follower-start-turn",
+    params: {
+      conversationId: "thread-held-dedupe",
+      senderRequestId: "phone-held-start",
+      turnStartParams: {
+        cwd: "/tmp/held-dedupe",
+        input,
+      },
+    },
+  });
+  const response = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "start-held-dedupe"
+  );
+  assert.equal(response.resultType, "success");
+
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-held-dedupe",
+      turn: {
+        id: "turn-one",
+        items: [],
+        status: "inProgress",
+        startedAt: 1,
+      },
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-held-dedupe",
+      turn: {
+        id: "turn-two",
+        items: [],
+        status: "inProgress",
+        startedAt: 2,
+      },
+    },
+  }));
+
+  const snapshot = owner._debugSnapshot("thread-held-dedupe");
+  const firstTurn = snapshot.turns.find((turn) => turn.turnId === "turn-one");
+  const secondTurn = snapshot.turns.find((turn) => turn.turnId === "turn-two");
+  assert.deepEqual(firstTurn.params.input, input);
+  assert.deepEqual(secondTurn.params.input, []);
+  assert.equal(secondTurn.items.some((item) => item.type === "userMessage"), false);
+});
+
+test("live owner broadcasts a removed snapshot before archive cleanup", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-archive-remove-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-archive-remove",
+    method: "turn/start",
+    params: {
+      threadId: "thread-archive-remove",
+      input: [{ type: "input_text", text: "work to archive" }],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-archive-remove",
+      turn: {
+        id: "turn-archive-remove",
+        items: [{
+          id: "assistant-archive-remove",
+          type: "agentMessage",
+          text: "visible before archive",
+        }],
+        status: "inProgress",
+        startedAt: 1,
+      },
+    },
+  }));
+  await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-archive-remove"
+      && frame.params?.change?.type === "snapshot"
+      && !frame.params?.remodexOwnerReleased
+  );
+
+  owner.observeInbound(JSON.stringify({
+    id: "archive-thread-remove",
+    method: "thread/archive",
+    params: { threadId: "thread-archive-remove" },
+  }));
+
+  const removed = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-archive-remove"
+      && frame.params?.remodexOwnerReleased === true
+  );
+  assert.equal(removed.params.remodexOwnerSource, "desktop-ipc-live-owner");
+  assert.equal(removed.params.change.type, "snapshot");
+  assert.deepEqual(removed.params.change.conversationState.turns, []);
+  assert.deepEqual(removed.params.change.conversationState.requests, []);
+  assert.equal(removed.params.change.conversationState.archived, true);
+  assert.equal(removed.params.change.conversationState.remodexRemoved, true);
+  assert.equal(owner._debugSnapshot("thread-archive-remove"), null);
+});
+
 test("live owner normalizes follower start-turn params before app-server requests", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-normalize-");
   const codexRequests = [];
