@@ -2,17 +2,25 @@
 // Purpose: Exposes bridge-owned Codex app-server streams to Codex Desktop/VSCode over the local IPC bus.
 // Layer: CLI helper
 // Exports: createDesktopIpcLiveOwner, buildConversationStateFromThread, applyAppServerMessageToConversationState
-// Depends on: crypto, fs, net, path, ./desktop-ipc-action-follower
+// Depends on: crypto, fs, net, path, ./desktop-ipc-shared
 
 const { randomUUID } = require("crypto");
 const fs = require("fs");
 const net = require("net");
 const path = require("path");
 
-const { resolveDefaultIpcSocketPath } = require("./desktop-ipc-action-follower");
+const {
+  FRAME_HEADER_BYTES,
+  MAX_FRAME_BYTES,
+  cloneJSON,
+  normalizeToken,
+  readString,
+  requestIdKey,
+  resolveDefaultIpcSocketPath,
+  safeParseJSON,
+  writeFrame,
+} = require("./desktop-ipc-shared");
 
-const FRAME_HEADER_BYTES = 4;
-const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_MS = 1_500;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 75;
@@ -20,6 +28,9 @@ const DEFAULT_MAX_PATCH_COUNT = 2_000;
 const DEFAULT_MAX_PATCH_BYTES = 512 * 1024;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_000;
 const THREAD_STREAM_STATE_CHANGED = "thread-stream-state-changed";
+// Cached thread/read responses are only a hydration convenience; owned threads
+// are never evicted, so a small cap keeps long browsing sessions bounded.
+const MAX_CACHED_THREADS = 30;
 const THREAD_ARCHIVED = "thread-archived";
 const THREAD_UNARCHIVED = "thread-unarchived";
 const CLIENT_STATUS_CHANGED = "client-status-changed";
@@ -161,8 +172,8 @@ function createDesktopIpcLiveOwner({
     },
   });
 
-  function observeInbound(rawMessage) {
-    const message = safeParseJSON(rawMessage);
+  function observeInbound(rawMessage, parsedMessage = null) {
+    const message = parsedMessage ?? safeParseJSON(rawMessage);
     const method = readString(message?.method);
     if (THREAD_READ_METHODS.has(method)) {
       if (message?.id != null) {
@@ -221,8 +232,8 @@ function createDesktopIpcLiveOwner({
     scheduleSnapshot(threadId);
   }
 
-  function observeOutbound(rawMessage) {
-    const message = safeParseJSON(rawMessage);
+  function observeOutbound(rawMessage, parsedMessage = null) {
+    const message = parsedMessage ?? safeParseJSON(rawMessage);
     if (!message || typeof message !== "object") {
       return;
     }
@@ -235,7 +246,7 @@ function createDesktopIpcLiveOwner({
       pendingThreadReadRequestIds.delete(responseId);
       const thread = readThreadFromResponse(message);
       if (thread?.id) {
-        cachedThreadsByThreadId.set(thread.id, cloneJSON(thread));
+        rememberCachedThread(thread.id, thread);
         if (ownedThreadIds.has(thread.id)) {
           upsertConversationFromThread(thread);
           scheduleSnapshot(thread.id);
@@ -586,6 +597,24 @@ function createDesktopIpcLiveOwner({
     }
   }
 
+  // Refreshing insertion order makes the Map behave as an LRU; owned threads
+  // are exempt from eviction because their cache backs live snapshot rebuilds.
+  function rememberCachedThread(threadId, thread) {
+    cachedThreadsByThreadId.delete(threadId);
+    cachedThreadsByThreadId.set(threadId, cloneJSON(thread));
+    if (cachedThreadsByThreadId.size <= MAX_CACHED_THREADS) {
+      return;
+    }
+    for (const cachedThreadId of cachedThreadsByThreadId.keys()) {
+      if (cachedThreadsByThreadId.size <= MAX_CACHED_THREADS) {
+        return;
+      }
+      if (!ownedThreadIds.has(cachedThreadId)) {
+        cachedThreadsByThreadId.delete(cachedThreadId);
+      }
+    }
+  }
+
   function hydrateOwnedThreadFromRead(threadId) {
     const normalizedThreadId = readString(threadId);
     if (!normalizedThreadId || pendingThreadHydrationsByThreadId.has(normalizedThreadId)) {
@@ -598,7 +627,7 @@ function createDesktopIpcLiveOwner({
         if (!thread?.id) {
           return;
         }
-        cachedThreadsByThreadId.set(thread.id, cloneJSON(thread));
+        rememberCachedThread(thread.id, thread);
         if (ownedThreadIds.has(thread.id)) {
           upsertConversationFromThread(thread);
         }
@@ -635,10 +664,12 @@ function createDesktopIpcLiveOwner({
     if (!conversationState || !ownedThreadIds.has(threadId)) {
       return true;
     }
-    const currentState = cloneJSON(conversationState);
     const previousState = lastBroadcastStatesByThreadId.get(threadId) || null;
     if (!forceSnapshot && previousState) {
-      const patches = buildConversationStatePatches(previousState, currentState, {
+      // Diff straight against the live state: every patch value is deep-cloned
+      // as it is collected, so the per-flush O(state) snapshot clone is not
+      // needed on the streaming path.
+      const patches = buildConversationStatePatches(previousState, conversationState, {
         maxPatchCount,
         maxPatchBytes,
       });
@@ -655,11 +686,17 @@ function createDesktopIpcLiveOwner({
           patches,
         },
       })) {
-        lastBroadcastStatesByThreadId.set(threadId, currentState);
+        // The baseline advances by replaying the emitted patches (their values
+        // are already private clones); a full clone happens only if that fails.
+        if (!applyPatchesToBaselineState(previousState, patches)) {
+          lastBroadcastStatesByThreadId.set(threadId, cloneJSON(conversationState));
+        }
         return true;
       }
     }
 
+    // Snapshot broadcasts serialize synchronously, so the live state can be
+    // passed through; only the retained baseline needs its own copy.
     if (ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
       hostId,
       conversationId: threadId,
@@ -667,10 +704,10 @@ function createDesktopIpcLiveOwner({
       remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
       change: {
         type: "snapshot",
-        conversationState: currentState,
+        conversationState,
       },
     })) {
-      lastBroadcastStatesByThreadId.set(threadId, currentState);
+      lastBroadcastStatesByThreadId.set(threadId, cloneJSON(conversationState));
       return true;
     }
     return false;
@@ -1857,6 +1894,72 @@ function pushPatch(patches, maxPatchCount, patch) {
   return patches.length <= maxPatchCount;
 }
 
+// Replays just-emitted patches onto the retained broadcast baseline. The
+// baseline is a private copy and patch values are already private clones, so
+// in-place mutation is safe and avoids re-cloning the whole state per flush.
+function applyPatchesToBaselineState(baselineState, patches) {
+  for (const patch of patches) {
+    if (!applyPatchToBaselineNode(baselineState, patch)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function applyPatchToBaselineNode(target, patch) {
+  const pathParts = Array.isArray(patch?.path) ? patch.path : [];
+  const op = patch?.op;
+  if (pathParts.length === 0) {
+    return false;
+  }
+
+  let parent = target;
+  for (let index = 0; index < pathParts.length - 1; index += 1) {
+    parent = parent?.[pathParts[index]];
+    if (parent == null || typeof parent !== "object") {
+      return false;
+    }
+  }
+
+  const key = pathParts[pathParts.length - 1];
+  const isArrayIndex = Array.isArray(parent) && Number.isInteger(key);
+  if (op === "remove") {
+    if (isArrayIndex) {
+      if (key < 0 || key >= parent.length) {
+        return false;
+      }
+      parent.splice(key, 1);
+      return true;
+    }
+    if (parent && typeof parent === "object") {
+      delete parent[key];
+      return true;
+    }
+    return false;
+  }
+  if (op === "add" && isArrayIndex) {
+    if (key < 0 || key > parent.length) {
+      return false;
+    }
+    parent.splice(key, 0, patch.value);
+    return true;
+  }
+  if (op === "add" || op === "replace") {
+    if (isArrayIndex) {
+      if (key < 0 || key >= parent.length) {
+        return false;
+      }
+      parent[key] = patch.value;
+      return true;
+    }
+    if (parent && typeof parent === "object") {
+      parent[key] = patch.value;
+      return true;
+    }
+  }
+  return false;
+}
+
 function isPlainJSONObject(value) {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
@@ -2657,48 +2760,6 @@ function readConversationIdFromFollowerParams(params) {
 
 function timestampSecondsToMs(value) {
   return Number.isFinite(value) && value > 0 ? Math.round(value * 1000) : 0;
-}
-
-function requestIdKey(value) {
-  if (typeof value === "string" && value) {
-    return value;
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return String(value);
-  }
-  return "";
-}
-
-function readString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
-}
-
-function normalizeToken(value) {
-  return typeof value === "string"
-    ? value.toLowerCase().replace(/[_-\s]+/g, "")
-    : "";
-}
-
-function cloneJSON(value) {
-  if (value == null) {
-    return value;
-  }
-  return JSON.parse(JSON.stringify(value));
-}
-
-function safeParseJSON(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function writeFrame(socket, payload) {
-  const body = Buffer.from(payload, "utf8");
-  const header = Buffer.alloc(FRAME_HEADER_BYTES);
-  header.writeUInt32LE(body.length, 0);
-  socket.write(Buffer.concat([header, body]));
 }
 
 module.exports = {

@@ -556,15 +556,18 @@ function startBridge({
   connectRelay();
 
   codex.onMessage((message) => {
-    if (handleBridgeManagedCodexResponse(message)) {
+    // Streaming deltas make this the hottest path in the bridge: parse the
+    // envelope once and share the read-only object with every observer.
+    const parsedMessage = parseBridgeMessage(message);
+    if (handleBridgeManagedCodexResponse(message, parsedMessage)) {
       return;
     }
-    updatePendingAuthLoginFromCodexMessage(message);
-    trackCodexHandshakeState(message);
-    desktopRefresher.handleOutbound(message);
-    desktopIpcLiveOwner?.observeOutbound(message);
-    pushNotificationTracker.handleOutbound(message);
-    rememberThreadFromMessage("codex", message);
+    updatePendingAuthLoginFromCodexMessage(message, parsedMessage);
+    trackCodexHandshakeState(message, parsedMessage);
+    desktopRefresher.handleOutbound(message, parsedMessage);
+    desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
+    pushNotificationTracker.handleOutbound(message, parsedMessage);
+    rememberThreadFromMessage("codex", message, parsedMessage);
     secureTransport.queueOutboundApplicationMessage(
       sanitizeRelayBoundCodexMessage(message),
       sendRelayWireMessage
@@ -643,12 +646,12 @@ function startBridge({
     })) {
       return;
     }
-    desktopRefresher.handleInbound(rawMessage);
-    rolloutLiveMirror?.observeInbound(rawMessage);
-    if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
+    desktopRefresher.handleInbound(rawMessage, parsedMessage);
+    rolloutLiveMirror?.observeInbound(rawMessage, parsedMessage);
+    if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
-    observeDesktopIpcLiveOwnerInbound(rawMessage);
+    observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
@@ -664,11 +667,11 @@ function startBridge({
 
   // Held Desktop-ownership probes can later fall back locally, so observe each
   // phone request at most once in the live owner even if it passes both paths.
-  function observeDesktopIpcLiveOwnerInbound(rawMessage) {
+  function observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage = null) {
     if (!desktopIpcLiveOwner) {
       return;
     }
-    const inboundKey = desktopIpcLiveOwnerInboundKey(rawMessage);
+    const inboundKey = desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage);
     if (inboundKey) {
       if (desktopIpcLiveOwnerObservedInboundKeys.has(inboundKey)) {
         return;
@@ -676,11 +679,11 @@ function startBridge({
       desktopIpcLiveOwnerObservedInboundKeys.add(inboundKey);
       evictOldestEntries(desktopIpcLiveOwnerObservedInboundKeys, FORWARDED_REQUEST_METHODS_MAX_SIZE);
     }
-    desktopIpcLiveOwner.observeInbound(rawMessage);
+    desktopIpcLiveOwner.observeInbound(rawMessage, parsedMessage);
   }
 
-  function desktopIpcLiveOwnerInboundKey(rawMessage) {
-    const parsed = safeParseJSON(rawMessage);
+  function desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     const method = typeof parsed?.method === "string" ? parsed.method : "";
     if (!method || parsed?.id == null) {
       return "";
@@ -1048,9 +1051,9 @@ function startBridge({
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
   }
 
-  function updatePendingAuthLoginFromCodexMessage(rawMessage) {
+  function updatePendingAuthLoginFromCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
-    const parsed = safeParseJSON(rawMessage);
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     const responseId = parsed?.id;
     if (responseId != null) {
       const trackedRequest = forwardedRequestMethodsById.get(String(responseId));
@@ -1134,8 +1137,8 @@ function startBridge({
     }
   }
 
-  function rememberThreadFromMessage(source, rawMessage) {
-    const context = extractBridgeMessageContext(rawMessage);
+  function rememberThreadFromMessage(source, rawMessage, parsedMessage = null) {
+    const context = extractBridgeMessageContext(rawMessage, parsedMessage);
     if (!context.threadId) {
       return;
     }
@@ -1319,11 +1322,9 @@ function startBridge({
   }
 
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
-  function trackCodexHandshakeState(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function trackCodexHandshakeState(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return;
     }
 
@@ -1387,11 +1388,9 @@ function startBridge({
 
   // Intercepts responses for bridge-private requests so only user-visible app-server traffic
   // is forwarded back through secure transport.
-  function handleBridgeManagedCodexResponse(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedCodexResponse(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -1773,11 +1772,9 @@ function readTurnStartModel(params) {
     || normalizeNonEmptyString(params?.collaboration_mode?.settings?.model).toLowerCase();
 }
 
-function extractBridgeMessageContext(rawMessage) {
-  let parsed = null;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+function extractBridgeMessageContext(rawMessage, parsedMessage = null) {
+  const parsed = parsedMessage ?? parseBridgeJSON(rawMessage);
+  if (!parsed) {
     return { method: "", threadId: null, turnId: null };
   }
 

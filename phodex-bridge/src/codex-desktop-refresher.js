@@ -82,8 +82,8 @@ class CodexDesktopRefresher {
     this.unavailableLogged = false;
   }
 
-  handleInbound(rawMessage) {
-    const parsed = safeParseJSON(rawMessage);
+  handleInbound(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
     }
@@ -117,8 +117,8 @@ class CodexDesktopRefresher {
     }
   }
 
-  handleOutbound(rawMessage) {
-    const parsed = safeParseJSON(rawMessage);
+  handleOutbound(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
     }

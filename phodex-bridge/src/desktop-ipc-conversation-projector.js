@@ -2,7 +2,14 @@
 // Purpose: Projects Codex Desktop IPC conversation snapshots into app-server-style live notifications.
 // Layer: CLI helper
 // Exports: createDesktopConversationProjector, projectDesktopConversationStateToThread
-// Depends on: desktop-ipc-action-follower for stream-change application only at the caller boundary
+// Depends on: ./desktop-ipc-shared
+
+const {
+  cloneJSON,
+  normalizeToken,
+  readString,
+  readText,
+} = require("./desktop-ipc-shared");
 
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const MIRROR_TAG = {
@@ -22,6 +29,19 @@ function createDesktopConversationProjector({
   // Threads whose cache was evicted for size were already mirrored to the phone;
   // re-seeding them as a baseline avoids replaying their whole history again.
   const evictedThreadIds = new Set();
+  // The follower applies IPC patches copy-on-write, so raw turn/item objects
+  // keep their identity while untouched. Memoizing projections on that identity
+  // makes each diff cost O(changed turns) instead of O(whole conversation).
+  const projectedTurnsByRawTurn = new WeakMap();
+  const projectedItemsByRawItem = new WeakMap();
+
+  function projectState(threadId, rawState) {
+    return projectConversationState(threadId, rawState, {
+      now,
+      turnCache: projectedTurnsByRawTurn,
+      itemCache: projectedItemsByRawItem,
+    });
+  }
 
   function project(threadId, rawState) {
     const normalizedThreadId = readString(threadId);
@@ -32,10 +52,9 @@ function createDesktopConversationProjector({
       };
     }
 
-    const nextProjection = projectConversationState(normalizedThreadId, rawState, { now });
+    const nextProjection = projectState(normalizedThreadId, rawState);
     const previousCache = cacheByThreadId.get(normalizedThreadId) || null;
     const previousProjection = previousCache?.projection || null;
-    let textSnapshots = previousCache?.textSnapshots || new Map();
 
     let notifications;
     let type = "events";
@@ -45,30 +64,24 @@ function createDesktopConversationProjector({
       evictedThreadIds.delete(normalizedThreadId);
       type = "baseline";
       notifications = [];
-      textSnapshots = snapshotItemTexts(nextProjection);
     } else if (!previousProjection) {
       notifications = bootstrapNotifications(normalizedThreadId, nextProjection);
-      textSnapshots = snapshotItemTexts(nextProjection);
     } else if (hasSynthesizedTurnIds(previousProjection) && !hasSynthesizedTurnIds(nextProjection)) {
       type = "fullReplace";
       notifications = [
         threadStartedNotification(nextProjection.thread),
         ...bootstrapNotifications(normalizedThreadId, nextProjection, { includeThreadStarted: false }),
       ];
-      textSnapshots = snapshotItemTexts(nextProjection);
     } else {
       notifications = diffProjections(
         normalizedThreadId,
         previousProjection,
-        nextProjection,
-        textSnapshots
+        nextProjection
       );
-      textSnapshots = snapshotItemTexts(nextProjection);
     }
 
     cacheByThreadId.set(normalizedThreadId, {
       projection: nextProjection,
-      textSnapshots,
       lastUpdated: now(),
     });
     evictOldest();
@@ -86,10 +99,9 @@ function createDesktopConversationProjector({
     if (!normalizedThreadId || !rawState || typeof rawState !== "object") {
       return;
     }
-    const projection = projectConversationState(normalizedThreadId, rawState, { now });
+    const projection = projectState(normalizedThreadId, rawState);
     cacheByThreadId.set(normalizedThreadId, {
       projection,
-      textSnapshots: snapshotItemTexts(projection),
       lastUpdated: now(),
     });
     evictOldest();
@@ -135,8 +147,12 @@ function projectDesktopConversationStateToThread(threadId, rawState, { now = () 
   return projectConversationState(threadId, rawState, { now }).thread;
 }
 
-function projectConversationState(threadId, rawState, { now = () => Date.now() } = {}) {
-  const turns = projectTurns(threadId, rawState);
+function projectConversationState(threadId, rawState, {
+  now = () => Date.now(),
+  turnCache = null,
+  itemCache = null,
+} = {}) {
+  const turns = projectTurns(threadId, rawState, { turnCache, itemCache });
   const activeTurnId = activeTurnIdFromTurns(turns);
   const thread = {
     id: threadId,
@@ -169,12 +185,35 @@ function projectConversationState(threadId, rawState, { now = () => Date.now() }
   };
 }
 
-function projectTurns(threadId, rawState) {
+function projectTurns(threadId, rawState, { turnCache = null, itemCache = null } = {}) {
   const rawTurns = Array.isArray(rawState?.turns) ? rawState.turns : [];
-  return rawTurns.map((turn, index) => projectTurn(threadId, turn, index)).filter(Boolean);
+  return rawTurns
+    .map((turn, index) => projectTurnCached(threadId, turn, index, { turnCache, itemCache }))
+    .filter(Boolean);
 }
 
-function projectTurn(threadId, rawTurn, index) {
+function projectTurnCached(threadId, rawTurn, index, { turnCache = null, itemCache = null } = {}) {
+  if (!rawTurn || typeof rawTurn !== "object") {
+    return null;
+  }
+  // Synthetic ids depend on the array index, so only turns with a real id are
+  // safe to reuse by identity.
+  const hasStableId = Boolean(readString(rawTurn.turnId) || readString(rawTurn.turn_id) || readString(rawTurn.id));
+  if (!turnCache || !hasStableId) {
+    return projectTurn(threadId, rawTurn, index, { itemCache });
+  }
+  const cached = turnCache.get(rawTurn);
+  if (cached) {
+    return cached;
+  }
+  const projected = projectTurn(threadId, rawTurn, index, { itemCache });
+  if (projected) {
+    turnCache.set(rawTurn, projected);
+  }
+  return projected;
+}
+
+function projectTurn(threadId, rawTurn, index, { itemCache = null } = {}) {
   if (!rawTurn || typeof rawTurn !== "object") {
     return null;
   }
@@ -204,7 +243,16 @@ function projectTurn(threadId, rawTurn, index) {
     if (itemType === "usermessage" && sameUserInput(item.content, paramsInput)) {
       continue;
     }
-    items.push(projectItemForMobile(item, itemType));
+    // Projected items are treated as immutable by every consumer, so raw items
+    // that survived copy-on-write untouched can reuse their previous clone.
+    const cachedItem = itemCache?.get(item);
+    if (cachedItem) {
+      items.push(cachedItem);
+      continue;
+    }
+    const projectedItem = projectItemForMobile(item, itemType);
+    itemCache?.set(item, projectedItem);
+    items.push(projectedItem);
   }
 
   return {
@@ -252,12 +300,12 @@ function shouldEmitThreadStarted(thread) {
     || (Array.isArray(thread.turns) && thread.turns.length > 0));
 }
 
-function diffProjections(threadId, previousProjection, nextProjection, textSnapshots) {
+function diffProjections(threadId, previousProjection, nextProjection) {
   const notifications = [];
 
   notifications.push(...diffThreadMetadata(previousProjection.thread, nextProjection.thread));
   notifications.push(...diffTurnLifecycle(threadId, previousProjection, nextProjection));
-  notifications.push(...diffTurnItems(threadId, previousProjection, nextProjection, textSnapshots));
+  notifications.push(...diffTurnItems(threadId, previousProjection, nextProjection));
 
   return notifications;
 }
@@ -336,12 +384,17 @@ function diffTurnLifecycle(threadId, previousProjection, nextProjection) {
   return notifications;
 }
 
-function diffTurnItems(threadId, previousProjection, nextProjection, textSnapshots) {
+function diffTurnItems(threadId, previousProjection, nextProjection) {
   const notifications = [];
   const previousTurnsById = new Map(previousProjection.turns.map((turn) => [turn.id, turn]));
 
   for (const nextTurn of nextProjection.turns) {
     const previousTurn = previousTurnsById.get(nextTurn.id) || null;
+    // Memoized projections keep their identity when the raw turn survived
+    // copy-on-write untouched, so unchanged turns cost nothing to skip.
+    if (previousTurn === nextTurn) {
+      continue;
+    }
     const previousItemsById = new Map((previousTurn?.items || []).map((item) => [itemIdOf(item), item]));
     const isActiveTurn = nextProjection.activeTurnId === nextTurn.id;
 
@@ -360,24 +413,27 @@ function diffTurnItems(threadId, previousProjection, nextProjection, textSnapsho
         }
         continue;
       }
-      if (JSON.stringify(previousItem) === JSON.stringify(nextItem)) {
+      if (previousItem === nextItem
+        || JSON.stringify(previousItem) === JSON.stringify(nextItem)) {
         continue;
       }
       if (!isActiveTurn) {
         notifications.push(itemCompletedNotification(threadId, nextTurn.id, nextItem));
         continue;
       }
-      notifications.push(...diffItem(threadId, nextTurn.id, previousItem, nextItem, textSnapshots));
+      notifications.push(...diffItem(threadId, nextTurn.id, previousItem, nextItem));
     }
   }
 
   return notifications;
 }
 
-function diffItem(threadId, turnId, previousItem, nextItem, textSnapshots) {
+function diffItem(threadId, turnId, previousItem, nextItem) {
   const itemId = itemIdOf(nextItem);
   const itemType = normalizeToken(nextItem.type);
-  const snapshot = textSnapshots.get(textSnapshotKey(turnId, itemId)) || {};
+  // Previous text lengths come straight from the previous projection, which is
+  // exactly what the per-thread snapshot map used to store.
+  const snapshot = snapshotItem(previousItem);
   if (isAssistantMessageItem(nextItem)) {
     const previousText = assistantMessageText(previousItem);
     const nextText = assistantMessageText(nextItem);
@@ -582,20 +638,6 @@ function tagNotification(notification) {
 
 // --- Text snapshots -------------------------------------------
 
-function snapshotItemTexts(projection) {
-  const snapshots = new Map();
-  for (const turn of projection.turns) {
-    for (const item of turn.items) {
-      const itemId = itemIdOf(item);
-      if (!itemId) {
-        continue;
-      }
-      snapshots.set(textSnapshotKey(turn.id, itemId), snapshotItem(item));
-    }
-  }
-  return snapshots;
-}
-
 function snapshotItem(item) {
   return {
     agentTextLen: assistantMessageText(item).length,
@@ -606,10 +648,6 @@ function snapshotItem(item) {
     fileOutputLen: fileChangeOutput(item).length,
     toolOutputLen: toolCallOutput(item).length,
   };
-}
-
-function textSnapshotKey(turnId, itemId) {
-  return `${turnId}:${itemId}`;
 }
 
 function appendedDelta(previousText, nextText, snapshotLength) {
@@ -890,24 +928,6 @@ function itemIdOf(item) {
 function normalizeTimestamp(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
-}
-
-function readString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
-}
-
-function readText(value) {
-  return typeof value === "string" ? value : "";
-}
-
-function normalizeToken(value) {
-  return typeof value === "string"
-    ? value.toLowerCase().replace(/[_-\s]+/g, "")
-    : "";
-}
-
-function cloneJSON(value) {
-  return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
 module.exports = {

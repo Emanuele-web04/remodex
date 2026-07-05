@@ -2,19 +2,26 @@
 // Purpose: Mirrors live Codex Desktop IPC pending actions to the phone and routes replies back to the desktop runtime.
 // Layer: CLI helper
 // Exports: createDesktopIpcActionFollower, projectPendingDesktopActions
-// Depends on: net, os, path
+// Depends on: net, ./desktop-ipc-conversation-projector, ./desktop-ipc-shared
 
 const net = require("net");
-const os = require("os");
-const path = require("path");
 
 const {
   createDesktopConversationProjector,
   projectDesktopConversationStateToThread,
 } = require("./desktop-ipc-conversation-projector");
+const {
+  FRAME_HEADER_BYTES,
+  MAX_FRAME_BYTES,
+  cloneJSON,
+  normalizeToken,
+  readString,
+  requestIdKey,
+  resolveDefaultIpcSocketPath,
+  safeParseJSON,
+  writeFrame,
+} = require("./desktop-ipc-shared");
 
-const FRAME_HEADER_BYTES = 4;
-const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const OWNERSHIP_PROBE_TIMEOUT_MS = 1_500;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
@@ -90,8 +97,8 @@ function createDesktopIpcActionFollower({
   const desktopOwnedByProbeThreadIds = new Set();
   let nextOwnershipProbeToken = 0;
 
-  function observeInbound(rawMessage) {
-    const message = safeParseJSON(rawMessage);
+  function observeInbound(rawMessage, parsedMessage = null) {
+    const message = parsedMessage ?? safeParseJSON(rawMessage);
     const responseRoute = desktopRouteForResponse(message);
     if (responseRoute) {
       submitDesktopActionResponse(responseRoute, message);
@@ -1260,21 +1267,32 @@ function applyConversationStateChange(previousState, change) {
     return previousState || null;
   }
 
-  let nextState = cloneJSON(previousState);
+  // Copy-on-write: clone only the nodes along each patch path and share the
+  // rest with the previous state. Besides skipping an O(state) deep clone per
+  // broadcast, preserving the identity of untouched turns lets the projector
+  // reuse their cached projection instead of re-diffing them.
+  let nextState = shallowCloneNode(previousState);
+  const clonedNodes = new Set([nextState]);
   for (const patch of patches) {
     if (Array.isArray(patch?.path) && patch.path.length === 0) {
       const op = readString(patch?.op).toLowerCase();
       if (op === "add" || op === "replace") {
         nextState = cloneJSON(patch.value);
+        clonedNodes.clear();
+        clonedNodes.add(nextState);
         continue;
       }
       return null;
     }
-    if (!applyImmerPatch(nextState, patch)) {
+    if (!applyImmerPatchCopyOnWrite(nextState, patch, clonedNodes)) {
       return null;
     }
   }
   return nextState;
+}
+
+function shallowCloneNode(value) {
+  return Array.isArray(value) ? value.slice() : { ...value };
 }
 
 function isPatchChange(change) {
@@ -1335,28 +1353,28 @@ function createEmptyConversationState() {
   };
 }
 
-function applyImmerPatch(target, patch) {
+function applyImmerPatchCopyOnWrite(target, patch, clonedNodes) {
   const patchPath = Array.isArray(patch?.path) ? patch.path : [];
   const op = readString(patch?.op).toLowerCase();
-  if (!op) {
-    return false;
-  }
-  if (patchPath.length === 0) {
-    if (op === "remove") {
-      return false;
-    }
-    if (op === "add" || op === "replace") {
-      return false;
-    }
+  if (!op || patchPath.length === 0) {
     return false;
   }
 
   let parent = target;
   for (let index = 0; index < patchPath.length - 1; index += 1) {
-    parent = parent?.[patchPath[index]];
-    if (parent == null) {
+    const key = patchPath[index];
+    const child = parent?.[key];
+    if (child == null || typeof child !== "object") {
       return false;
     }
+    if (clonedNodes.has(child)) {
+      parent = child;
+      continue;
+    }
+    const clonedChild = shallowCloneNode(child);
+    clonedNodes.add(clonedChild);
+    parent[key] = clonedChild;
+    parent = clonedChild;
   }
 
   const key = patchPath[patchPath.length - 1];
@@ -1399,59 +1417,11 @@ function applyImmerPatch(target, patch) {
   return false;
 }
 
-function writeFrame(socket, payload, callback) {
-  const body = Buffer.from(payload, "utf8");
-  const header = Buffer.alloc(FRAME_HEADER_BYTES);
-  header.writeUInt32LE(body.length, 0);
-  socket.write(Buffer.concat([header, body]), callback);
-}
-
-function resolveDefaultIpcSocketPath() {
-  if (process.platform === "win32") {
-    return "\\\\.\\pipe\\codex-ipc";
-  }
-
-  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
-}
-
 function readThreadId(params) {
   return readString(params?.threadId)
     || readString(params?.thread_id)
     || readString(params?.conversationId)
     || readString(params?.conversation_id);
-}
-
-function requestIdKey(value) {
-  if (typeof value === "string" && value) {
-    return value;
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return String(value);
-  }
-  return "";
-}
-
-function readString(value) {
-  return typeof value === "string" && value.trim() ? value.trim() : "";
-}
-
-function normalizeToken(value) {
-  return typeof value === "string"
-    ? value.toLowerCase().replace(/[_-\s]+/g, "")
-    : "";
-}
-
-function cloneJSON(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-function safeParseJSON(value) {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
 }
 
 module.exports = {
