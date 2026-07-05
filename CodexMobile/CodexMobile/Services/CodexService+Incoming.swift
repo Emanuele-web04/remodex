@@ -916,13 +916,14 @@ extension CodexService {
     }
 
     // The bridge rebuilt a mirrored thread under new canonical ids (synthetic
-    // turn ids became real), so refetch history instead of merging stale rows.
+    // turn ids became real), so force a canonical history rebuild: a plain sync
+    // can early-return for running threads and leave stale synthetic rows behind.
     private func handleThreadReplaced(_ paramsObject: IncomingParamsObject?) {
         guard let threadId = extractThreadID(from: paramsObject), !threadId.isEmpty else {
             return
         }
 
-        requestImmediateSync(threadId: threadId)
+        requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
     }
 
     // Parses the real terminal outcome so UI can distinguish completion from interruption.

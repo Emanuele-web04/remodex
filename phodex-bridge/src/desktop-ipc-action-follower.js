@@ -533,9 +533,11 @@ function createDesktopIpcActionFollower({
 
   function syncProjectedConversationState(threadId, nextState) {
     const output = conversationProjector.project(threadId, nextState);
-    if (output.type === "fullReplace") {
-      // Synthesized turn ids just became real: tell the phone to rebuild this
-      // thread from history instead of merging rows under stale synthetic ids.
+    if (output.type === "fullReplace" || output.type === "baseline") {
+      // fullReplace: synthesized turn ids just became real, stale rows must go.
+      // baseline: the projector cache was evicted, so updates that arrived while
+      // unobserved were never mirrored. Both cases need the phone to rebuild the
+      // thread from canonical history instead of trusting incremental rows.
       sendApplicationResponse(JSON.stringify({
         method: "thread/replaced",
         params: {
