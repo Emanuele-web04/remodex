@@ -50,8 +50,8 @@ function createRolloutLiveMirrorController({
 } = {}) {
   const mirrorsByThreadId = new Map();
 
-  function observeInbound(rawMessage) {
-    const request = safeParseJSON(rawMessage);
+  function observeInbound(rawMessage, parsedMessage = null) {
+    const request = parsedMessage ?? safeParseJSON(rawMessage);
     const method = readString(request?.method);
     if (!DESKTOP_RESUME_METHODS.has(method)) {
       return;

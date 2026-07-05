@@ -325,4 +325,68 @@ final class CodexThreadRenamePersistenceTests: XCTestCase {
         XCTAssertTrue(service.isThreadPinned("root-thread"))
         XCTAssertTrue(service.thread(for: "child-thread")?.syncState == .archivedLocal)
     }
+
+    func testRemoteArchiveCascadesThroughChildThreads() {
+        let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [
+            CodexThread(
+                id: "root-thread",
+                title: "Root Thread",
+                cwd: "/tmp/remodex"
+            ),
+            CodexThread(
+                id: "child-thread",
+                title: "Child Thread",
+                cwd: "/tmp/remodex",
+                parentThreadId: "root-thread"
+            ),
+        ]
+
+        service.applyRemoteThreadArchiveState(threadId: "root-thread", isArchived: true)
+
+        XCTAssertTrue(service.thread(for: "root-thread")?.syncState == .archivedLocal)
+        XCTAssertTrue(service.thread(for: "child-thread")?.syncState == .archivedLocal)
+
+        service.applyRemoteThreadArchiveState(threadId: "root-thread", isArchived: false)
+
+        XCTAssertTrue(service.thread(for: "root-thread")?.syncState == .live)
+        XCTAssertTrue(service.thread(for: "child-thread")?.syncState == .live)
+    }
+
+    func testRemoteArchivePreservesActiveRuntimeState() {
+        let suiteName = "CodexThreadRenamePersistenceTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Expected isolated UserDefaults suite")
+            return
+        }
+        defaults.removePersistentDomain(forName: suiteName)
+
+        let service = CodexService(defaults: defaults)
+        service.threads = [
+            CodexThread(
+                id: "running-thread",
+                title: "Running Thread",
+                cwd: "/tmp/remodex"
+            ),
+        ]
+        service.runningThreadIDs.insert("running-thread")
+        service.activeTurnIdByThread["running-thread"] = "turn-live"
+        service.activeTurnId = "turn-live"
+        service.threadIdByTurnID["turn-live"] = "running-thread"
+
+        service.applyRemoteThreadArchiveState(threadId: "running-thread", isArchived: true)
+
+        XCTAssertTrue(service.thread(for: "running-thread")?.syncState == .archivedLocal)
+        XCTAssertTrue(service.runningThreadIDs.contains("running-thread"))
+        XCTAssertEqual(service.activeTurnIdByThread["running-thread"], "turn-live")
+        XCTAssertEqual(service.activeTurnId, "turn-live")
+        XCTAssertEqual(service.threadIdByTurnID["turn-live"], "running-thread")
+    }
 }

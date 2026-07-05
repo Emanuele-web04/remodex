@@ -27,8 +27,8 @@ function createPushNotificationTracker({
 
   // ─── ENTRY POINT ─────────────────────────────────────────────
 
-  function handleOutbound(rawMessage) {
-    const message = parseOutboundMessage(rawMessage);
+  function handleOutbound(rawMessage, parsedMessage = null) {
+    const message = parseOutboundMessage(rawMessage, parsedMessage);
     if (!message) {
       return;
     }
@@ -274,8 +274,8 @@ function createPushNotificationTracker({
 }
 
 // Normalizes the message envelope once so downstream helpers can share the same parsed view.
-function parseOutboundMessage(rawMessage) {
-  const parsed = safeParseJSON(rawMessage);
+function parseOutboundMessage(rawMessage, parsedMessage = null) {
+  const parsed = parsedMessage ?? safeParseJSON(rawMessage);
   if (!parsed || typeof parsed.method !== "string") {
     return null;
   }

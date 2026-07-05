@@ -82,8 +82,8 @@ class CodexDesktopRefresher {
     this.unavailableLogged = false;
   }
 
-  handleInbound(rawMessage) {
-    const parsed = safeParseJSON(rawMessage);
+  handleInbound(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
     }
@@ -117,8 +117,8 @@ class CodexDesktopRefresher {
     }
   }
 
-  handleOutbound(rawMessage) {
-    const parsed = safeParseJSON(rawMessage);
+  handleOutbound(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     if (!parsed) {
       return;
     }
@@ -553,11 +553,12 @@ function readBridgeConfig({
     env
   );
   const explicitRefreshEnabled = readOptionalBooleanEnv(["REMODEX_REFRESH_ENABLED"], env);
+  const explicitDesktopIpcLiveSyncEnabled = readOptionalBooleanEnv(["REMODEX_DESKTOP_IPC_LIVE_SYNC"], env);
   const explicitKeepMacAwakeEnabled = readOptionalBooleanEnv(["REMODEX_KEEP_MAC_AWAKE"], env);
   const persistedKeepMacAwakeEnabled = typeof daemonConfig.keepMacAwakeEnabled === "boolean"
     ? daemonConfig.keepMacAwakeEnabled
     : null;
-  // Desktop refresh is opt-in for now because Codex.app still lacks true live updates.
+  // The deep-link refresh workaround stays opt-in; local IPC live sync is the primary desktop path.
   const defaultRefreshEnabled = false;
   return {
     relayUrl,
@@ -582,6 +583,13 @@ function readBridgeConfig({
       : explicitKeepMacAwakeEnabled,
     codexEndpoint,
     desktopIpcSocketPath: readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SOCKET"], "", env),
+    desktopIpcLiveSyncEnabled: explicitDesktopIpcLiveSyncEnabled == null
+      ? true
+      : explicitDesktopIpcLiveSyncEnabled,
+    desktopIpcSnapshotDebounceMs: parseIntegerEnv(
+      readFirstDefinedEnv(["REMODEX_DESKTOP_IPC_SNAPSHOT_DEBOUNCE_MS"], "75", env),
+      75
+    ),
     refreshCommand,
     codexBundleId: readFirstDefinedEnv(["REMODEX_CODEX_BUNDLE_ID"], DEFAULT_BUNDLE_ID, env),
     codexAppPath: DEFAULT_APP_PATH,

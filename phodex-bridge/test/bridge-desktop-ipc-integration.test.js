@@ -93,6 +93,7 @@ test("bridge forwards desktop IPC actions to the phone and routes replies back t
       codexBundleId: "",
       codexAppPath: "",
       desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
     },
   });
 
@@ -254,6 +255,7 @@ test("bridge recovers desktop IPC state when the first live update is patch-only
       codexBundleId: "",
       codexAppPath: "",
       desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
     },
   });
 
@@ -361,6 +363,7 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
       codexBundleId: "",
       codexAppPath: "",
       desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
     },
   });
 
@@ -384,6 +387,7 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
         conversationState: {
           turns: [{
             id: "turn-ipc-delta",
+            status: "inProgress",
             items: [{
               id: "assistant-ipc-delta",
               type: "assistant_message",
@@ -416,22 +420,371 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
     relayMessages,
     (message) => message.method === "item/agentMessage/delta"
   );
-  assert.deepEqual(deltaMessage.params, {
-    threadId: "thread-ipc-delta",
-    turnId: "turn-ipc-delta",
-    itemId: "assistant-ipc-delta",
-    delta: " world",
+  assert.equal(deltaMessage.params.threadId, "thread-ipc-delta");
+  assert.equal(deltaMessage.params.turnId, "turn-ipc-delta");
+  assert.equal(deltaMessage.params.itemId, "assistant-ipc-delta");
+  assert.equal(deltaMessage.params.delta, " world");
+  assert.equal(deltaMessage.params.remodexDesktopMirror, true);
+  assert.equal(deltaMessage.params.remodexDesktopIpcMirror, true);
+});
+
+test("bridge serves Desktop-owned thread history from cached IPC state", async (t) => {
+  const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-bridge-ipc-read-");
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let ipcServerSocket = null;
+  let bridge = null;
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => {
+      const parsed = safeParseJSON(data.toString("utf8"));
+      if (parsed) {
+        relayMessages.push(parsed);
+      }
+    });
   });
+
+  const ipcServer = net.createServer((socket) => {
+    ipcServerSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "desktop-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => ipcServer.listen(ipcSocketPath, resolve));
+
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      return createFakeCodexTransport();
+    },
+  });
+
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    ipcServer.close();
+    ipcServerSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      pushPreviewMaxChars: 160,
+      refreshEnabled: false,
+      refreshDebounceMs: 1,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
+    },
+  });
+
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "resume-before-read",
+    method: "thread/resume",
+    params: { threadId: "thread-ipc-read" },
+  }));
+  await waitFor(() => ipcServerSocket, 2_000);
+  writeFrame(ipcServerSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-ipc-read",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          title: "Cached Desktop Thread",
+          cwd: "/repo",
+          turns: [{
+            turnId: "turn-ipc-read",
+            status: "completed",
+            params: {
+              input: [{ type: "text", text: "read me" }],
+            },
+            items: [{ id: "assistant-ipc-read", type: "agentMessage", text: "cached reply" }],
+          }],
+        },
+      },
+    },
+  });
+
+  await waitForMessage(relayMessages, (message) => message.method === "thread/started");
+  relaySocket.send(JSON.stringify({
+    id: "read-cached-desktop-thread",
+    method: "thread/read",
+    params: { threadId: "thread-ipc-read" },
+  }));
+
+  const readResponse = await waitForMessage(
+    relayMessages,
+    (message) => message.id === "read-cached-desktop-thread"
+  );
+  assert.equal(readResponse.result.thread.id, "thread-ipc-read");
+  assert.equal(readResponse.result.thread.name, "Cached Desktop Thread");
+  assert.deepEqual(
+    readResponse.result.thread.turns[0].items.map((item) => item.type),
+    ["userMessage", "agentMessage"]
+  );
+});
+
+test("bridge maps Desktop IPC archive broadcasts to phone notifications", async (t) => {
+  const { tempDir, socketPath: ipcSocketPath } = createIpcTestSocket("remodex-bridge-ipc-archive-");
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const relayMessages = [];
+  let relaySocket = null;
+  let ipcServerSocket = null;
+  let bridge = null;
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => {
+      const parsed = safeParseJSON(data.toString("utf8"));
+      if (parsed) {
+        relayMessages.push(parsed);
+      }
+    });
+  });
+
+  const ipcServer = net.createServer((socket) => {
+    ipcServerSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "desktop-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => ipcServer.listen(ipcSocketPath, resolve));
+
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      return createFakeCodexTransport();
+    },
+  });
+
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+    ipcServer.close();
+    ipcServerSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      pushPreviewMaxChars: 160,
+      refreshEnabled: false,
+      refreshDebounceMs: 1,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcSocketPath: ipcSocketPath,
+      desktopIpcLiveSyncEnabled: false,
+    },
+  });
+
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "resume-before-archive",
+    method: "thread/resume",
+    params: { threadId: "thread-ipc-archive" },
+  }));
+  await waitFor(() => ipcServerSocket, 2_000);
+  writeFrame(ipcServerSocket, {
+    type: "broadcast",
+    method: "thread-archived",
+    sourceClientId: "desktop",
+    version: 2,
+    params: {
+      hostId: "desktop",
+      conversationId: "thread-ipc-archive",
+      cwd: "/repo",
+    },
+  });
+
+  const archiveMessage = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "thread/archived"
+  );
+  assert.equal(archiveMessage.params.threadId, "thread-ipc-archive");
+  assert.equal(archiveMessage.params.cwd, "/repo");
+  assert.equal(archiveMessage.params.remodexDesktopIpcMirror, true);
+
+  writeFrame(ipcServerSocket, {
+    type: "broadcast",
+    method: "thread-unarchived",
+    sourceClientId: "desktop",
+    version: 2,
+    params: {
+      hostId: "desktop",
+      conversationId: "thread-ipc-archive",
+      cwd: "/repo",
+    },
+  });
+
+  const unarchiveMessage = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "thread/unarchived"
+  );
+  assert.equal(unarchiveMessage.params.threadId, "thread-ipc-archive");
+  assert.equal(unarchiveMessage.params.cwd, "/repo");
+  assert.equal(unarchiveMessage.params.remodexDesktopIpcMirror, true);
+});
+
+test("bridge observes held desktop IPC turns only after local fallback", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+  let followerOptions = null;
+  let heldTurnStart = null;
+  const liveOwnerInbound = [];
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+  });
+
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+    desktopIpcActionFollowerModule: {
+      createDesktopIpcActionFollower(options) {
+        followerOptions = options;
+        return {
+          observeInbound(rawMessage) {
+            const parsed = safeParseJSON(rawMessage);
+            if (parsed?.method !== "turn/start") {
+              return false;
+            }
+            heldTurnStart = rawMessage;
+            return true;
+          },
+          stopAll() {},
+        };
+      },
+      seedConversationStateFromThreadRead() {
+        return null;
+      },
+    },
+    desktopIpcLiveOwnerModule: {
+      createDesktopIpcLiveOwner() {
+        return {
+          observeInbound(rawMessage) {
+            liveOwnerInbound.push(JSON.parse(rawMessage));
+          },
+          observeOutbound() {},
+          stopAll() {},
+        };
+      },
+    },
+  });
+
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      pushPreviewMaxChars: 160,
+      refreshEnabled: false,
+      refreshDebounceMs: 1,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcLiveSyncEnabled: true,
+    },
+  });
+
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "held-turn-start",
+    method: "turn/start",
+    params: {
+      threadId: "thread-held-live-owner",
+      input: [{ type: "input_text", text: "start locally if unowned" }],
+    },
+  }));
+
+  await waitFor(() => heldTurnStart);
+  await wait(25);
+  assert.equal(liveOwnerInbound.length, 0);
+  assert.equal(fakeCodex.sent.some((message) => message.id === "held-turn-start"), false);
+
+  followerOptions.forwardToLocalCodex(heldTurnStart);
+  await waitFor(() => liveOwnerInbound.some((message) => message.id === "held-turn-start"));
+  assert.equal(
+    liveOwnerInbound.filter((message) => message.id === "held-turn-start").length,
+    1
+  );
+  assert.equal(fakeCodex.sent.filter((message) => message.id === "held-turn-start").length, 1);
 });
 
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
-function loadBridgeWithTestDoubles({ createCodexTransportImpl }) {
+function loadBridgeWithTestDoubles({
+  createCodexTransportImpl,
+  desktopIpcActionFollowerModule = null,
+  desktopIpcLiveOwnerModule = null,
+}) {
   const bridgePath = require.resolve("../src/bridge");
   const originalLoad = Module._load;
   delete require.cache[bridgePath];
   Module._load = function loadWithBridgeDoubles(request, parent, isMain) {
     if (parent?.filename === bridgePath && request === "./codex-transport") {
       return { createCodexTransport: createCodexTransportImpl };
+    }
+    if (parent?.filename === bridgePath
+      && request === "./desktop-ipc-action-follower"
+      && desktopIpcActionFollowerModule) {
+      return desktopIpcActionFollowerModule;
+    }
+    if (parent?.filename === bridgePath
+      && request === "./desktop-ipc-live-owner"
+      && desktopIpcLiveOwnerModule) {
+      return desktopIpcLiveOwnerModule;
     }
     if (parent?.filename === bridgePath && request === "./secure-transport") {
       return { createBridgeSecureTransport: createPlaintextSecureTransport };

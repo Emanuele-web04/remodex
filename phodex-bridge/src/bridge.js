@@ -56,6 +56,7 @@ const {
   createDesktopIpcActionFollower,
   seedConversationStateFromThreadRead,
 } = require("./desktop-ipc-action-follower");
+const { createDesktopIpcLiveOwner } = require("./desktop-ipc-live-owner");
 const { version: bridgePackageVersion = "" } = require("../package.json");
 const {
   MINIMUM_SUPPORTED_IOS_APP_VERSION,
@@ -199,6 +200,7 @@ function startBridge({
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
+  const desktopIpcLiveOwnerObservedInboundKeys = new Set();
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const trackedForwardedRequestMethods = new Set([
@@ -260,7 +262,22 @@ function startBridge({
       readConversationState: async (threadId) => seedConversationStateFromThreadRead(
         await sendCodexRequest("thread/read", { threadId })
       ),
+      forwardToLocalCodex: (rawMessage) => {
+        observeDesktopIpcLiveOwnerInbound(rawMessage);
+        forwardInboundRequestToCodex(rawMessage);
+      },
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
+    })
+    : null;
+  const desktopIpcLiveOwner = !config.codexEndpoint
+    ? createDesktopIpcLiveOwner({
+      enabled: config.desktopIpcLiveSyncEnabled !== false,
+      sendCodexRequest,
+      sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
+      socketPath: config.desktopIpcSocketPath || undefined,
+      snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
     : null;
   let contextUsageWatcher = null;
@@ -352,6 +369,7 @@ function startBridge({
     stopContextUsageWatcher();
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
+    desktopIpcLiveOwner?.stopAll();
   }
 
   function stopBridge() {
@@ -538,14 +556,18 @@ function startBridge({
   connectRelay();
 
   codex.onMessage((message) => {
-    if (handleBridgeManagedCodexResponse(message)) {
+    // Streaming deltas make this the hottest path in the bridge: parse the
+    // envelope once and share the read-only object with every observer.
+    const parsedMessage = parseBridgeMessage(message);
+    if (handleBridgeManagedCodexResponse(message, parsedMessage)) {
       return;
     }
-    updatePendingAuthLoginFromCodexMessage(message);
-    trackCodexHandshakeState(message);
-    desktopRefresher.handleOutbound(message);
-    pushNotificationTracker.handleOutbound(message);
-    rememberThreadFromMessage("codex", message);
+    updatePendingAuthLoginFromCodexMessage(message, parsedMessage);
+    trackCodexHandshakeState(message, parsedMessage);
+    desktopRefresher.handleOutbound(message, parsedMessage);
+    desktopIpcLiveOwner?.observeOutbound(message, parsedMessage);
+    pushNotificationTracker.handleOutbound(message, parsedMessage);
+    rememberThreadFromMessage("codex", message, parsedMessage);
     secureTransport.queueOutboundApplicationMessage(
       sanitizeRelayBoundCodexMessage(message),
       sendRelayWireMessage
@@ -624,18 +646,58 @@ function startBridge({
     })) {
       return;
     }
-    desktopRefresher.handleInbound(rawMessage);
-    rolloutLiveMirror?.observeInbound(rawMessage);
-    if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
+    desktopRefresher.handleInbound(rawMessage, parsedMessage);
+    rolloutLiveMirror?.observeInbound(rawMessage, parsedMessage);
+    if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
+    observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
+    forwardInboundRequestToCodex(rawMessage);
+  }
+
+  function forwardInboundRequestToCodex(rawMessage) {
     const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
+  }
+
+  // Held Desktop-ownership probes can later fall back locally, so observe each
+  // phone request at most once in the live owner even if it passes both paths.
+  function observeDesktopIpcLiveOwnerInbound(rawMessage, parsedMessage = null) {
+    if (!desktopIpcLiveOwner) {
+      return;
+    }
+    const inboundKey = desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage);
+    if (inboundKey) {
+      if (desktopIpcLiveOwnerObservedInboundKeys.has(inboundKey)) {
+        return;
+      }
+      desktopIpcLiveOwnerObservedInboundKeys.add(inboundKey);
+      evictOldestEntries(desktopIpcLiveOwnerObservedInboundKeys, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    }
+    desktopIpcLiveOwner.observeInbound(rawMessage, parsedMessage);
+  }
+
+  function desktopIpcLiveOwnerInboundKey(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    const method = typeof parsed?.method === "string" ? parsed.method : "";
+    if (!method || parsed?.id == null) {
+      return "";
+    }
+    // extractThreadId only understands turn/thread start and completion params;
+    // archive, steer, interrupt, and compact requests need the generic fields so
+    // same-id requests for different threads never share a dedupe key.
+    const threadId = extractThreadId(method, parsed.params)
+      || readString(parsed?.params?.threadId)
+      || readString(parsed?.params?.thread_id)
+      || readString(parsed?.params?.conversationId)
+      || readString(parsed?.params?.conversation_id)
+      || "";
+    return `${method}:${threadId}:${String(parsed.id)}`;
   }
 
   function parseBridgeMessage(rawMessage) {
@@ -989,9 +1051,9 @@ function startBridge({
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
   }
 
-  function updatePendingAuthLoginFromCodexMessage(rawMessage) {
+  function updatePendingAuthLoginFromCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
-    const parsed = safeParseJSON(rawMessage);
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
     const responseId = parsed?.id;
     if (responseId != null) {
       const trackedRequest = forwardedRequestMethodsById.get(String(responseId));
@@ -1075,8 +1137,8 @@ function startBridge({
     }
   }
 
-  function rememberThreadFromMessage(source, rawMessage) {
-    const context = extractBridgeMessageContext(rawMessage);
+  function rememberThreadFromMessage(source, rawMessage, parsedMessage = null) {
+    const context = extractBridgeMessageContext(rawMessage, parsedMessage);
     if (!context.threadId) {
       return;
     }
@@ -1260,11 +1322,9 @@ function startBridge({
   }
 
   // Learns whether the underlying Codex transport has already completed its own MCP handshake.
-  function trackCodexHandshakeState(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function trackCodexHandshakeState(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return;
     }
 
@@ -1328,11 +1388,9 @@ function startBridge({
 
   // Intercepts responses for bridge-private requests so only user-visible app-server traffic
   // is forwarded back through secure transport.
-  function handleBridgeManagedCodexResponse(rawMessage) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedCodexResponse(rawMessage, parsedMessage = null) {
+    const parsed = parsedMessage ?? safeParseJSON(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -1697,17 +1755,26 @@ function disableUnsupportedReasoningSummaryForTurnStart(rawMessage) {
   });
 }
 
+function normalizeTurnStartParamsForCodex(params) {
+  const normalizedRawMessage = disableUnsupportedReasoningSummaryForTurnStart(JSON.stringify({
+    method: "turn/start",
+    params,
+  }));
+  const parsed = parseBridgeJSON(normalizedRawMessage);
+  return parsed?.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+    ? parsed.params
+    : params;
+}
+
 function readTurnStartModel(params) {
   return normalizeNonEmptyString(params?.model).toLowerCase()
     || normalizeNonEmptyString(params?.collaborationMode?.settings?.model).toLowerCase()
     || normalizeNonEmptyString(params?.collaboration_mode?.settings?.model).toLowerCase();
 }
 
-function extractBridgeMessageContext(rawMessage) {
-  let parsed = null;
-  try {
-    parsed = JSON.parse(rawMessage);
-  } catch {
+function extractBridgeMessageContext(rawMessage, parsedMessage = null) {
+  const parsed = parsedMessage ?? parseBridgeJSON(rawMessage);
+  if (!parsed) {
     return { method: "", threadId: null, turnId: null };
   }
 
