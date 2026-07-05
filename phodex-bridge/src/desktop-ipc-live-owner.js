@@ -530,7 +530,10 @@ function createDesktopIpcLiveOwner({
       case "thread-follower-command-approval-decision":
         return sendServerRequestResponse(params.requestId, { decision: params.decision });
       case "thread-follower-file-approval-decision":
-        return sendServerRequestResponse(params.requestId, { decision: params.decision });
+        return sendServerRequestResponse(
+          params.requestId,
+          followerApprovalResultForRequest(conversationId, params)
+        );
       case "thread-follower-permissions-request-approval-response":
         return sendServerRequestResponse(params.requestId, params.response);
       case "thread-follower-submit-user-input":
@@ -596,6 +599,27 @@ function createDesktopIpcLiveOwner({
       threadId: conversationId,
       turnId,
     });
+  }
+
+  // Desktop follower approvals only carry decision-style payloads, but app-server
+  // permission prompts expect a grant object, mirroring the phone response path.
+  function followerApprovalResultForRequest(conversationId, params) {
+    const requestId = requestIdKey(params.requestId);
+    const pendingRequest = (conversations.get(conversationId)?.requests || [])
+      .find((request) => requestIdKey(request?.id) === requestId);
+    if (readString(pendingRequest?.method) !== "item/permissions/requestApproval") {
+      return { decision: params.decision };
+    }
+
+    const decision = readString(params.decision);
+    const grantsRequestedPermissions = decision === "accept" || decision === "acceptForSession";
+    const requestedPermissions = pendingRequest?.params?.permissions;
+    return {
+      permissions: grantsRequestedPermissions && isPlainJSONObject(requestedPermissions)
+        ? cloneJSON(requestedPermissions)
+        : {},
+      scope: "turn",
+    };
   }
 
   function sendServerRequestResponse(requestId, result) {

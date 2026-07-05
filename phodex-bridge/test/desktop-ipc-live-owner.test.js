@@ -1308,6 +1308,112 @@ test("live owner routes follower approval responses back to app-server", async (
   }]);
 });
 
+test("live owner converts desktop permission approvals into grant payloads", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-permissions-");
+  const rawCodexMessages = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage(rawMessage) {
+      rawCodexMessages.push(JSON.parse(rawMessage));
+    },
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-permissions", input: [] },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "permission-request-1",
+    method: "item/permissions/requestApproval",
+    params: {
+      threadId: "thread-permissions",
+      turnId: "turn-permissions",
+      itemId: "item-permissions",
+      permissions: {
+        network: { enabled: true },
+      },
+    },
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "permission-approval-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-file-approval-decision",
+    params: {
+      conversationId: "thread-permissions",
+      requestId: "permission-request-1",
+      decision: "accept",
+    },
+  });
+  const acceptResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "permission-approval-1"
+  );
+  assert.equal(acceptResponse.resultType, "success");
+  assert.deepEqual(rawCodexMessages.at(-1), {
+    id: "permission-request-1",
+    result: {
+      permissions: {
+        network: { enabled: true },
+      },
+      scope: "turn",
+    },
+  });
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "permission-approval-2",
+    sourceClientId: "desktop",
+    method: "thread-follower-file-approval-decision",
+    params: {
+      conversationId: "thread-permissions",
+      requestId: "permission-request-1",
+      decision: "decline",
+    },
+  });
+  const declineResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "permission-approval-2"
+  );
+  assert.equal(declineResponse.resultType, "success");
+  assert.deepEqual(rawCodexMessages.at(-1), {
+    id: "permission-request-1",
+    result: {
+      permissions: {},
+      scope: "turn",
+    },
+  });
+});
+
 test("conversation adapter tracks requests and resolved notifications", () => {
   const conversations = new Map();
   const owned = new Set(["thread-adapter"]);
