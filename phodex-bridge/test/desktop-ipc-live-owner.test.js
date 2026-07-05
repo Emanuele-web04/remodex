@@ -1409,6 +1409,15 @@ test("live owner broadcasts a removed snapshot before archive cleanup", async (t
     params: { threadId: "thread-archive-remove" },
   }));
 
+  const archived = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-archived"
+      && frame.params?.conversationId === "thread-archive-remove"
+  );
+  assert.equal(archived.version, 2);
+  assert.equal(archived.params.hostId, "local");
+
   const removed = await waitForMessage(
     frames,
     (frame) => frame.type === "broadcast"

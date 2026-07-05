@@ -20,6 +20,8 @@ const DEFAULT_MAX_PATCH_COUNT = 2_000;
 const DEFAULT_MAX_PATCH_BYTES = 512 * 1024;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_000;
 const THREAD_STREAM_STATE_CHANGED = "thread-stream-state-changed";
+const THREAD_ARCHIVED = "thread-archived";
+const THREAD_UNARCHIVED = "thread-unarchived";
 const CLIENT_STATUS_CHANGED = "client-status-changed";
 const LOCAL_HOST_ID = "local";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
@@ -28,6 +30,8 @@ const METHOD_VERSION_BY_NAME = new Map([
   ["initialize", 1],
   [CLIENT_STATUS_CHANGED, 1],
   [THREAD_STREAM_STATE_CHANGED, 6],
+  [THREAD_ARCHIVED, 2],
+  [THREAD_UNARCHIVED, 1],
   ["thread-follower-start-turn", 1],
   ["thread-follower-compact-thread", 1],
   ["thread-follower-steer-turn", 1],
@@ -391,6 +395,13 @@ function createDesktopIpcLiveOwner({
     const previousState = conversations.get(threadId)
       || lastBroadcastStatesByThreadId.get(threadId)
       || createEmptyConversationState(threadId, { hostId, now });
+    if (reason === "thread/archive") {
+      ipc.sendBroadcast(THREAD_ARCHIVED, {
+        hostId,
+        conversationId: threadId,
+        cwd: readString(previousState?.cwd),
+      });
+    }
     const removedState = {
       ...cloneJSON(previousState),
       id: threadId,

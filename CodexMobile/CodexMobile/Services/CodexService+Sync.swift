@@ -374,6 +374,21 @@ extension CodexService {
         sendThreadArchiveRPC(threadId: threadId, unarchive: true)
     }
 
+    // Applies archive state pushed by a paired Desktop IPC owner without echoing an RPC back.
+    func applyRemoteThreadArchiveState(threadId: String, isArchived: Bool) {
+        if threadIndex(for: threadId) == nil {
+            threads.append(CodexThread(
+                id: threadId,
+                title: CodexThread.defaultDisplayTitle,
+                syncState: isArchived ? .archivedLocal : .live
+            ))
+        }
+
+        setThreadArchivedLocally(threadId, isArchived: isArchived)
+        threads = sortThreads(threads)
+        debugSyncLog("thread archive state mirrored from desktop: \(threadId) archived=\(isArchived)")
+    }
+
     func deleteThread(_ threadId: String) {
         // Child threads still exist as standalone server conversations, so deleting a parent
         // should archive descendants locally instead of permanently hiding them as deleted.

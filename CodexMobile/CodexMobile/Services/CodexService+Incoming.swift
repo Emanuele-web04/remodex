@@ -256,6 +256,12 @@ extension CodexService {
         case "thread/status/changed":
             handleThreadStatusChanged(paramsObject)
 
+        case "thread/archived":
+            handleThreadArchiveStateChanged(paramsObject, isArchived: true)
+
+        case "thread/unarchived":
+            handleThreadArchiveStateChanged(paramsObject, isArchived: false)
+
         case "turn/started":
             handleTurnStarted(paramsObject)
 
@@ -876,6 +882,18 @@ extension CodexService {
                 markFailedIfUnread(threadId: threadId)
             }
         }
+    }
+
+    // Applies remote Desktop archive broadcasts to the local sidebar state.
+    private func handleThreadArchiveStateChanged(
+        _ paramsObject: IncomingParamsObject?,
+        isArchived: Bool
+    ) {
+        guard let threadId = extractThreadID(from: paramsObject), !threadId.isEmpty else {
+            return
+        }
+
+        applyRemoteThreadArchiveState(threadId: threadId, isArchived: isArchived)
     }
 
     // Parses the real terminal outcome so UI can distinguish completion from interruption.

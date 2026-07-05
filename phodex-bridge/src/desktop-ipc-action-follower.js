@@ -8,13 +8,18 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 
+const {
+  createDesktopConversationProjector,
+  projectDesktopConversationStateToThread,
+} = require("./desktop-ipc-conversation-projector");
+
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const OWNERSHIP_PROBE_TIMEOUT_MS = 1_500;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
-const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
+const DESKTOP_STATE_READ_METHODS = new Set(["thread/read", "thread/resume", "thread/turns/list"]);
 const DESKTOP_FOLLOWER_REQUEST_METHODS = new Set([
   "turn/start",
   "turn/steer",
@@ -73,7 +78,7 @@ function createDesktopIpcActionFollower({
     onDisconnect,
   });
   const rawStatesByThreadId = new Map();
-  const assistantMessageTextsByThreadId = new Map();
+  const conversationProjector = createDesktopConversationProjector({ now });
   const pendingRoutesByRequestId = new Map();
   const activeThreadIds = new Set();
   const recoveringThreadIds = new Set();
@@ -107,7 +112,11 @@ function createDesktopIpcActionFollower({
       }
     }
 
-    if (!DESKTOP_RESUME_METHODS.has(method)) {
+    if (tryServeDesktopOwnedRead(message)) {
+      return true;
+    }
+
+    if (!DESKTOP_STATE_READ_METHODS.has(method)) {
       return false;
     }
 
@@ -126,7 +135,7 @@ function createDesktopIpcActionFollower({
 
   function stopAll() {
     rawStatesByThreadId.clear();
-    assistantMessageTextsByThreadId.clear();
+    conversationProjector.reset();
     pendingRoutesByRequestId.clear();
     activeThreadIds.clear();
     recoveringThreadIds.clear();
@@ -146,6 +155,11 @@ function createDesktopIpcActionFollower({
 
   // Desktop broadcasts carry the live conversation state Litter projects from.
   function onEnvelope(envelope) {
+    if (envelope?.type === "broadcast"
+      && (envelope.method === "thread-archived" || envelope.method === "thread-unarchived")) {
+      syncThreadArchiveBroadcast(envelope);
+      return;
+    }
     if (envelope?.type !== "broadcast" || envelope.method !== "thread-stream-state-changed") {
       return;
     }
@@ -191,6 +205,7 @@ function createDesktopIpcActionFollower({
         const speculativeActions = projectPendingDesktopActions(threadId, speculativeState);
         if (speculativeActions.length > 0) {
           rawStatesByThreadId.set(threadId, speculativeState);
+          conversationProjector.seed(threadId, speculativeState);
           syncProjectedActions(threadId, speculativeActions);
           releaseHeldFollowerRequests(threadId, { toDesktop: true });
           return;
@@ -207,14 +222,14 @@ function createDesktopIpcActionFollower({
     }
 
     rawStatesByThreadId.set(threadId, nextState);
-    syncProjectedAssistantDeltas(threadId, previousState, nextState);
+    syncProjectedConversationState(threadId, nextState);
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
     releaseHeldFollowerRequests(threadId, { toDesktop: true });
   }
 
   function onDisconnect() {
     rawStatesByThreadId.clear();
-    assistantMessageTextsByThreadId.clear();
+    conversationProjector.reset();
     resolveAllProjectedActions();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
@@ -247,7 +262,7 @@ function createDesktopIpcActionFollower({
     desktopOwnedByProbeThreadIds.delete(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
-    assistantMessageTextsByThreadId.delete(threadId);
+    conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
     releaseHeldFollowerRequests(threadId, { toDesktop: false });
   }
@@ -262,7 +277,7 @@ function createDesktopIpcActionFollower({
     desktopOwnedByProbeThreadIds.delete(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
-    assistantMessageTextsByThreadId.delete(threadId);
+    conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
     rejectHeldFollowerRequests(threadId, "This thread is no longer available for Desktop routing.");
   }
@@ -495,6 +510,73 @@ function createDesktopIpcActionFollower({
     }
   }
 
+  // Serves Desktop-owned history/read requests from the cached IPC snapshot so
+  // mobile can backfill threads that only exist in Codex Desktop.
+  function tryServeDesktopOwnedRead(message) {
+    const method = readString(message?.method);
+    if (!DESKTOP_STATE_READ_METHODS.has(method) || message?.id == null) {
+      return false;
+    }
+    const threadId = readThreadId(message.params);
+    if (!threadId || liveOwnerThreadIds.has(threadId)) {
+      return false;
+    }
+    const rawState = rawStatesByThreadId.get(threadId);
+    if (!rawState) {
+      return false;
+    }
+
+    activeThreadIds.add(threadId);
+    const thread = projectDesktopConversationStateToThread(threadId, rawState, { now });
+    const result = method === "thread/turns/list"
+      ? {
+          data: cloneJSON(thread.turns || []),
+          turns: cloneJSON(thread.turns || []),
+          nextCursor: null,
+          hasMore: false,
+        }
+      : {
+          thread,
+          conversationState: cloneJSON(rawState),
+        };
+    sendApplicationResponse(JSON.stringify({
+      id: message.id,
+      result,
+    }));
+    return true;
+  }
+
+  function syncProjectedConversationState(threadId, nextState) {
+    const output = conversationProjector.project(threadId, nextState);
+    for (const notification of output.notifications || []) {
+      sendApplicationResponse(JSON.stringify(notification));
+    }
+  }
+
+  function syncThreadArchiveBroadcast(envelope) {
+    const params = envelope.params || {};
+    const threadId = readString(params.conversationId) || readString(params.conversation_id);
+    if (!threadId) {
+      return;
+    }
+    if (envelope.method === "thread-archived") {
+      rawStatesByThreadId.delete(threadId);
+      conversationProjector.remove(threadId);
+      syncProjectedActions(threadId, []);
+    }
+    sendApplicationResponse(JSON.stringify({
+      method: envelope.method === "thread-archived" ? "thread/archived" : "thread/unarchived",
+      params: {
+        threadId,
+        conversationId: threadId,
+        cwd: readString(params.cwd),
+        remodexDesktopMirror: true,
+        remodexDesktopIpcMirror: true,
+        remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+      },
+    }));
+  }
+
   function desktopRouteForResponse(message) {
     if (!message || typeof message !== "object" || message.method) {
       return null;
@@ -702,33 +784,12 @@ function createDesktopIpcActionFollower({
     }
 
     rawStatesByThreadId.set(threadId, nextState);
-    syncProjectedAssistantDeltas(threadId, baselineState, nextState);
+    if (baselineState && typeof baselineState === "object") {
+      conversationProjector.seed(threadId, baselineState);
+    }
+    syncProjectedConversationState(threadId, nextState);
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
     releaseHeldFollowerRequests(threadId, { toDesktop: true });
-  }
-
-  function syncProjectedAssistantDeltas(threadId, previousState, nextState) {
-    const previousTexts = assistantMessageTextsByThreadId.get(threadId);
-    if (!previousTexts && !previousState) {
-      assistantMessageTextsByThreadId.set(threadId, snapshotAssistantMessageTexts(nextState));
-      return;
-    }
-
-    const notifications = projectDesktopAssistantDeltaNotifications(
-      threadId,
-      previousState,
-      nextState,
-      previousTexts || snapshotAssistantMessageTexts(previousState)
-    );
-    if (notifications.length === 0) {
-      assistantMessageTextsByThreadId.set(threadId, snapshotAssistantMessageTexts(nextState));
-      return;
-    }
-
-    for (const notification of notifications) {
-      sendApplicationResponse(JSON.stringify(notification));
-    }
-    assistantMessageTextsByThreadId.set(threadId, snapshotAssistantMessageTexts(nextState));
   }
 
   return {
@@ -1200,9 +1261,19 @@ function applyConversationStateChange(previousState, change) {
     return previousState || null;
   }
 
-  const nextState = cloneJSON(previousState);
+  let nextState = cloneJSON(previousState);
   for (const patch of patches) {
-    applyImmerPatch(nextState, patch);
+    if (Array.isArray(patch?.path) && patch.path.length === 0) {
+      const op = readString(patch?.op).toLowerCase();
+      if (op === "add" || op === "replace") {
+        nextState = cloneJSON(patch.value);
+        continue;
+      }
+      return null;
+    }
+    if (!applyImmerPatch(nextState, patch)) {
+      return null;
+    }
   }
   return nextState;
 }
@@ -1253,39 +1324,65 @@ function createEmptyConversationState() {
 function applyImmerPatch(target, patch) {
   const patchPath = Array.isArray(patch?.path) ? patch.path : [];
   const op = readString(patch?.op).toLowerCase();
-  if (!op || patchPath.length === 0) {
-    return;
+  if (!op) {
+    return false;
+  }
+  if (patchPath.length === 0) {
+    if (op === "remove") {
+      return false;
+    }
+    if (op === "add" || op === "replace") {
+      return false;
+    }
+    return false;
   }
 
   let parent = target;
   for (let index = 0; index < patchPath.length - 1; index += 1) {
     parent = parent?.[patchPath[index]];
     if (parent == null) {
-      return;
+      return false;
     }
   }
 
   const key = patchPath[patchPath.length - 1];
   if (op === "remove") {
     if (Array.isArray(parent) && Number.isInteger(key)) {
+      if (key < 0 || key >= parent.length) {
+        return false;
+      }
       parent.splice(key, 1);
+      return true;
     } else if (parent && typeof parent === "object") {
+      if (!Object.prototype.hasOwnProperty.call(parent, key)) {
+        return false;
+      }
       delete parent[key];
+      return true;
     }
-    return;
+    return false;
   }
 
   if (op === "add" || op === "replace") {
     if (Array.isArray(parent) && Number.isInteger(key)) {
       if (op === "add") {
+        if (key < 0 || key > parent.length) {
+          return false;
+        }
         parent.splice(key, 0, patch.value);
       } else {
+        if (key < 0 || key >= parent.length) {
+          return false;
+        }
         parent[key] = patch.value;
       }
+      return true;
     } else if (parent && typeof parent === "object") {
       parent[key] = patch.value;
+      return true;
     }
   }
+  return false;
 }
 
 function writeFrame(socket, payload, callback) {
