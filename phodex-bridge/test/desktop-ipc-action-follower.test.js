@@ -1013,6 +1013,95 @@ test("desktop IPC follower forwards pending actions and routes iOS replies back 
   });
 });
 
+test("desktop IPC follower resolves projected actions on IPC disconnect", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-disconnect-action-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-action-disconnect" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-action-disconnect",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          requests: [{
+            id: "req-action-disconnect",
+            method: "item/tool/requestUserInput",
+            params: {
+              threadId: "thread-action-disconnect",
+              turnId: "turn-action-disconnect",
+              itemId: "item-action-disconnect",
+              questions: [{ id: "q1", question: "Continue?" }],
+            },
+          }],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.find((message) => message.id === "req-action-disconnect"));
+
+  serverSocket.destroy();
+
+  await waitFor(
+    () => outbound.find((message) => message.method === "serverRequest/resolved"
+      && message.params?.requestId === "req-action-disconnect"),
+    1_000
+  );
+  const resolved = outbound.find((message) => message.method === "serverRequest/resolved"
+    && message.params?.requestId === "req-action-disconnect");
+  assert.deepEqual(resolved, {
+    method: "serverRequest/resolved",
+    params: {
+      threadId: "thread-action-disconnect",
+      requestId: "req-action-disconnect",
+    },
+  });
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "req-action-disconnect",
+    result: { answers: { q1: { answers: ["Yes"] } } },
+  })), false);
+});
+
 test("desktop IPC follower routes phone turns to Desktop-owned threads", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-turn-start-");
   const serverFrames = [];
@@ -2667,7 +2756,7 @@ test("desktop IPC follower cancels held turns when the live owner removes a thre
   );
 });
 
-test("desktop IPC follower forwards held phone turns locally once discovery denies ownership", async (t) => {
+test("desktop IPC follower keeps held phone turns queued when discovery denies ownership", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-denied-");
   const serverFrames = [];
   const localForwards = [];
@@ -2692,6 +2781,13 @@ test("desktop IPC follower forwards held phone turns locally once discovery deni
           requestId: frame.requestId,
           response: { canHandle: false },
         });
+      } else if (frame.type === "request" && frame.method === "thread-follower-start-turn") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "error",
+          error: "no-client-found",
+        });
       }
     });
   });
@@ -2709,7 +2805,7 @@ test("desktop IPC follower forwards held phone turns locally once discovery deni
       localForwards.push(JSON.parse(rawMessage));
     },
     requestTimeoutMs: 500,
-    ownershipProbeTimeoutMs: 5_000,
+    ownershipProbeTimeoutMs: 120,
   });
   t.after(() => follower.stopAll());
 
@@ -2727,12 +2823,20 @@ test("desktop IPC follower forwards held phone turns locally once discovery deni
   }));
   assert.equal(handled, true);
 
-  // The denial should release the request long before the 5s probe window.
+  await waitFor(() => serverFrames.some((frame) => frame.type === "client-discovery-request"), 1_000);
+  await wait(30);
+  assert.deepEqual(localForwards, []);
+  assert.equal(
+    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
+    false
+  );
+
+  // The timer-routed request can still fall back locally after a real no-client-found.
   await waitFor(() => localForwards.length > 0, 1_000);
   assert.equal(localForwards[0].id, "phone-turn-start-denied");
   assert.equal(
     serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
-    false
+    true
   );
 });
 

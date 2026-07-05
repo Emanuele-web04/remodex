@@ -408,6 +408,7 @@ function createDesktopIpcLiveOwner({
     ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
       hostId,
       conversationId: threadId,
+      version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
       remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
       remodexOwnerReleased: true,
       change: {
@@ -556,6 +557,7 @@ function createDesktopIpcLiveOwner({
       if (patches && ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
         hostId,
         conversationId: threadId,
+        version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
         remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
         change: {
           type: "patches",
@@ -570,6 +572,7 @@ function createDesktopIpcLiveOwner({
     if (ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
       hostId,
       conversationId: threadId,
+      version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
       remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
       change: {
         type: "snapshot",

@@ -215,7 +215,7 @@ function createDesktopIpcActionFollower({
   function onDisconnect() {
     rawStatesByThreadId.clear();
     assistantMessageTextsByThreadId.clear();
-    pendingRoutesByRequestId.clear();
+    resolveAllProjectedActions();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
@@ -223,6 +223,19 @@ function createDesktopIpcActionFollower({
     // Keep held turns queued: a disconnect proves nothing about ownership. Their
     // hold timers route them through the bus (with a reconnect attempt), and only
     // a proven delivery failure falls back to the local app-server.
+  }
+
+  function resolveAllProjectedActions() {
+    for (const [requestId, route] of Array.from(pendingRoutesByRequestId.entries())) {
+      pendingRoutesByRequestId.delete(requestId);
+      sendApplicationResponse(JSON.stringify({
+        method: "serverRequest/resolved",
+        params: {
+          threadId: route.threadId,
+          requestId,
+        },
+      }));
+    }
   }
 
   // The bridge's own live owner just claimed this thread's stream, so drop stale
@@ -305,11 +318,9 @@ function createDesktopIpcActionFollower({
           releaseHeldFollowerRequests(threadId, { toDesktop: true });
           return;
         }
-        if (canHandle === false) {
-          ownershipProbeDeadlinesByThreadId.delete(threadId);
-          releaseHeldFollowerRequests(threadId, { toDesktop: false });
-        }
-        // No discovery answer: keep holding and let the timer fallback decide.
+        // A negative discovery answer only means no currently connected client
+        // claimed the request. Keep holding so the bounded timer can route the
+        // request through the bus and only fall back locally after no-client-found.
       });
   }
 
