@@ -482,6 +482,110 @@ test("live owner seeds existing thread snapshots from thread reads before owners
   assert.equal(state.turns[1].turnId, "turn-new");
 });
 
+test("live owner does not rewind live state from a stale cached thread on later turns", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-stale-cache-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "read-stale-cache",
+    method: "thread/read",
+    params: { threadId: "thread-stale-cache" },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    id: "read-stale-cache",
+    result: {
+      thread: {
+        id: "thread-stale-cache",
+        createdAt: 1,
+        updatedAt: 2,
+        cwd: "/tmp/stale-cache",
+        name: "Stale cache",
+        turns: [{
+          id: "turn-stale-cache",
+          items: [{
+            id: "assistant-stale-cache",
+            type: "agentMessage",
+            text: "cached text",
+          }],
+          status: "inProgress",
+          startedAt: 1,
+        }],
+      },
+    },
+  }));
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-stale-cache-1",
+    method: "turn/start",
+    params: {
+      threadId: "thread-stale-cache",
+      cwd: "/tmp/stale-cache",
+      input: [{ type: "input_text", text: "continue" }],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "item/completed",
+    params: {
+      threadId: "thread-stale-cache",
+      turnId: "turn-stale-cache",
+      item: {
+        id: "assistant-stale-cache",
+        type: "agentMessage",
+        text: "live updated text",
+      },
+    },
+  }));
+  assert.equal(
+    owner._debugSnapshot("thread-stale-cache").turns[0].items[0].text,
+    "live updated text"
+  );
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-stale-cache-2",
+    method: "turn/start",
+    params: {
+      threadId: "thread-stale-cache",
+      cwd: "/tmp/stale-cache",
+      input: [{ type: "input_text", text: "continue again" }],
+    },
+  }));
+
+  assert.equal(
+    owner._debugSnapshot("thread-stale-cache").turns[0].items[0].text,
+    "live updated text"
+  );
+});
+
 test("live owner keeps phone turn input in snapshots when turn/started has no items", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-user-input-");
   const frames = [];

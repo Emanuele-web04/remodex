@@ -52,6 +52,7 @@ function createDesktopIpcActionFollower({
   sendApplicationResponse,
   readConversationState = null,
   forwardToLocalCodex = null,
+  onHoldFollowerRequest = null,
   normalizeTurnStartParams = (params) => params,
   logPrefix = "[remodex]",
   socketPath = resolveDefaultIpcSocketPath(),
@@ -102,6 +103,7 @@ function createDesktopIpcActionFollower({
       }
       if (route && shouldHoldFollowerRequest(message, route.threadId)) {
         holdFollowerRequest(route.threadId, rawMessage);
+        onHoldFollowerRequest?.(rawMessage);
         probeDesktopOwnership(route);
         return true;
       }

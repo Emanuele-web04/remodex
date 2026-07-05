@@ -427,14 +427,119 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
   });
 });
 
+test("bridge lets the live owner observe desktop IPC held phone turns", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  let relaySocket = null;
+  let bridge = null;
+  let fakeCodex = null;
+  let followerOptions = null;
+  const liveOwnerInbound = [];
+
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+  });
+
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() {
+      fakeCodex = createFakeCodexTransport();
+      return fakeCodex;
+    },
+    desktopIpcActionFollowerModule: {
+      createDesktopIpcActionFollower(options) {
+        followerOptions = options;
+        return {
+          observeInbound(rawMessage) {
+            const parsed = safeParseJSON(rawMessage);
+            if (parsed?.method !== "turn/start") {
+              return false;
+            }
+            followerOptions.onHoldFollowerRequest?.(rawMessage);
+            return true;
+          },
+          stopAll() {},
+        };
+      },
+      seedConversationStateFromThreadRead() {
+        return null;
+      },
+    },
+    desktopIpcLiveOwnerModule: {
+      createDesktopIpcLiveOwner() {
+        return {
+          observeInbound(rawMessage) {
+            liveOwnerInbound.push(JSON.parse(rawMessage));
+          },
+          observeOutbound() {},
+          stopAll() {},
+        };
+      },
+    },
+  });
+
+  t.after(() => {
+    bridge?.stop();
+    relaySocket?.close();
+    relayServer.close();
+  });
+
+  bridge = startBridge({
+    printPairingQr: false,
+    config: {
+      relayUrl: `ws://127.0.0.1:${relayServer.address().port}`,
+      pushServiceUrl: "",
+      pushPreviewMaxChars: 160,
+      refreshEnabled: false,
+      refreshDebounceMs: 1,
+      keepMacAwakeEnabled: false,
+      codexEndpoint: "",
+      refreshCommand: "",
+      codexBundleId: "",
+      codexAppPath: "",
+      desktopIpcLiveSyncEnabled: true,
+    },
+  });
+
+  await waitFor(() => relaySocket && relaySocket.readyState === WebSocket.OPEN);
+  relaySocket.send(JSON.stringify({
+    id: "held-turn-start",
+    method: "turn/start",
+    params: {
+      threadId: "thread-held-live-owner",
+      input: [{ type: "input_text", text: "start locally if unowned" }],
+    },
+  }));
+
+  await waitFor(() => liveOwnerInbound.some((message) => message.id === "held-turn-start"));
+  assert.equal(
+    liveOwnerInbound.filter((message) => message.id === "held-turn-start").length,
+    1
+  );
+  assert.equal(fakeCodex.sent.some((message) => message.id === "held-turn-start"), false);
+});
+
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
-function loadBridgeWithTestDoubles({ createCodexTransportImpl }) {
+function loadBridgeWithTestDoubles({
+  createCodexTransportImpl,
+  desktopIpcActionFollowerModule = null,
+  desktopIpcLiveOwnerModule = null,
+}) {
   const bridgePath = require.resolve("../src/bridge");
   const originalLoad = Module._load;
   delete require.cache[bridgePath];
   Module._load = function loadWithBridgeDoubles(request, parent, isMain) {
     if (parent?.filename === bridgePath && request === "./codex-transport") {
       return { createCodexTransport: createCodexTransportImpl };
+    }
+    if (parent?.filename === bridgePath
+      && request === "./desktop-ipc-action-follower"
+      && desktopIpcActionFollowerModule) {
+      return desktopIpcActionFollowerModule;
+    }
+    if (parent?.filename === bridgePath
+      && request === "./desktop-ipc-live-owner"
+      && desktopIpcLiveOwnerModule) {
+      return desktopIpcLiveOwnerModule;
     }
     if (parent?.filename === bridgePath && request === "./secure-transport") {
       return { createBridgeSecureTransport: createPlaintextSecureTransport };

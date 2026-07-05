@@ -195,6 +195,7 @@ function startBridge({
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
   const relaySanitizedResponseMethodsById = new Map();
+  const desktopIpcLiveOwnerObservedInboundKeys = new Set();
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
   const trackedForwardedRequestMethods = new Set([
@@ -257,9 +258,10 @@ function startBridge({
         await sendCodexRequest("thread/read", { threadId })
       ),
       forwardToLocalCodex: (rawMessage) => {
-        desktopIpcLiveOwner?.observeInbound(rawMessage);
+        observeDesktopIpcLiveOwnerInbound(rawMessage);
         forwardInboundRequestToCodex(rawMessage);
       },
+      onHoldFollowerRequest: observeDesktopIpcLiveOwnerInbound,
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
     })
@@ -641,7 +643,7 @@ function startBridge({
     if (desktopIpcActionFollower?.observeInbound(rawMessage)) {
       return;
     }
-    desktopIpcLiveOwner?.observeInbound(rawMessage);
+    observeDesktopIpcLiveOwnerInbound(rawMessage);
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
@@ -653,6 +655,33 @@ function startBridge({
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
+  }
+
+  // Held Desktop-ownership probes can later fall back locally, so observe each
+  // phone request at most once in the live owner even if it passes both paths.
+  function observeDesktopIpcLiveOwnerInbound(rawMessage) {
+    if (!desktopIpcLiveOwner) {
+      return;
+    }
+    const inboundKey = desktopIpcLiveOwnerInboundKey(rawMessage);
+    if (inboundKey) {
+      if (desktopIpcLiveOwnerObservedInboundKeys.has(inboundKey)) {
+        return;
+      }
+      desktopIpcLiveOwnerObservedInboundKeys.add(inboundKey);
+      evictOldestEntries(desktopIpcLiveOwnerObservedInboundKeys, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+    }
+    desktopIpcLiveOwner.observeInbound(rawMessage);
+  }
+
+  function desktopIpcLiveOwnerInboundKey(rawMessage) {
+    const parsed = safeParseJSON(rawMessage);
+    const method = typeof parsed?.method === "string" ? parsed.method : "";
+    if (!method || parsed?.id == null) {
+      return "";
+    }
+    const threadId = extractThreadId(method, parsed.params) || "";
+    return `${method}:${threadId}:${String(parsed.id)}`;
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.

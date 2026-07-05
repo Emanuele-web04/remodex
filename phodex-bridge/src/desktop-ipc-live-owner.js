@@ -414,6 +414,10 @@ function createDesktopIpcLiveOwner({
 
   function seedOwnedConversation(threadId, seed = {}) {
     const normalizedThreadId = readString(threadId);
+    const existingConversation = normalizedThreadId ? conversations.get(normalizedThreadId) : null;
+    if (existingConversation) {
+      return existingConversation;
+    }
     const cachedThread = normalizedThreadId ? cachedThreadsByThreadId.get(normalizedThreadId) : null;
     if (cachedThread) {
       return upsertConversationFromThread(cachedThread);
