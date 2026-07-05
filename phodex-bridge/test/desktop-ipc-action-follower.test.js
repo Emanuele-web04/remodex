@@ -2564,6 +2564,109 @@ test("desktop IPC follower ignores stale positive discovery after live owner cla
   );
 });
 
+test("desktop IPC follower cancels held turns when the live owner removes a thread", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-removed-");
+  const serverFrames = [];
+  const localForwards = [];
+  const outbound = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.method === "thread-follower-start-turn") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: frame.method,
+          handledByClientId: "desktop",
+          result: { turn: { id: "turn-should-not-start-after-removal" } },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 5_000,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-probe-removed" },
+  }));
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-removed",
+    method: "turn/start",
+    params: {
+      threadId: "thread-probe-removed",
+      input: [{ type: "input_text", text: "must not start after removal" }],
+    },
+  }));
+  assert.equal(handled, true);
+
+  await waitFor(() => (
+    serverFrames.find((frame) => frame.type === "client-discovery-request")
+  ), 1_000);
+  const discoveryRequest = serverFrames.find((frame) => frame.type === "client-discovery-request");
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "remodex-owner",
+    version: 6,
+    params: {
+      conversationId: "thread-probe-removed",
+      remodexOwnerSource: "desktop-ipc-live-owner",
+      remodexOwnerReleased: true,
+      change: {
+        type: "snapshot",
+        conversationState: { remodexRemoved: true, turns: [], requests: [] },
+      },
+    },
+  });
+
+  await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-removed"), 1_000);
+  writeFrame(serverSocket, {
+    type: "client-discovery-response",
+    requestId: discoveryRequest.requestId,
+    response: { canHandle: true },
+  });
+  await wait(25);
+
+  const errorResponse = outbound.find((message) => message.id === "phone-turn-start-removed");
+  assert.equal(errorResponse.error.code, -32000);
+  assert.deepEqual(localForwards, []);
+  assert.equal(
+    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
+    false
+  );
+});
+
 test("desktop IPC follower forwards held phone turns locally once discovery denies ownership", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-denied-");
   const serverFrames = [];

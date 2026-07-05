@@ -154,7 +154,11 @@ function createDesktopIpcActionFollower({
     const threadId = readString(params.conversationId) || readString(params.conversation_id);
     if (isRemodexLiveOwnerBroadcast(params)) {
       if (threadId) {
-        releaseDesktopThreadState(threadId);
+        if (params.remodexOwnerReleased === true) {
+          removeDesktopThreadState(threadId);
+        } else {
+          releaseDesktopThreadState(threadId);
+        }
       }
       return;
     }
@@ -233,6 +237,21 @@ function createDesktopIpcActionFollower({
     assistantMessageTextsByThreadId.delete(threadId);
     queuedChangesByThreadId.delete(threadId);
     releaseHeldFollowerRequests(threadId, { toDesktop: false });
+  }
+
+  // The live owner is releasing/removing its stream, not claiming it; cancel any
+  // speculative phone request instead of routing it to either runtime.
+  function removeDesktopThreadState(threadId) {
+    liveOwnerThreadIds.delete(threadId);
+    activeThreadIds.delete(threadId);
+    ownershipProbeDeadlinesByThreadId.delete(threadId);
+    pendingOwnershipProbeTokensByThreadId.delete(threadId);
+    desktopOwnedByProbeThreadIds.delete(threadId);
+    syncProjectedActions(threadId, []);
+    rawStatesByThreadId.delete(threadId);
+    assistantMessageTextsByThreadId.delete(threadId);
+    queuedChangesByThreadId.delete(threadId);
+    rejectHeldFollowerRequests(threadId, "This thread is no longer available for Desktop routing.");
   }
 
   // A just-resumed Desktop-owned thread has no snapshot yet, so hold phone turn
@@ -401,6 +420,19 @@ function createDesktopIpcActionFollower({
       } else {
         forwardToLocalCodex?.(entry.rawMessage);
       }
+    }
+  }
+
+  function rejectHeldFollowerRequests(threadId, reason) {
+    const queue = heldFollowerRequestsByThreadId.get(threadId);
+    if (!queue || queue.length === 0) {
+      heldFollowerRequestsByThreadId.delete(threadId);
+      return;
+    }
+    heldFollowerRequestsByThreadId.delete(threadId);
+    for (const entry of queue) {
+      clearTimeout(entry.timer);
+      rejectHeldFollowerRequest(safeParseJSON(entry.rawMessage), reason);
     }
   }
 
