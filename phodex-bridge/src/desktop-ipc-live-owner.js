@@ -70,6 +70,7 @@ const OWNER_INBOUND_METHODS = new Set([
   "turn/interrupt",
   "thread/compact/start",
   "thread/archive",
+  "thread/unarchive",
   "thread/unsubscribe",
 ]);
 
@@ -134,6 +135,8 @@ function createDesktopIpcLiveOwner({
   const pendingTurnStartParamsByThreadId = new Map();
   const pendingTurnStartEntriesByRequestId = new Map();
   const followerRuntimeOverridesByThreadId = new Map();
+  const pendingThreadArchiveBroadcastsByThreadId = new Map();
+  const pendingThreadUnarchiveBroadcastIds = new Set();
   const dirtyThreadIds = new Set();
   let snapshotTimer = null;
 
@@ -145,6 +148,8 @@ function createDesktopIpcLiveOwner({
     reconnectMs,
     logPrefix,
     onConnected() {
+      flushPendingThreadArchiveBroadcasts();
+      flushPendingThreadUnarchiveBroadcasts();
       broadcastAllOwnedSnapshots();
     },
     onBroadcast(envelope) {
@@ -187,6 +192,10 @@ function createDesktopIpcLiveOwner({
 
     if (method === "thread/archive" || method === "thread/unsubscribe") {
       removeOwnedThread(threadId, { broadcastRemoval: true, reason: method });
+      return;
+    }
+    if (method === "thread/unarchive") {
+      broadcastThreadUnarchived(threadId);
       return;
     }
 
@@ -270,6 +279,8 @@ function createDesktopIpcLiveOwner({
     pendingTurnStartParamsByThreadId.clear();
     pendingTurnStartEntriesByRequestId.clear();
     followerRuntimeOverridesByThreadId.clear();
+    pendingThreadArchiveBroadcastsByThreadId.clear();
+    pendingThreadUnarchiveBroadcastIds.clear();
     ownedThreadIds.clear();
     conversations.clear();
     ipc.close();
@@ -396,11 +407,7 @@ function createDesktopIpcLiveOwner({
       || lastBroadcastStatesByThreadId.get(threadId)
       || createEmptyConversationState(threadId, { hostId, now });
     if (reason === "thread/archive") {
-      ipc.sendBroadcast(THREAD_ARCHIVED, {
-        hostId,
-        conversationId: threadId,
-        cwd: readString(previousState?.cwd),
-      });
+      broadcastThreadArchived(threadId, readString(previousState?.cwd));
     }
     const removedState = {
       ...cloneJSON(previousState),
@@ -427,6 +434,72 @@ function createDesktopIpcLiveOwner({
         conversationState: removedState,
       },
     });
+  }
+
+  function broadcastThreadArchived(threadId, cwd) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId) {
+      return;
+    }
+    pendingThreadArchiveBroadcastsByThreadId.set(normalizedThreadId, {
+      cwd: readString(cwd),
+    });
+    ipc.ensureConnected();
+    flushPendingThreadArchiveBroadcasts();
+  }
+
+  function broadcastThreadUnarchived(threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId) {
+      return;
+    }
+    pendingThreadUnarchiveBroadcastIds.add(normalizedThreadId);
+    ipc.ensureConnected();
+    flushPendingThreadUnarchiveBroadcasts();
+  }
+
+  function flushPendingThreadArchiveBroadcasts() {
+    for (const [threadId, pending] of pendingThreadArchiveBroadcastsByThreadId) {
+      if (!ipc.sendBroadcast(THREAD_ARCHIVED, {
+        hostId,
+        conversationId: threadId,
+        cwd: pending.cwd,
+      })) {
+        return;
+      }
+      pendingThreadArchiveBroadcastsByThreadId.delete(threadId);
+    }
+  }
+
+  function flushPendingThreadUnarchiveBroadcasts() {
+    for (const threadId of pendingThreadUnarchiveBroadcastIds) {
+      if (!ipc.sendBroadcast(THREAD_UNARCHIVED, {
+        hostId,
+        conversationId: threadId,
+      })) {
+        return;
+      }
+      pendingThreadUnarchiveBroadcastIds.delete(threadId);
+    }
+  }
+
+  function maybeYieldOwnedThreadForPeerArchive(envelope) {
+    if (envelope?.method !== THREAD_ARCHIVED) {
+      return false;
+    }
+    if (envelope.sourceClientId && envelope.sourceClientId === ipc.clientId) {
+      return true;
+    }
+    const params = envelope.params || {};
+    const threadId = readString(params.conversationId) || readString(params.conversation_id);
+    if (!threadId || !ownedThreadIds.has(threadId)) {
+      return true;
+    }
+
+    // Desktop archive is a list-level ownership signal; stop publishing snapshots
+    // so archived threads do not immediately reappear from bridge-owned state.
+    removeOwnedThread(threadId);
+    return true;
   }
 
   function upsertConversationFromThread(thread) {
@@ -599,6 +672,9 @@ function createDesktopIpcLiveOwner({
   function handlePeerBroadcast(envelope) {
     if (envelope?.method === CLIENT_STATUS_CHANGED) {
       broadcastAllOwnedSnapshots();
+      return;
+    }
+    if (maybeYieldOwnedThreadForPeerArchive(envelope)) {
       return;
     }
     if (envelope?.method !== THREAD_STREAM_STATE_CHANGED) {

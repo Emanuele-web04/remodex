@@ -1435,6 +1435,138 @@ test("live owner broadcasts a removed snapshot before archive cleanup", async (t
   assert.equal(owner._debugSnapshot("thread-archive-remove"), null);
 });
 
+test("live owner broadcasts phone unarchive requests over Desktop IPC", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-unarchive-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "unarchive-thread-live-owner",
+    method: "thread/unarchive",
+    params: { threadId: "thread-unarchive-live-owner" },
+  }));
+
+  const unarchived = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-unarchived"
+      && frame.params?.conversationId === "thread-unarchive-live-owner"
+  );
+  assert.equal(unarchived.version, 1);
+  assert.equal(unarchived.params.hostId, "local");
+});
+
+test("live owner yields ownership when a peer archives an owned thread", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-peer-archive-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-peer-archive",
+    method: "turn/start",
+    params: {
+      threadId: "thread-peer-archive",
+      input: [{ type: "input_text", text: "work before archive" }],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-peer-archive",
+      turn: {
+        id: "turn-peer-archive",
+        items: [],
+        status: "inProgress",
+        startedAt: 1,
+      },
+    },
+  }));
+
+  await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-peer-archive"
+      && frame.params?.change?.type === "snapshot"
+  );
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    sourceClientId: "desktop-peer",
+    method: "thread-archived",
+    version: 2,
+    params: {
+      hostId: "desktop",
+      conversationId: "thread-peer-archive",
+    },
+  });
+
+  await waitFor(() => owner._debugSnapshot("thread-peer-archive") === null);
+  assert.equal(owner._debugSnapshot("thread-peer-archive"), null);
+});
+
 test("live owner normalizes follower start-turn params before app-server requests", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-normalize-");
   const codexRequests = [];
