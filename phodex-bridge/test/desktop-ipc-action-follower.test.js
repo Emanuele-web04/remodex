@@ -1645,6 +1645,91 @@ test("desktop IPC follower releases desktop state when the live owner claims a t
   );
 });
 
+test("desktop IPC follower keeps held turns queued across a transient IPC disconnect", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-hold-disconnect-");
+  const serverFrames = [];
+  const localForwards = [];
+  const outbound = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.method === "thread-follower-start-turn") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: frame.method,
+          handledByClientId: "desktop",
+          result: { turn: { id: "turn-after-reconnect" } },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 600,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-hold-disconnect" },
+  }));
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-hold-disconnect",
+    method: "turn/start",
+    params: {
+      threadId: "thread-hold-disconnect",
+      input: [{ type: "input_text", text: "survive the drop" }],
+    },
+  }));
+  assert.equal(handled, true);
+
+  // Drop the IPC connection while the turn is still held: it must stay queued
+  // instead of running locally on unproven ownership.
+  await waitFor(() => serverSocket);
+  const firstSocket = serverSocket;
+  serverSocket = null;
+  firstSocket.destroy();
+  await wait(50);
+  assert.deepEqual(localForwards, []);
+
+  // At the hold deadline the request routes through the bus over a reconnect.
+  await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"), 2_000);
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-hold-disconnect"), 1_000);
+  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-hold-disconnect"), {
+    id: "phone-turn-start-hold-disconnect",
+    result: { turn: { id: "turn-after-reconnect" } },
+  });
+  assert.deepEqual(localForwards, []);
+});
+
 test("desktop IPC follower keeps live owner routing guard across IPC disconnects", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-owner-disconnect-");
   const serverFrames = [];

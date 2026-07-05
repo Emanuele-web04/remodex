@@ -214,12 +214,11 @@ function createDesktopIpcActionFollower({
     pendingRoutesByRequestId.clear();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
-    ownershipProbeDeadlinesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
-    for (const threadId of Array.from(heldFollowerRequestsByThreadId.keys())) {
-      releaseHeldFollowerRequests(threadId, { toDesktop: false });
-    }
+    // Keep held turns queued: a disconnect proves nothing about ownership. Their
+    // hold timers route them through the bus (with a reconnect attempt), and only
+    // a proven delivery failure falls back to the local app-server.
   }
 
   // The bridge's own live owner just claimed this thread's stream, so drop stale
