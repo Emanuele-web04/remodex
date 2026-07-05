@@ -379,7 +379,7 @@ extension CodexService {
                 retaining: gptAccountSnapshot
             )
         )
-        gptAccountErrorMessage = "Voice mode needs fresh OpenAI auth on your paired device."
+        gptAccountErrorMessage = "Voice mode needs fresh ChatGPT auth on your paired device."
     }
 
     // Stores an incoming deep-link callback and completes the pending login when the bridge is reachable.

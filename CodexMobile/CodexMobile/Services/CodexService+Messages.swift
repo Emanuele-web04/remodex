@@ -25,6 +25,9 @@ private enum StreamingDeltaCoalescingPolicy {
     static let assistantLargeStreamingFlushDelayNanoseconds: UInt64 = 100_000_000
     static let assistantLargePendingDeltaByteCount = 12_000
     static let assistantLargeVisibleTextByteCount = 32_000
+    // System/tool rows still rebuild heavier timeline content; back them off while
+    // gestures/typing own the main thread. Assistant prose uses a lighter fast path.
+    static let interactionFlushDelayNanoseconds: UInt64 = 250_000_000
 }
 
 private enum MessageTextProcessingPolicy {
@@ -218,6 +221,10 @@ extension CodexService {
         canonicalHistoryReconcileTaskByThreadID.removeValue(forKey: threadId)
         canonicalHistoryReconcileRetryTaskByThreadID[threadId]?.cancel()
         canonicalHistoryReconcileRetryTaskByThreadID.removeValue(forKey: threadId)
+        timelineCatchUpFlushTaskByThreadID[threadId]?.cancel()
+        timelineCatchUpFlushTaskByThreadID.removeValue(forKey: threadId)
+        timelineCatchUpBurstThreadIDs.remove(threadId)
+        replayCatchUpBurstThreadIDs.remove(threadId)
         cancelPerThreadRefreshWork(for: threadId)
     }
 
@@ -245,12 +252,25 @@ extension CodexService {
         canonicalHistoryReconcileTaskByThreadID.removeAll()
         canonicalHistoryReconcileRetryTaskByThreadID.values.forEach { $0.cancel() }
         canonicalHistoryReconcileRetryTaskByThreadID.removeAll()
+        timelineCatchUpFlushTaskByThreadID.values.forEach { $0.cancel() }
+        timelineCatchUpFlushTaskByThreadID.removeAll()
+        timelineCatchUpBurstThreadIDs.removeAll()
+        replayCatchUpBurstThreadIDs.removeAll()
         cancelAllPerThreadRefreshWork()
     }
 
     // Refreshes the derived output cache and bumps the thread timeline revision.
     func updateCurrentOutput(for threadId: String) {
         noteMessagesChanged(for: threadId)
+
+        // During a replay burst every replayed event lands here through its append
+        // path; the O(messages) latest-output scan and the snapshot rebuild are
+        // deferred to the single settle in finishTimelineCatchUpBurst. Live-mirror
+        // micro-bursts stay on this path (only the reducer rebuild below defers)
+        // so mirrored text keeps streaming into the visible output.
+        if replayCatchUpBurstThreadIDs.contains(threadId) {
+            return
+        }
 
         let latestAssistantText = syncLatestAssistantOutputCache(for: threadId)
         refreshThreadTimelineState(for: threadId)
@@ -266,6 +286,17 @@ extension CodexService {
     // Falls back to the full projection path whenever the visible snapshot shape changed underneath us.
     func updateStreamingAssistantOutput(for threadId: String, messageId: String, rawMessageIndex: Int? = nil) {
         noteMessagesChanged(for: threadId)
+
+        // During a replay burst nothing may touch the visible snapshot: both the
+        // O(messages) latest-output scan and the fast-path snapshot patch below are
+        // deferred to the single settle in finishTimelineCatchUpBurst. (The raw
+        // message data is already updated by the caller; replay dedup is covered by
+        // the reducer at projection time.) Live-mirror micro-bursts deliberately
+        // skip this gate: the fast-path patch is what keeps mirrored assistant
+        // text streaming instead of materializing as one block at settle.
+        if replayCatchUpBurstThreadIDs.contains(threadId) {
+            return
+        }
 
         // Keep the visible output anchored to the latest assistant bubble, even if a late
         // delta updates an older item inside the same turn.
@@ -343,6 +374,13 @@ extension CodexService {
     // Patches an already-projected streaming system row without rerunning the reducer.
     func updateStreamingSystemOutput(for threadId: String, messageId: String, rawMessageIndex: Int? = nil) {
         noteMessagesChanged(for: threadId)
+
+        // Mirror of updateStreamingAssistantOutput: during a replay burst the
+        // snapshot settles once at flush, so the fast-path patch must not run.
+        // Live-mirror micro-bursts keep streaming through this fast path.
+        if replayCatchUpBurstThreadIDs.contains(threadId) {
+            return
+        }
 
         if activeThreadId == threadId {
             currentOutput = latestAssistantOutputByThread[threadId] ?? syncLatestAssistantOutputCache(for: threadId)
@@ -741,6 +779,10 @@ extension CodexService {
     func prepareThreadForDisplay(threadId: String) async -> Bool {
         activeThreadId = threadId
         markThreadAsViewed(threadId)
+        // Opening a thread mid-mirror-batch must render immediately: settle any
+        // open catch-up burst so the initial updateCurrentOutput below is not
+        // deferred to the batch flush (finish is idempotent when no burst is open).
+        finishTimelineCatchUpBurst(threadId: threadId)
         updateCurrentOutput(for: threadId)
         var didRefreshRunningState = false
         var shouldRequestImmediateSync = true
@@ -2745,6 +2787,8 @@ extension CodexService {
         systemDeltaFlushTasksByKey[key] = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: flushDelay)
             guard !Task.isCancelled else { return }
+            await Self.deferFlushWhileInteractionIsActive()
+            guard !Task.isCancelled else { return }
             self?.flushPendingSystemDeltas(forKey: key)
         }
     }
@@ -4021,6 +4065,54 @@ extension CodexService {
         streamingAssistantMessageByItemKey = streamingAssistantMessageByItemKey.filter { $0.value != messageId }
     }
 
+    // The live fast path removes a streaming assistant row as soon as its text turns
+    // out to replay an already-present terminal row (see updateStreamingAssistantOutput).
+    // During a catch-up burst that fast path is gated, so the settle runs one bounded
+    // pass with the same semantics before the snapshot rebuild.
+    func pruneStreamingAssistantReplayRowsAfterCatchUp(threadId: String) {
+        guard let messages = messagesByThread[threadId], !messages.isEmpty else {
+            return
+        }
+
+        var nextMessages = messages
+        var removedMessageIDs: [String] = []
+        // Newest-first keeps earlier indices valid while removing.
+        for index in nextMessages.indices.reversed() {
+            let message = nextMessages[index]
+            guard message.role == .assistant, message.isStreaming else {
+                continue
+            }
+            guard let terminalMessageId = assistantReplayTargetMessageId(
+                in: nextMessages,
+                threadId: threadId,
+                turnId: message.turnId,
+                text: message.text,
+                excludingMessageID: message.id
+            ) else {
+                continue
+            }
+
+            nextMessages.remove(at: index)
+            removedMessageIDs.append(message.id)
+            if let turnId = message.turnId {
+                noteAssistantMessage(
+                    threadId: threadId,
+                    turnId: turnId,
+                    assistantMessageId: terminalMessageId
+                )
+            }
+        }
+
+        guard !removedMessageIDs.isEmpty else {
+            return
+        }
+        messagesByThread[threadId] = nextMessages
+        for messageId in removedMessageIDs {
+            removeAssistantStreamingLookups(messageId: messageId)
+        }
+        persistMessages()
+    }
+
     private func assistantReplayTargetMessageId(
         in messages: [CodexMessage],
         threadId: String,
@@ -4485,6 +4577,20 @@ extension CodexService {
         }
     }
 
+    // A drag or typing burst can start after the flush timer was armed; wait it out in
+    // interaction-cadence slices (bounded, so a long flick chain cannot starve the stream).
+    static func deferFlushWhileInteractionIsActive() async {
+        var remainingDeferrals = 8
+        while !Task.isCancelled,
+              remainingDeferrals > 0,
+              StreamingUIInteractionMonitor.isInteractionActive() {
+            remainingDeferrals -= 1
+            try? await Task.sleep(
+                nanoseconds: StreamingDeltaCoalescingPolicy.interactionFlushDelayNanoseconds
+            )
+        }
+    }
+
     private func pendingAssistantDeltaFlushDelayNanoseconds() -> UInt64 {
         var largestVisibleByteCount = 0
         for streamID in pendingAssistantDeltaStreamOrder {
@@ -4664,6 +4770,12 @@ extension CodexService {
 
     // Rebuilds one thread's render snapshot from service-owned caches after any timeline mutation.
     func refreshThreadTimelineState(for threadId: String) {
+        // While a catch-up burst is applying replayed history, defer the rebuild
+        // so the reopened thread settles in one pass at flush time
+        // (finishTimelineCatchUpBurst always rebuilds unconditionally).
+        if timelineCatchUpBurstThreadIDs.contains(threadId) {
+            return
+        }
         let state = timelineState(for: threadId)
         let messages = messagesByThread[threadId] ?? []
         let revision = messageRevisionByThread[threadId] ?? 0
@@ -5040,7 +5152,10 @@ extension CodexService {
             markThreadAsRunning(normalizedMessage.threadId)
         }
         if normalizedMessage.role == .assistant,
-           let existingIndex = messagesByThread[message.threadId]?.firstIndex(where: { $0.id == normalizedMessage.id }),
+           let existingIndex = existingMessageIndexForAppend(
+               threadId: message.threadId,
+               messageId: normalizedMessage.id
+           ),
            let existingMessage = messagesByThread[message.threadId]?[existingIndex] {
             let activeThreadIDs = Set(activeTurnIdByThread.keys)
             let merged = Self.reconcileExistingMessage(
@@ -5058,6 +5173,31 @@ extension CodexService {
         messagesByThread[message.threadId]?.sortByOrderIndexIfNeeded()
         persistMessages()
         updateCurrentOutput(for: message.threadId)
+    }
+
+    // O(1) probe through the shared index cache for the assistant reconcile branch of
+    // appendMessage. findMessageIndex is unsuitable there: a brand-new id (the common
+    // append case) would trigger a full index rebuild per append. Cache hits are
+    // verified by id; a miss falls back to one linear scan and backfills the cache so
+    // repeated updates to the same row (replay bursts) stay O(1).
+    private func existingMessageIndexForAppend(threadId: String, messageId: String) -> Int? {
+        guard let messages = messagesByThread[threadId], !messages.isEmpty else {
+            return nil
+        }
+
+        if let cachedIndex = messageIndexCacheByThread[threadId]?[messageId],
+           messages.indices.contains(cachedIndex),
+           messages[cachedIndex].id == messageId {
+            return cachedIndex
+        }
+
+        guard let index = messages.firstIndex(where: { $0.id == messageId }) else {
+            return nil
+        }
+        if messageIndexCacheByThread[threadId] != nil {
+            messageIndexCacheByThread[threadId]?[messageId] = index
+        }
+        return index
     }
 
     private func refreshDerivedPlanMetadata(threadId: String, messageIndex: Int) {

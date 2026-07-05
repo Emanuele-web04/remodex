@@ -415,10 +415,18 @@ function createBridgeSecureTransport({
       includeCurrentSessionEntries: true,
     });
     activeSession.isResumed = true;
+    let replayedHistoricalBacklog = false;
     for (const entry of missingEntries) {
-      if (!sendBufferedEntry(replayTaggedEntryIfHistorical(entry), activeSession.sendWireMessage)) {
-        break;
+      const outboundEntry = replayTaggedEntryIfHistorical(entry);
+      if (!sendBufferedEntry(outboundEntry, activeSession.sendWireMessage)) {
+        return;
       }
+      if (outboundEntry !== entry) {
+        replayedHistoricalBacklog = true;
+      }
+    }
+    if (replayedHistoricalBacklog) {
+      sendBufferedReplayCompleteMarker(activeSession.sendWireMessage);
     }
   }
 
@@ -553,11 +561,45 @@ function createBridgeSecureTransport({
       return;
     }
 
+    let replayedHistoricalBacklog = false;
     for (const entry of replayableOutboundEntries(lastRelayedBridgeOutboundSeq)) {
-      if (!sendBufferedEntry(replayTaggedEntryIfHistorical(entry), activeSession.sendWireMessage)) {
-        break;
+      const outboundEntry = replayTaggedEntryIfHistorical(entry);
+      if (!sendBufferedEntry(outboundEntry, activeSession.sendWireMessage)) {
+        return;
+      }
+      if (outboundEntry !== entry) {
+        replayedHistoricalBacklog = true;
       }
     }
+    if (replayedHistoricalBacklog) {
+      sendBufferedReplayCompleteMarker(activeSession.sendWireMessage);
+    }
+  }
+
+  // Closes a replayed-backlog burst deterministically: the phone batches tagged
+  // catch-up events and settles its timeline once on this marker instead of
+  // waiting out a debounce. Sent transiently (no bridgeOutboundSeq, never
+  // buffered) so it cannot occupy replay-buffer space or be replayed itself.
+  function sendBufferedReplayCompleteMarker(sendWireMessage) {
+    if (!activeSession?.isResumed || typeof sendWireMessage !== "function") {
+      return;
+    }
+
+    const envelope = encryptEnvelopePayload(
+      {
+        payloadText: JSON.stringify({
+          method: "remodex/bufferedReplay/completed",
+          params: { remodexBufferedReplayComplete: true },
+        }),
+      },
+      activeSession.macToPhoneKey,
+      SECURE_SENDER_MAC,
+      activeSession.nextOutboundCounter,
+      sessionId,
+      activeSession.keyEpoch
+    );
+    activeSession.nextOutboundCounter += 1;
+    sendWireMessage(JSON.stringify(envelope));
   }
 
   // Only prior secure-session backlog is catch-up history; same-session retries

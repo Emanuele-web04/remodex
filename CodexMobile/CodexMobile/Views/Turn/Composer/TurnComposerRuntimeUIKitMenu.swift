@@ -9,10 +9,13 @@
 //
 // Design notes
 // ------------
-// * Top-level menu has three submenus: Model, Intelligence, Speed. Each parent
-//   carries `subtitle:` (current selection) so the row renders as the
-//   "Label / Value / >" pill you see in the screenshot.
-// * Submenus use `UIMenu.Options.singleSelection` so UIKit draws/clears the
+// * Intelligence (reasoning effort) is surfaced inline at the top of the menu
+//   so every level is directly selectable without drilling into a submenu. It
+//   is a `.displayInline` group whose `title` renders as the "Intelligence"
+//   section header, followed by Model and Speed as "Label / Value / >" submenus.
+// * Model and Speed submenus carry `subtitle:` (current selection) so the row
+//   renders as the "Label / Value / >" pill you see in the screenshot.
+// * Menus use `UIMenu.Options.singleSelection` so UIKit draws/clears the
 //   checkmarks for us. We pass `.on` for the active item as a hint; UIKit
 //   reconciles state when singleSelection is set.
 // * Long model lists keep the existing "featured + Other models…" split so the
@@ -38,11 +41,11 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
     static func makeMenu(_ input: Input) -> UIMenu {
         var children: [UIMenuElement] = []
 
-        children.append(modelMenu(input))
-
         if let intelligenceMenu = intelligenceMenu(input) {
             children.append(intelligenceMenu)
         }
+
+        children.append(modelMenu(input))
 
         if let speedMenu = speedMenu(input) {
             children.append(speedMenu)
@@ -144,6 +147,9 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
 
     // MARK: - Intelligence (reasoning effort)
 
+    // Surfaced inline (not a submenu) so the reasoning levels are selectable
+    // directly from the top of the runtime menu. The inline group's title
+    // renders as the "Intelligence" section header above the options.
     private static func intelligenceMenu(_ input: Input) -> UIMenu? {
         let options = input.runtimeState.reasoningDisplayOptions
         guard !options.isEmpty else { return nil }
@@ -164,9 +170,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
 
         return UIMenu(
             title: "Intelligence",
-            subtitle: input.runtimeState.selectedReasoningTitle,
-            image: RemodexIcon.menuUIImage(systemName: "brain"),
-            options: [.singleSelection],
+            options: [.displayInline, .singleSelection],
             children: actions
         )
     }

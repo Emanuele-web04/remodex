@@ -579,6 +579,21 @@ extension CodexService {
             }
         }
 
+        // A synthetic placeholder id would be rejected by the app-server; resolve
+        // the real in-flight turn id first and keep the placeholder only as a
+        // last resort (the refresh-retry below still covers that path).
+        if let placeholderTurnID = normalizedTurnID,
+           Self.isSyntheticPlaceholderTurnID(placeholderTurnID),
+           let placeholderThreadID = normalizedThreadID
+                ?? threadIdByTurnID[placeholderTurnID]
+                ?? normalizedInterruptIdentifier(activeThreadId),
+           let refreshedTurnID = try? await resolveInFlightTurnID(threadId: placeholderThreadID),
+           let refreshedNormalizedTurnID = normalizedInterruptIdentifier(refreshedTurnID),
+           !Self.isSyntheticPlaceholderTurnID(refreshedNormalizedTurnID) {
+            normalizedTurnID = refreshedNormalizedTurnID
+            setActiveTurnID(refreshedNormalizedTurnID, for: placeholderThreadID)
+        }
+
         guard let normalizedTurnID else {
             throw CodexServiceError.invalidInput("turn/interrupt requires a non-empty turnId")
         }
@@ -1849,6 +1864,18 @@ extension CodexService {
             pendingMessageId = ""
         }
         var resolvedExpectedTurnID = normalizedInterruptIdentifier(expectedTurnId)
+        // Bridge-synthesized placeholder ids are not valid expectedTurnId values;
+        // resolve the real in-flight turn just like the missing-id path (the
+        // refresh-retry below stays as the fallback if resolution fails).
+        if let placeholderTurnID = resolvedExpectedTurnID,
+           Self.isSyntheticPlaceholderTurnID(placeholderTurnID) {
+            if let refreshedTurnID = try? await resolveInFlightTurnID(threadId: normalizedThreadID),
+               let refreshedNormalizedTurnID = normalizedInterruptIdentifier(refreshedTurnID),
+               !Self.isSyntheticPlaceholderTurnID(refreshedNormalizedTurnID) {
+                resolvedExpectedTurnID = refreshedNormalizedTurnID
+                setActiveTurnID(refreshedNormalizedTurnID, for: normalizedThreadID)
+            }
+        }
         if resolvedExpectedTurnID == nil {
             do {
                 resolvedExpectedTurnID = try await resolveInFlightTurnID(threadId: normalizedThreadID)
@@ -3009,6 +3036,14 @@ extension CodexService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    // Bridge-synthesized placeholder turn ids ("turn-line-<n>" from JSONL history
+    // fallback, "rollout-…" from the rollout live mirror) group history rows and
+    // keep running state visible, but they are not real app-server turn ids:
+    // acting with one gets rejected ("expected active turn id … but found …").
+    nonisolated static func isSyntheticPlaceholderTurnID(_ turnId: String) -> Bool {
+        turnId.hasPrefix("turn-line-") || turnId.hasPrefix("rollout-")
+    }
+
     // Resolves the currently interruptible turn id from the latest turn page when local state is stale.
     // If the runtime reports "running" without an id yet, surface that instead of falling
     // back to the latest completed turn and interrupting the wrong run.
@@ -3251,7 +3286,11 @@ extension CodexService {
             "no such turn",
             "not active",
             "does not exist",
-            "cannot interrupt"
+            "cannot interrupt",
+            // Codex rejects actions whose turn id does not match the live turn
+            // (e.g. a stale or bridge-synthesized placeholder id):
+            // "expected active turn id <x> but found <y>".
+            "expected active turn"
         ]
         return hints.contains { message.contains($0) }
     }

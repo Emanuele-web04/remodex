@@ -982,6 +982,107 @@ test("sanitizeThreadHistoryImagesForRelay converts desktop apply_patch history t
   }]);
 });
 
+test("sanitizeThreadHistoryImagesForRelay restores JSONL context when thread/read only has final text", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-context-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-context";
+  const turnId = "turn-jsonl-context";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "05");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-05T17-40-00-${threadId}.jsonl`),
+    [
+      JSON.stringify({
+        type: "session_meta",
+        payload: { id: threadId },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: turnId,
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          turn_id: turnId,
+          message: "fix the completed-open history",
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          call_id: "call-jsonl-context-command",
+          arguments: JSON.stringify({ cmd: "git diff --check" }),
+        },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          id: "jsonl-final-context",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Done." }],
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "task_complete",
+          turn_id: turnId,
+        },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const sanitized = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-thread-jsonl-context",
+    result: {
+      thread: {
+        id: threadId,
+        turns: [
+          {
+            id: turnId,
+            items: [
+              {
+                id: "server-final-context",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Done." }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  }), "thread/read"));
+
+  const items = sanitized.result.thread.turns[0].items;
+  assert.deepEqual(items.map((item) => item.type), [
+    "user_message",
+    "commandExecution",
+    "message",
+  ]);
+  assert.equal(items[0].text, "fix the completed-open history");
+  assert.equal(items[1].command, "git diff --check");
+  assert.equal(items[2].id, "server-final-context");
+});
+
 test("sanitizeThreadHistoryImagesForRelay augments app-server history with JSONL fileChange blocks", (t) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-"));
   const previousCodexHome = process.env.CODEX_HOME;
@@ -1446,11 +1547,14 @@ test("sanitizeThreadHistoryImagesForRelay restores JSONL view_image output previ
   );
   const items = sanitized.result.thread.turns[0].items;
 
-  assert.equal(items.length, 2);
-  assert.equal(items[1].type, "imageView");
-  assert.equal(items[1].path, imagePath);
-  assert.equal(items[1].remodexJsonlToolOutputImage, true);
-  assert.equal(Object.hasOwn(items[1], "output"), false);
+  assert.equal(items.length, 3);
+  assert.equal(items[0].type, "tool_call");
+  assert.equal(items[0].message, "Open image …/media/screenshot.png");
+  assert.equal(items[1].type, "message");
+  assert.equal(items[2].type, "imageView");
+  assert.equal(items[2].path, imagePath);
+  assert.equal(items[2].remodexJsonlToolOutputImage, true);
+  assert.equal(Object.hasOwn(items[2], "output"), false);
 });
 
 test("sanitizeThreadHistoryImagesForRelay restores JSONL cwd without file changes", (t) => {

@@ -31,6 +31,9 @@ extension CodexService {
         // Late/replayed deltas for finished turns still merge into closed rows via
         // applyLateTerminalAssistantDelta, but they must never revive running UI.
         let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
+        // Rollout bootstrap catch-up (scoped via isApplyingReplayedBridgeEvent) keeps
+        // the thread running but must append text as closed history, not streaming.
+        let appliesAsReplay = isReplayedEvent || isApplyingReplayedBridgeEvent
 
         if let directThreadId = extractThreadID(from: paramsObject),
            !directThreadId.isEmpty,
@@ -64,7 +67,7 @@ extension CodexService {
             itemId: context.identity.itemId,
             assistantPhase: context.identity.phase,
             delta: delta,
-            isReplay: isReplayedEvent
+            isReplay: appliesAsReplay
         )
     }
 
@@ -121,6 +124,20 @@ extension CodexService {
                 eventObject: eventObject,
                 itemObject: nil
             )
+            let appliesAsReplay = isReplayedBridgeEvent(paramsObject) || isApplyingReplayedBridgeEvent
+            if !appliesAsReplay,
+               isDesktopMirroredBridgeEvent(paramsObject),
+               let turnId {
+                appendAssistantDelta(
+                    threadId: context.threadId,
+                    turnId: turnId,
+                    itemId: context.identity.itemId,
+                    assistantPhase: context.identity.phase,
+                    delta: text,
+                    isReplay: false
+                )
+                return
+            }
             completeAssistantMessage(
                 threadId: context.threadId,
                 turnId: turnId,

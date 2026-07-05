@@ -591,12 +591,22 @@ test("previous-session replayed notifications are tagged as catch-up history", (
     serverHello,
     transcriptBytes,
   });
-  assert.equal(replayWireMessages.length, 1);
+  // Historical backlog replay closes with a transient completion marker so the
+  // phone can settle its catch-up burst deterministically.
+  assert.equal(replayWireMessages.length, 2);
   const replayedNotification = decryptEnvelope(JSON.parse(replayWireMessages[0]), macToPhoneKey);
   const replayedNotificationPayload = JSON.parse(replayedNotification.payloadText);
   assert.equal(replayedNotificationPayload.method, "turn/started");
   assert.equal(replayedNotificationPayload.params.threadId, "thread-previous-session");
   assert.equal(replayedNotificationPayload.params.remodexReplayedEvent, true);
+
+  const completionMarker = decryptEnvelope(JSON.parse(replayWireMessages[1]), macToPhoneKey);
+  // Transient marker: no bridgeOutboundSeq, so it never advances the phone ack
+  // cursor and is never re-replayed from the buffer.
+  assert.equal(completionMarker.bridgeOutboundSeq, undefined);
+  const completionMarkerPayload = JSON.parse(completionMarker.payloadText);
+  assert.equal(completionMarkerPayload.method, "remodex/bufferedReplay/completed");
+  assert.equal(completionMarkerPayload.params.remodexBufferedReplayComplete, true);
 });
 
 test("resume replay does not advance the replay watermark before a phone ack", () => {

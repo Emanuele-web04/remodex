@@ -443,8 +443,13 @@ func shortCommandPreview(from rawCommand: String, maxLength: Int = 92) -> String
 
     var preview = components.joined(separator: " ")
     if preview.count > maxLength {
-        let cutoff = preview.index(preview.startIndex, offsetBy: maxLength - 1)
-        preview = String(preview[..<cutoff]) + "..."
+        // Truncate in the middle so the trailing token survives: the timeline
+        // humanizer surfaces the last path argument as the row target, and a
+        // tail cut would leave a mangled fragment like "phodex-br...".
+        let ellipsis = "..."
+        let tailLength = min(40, max(12, maxLength / 3))
+        let headLength = max(1, maxLength - tailLength - ellipsis.count)
+        preview = String(preview.prefix(headLength)) + ellipsis + String(preview.suffix(tailLength))
     }
     return preview
 }

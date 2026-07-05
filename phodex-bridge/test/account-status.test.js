@@ -176,6 +176,61 @@ test("composeAccountStatus keeps voice-ready ChatGPT token authenticated despite
   });
 });
 
+test("composeAccountStatus accepts snake-case ChatGPT auth methods as voice-ready", () => {
+  const status = composeAccountStatus(withMacHost({
+    accountRead: {
+      account: null,
+      requiresOpenaiAuth: true,
+    },
+    authStatus: {
+      authMethod: "chatgpt_auth_tokens",
+      authToken: "chatgpt-token",
+      requiresOpenaiAuth: true,
+    },
+    bridgeVersionInfo: {
+      bridgeVersion: bridgePackageVersion,
+      bridgeLatestVersion: "9.9.9",
+    },
+  }));
+
+  assert.equal(status.status, "authenticated");
+  assert.equal(status.needsReauth, false);
+  assert.equal(status.tokenReady, true);
+});
+
+test("composeAccountStatus does not advertise API-key auth as voice-ready", () => {
+  const status = composeAccountStatus(withMacHost({
+    accountRead: {
+      account: null,
+      requiresOpenaiAuth: false,
+    },
+    authStatus: {
+      authMethod: "apiKey",
+      authToken: "sk-test",
+      requiresOpenaiAuth: false,
+    },
+    bridgeVersionInfo: {
+      bridgeVersion: bridgePackageVersion,
+      bridgeLatestVersion: "9.9.9",
+    },
+  }));
+
+  assert.deepEqual(status, {
+    status: "not_logged_in",
+    authMethod: "apiKey",
+    email: null,
+    planType: null,
+    loginInFlight: false,
+    needsReauth: false,
+    tokenReady: false,
+    expiresAt: null,
+    requiresOpenaiAuth: false,
+    bridgeVersion: bridgePackageVersion,
+    bridgeLatestVersion: "9.9.9",
+    ...macHostMetadata,
+  });
+});
+
 test("redactAuthStatus strips token-bearing fields from the status snapshot", () => {
   const status = redactAuthStatus({
     authMethod: "chatgpt",

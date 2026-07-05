@@ -584,16 +584,17 @@ function startBridge({
 
   // Routes decrypted app payloads through the same bridge handlers as before.
   function handleApplicationMessage(rawMessage) {
-    if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse)) {
+    const parsedMessage = parseBridgeMessage(rawMessage);
+    if (handleBridgeManagedHandshakeMessage(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse)) {
+    if (handleBridgeManagedAccountRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse)) {
+    if (voiceHandler.handleVoiceRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
-    if (handleThreadContextRequest(rawMessage, sendApplicationResponse)) {
+    if (handleThreadContextRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
     if (handleWorkspaceRequest(rawMessage, sendApplicationResponse)) {
@@ -635,6 +636,14 @@ function startBridge({
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);
     codex.send(codexRequest);
+  }
+
+  function parseBridgeMessage(rawMessage) {
+    try {
+      return JSON.parse(rawMessage);
+    } catch {
+      return null;
+    }
   }
 
   // Encrypts bridge-generated responses instead of letting the relay see plaintext.
@@ -799,11 +808,9 @@ function startBridge({
 
   // Handles the bridge-owned auth status wrappers without exposing tokens to the phone.
   // This dispatcher stays synchronous so non-account messages can continue down the normal routing chain.
-  function handleBridgeManagedAccountRequest(rawMessage, sendResponse) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedAccountRequest(rawMessage, sendResponse, parsedMessage = null) {
+    const parsed = parsedMessage || parseBridgeMessage(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -1146,11 +1153,9 @@ function startBridge({
   // The spawned/shared Codex app-server stays warm across phone reconnects.
   // When iPhone reconnects it sends initialize again, but forwarding that to the
   // already-initialized Codex transport only produces "Already initialized".
-  function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse) {
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rawMessage);
-    } catch {
+  function handleBridgeManagedHandshakeMessage(rawMessage, sendResponse = sendApplicationResponse, parsedMessage = null) {
+    const parsed = parsedMessage || parseBridgeMessage(rawMessage);
+    if (!parsed) {
       return false;
     }
 
@@ -2432,7 +2437,11 @@ function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestC
 
   const { turns: sanitizedTurns, didSanitize } = sanitizeRelayHistoryTurns(workingTurns, threadId);
   const { thread: threadWithJsonlMetadata, didAugment: didAugmentThreadMetadata } = augmentRelayThreadWithJsonlMetadata(workingThread, threadId);
-  const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(sanitizedTurns, threadId);
+  const { turns: augmentedTurns, didAugment } = augmentRelayHistoryTurnsWithJsonlArtifacts(
+    sanitizedTurns,
+    threadId,
+    { includeHistoryItems: true }
+  );
 
   if (!didSanitize && !didAugment && !didAugmentThreadMetadata && !didPreTrimTurnWindow) {
     const trimmedPayload = trimThreadPayloadForRelay(parsed, thread);
@@ -2599,7 +2608,9 @@ function rememberJsonlThreadCwdCache(cacheKey, entry) {
   }
 }
 
-function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
+function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
+  includeHistoryItems = false,
+} = {}) {
   const normalizedThreadId = normalizeNonEmptyString(threadId);
   if (!normalizedThreadId || !Array.isArray(turns) || turns.length === 0) {
     return { turns, didAugment: false };
@@ -2622,6 +2633,12 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "") {
 
     const items = Array.isArray(turn.items) ? turn.items : [];
     let nextItems = items;
+    if (includeHistoryItems && artifacts.historyItems?.length > 0) {
+      const merged = mergeRelayHistoryItemsWithJsonlItems(items, artifacts.historyItems, normalizedThreadId);
+      if (merged.items !== items) {
+        nextItems = merged.items;
+      }
+    }
     if (artifacts.fileChangeItem && !hasEquivalentFileChangeItem(nextItems, artifacts.fileChangeItem)) {
       nextItems = nextItems === items ? [...items] : nextItems;
       nextItems.push(artifacts.fileChangeItem);
@@ -2740,6 +2757,7 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
       ));
       const artifacts = {
         fileChangeItem: null,
+        historyItems: turnItems.filter(shouldMergeJsonlHistoryItemIntoThreadRead),
         imageViewItems: [],
         progressPlanItem: null,
       };
@@ -2772,7 +2790,12 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
           id: normalizeNonEmptyString(item.id) || `remodex-jsonl-image-view-${turnId}-${index + 1}`,
         }));
 
-      if (artifacts.fileChangeItem || artifacts.progressPlanItem || artifacts.imageViewItems.length > 0) {
+      if (
+        artifacts.fileChangeItem
+        || artifacts.progressPlanItem
+        || artifacts.imageViewItems.length > 0
+        || artifacts.historyItems.length > 0
+      ) {
         artifactsByTurnId.set(turnId, artifacts);
       }
     }
@@ -2808,6 +2831,145 @@ function rememberJsonlArtifactItemsCache(cacheKey, entry) {
     }
     jsonlArtifactItemsCacheByThread.delete(oldestKey);
   }
+}
+
+// Fills sparse app-server thread/read turns from local JSONL while preserving server-rich duplicates.
+function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadId = "") {
+  if (!Array.isArray(existingItems) || !Array.isArray(jsonlItems) || jsonlItems.length === 0) {
+    return { items: existingItems, didMerge: false };
+  }
+
+  const candidates = existingItems.map((item) => ({
+    item,
+    used: false,
+  }));
+  const mergedItems = [];
+  let didMerge = false;
+
+  for (const rawJsonlItem of jsonlItems) {
+    const jsonlItem = sanitizeJsonlHistoryItemForRelayMerge(rawJsonlItem, threadId);
+    const existingIndex = candidates.findIndex((candidate) => (
+      !candidate.used && areEquivalentRelayHistoryItems(candidate.item, jsonlItem)
+    ));
+    if (existingIndex === -1) {
+      mergedItems.push(jsonlItem);
+      didMerge = true;
+      continue;
+    }
+
+    candidates[existingIndex].used = true;
+    mergedItems.push(candidates[existingIndex].item);
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate.used) {
+      mergedItems.push(candidate.item);
+      didMerge = true;
+    }
+  }
+
+  if (!didMerge && mergedItems.every((item, index) => item === existingItems[index])) {
+    return { items: existingItems, didMerge: false };
+  }
+
+  return { items: mergedItems, didMerge: true };
+}
+
+function sanitizeJsonlHistoryItemForRelayMerge(item, threadId) {
+  const sanitizedTurn = sanitizeRelayHistoryTurn({ items: [item] }, threadId);
+  return sanitizedTurn?.items?.[0] || item;
+}
+
+function shouldMergeJsonlHistoryItemIntoThreadRead(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  if (!itemType) {
+    return false;
+  }
+
+  // These already have specialized lightweight restoration paths below.
+  if (itemType === "filechange" || itemType === "imageview" || itemType === "plan") {
+    return false;
+  }
+
+  // Raw outputs can be huge/noisy; readable tool rows and command rows carry the useful context.
+  return itemType !== "toolcalloutput" && itemType !== "functioncalloutput";
+}
+
+function areEquivalentRelayHistoryItems(first, second) {
+  const firstIdentity = relayHistoryItemIdentity(first);
+  const secondIdentity = relayHistoryItemIdentity(second);
+  if (firstIdentity && secondIdentity && firstIdentity === secondIdentity) {
+    return true;
+  }
+
+  const firstCallId = relayHistoryItemCallId(first);
+  const secondCallId = relayHistoryItemCallId(second);
+  if (firstCallId && secondCallId && firstCallId === secondCallId) {
+    return true;
+  }
+
+  const firstText = relayHistoryItemText(first);
+  const secondText = relayHistoryItemText(second);
+  if (!firstText || !secondText || firstText !== secondText) {
+    return false;
+  }
+
+  return relayHistoryItemKindsCompatible(first, second);
+}
+
+function relayHistoryItemKindsCompatible(first, second) {
+  const firstType = normalizeHistoryItemToken(first?.type);
+  const secondType = normalizeHistoryItemToken(second?.type);
+  if (firstType && secondType && firstType === secondType) {
+    return true;
+  }
+
+  const firstRole = normalizeNonEmptyString(first?.role).toLowerCase();
+  const secondRole = normalizeNonEmptyString(second?.role).toLowerCase();
+  if (firstRole && secondRole && firstRole === secondRole) {
+    return true;
+  }
+
+  return isRelayMessageLikeHistoryType(firstType) && isRelayMessageLikeHistoryType(secondType);
+}
+
+function isRelayMessageLikeHistoryType(itemType) {
+  return itemType === "message"
+    || itemType === "assistantmessage"
+    || itemType === "usermessage";
+}
+
+function relayHistoryItemIdentity(item) {
+  return normalizeNonEmptyString(item?.id)
+    || normalizeNonEmptyString(item?.itemId)
+    || normalizeNonEmptyString(item?.item_id);
+}
+
+function relayHistoryItemCallId(item) {
+  return normalizeNonEmptyString(item?.call_id)
+    || normalizeNonEmptyString(item?.callId);
+}
+
+function relayHistoryItemText(item) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    return "";
+  }
+
+  for (const key of ["text", "message", "summary", "output", "outputText", "output_text", "command"]) {
+    const value = normalizeNonEmptyString(item[key]);
+    if (value) {
+      return value;
+    }
+  }
+
+  if (Array.isArray(item.content)) {
+    return item.content
+      .map(relayHistoryItemText)
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return "";
 }
 
 function hasEquivalentFileChangeItem(items, incomingItem) {

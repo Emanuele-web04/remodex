@@ -428,6 +428,7 @@ final class CodexService {
     var supportsServiceTier = true
     // Runtime compatibility flag for the bridge-owned voice transcription flow.
     var supportsBridgeVoiceTranscription = true
+    var supportedBridgeVoiceTranscriptionFormats: Set<String> = ["wav"]
     // Runtime compatibility flag for native `thread/fork` conversation branching.
     var supportsThreadFork = true
     // Runtime compatibility flag for `thread/turns/list` and `excludeTurns`.
@@ -513,6 +514,26 @@ final class CodexService {
     // Scoped while replayed bridge notifications apply so catch-up history cannot
     // recreate live/streaming UI or mark the sidebar as running.
     @ObservationIgnored var isApplyingReplayedBridgeEvent = false
+    // Threads receiving a catch-up burst (rollout-mirror bootstrap replay or
+    // buffered reconnect replay): timeline refreshes and derived-output cache
+    // syncs are deferred and flushed once when the bridge's bootstrap-complete
+    // marker arrives (or the debounce fallback fires), so reopening the app onto
+    // a running desktop thread settles in one pass instead of replaying every
+    // past event visually.
+    @ObservationIgnored var timelineCatchUpBurstThreadIDs: Set<String> = []
+    @ObservationIgnored var timelineCatchUpFlushTaskByThreadID: [String: Task<Void, Never>] = [:]
+    // Subset of the burst threads that are applying *replayed history* (bootstrap
+    // or buffered reconnect replay). Only these gate the assistant/system
+    // streaming fast paths: live-mirror micro-bursts defer just the reducer
+    // rebuild so text keeps streaming into the visible snapshot per event.
+    @ObservationIgnored var replayCatchUpBurstThreadIDs: Set<String> = []
+
+    // The two catch-up burst flavors: replayed history applies fully closed in
+    // one settle, live-mirror micro-bursts only coalesce the reducer rebuild.
+    enum TimelineCatchUpBurstKind {
+        case replay
+        case liveMirror
+    }
     // Coalesces multiple invalidateAssistantRevertStates() calls within the same run loop tick into one refresh.
     var coalescedRevertRefreshTask: Task<Void, Never>?
     // Dedupes completion payloads when servers omit turn/item identifiers.

@@ -5,7 +5,12 @@
 // Depends on: Combine, SwiftUI, CodexService, GPTVoiceTranscriptionManager
 
 import Combine
+import Foundation
 import SwiftUI
+
+private func codexLogVoiceInput(_ message: String) {
+    print("[VOICE] \(message)")
+}
 
 @MainActor
 final class VoiceInputCoordinator: ObservableObject {
@@ -67,6 +72,9 @@ final class VoiceInputCoordinator: ObservableObject {
         onTranscript: @escaping @MainActor (String) -> Void,
         onDismissInput: @escaping @MainActor () -> Void
     ) {
+        codexLogVoiceInput(
+            "button tapped recording=\(isRecording) preflighting=\(isPreflighting) transcribing=\(isTranscribing) connected=\(codex.isConnected)"
+        )
         if isTranscribing {
             return
         }
@@ -145,18 +153,20 @@ final class VoiceInputCoordinator: ObservableObject {
         }
 
         cancelTranscriptionIfNeeded()
-        invalidatePendingPreflight()
+        preflightGeneration += 1
+        transcriptionManager.cancelRecording()
         isRecording = false
         isPreflighting = false
         hasTriggeredAutoStop = false
+        transcriptionManager.resetMeteringState()
         presentRecovery(for: .recorderUnavailable, codex: codex)
     }
 
     // User-initiated cancel clears the full voice flow, including a stop/upload race.
     func cancelInputIfNeeded() {
         cancelTranscriptionIfNeeded()
-        cancelRecordingIfNeeded()
         invalidatePendingPreflight()
+        cancelRecordingIfNeeded()
     }
 
     func startVoiceLoginOnMac(codex: CodexService) {
@@ -184,6 +194,9 @@ final class VoiceInputCoordinator: ObservableObject {
         operationGeneration += 1
         let currentGeneration = operationGeneration
         transcriptionTask?.cancel()
+        // Re-warm right before upload so the provider connection overlaps clip prep and relay transfer.
+        codex.prewarmVoiceTranscription()
+        codexLogVoiceInput("stop requested; starting transcription pipeline")
         transcriptionTask = Task { @MainActor [weak self] in
             await self?.stopTranscription(
                 operationGeneration: currentGeneration,
@@ -208,10 +221,14 @@ final class VoiceInputCoordinator: ObservableObject {
         }
 
         do {
-            guard let clip = try transcriptionManager.stopRecording() else {
+            codexLogVoiceInput("stopping recorder")
+            guard let clip = try transcriptionManager.stopRecording(
+                preferM4A: codex.prefersM4AVoiceTranscription
+            ) else {
                 if isOperationCurrent(operationGeneration) {
                     isRecording = false
                     transcriptionManager.resetMeteringState()
+                    codexLogVoiceInput("stop produced no audio clip")
                     presentRecovery(for: .recorderUnavailable, codex: codex)
                 }
                 return
@@ -223,10 +240,14 @@ final class VoiceInputCoordinator: ObservableObject {
 
             isRecording = false
             transcriptionManager.resetMeteringState()
+            codexLogVoiceInput(
+                "transcription upload starting duration=\(String(format: "%.1f", clip.durationSeconds))s bytes=\(clip.byteCount)"
+            )
             let transcript = try await VoiceTranscriptionBackgroundTask.run {
                 try await codex.transcribeVoiceAudioFile(
                     at: clip.url,
-                    durationSeconds: clip.durationSeconds
+                    durationSeconds: clip.durationSeconds,
+                    mimeType: clip.mimeType
                 )
             }
             guard isOperationCurrent(operationGeneration), !Task.isCancelled else {
@@ -234,6 +255,7 @@ final class VoiceInputCoordinator: ObservableObject {
             }
 
             clearRecovery()
+            codexLogVoiceInput("transcription succeeded chars=\(transcript.count)")
             onTranscript(transcript)
             onDismissInput()
         } catch {
@@ -242,6 +264,7 @@ final class VoiceInputCoordinator: ObservableObject {
             }
             isRecording = false
             transcriptionManager.resetMeteringState()
+            codexLogVoiceInput("transcription failed: \(codex.classifyVoiceFailure(error))")
             presentRecovery(for: error, codex: codex)
         }
     }
@@ -252,11 +275,6 @@ final class VoiceInputCoordinator: ObservableObject {
         onDismissInput: @escaping @MainActor () -> Void
     ) async {
         guard !isPreflighting else {
-            return
-        }
-
-        guard codex.supportsBridgeVoiceTranscription else {
-            presentRecovery(for: .bridgeSessionUnsupported, codex: codex)
             return
         }
 
@@ -282,6 +300,8 @@ final class VoiceInputCoordinator: ObservableObject {
             guard isPreflightCurrent(currentGeneration) else {
                 return
             }
+            // Warm bridge auth + provider TLS while the user is still speaking.
+            codex.prewarmVoiceTranscription()
             try await transcriptionManager.startRecording()
             guard isPreflightCurrent(currentGeneration) else {
                 transcriptionManager.cancelRecording()
@@ -298,13 +318,12 @@ final class VoiceInputCoordinator: ObservableObject {
     }
 
     private func cancelRecordingIfNeeded() {
-        guard isRecording || isPreflighting else {
+        guard isRecording else {
             return
         }
 
         transcriptionManager.cancelRecording()
         isRecording = false
-        isPreflighting = false
         hasTriggeredAutoStop = false
     }
 
@@ -321,8 +340,13 @@ final class VoiceInputCoordinator: ObservableObject {
 
     private func invalidatePendingPreflight() {
         preflightGeneration += 1
+        guard isPreflighting else {
+            return
+        }
+
         isPreflighting = false
         transcriptionManager.cancelRecording()
+        hasTriggeredAutoStop = false
     }
 
     private func presentRecovery(for error: Error, codex: CodexService) {

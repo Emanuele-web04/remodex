@@ -50,6 +50,7 @@ struct NewChatDraftView: View {
 
     @State private var viewModel = TurnViewModel()
     @State private var isInputFocused = false
+    @State private var hasAutoFocusedComposer = false
     @State private var selectedProjectPath: String?
     @State private var projectlessChatRootPaths: [String] = []
     @State private var activeSheet: NewChatDraftSheet?
@@ -130,6 +131,9 @@ struct NewChatDraftView: View {
         .task {
             initializeProjectSelectionIfNeeded()
             refreshDraftGitStateIfNeeded()
+            // Opening a fresh chat should land the cursor in the composer so the
+            // keyboard is up and the user can type right away.
+            autoFocusComposerIfNeeded()
             await refreshProjectlessChatRoots()
             refreshDraftGitStateIfNeeded()
         }
@@ -755,6 +759,14 @@ struct NewChatDraftView: View {
         selectedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(route.preferredProjectPath)
             ?? projectChoices.first?.projectPath
         hasInitializedProjectSelection = selectedProjectPath != nil || !projectChoices.isEmpty
+    }
+
+    // Focus the composer once when the draft first opens, unless the user has
+    // already started typing (e.g. returning to a draft with restored text).
+    private func autoFocusComposerIfNeeded() {
+        guard !hasAutoFocusedComposer, viewModel.input.isEmpty else { return }
+        hasAutoFocusedComposer = true
+        isInputFocused = true
     }
 
     private func refreshProjectlessChatRoots() async {
