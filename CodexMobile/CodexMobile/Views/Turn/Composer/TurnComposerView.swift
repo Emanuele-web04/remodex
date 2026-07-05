@@ -118,6 +118,10 @@ struct TurnComposerView: View {
     // with Dynamic Type so large accessibility sizes don't clip the placeholder.
     @ScaledMetric(relativeTo: .body) private var collapsedInputHeight: CGFloat = 22
 
+    // Square hit target for the resting capsule's "+" and mic controls, matched
+    // to the send button so they're just as easy to tap despite smaller glyphs.
+    private let collapsedControlTapTarget: CGFloat = 32
+
     @State private var composerInputHeight: CGFloat = 32
     @State private var inputChangeTask: Task<Void, Never>?
 
@@ -234,9 +238,10 @@ struct TurnComposerView: View {
                             isInteractionLocked: isComposerInteractionLocked,
                             onSetPlanModeArmed: onSetPlanModeArmed,
                             onTapAddImage: onTapAddImage,
-                            onTapTakePhoto: onTapTakePhoto
+                            onTapTakePhoto: onTapTakePhoto,
+                            tapTargetSide: collapsedControlTapTarget
                         )
-                        .frame(width: 30, height: 30)
+                        .frame(width: collapsedControlTapTarget, height: collapsedControlTapTarget)
                         .transition(.opacity)
                     }
 
@@ -289,9 +294,10 @@ struct TurnComposerView: View {
                     if showsCollapsedComposer {
                         ComposerVoiceButton(
                             presentation: voiceButtonPresentation,
-                            onTap: onTapVoice
+                            onTap: onTapVoice,
+                            tapTargetSide: collapsedControlTapTarget
                         )
-                        .frame(width: 30, height: 30)
+                        .frame(width: collapsedControlTapTarget, height: collapsedControlTapTarget)
                         .transition(.opacity)
 
                         // Keep Stop reachable while a turn runs even in the resting capsule.

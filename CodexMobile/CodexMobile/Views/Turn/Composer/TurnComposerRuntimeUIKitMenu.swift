@@ -39,16 +39,22 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
     }
 
     static func makeMenu(_ input: Input) -> UIMenu {
+        // The pill lives in the composer bottom bar, so UIKit anchors the menu
+        // above the button and lays it out in `.priority` order: the first child
+        // renders closest to the button (at the BOTTOM), so the array is
+        // effectively reversed on screen. Author the children in reverse of the
+        // desired top-to-bottom order — Speed, Model, Intelligence — so the menu
+        // reads Intelligence → Model → Speed from the top.
         var children: [UIMenuElement] = []
 
-        if let intelligenceMenu = intelligenceMenu(input) {
-            children.append(intelligenceMenu)
+        if let speedMenu = speedMenu(input) {
+            children.append(speedMenu)
         }
 
         children.append(modelMenu(input))
 
-        if let speedMenu = speedMenu(input) {
-            children.append(speedMenu)
+        if let intelligenceMenu = intelligenceMenu(input) {
+            children.append(intelligenceMenu)
         }
 
         return UIMenu(title: "", options: [.displayInline], children: children)

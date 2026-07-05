@@ -22,6 +22,9 @@ struct ComposerAttachmentMenu: View {
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
     var iconSide: CGFloat = 22
+    // When set, the "+" gets a larger square hit area (matching the send
+    // button) so it's as easy to tap as the primary CTA in the collapsed row.
+    var tapTargetSide: CGFloat?
 
     private let metaLabelColor = Color(.secondaryLabel)
 
@@ -72,8 +75,8 @@ struct ComposerAttachmentMenu: View {
             RemodexIcon.image(systemName: "plus")
                 .font(AppFont.title3(weight: .regular))
                 .foregroundStyle(Color.primary)
-                .frame(width: iconSide, height: iconSide)
-                .contentShape(Capsule())
+                .frame(width: tapTargetSide ?? iconSide, height: tapTargetSide ?? iconSide)
+                .contentShape(Circle())
         }
         .tint(metaLabelColor)
         .disabled(isInteractionLocked)
@@ -99,13 +102,22 @@ struct ComposerVoiceButton: View {
     let onTap: () -> Void
     var circleDiameter: CGFloat = 30
     var iconSide: CGFloat = 19
+    // When set, the whole button gets a larger square hit area (matching the
+    // send button) so the mic is as easy to tap as the primary CTA.
+    var tapTargetSide: CGFloat?
 
     var body: some View {
         Button {
             HapticFeedback.shared.triggerImpactFeedback()
             onTap()
         } label: {
-            label
+            if let tapTargetSide {
+                label
+                    .frame(width: tapTargetSide, height: tapTargetSide)
+                    .contentShape(Circle())
+            } else {
+                label
+            }
         }
         .disabled(presentation.isDisabled)
         .accessibilityLabel(presentation.accessibilityLabel)
