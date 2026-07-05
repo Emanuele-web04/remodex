@@ -318,13 +318,28 @@ function createDesktopIpcActionFollower({
         if (queue.length === 0) {
           heldFollowerRequestsByThreadId.delete(threadId);
         }
-        forwardToLocalCodex(rawMessage);
+        routeExpiredHeldRequestThroughBus(rawMessage);
       }, Math.max(0, probeDeadline - now())),
     };
     entry.timer.unref?.();
     const queue = heldFollowerRequestsByThreadId.get(threadId) || [];
     queue.push(entry);
     heldFollowerRequestsByThreadId.set(threadId, queue);
+  }
+
+  // Codex Desktop's real IPC router ignores client-origin discovery probes, so an
+  // unanswered probe proves nothing. Route the expired request through the bus as
+  // a normal request: the router discovers a Desktop owner itself, and a proven
+  // no-handler error falls back to the local app-server via the delivery-failure
+  // path instead of double-running the turn on both runtimes.
+  function routeExpiredHeldRequestThroughBus(rawMessage) {
+    const message = safeParseJSON(rawMessage);
+    const route = message ? buildDesktopFollowerRoute(message) : null;
+    if (!route || liveOwnerThreadIds.has(route.threadId)) {
+      forwardToLocalCodex(rawMessage);
+      return;
+    }
+    submitDesktopFollowerRequest(route, message);
   }
 
   function releaseHeldFollowerRequests(threadId, { toDesktop } = {}) {
@@ -803,8 +818,9 @@ function createDesktopIpcClient({
       if (envelope.resultType === "error") {
         const error = new Error(envelope.error || `Desktop IPC request failed: ${waiter.method}`);
         // A no-handler routing error means the request never reached any client,
-        // so callers may safely retry it against the local app-server.
-        if (/no codex ipc client can handle/i.test(error.message)) {
+        // so callers may safely retry it against the local app-server. Codex
+        // Desktop's router reports this case as "no-client-found".
+        if (/no codex ipc client can handle|no-client-found/i.test(error.message)) {
           markDeliveryFailureError(error);
         }
         waiter.reject(error);

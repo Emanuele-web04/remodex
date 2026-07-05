@@ -2175,6 +2175,9 @@ test("desktop IPC follower forwards held phone turns to local codex when no snap
   const localForwards = [];
   let serverSocket = null;
 
+  // Models Codex Desktop's real router: client-origin discovery probes are
+  // ignored, but routed requests get a no-client-found error when nobody owns
+  // the thread.
   const server = net.createServer((socket) => {
     serverSocket = socket;
     attachFrameReader(socket, (frame) => {
@@ -2187,6 +2190,13 @@ test("desktop IPC follower forwards held phone turns to local codex when no snap
           method: "initialize",
           handledByClientId: "router",
           result: { clientId: "remodex-test" },
+        });
+      } else if (frame.type === "request" && frame.method?.startsWith("thread-follower-")) {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "error",
+          error: "no-client-found",
         });
       }
     });
@@ -2226,10 +2236,6 @@ test("desktop IPC follower forwards held phone turns to local codex when no snap
   await waitFor(() => localForwards.length > 0, 1_000);
   assert.equal(localForwards[0].id, "phone-turn-start-timeout");
   assert.equal(localForwards[0].method, "turn/start");
-  assert.equal(
-    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
-    false
-  );
 });
 
 test("desktop IPC follower ignores Remodex-owned live owner broadcasts", async (t) => {

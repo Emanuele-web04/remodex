@@ -1821,6 +1821,51 @@ test("live owner converts desktop permission approvals into grant payloads", asy
   });
 });
 
+test("conversation adapter streams fileChange output deltas into fileChange items", () => {
+  const conversations = new Map();
+  const owned = new Set(["thread-file-change"]);
+  const now = () => 42;
+
+  let update = applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/fileChange/outputDelta",
+      params: {
+        threadId: "thread-file-change",
+        turnId: "turn-file-change",
+        itemId: "item-file-change",
+        delta: "diff --git a/a.txt",
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-file-change", changed: true });
+
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/fileChange/outputDelta",
+      params: {
+        threadId: "thread-file-change",
+        turnId: "turn-file-change",
+        itemId: "item-file-change",
+        delta: " b/a.txt",
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-file-change", changed: true });
+
+  const turn = conversations.get("thread-file-change").turns
+    .find((candidate) => candidate.turnId === "turn-file-change");
+  const item = turn.items.find((candidate) => candidate.id === "item-file-change");
+  assert.equal(item.type, "fileChange");
+  assert.equal(item.status, "inProgress");
+  assert.equal(item.aggregatedOutput, "diff --git a/a.txt b/a.txt");
+});
+
 test("conversation adapter tracks requests and resolved notifications", () => {
   const conversations = new Map();
   const owned = new Set(["thread-adapter"]);

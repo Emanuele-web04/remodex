@@ -1050,6 +1050,7 @@ function applyAppServerMessageToConversationState({
     case "item/plan/delta":
     case "item/reasoning/summaryTextDelta":
     case "item/reasoning/textDelta":
+    case "item/fileChange/outputDelta":
     case "item/commandExecution/outputDelta":
     case "command/exec/outputDelta": {
       const threadId = readThreadIdFromParams(message.params);
@@ -1061,29 +1062,6 @@ function applyAppServerMessageToConversationState({
         fallbackTurnIdsByThreadId,
         now,
       });
-      conversation.updatedAt = now();
-      return { threadId, changed: true };
-    }
-    case "item/fileChange/patchUpdated": {
-      const threadId = readThreadIdFromParams(message.params);
-      if (!threadId || !shouldOwnThread(threadId)) {
-        return null;
-      }
-      const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      const turn = ensureTurn(conversation, resolveTurnIdForParams({
-        conversation,
-        params: message.params,
-        fallbackTurnIdsByThreadId,
-        now,
-      }), { now });
-      if (turn) {
-        upsertItem(turn, {
-          type: "fileChange",
-          id: readString(message.params?.itemId) || `file-change-${now()}`,
-          changes: Array.isArray(message.params?.changes) ? cloneJSON(message.params.changes) : [],
-          status: "inProgress",
-        });
-      }
       conversation.updatedAt = now();
       return { threadId, changed: true };
     }
@@ -1550,6 +1528,18 @@ function applyDeltaNotification(conversation, method, params, {
       item.content = growArray(item.content, index, "");
       item.content[index] = `${item.content[index] || ""}${delta}`;
     }
+    return;
+  }
+
+  if (method === "item/fileChange/outputDelta") {
+    const item = ensureItemOfType(turn, itemId, () => ({
+      type: "fileChange",
+      id: itemId,
+      changes: [],
+      status: "inProgress",
+      aggregatedOutput: "",
+    }));
+    item.aggregatedOutput = `${item.aggregatedOutput || ""}${delta}`;
     return;
   }
 
