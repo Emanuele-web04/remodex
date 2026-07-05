@@ -187,7 +187,7 @@ function projectTurn(threadId, rawTurn, index) {
     if (itemType === "usermessage" && sameUserInput(item.content, paramsInput)) {
       continue;
     }
-    items.push(cloneJSON(item));
+    items.push(projectItemForMobile(item, itemType));
   }
 
   return {
@@ -688,6 +688,21 @@ function sameUserInput(content, paramsInput) {
   return JSON.stringify(content || []) === JSON.stringify(paramsInput || []);
 }
 
+// Desktop IPC uses richer tool aliases than the mobile app-server timeline.
+// Keep the original type as metadata, but emit the generic shape iOS already decodes.
+function projectItemForMobile(item, itemType = normalizeToken(item?.type)) {
+  const projected = cloneJSON(item);
+  if (!isGenericToolCallItemType(itemType)) {
+    return projected;
+  }
+
+  projected.type = "toolCall";
+  if (!projected.remodexDesktopIpcItemType) {
+    projected.remodexDesktopIpcItemType = readString(item?.type) || itemType;
+  }
+  return projected;
+}
+
 function isSupportedItemType(type) {
   return type === "usermessage"
     || type === "hookprompt"
@@ -699,6 +714,7 @@ function isSupportedItemType(type) {
     || type === "reasoning"
     || type === "commandexecution"
     || type === "filechange"
+    || type === "toolcall"
     || type === "mcptoolcall"
     || type === "dynamictoolcall"
     || type === "collabagenttoolcall"
@@ -721,11 +737,15 @@ function isAssistantMessageItem(item) {
 
 function isToolCallItem(item) {
   const type = normalizeToken(item?.type);
+  return isGenericToolCallItemType(type)
+    || type === "collabagenttoolcall"
+    || type === "collabtoolcall";
+}
+
+function isGenericToolCallItemType(type) {
   return type === "toolcall"
     || type === "mcptoolcall"
     || type === "dynamictoolcall"
-    || type === "collabagenttoolcall"
-    || type === "collabtoolcall"
     || type === "websearch";
 }
 
@@ -766,6 +786,8 @@ function toolCallOutput(item) {
     || readText(item.result)
     || readText(item.response)
     || renderContentText(item.result?.content)
+    || renderContentText(item.contentItems)
+    || renderContentText(item.content_items)
     || renderContentText(item.content)
     || "";
 }
@@ -800,7 +822,10 @@ function renderContentText(value) {
       if (!entry || typeof entry !== "object") {
         return "";
       }
-      return readText(entry.text) || readText(entry.content) || readText(entry?.data?.text);
+      return readText(entry.text)
+        || readText(entry.content)
+        || readText(entry?.data?.text)
+        || readText(entry?.file?.content);
     })
     .filter((entry) => entry !== "")
     .join("");

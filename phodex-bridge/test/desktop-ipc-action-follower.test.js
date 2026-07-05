@@ -550,6 +550,91 @@ test("desktop conversation projector emits plan reasoning and command deltas", (
   );
 });
 
+test("desktop conversation projector normalizes Desktop tool aliases for mobile lifecycle", () => {
+  const projector = createDesktopConversationProjector();
+  const output = projector.project("thread-tool-aliases", {
+    turns: [{
+      turnId: "turn-tool-aliases",
+      status: "inProgress",
+      items: [
+        {
+          id: "mcp-tool-alias",
+          type: "mcpToolCall",
+          status: "completed",
+          server: "search",
+          tool: "query",
+          result: { content: [{ type: "text", text: "found it" }] },
+        },
+        {
+          id: "dynamic-tool-alias",
+          type: "dynamicToolCall",
+          status: "running",
+          namespace: "workspace",
+          tool: "Read",
+          contentItems: [{ type: "text", text: "file contents" }],
+        },
+        {
+          id: "web-search-alias",
+          type: "webSearch",
+          status: "completed",
+          query: "docs",
+          output: "opened docs",
+        },
+      ],
+    }],
+  });
+
+  const completedItems = output.notifications
+    .filter((notification) => notification.method === "item/completed")
+    .map((notification) => notification.params.item);
+  assert.deepEqual(
+    completedItems.map((item) => item.type),
+    ["toolCall", "toolCall", "toolCall"]
+  );
+  assert.deepEqual(
+    completedItems.map((item) => item.remodexDesktopIpcItemType),
+    ["mcpToolCall", "dynamicToolCall", "webSearch"]
+  );
+});
+
+test("desktop conversation projector emits generic tool output deltas from Desktop aliases", () => {
+  const projector = createDesktopConversationProjector();
+  projector.project("thread-tool-delta", {
+    turns: [{
+      turnId: "turn-tool-delta",
+      status: "inProgress",
+      items: [{
+        id: "dynamic-tool-delta",
+        type: "dynamicToolCall",
+        status: "running",
+        tool: "Read",
+        contentItems: [{ type: "text", text: "line 1\n" }],
+      }],
+    }],
+  });
+
+  const output = projector.project("thread-tool-delta", {
+    turns: [{
+      turnId: "turn-tool-delta",
+      status: "inProgress",
+      items: [{
+        id: "dynamic-tool-delta",
+        type: "dynamicToolCall",
+        status: "running",
+        tool: "Read",
+        contentItems: [{ type: "text", text: "line 1\nline 2\n" }],
+      }],
+    }],
+  });
+
+  assert.deepEqual(
+    output.notifications.map((notification) => [notification.method, notification.params.delta]),
+    [["item/toolCall/outputDelta", "line 2\n"]]
+  );
+  assert.equal(output.notifications[0].params.item.type, "toolCall");
+  assert.equal(output.notifications[0].params.item.remodexDesktopIpcItemType, "dynamicToolCall");
+});
+
 test("desktop conversation projector mirrors thread metadata changes", () => {
   const projector = createDesktopConversationProjector();
   projector.project("thread-meta", {
@@ -581,7 +666,23 @@ test("projects Desktop conversation state into thread/read backfill shape", () =
       params: {
         input: [{ type: "text", text: "hello" }],
       },
-      items: [{ id: "assistant-read-backfill", type: "agentMessage", text: "world" }],
+      items: [
+        { id: "assistant-read-backfill", type: "agentMessage", text: "world" },
+        {
+          id: "mcp-read-backfill",
+          type: "mcpToolCall",
+          status: "completed",
+          tool: "query",
+          result: { content: [{ type: "text", text: "found it" }] },
+        },
+        {
+          id: "dynamic-read-backfill",
+          type: "dynamicToolCall",
+          status: "completed",
+          tool: "Read",
+          contentItems: [{ type: "text", text: "file contents" }],
+        },
+      ],
     }],
   });
 
@@ -590,7 +691,11 @@ test("projects Desktop conversation state into thread/read backfill shape", () =
   assert.equal(thread.turns[0].id, "turn-read-backfill");
   assert.deepEqual(
     thread.turns[0].items.map((item) => item.type),
-    ["userMessage", "agentMessage"]
+    ["userMessage", "agentMessage", "toolCall", "toolCall"]
+  );
+  assert.deepEqual(
+    thread.turns[0].items.slice(2).map((item) => item.remodexDesktopIpcItemType),
+    ["mcpToolCall", "dynamicToolCall"]
   );
 });
 
