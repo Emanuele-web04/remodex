@@ -427,12 +427,13 @@ test("bridge forwards live desktop assistant deltas to the phone", async (t) => 
   });
 });
 
-test("bridge lets the live owner observe desktop IPC held phone turns", async (t) => {
+test("bridge observes held desktop IPC turns only after local fallback", async (t) => {
   const relayServer = new WebSocket.Server({ port: 0 });
   let relaySocket = null;
   let bridge = null;
   let fakeCodex = null;
   let followerOptions = null;
+  let heldTurnStart = null;
   const liveOwnerInbound = [];
 
   await new Promise((resolve) => relayServer.once("listening", resolve));
@@ -454,7 +455,7 @@ test("bridge lets the live owner observe desktop IPC held phone turns", async (t
             if (parsed?.method !== "turn/start") {
               return false;
             }
-            followerOptions.onHoldFollowerRequest?.(rawMessage);
+            heldTurnStart = rawMessage;
             return true;
           },
           stopAll() {},
@@ -510,12 +511,18 @@ test("bridge lets the live owner observe desktop IPC held phone turns", async (t
     },
   }));
 
+  await waitFor(() => heldTurnStart);
+  await wait(25);
+  assert.equal(liveOwnerInbound.length, 0);
+  assert.equal(fakeCodex.sent.some((message) => message.id === "held-turn-start"), false);
+
+  followerOptions.forwardToLocalCodex(heldTurnStart);
   await waitFor(() => liveOwnerInbound.some((message) => message.id === "held-turn-start"));
   assert.equal(
     liveOwnerInbound.filter((message) => message.id === "held-turn-start").length,
     1
   );
-  assert.equal(fakeCodex.sent.some((message) => message.id === "held-turn-start"), false);
+  assert.equal(fakeCodex.sent.filter((message) => message.id === "held-turn-start").length, 1);
 });
 
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.

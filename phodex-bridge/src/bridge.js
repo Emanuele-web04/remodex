@@ -261,7 +261,6 @@ function startBridge({
         observeDesktopIpcLiveOwnerInbound(rawMessage);
         forwardInboundRequestToCodex(rawMessage);
       },
-      onHoldFollowerRequest: observeDesktopIpcLiveOwnerInbound,
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
     })
