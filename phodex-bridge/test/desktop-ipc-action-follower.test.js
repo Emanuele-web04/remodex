@@ -1904,6 +1904,96 @@ test("desktop IPC follower routes held phone turns once discovery confirms deskt
   assert.deepEqual(localForwards, []);
 });
 
+test("desktop IPC follower coalesces duplicate held turn starts for a thread", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-held-turn-coalesce-");
+  const serverFrames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.type === "client-discovery-request") {
+        writeFrame(socket, {
+          type: "client-discovery-response",
+          requestId: frame.requestId,
+          response: { canHandle: true },
+        });
+      } else if (frame.method === "thread-follower-start-turn") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: frame.method,
+          handledByClientId: "desktop",
+          result: { turn: { id: "turn-coalesced" } },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex() {
+      assert.fail("duplicate held turn/start should not fall back locally");
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 2_000,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-held-coalesce" },
+  }));
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-coalesce-old",
+    method: "turn/start",
+    params: {
+      threadId: "thread-held-coalesce",
+      input: [{ type: "input_text", text: "old duplicate" }],
+    },
+  })), true);
+  assert.equal(follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-coalesce-new",
+    method: "turn/start",
+    params: {
+      threadId: "thread-held-coalesce",
+      input: [{ type: "input_text", text: "new duplicate" }],
+    },
+  })), true);
+
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-coalesce-old"), 1_000);
+  assert.equal(outbound.find((message) => message.id === "phone-turn-start-coalesce-old").error?.code, -32000);
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-coalesce-new"), 1_000);
+  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-coalesce-new"), {
+    id: "phone-turn-start-coalesce-new",
+    result: { turn: { id: "turn-coalesced" } },
+  });
+  const routedStarts = serverFrames.filter((frame) => frame.method === "thread-follower-start-turn");
+  assert.equal(routedStarts.length, 1);
+  assert.equal(routedStarts[0].params.turnStartParams.input[0].text, "new duplicate");
+});
+
 test("desktop IPC follower retries held ownership probes after IPC connects", async (t) => {
   const outbound = [];
   const localForwards = [];

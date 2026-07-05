@@ -306,6 +306,8 @@ function createDesktopIpcActionFollower({
 
   function holdFollowerRequest(threadId, rawMessage) {
     const probeDeadline = ownershipProbeDeadlinesByThreadId.get(threadId) || 0;
+    const message = safeParseJSON(rawMessage);
+    const method = readString(message?.method);
     const entry = {
       rawMessage,
       timer: setTimeout(() => {
@@ -323,8 +325,24 @@ function createDesktopIpcActionFollower({
     };
     entry.timer.unref?.();
     const queue = heldFollowerRequestsByThreadId.get(threadId) || [];
+    if (method === "turn/start") {
+      rejectQueuedHeldTurnStarts(queue);
+    }
     queue.push(entry);
     heldFollowerRequestsByThreadId.set(threadId, queue);
+  }
+
+  function rejectQueuedHeldTurnStarts(queue) {
+    for (let index = queue.length - 1; index >= 0; index -= 1) {
+      const entry = queue[index];
+      const message = safeParseJSON(entry.rawMessage);
+      if (readString(message?.method) !== "turn/start") {
+        continue;
+      }
+      queue.splice(index, 1);
+      clearTimeout(entry.timer);
+      rejectHeldFollowerRequest(message, "Superseded by a newer held turn/start request.");
+    }
   }
 
   // Codex Desktop's real IPC router ignores client-origin discovery probes, so an
@@ -350,9 +368,18 @@ function createDesktopIpcActionFollower({
     }
 
     heldFollowerRequestsByThreadId.delete(threadId);
+    let releasedTurnStart = false;
     for (const entry of queue) {
       clearTimeout(entry.timer);
-      const message = toDesktop ? safeParseJSON(entry.rawMessage) : null;
+      const originalMessage = safeParseJSON(entry.rawMessage);
+      if (readString(originalMessage?.method) === "turn/start") {
+        if (releasedTurnStart) {
+          rejectHeldFollowerRequest(originalMessage, "Superseded by another held turn/start request.");
+          continue;
+        }
+        releasedTurnStart = true;
+      }
+      const message = toDesktop ? originalMessage : null;
       const route = message ? buildDesktopFollowerRoute(message) : null;
       if (route && isDesktopRoutableThread(route.threadId)) {
         submitDesktopFollowerRequest(route, message);
@@ -360,6 +387,19 @@ function createDesktopIpcActionFollower({
         forwardToLocalCodex?.(entry.rawMessage);
       }
     }
+  }
+
+  function rejectHeldFollowerRequest(message, reason) {
+    if (message?.id == null) {
+      return;
+    }
+    sendApplicationResponse(JSON.stringify({
+      id: message.id,
+      error: {
+        code: -32000,
+        message: reason,
+      },
+    }));
   }
 
   function syncProjectedActions(threadId, actions) {
