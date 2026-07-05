@@ -229,6 +229,7 @@ function createDesktopIpcLiveOwner({
         scheduleSnapshot(thread.id);
       }
     }
+    claimStartedThreadForPendingLocalStart(message);
 
     const update = applyAppServerMessageToConversationState({
       conversations,
@@ -240,7 +241,6 @@ function createDesktopIpcLiveOwner({
       shouldOwnThread(threadId) {
         return ownedThreadIds.has(threadId);
       },
-      markOwnedThread,
     });
 
     if (update?.threadId && update.changed) {
@@ -331,6 +331,23 @@ function createDesktopIpcLiveOwner({
     }
     ownedThreadIds.add(normalizedThreadId);
     ipc.ensureConnected();
+  }
+
+  // Notification-only thread/start paths do not echo a request id, so consume one
+  // pending local start before accepting the matching thread/started snapshot.
+  function claimStartedThreadForPendingLocalStart(message) {
+    if (readString(message?.method) !== "thread/started" || pendingThreadStartRequestIds.size === 0) {
+      return;
+    }
+    const threadId = readString(message?.params?.thread?.id);
+    if (!threadId || ownedThreadIds.has(threadId)) {
+      return;
+    }
+    const pendingRequestId = pendingThreadStartRequestIds.values().next().value;
+    if (pendingRequestId != null) {
+      pendingThreadStartRequestIds.delete(pendingRequestId);
+    }
+    markOwnedThread(threadId);
   }
 
   function removeOwnedThread(threadId) {
@@ -871,7 +888,6 @@ function applyAppServerMessageToConversationState({
   hostId = LOCAL_HOST_ID,
   now = () => Date.now(),
   shouldOwnThread = () => false,
-  markOwnedThread = () => {},
 } = {}) {
   const method = readString(message?.method);
   if (!method) {
@@ -898,10 +914,9 @@ function applyAppServerMessageToConversationState({
     case "thread/started": {
       const thread = message.params?.thread;
       const threadId = readString(thread?.id);
-      if (!threadId) {
+      if (!threadId || !shouldOwnThread(threadId)) {
         return null;
       }
-      markOwnedThread(threadId);
       const previous = conversations.get(threadId) || null;
       conversations.set(threadId, buildConversationStateFromThread(thread, {
         previous,
@@ -2267,11 +2282,24 @@ function createDesktopIpcRouterServer({
     const candidates = Array.from(clientsById.values()).filter((client) => (
       client.initialized && client !== sender && !client.socket.destroyed
     ));
-    const results = await Promise.all(candidates.map(async (candidate) => {
+    const results = await Promise.all(candidates.map(async (candidate, index) => {
       const canHandle = await askClientCanHandle(candidate, request);
-      return canHandle ? candidate : null;
+      return canHandle ? { client: candidate, index } : null;
     }));
-    return results.find(Boolean) || null;
+    return results
+      .filter(Boolean)
+      .sort(compareDiscoveryTargets)[0]?.client || null;
+  }
+
+  function compareDiscoveryTargets(left, right) {
+    const priorityDelta = discoveryTargetPriority(left.client) - discoveryTargetPriority(right.client);
+    return priorityDelta || left.index - right.index;
+  }
+
+  function discoveryTargetPriority(client) {
+    // If both sides claim a follower request, the bridge's tagged live owner wins
+    // over stale Desktop state to keep phone-owned streams on the local runtime.
+    return normalizeToken(client?.type) === "remodexbridge" ? 0 : 1;
   }
 
   function askClientCanHandle(client, request) {

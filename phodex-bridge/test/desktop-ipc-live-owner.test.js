@@ -692,6 +692,124 @@ test("live owner router keeps same-id requests from different clients separate",
   assert.notEqual(routedRequests[0].requestId, routedRequests[1].requestId);
 });
 
+test("live owner router prefers Remodex handler when multiple clients can handle", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-router-priority-");
+  let desktopSocket = null;
+  let remodexSocket = null;
+  let senderSocket = null;
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    reconnectMs: 10,
+    requestTimeoutMs: 500,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+  t.after(() => {
+    owner.stopAll();
+    desktopSocket?.destroy();
+    remodexSocket?.destroy();
+    senderSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-router-priority", input: [] },
+  }));
+  await waitFor(() => fs.existsSync(socketPath));
+
+  const connectHandler = async (initId, clientType, resultTag) => {
+    const frames = [];
+    const socket = net.createConnection(socketPath);
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.type === "client-discovery-request") {
+        writeFrame(socket, {
+          type: "client-discovery-response",
+          requestId: frame.requestId,
+          response: { canHandle: frame.request?.method === "desktop-owned-action" },
+        });
+        return;
+      }
+      if (frame.type === "request" && frame.method === "desktop-owned-action") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: frame.method,
+          handledByClientId: resultTag,
+          result: { handledBy: resultTag },
+        });
+      }
+    });
+    await new Promise((resolve) => socket.once("connect", resolve));
+    writeFrame(socket, {
+      type: "request",
+      requestId: initId,
+      sourceClientId: "initializing-client",
+      version: 1,
+      method: "initialize",
+      params: { clientType },
+    });
+    await waitFor(() => frames.find((frame) => frame.requestId === initId));
+    return { socket, frames };
+  };
+
+  const desktop = await connectHandler("desktop-priority-init", "desktop", "desktop");
+  desktopSocket = desktop.socket;
+  const remodex = await connectHandler("remodex-priority-init", "remodex-bridge", "remodex");
+  remodexSocket = remodex.socket;
+
+  const senderFrames = [];
+  senderSocket = net.createConnection(socketPath);
+  attachFrameReader(senderSocket, (frame) => {
+    senderFrames.push(frame);
+    if (frame.type === "client-discovery-request") {
+      writeFrame(senderSocket, {
+        type: "client-discovery-response",
+        requestId: frame.requestId,
+        response: { canHandle: false },
+      });
+    }
+  });
+  await new Promise((resolve) => senderSocket.once("connect", resolve));
+  writeFrame(senderSocket, {
+    type: "request",
+    requestId: "sender-priority-init",
+    sourceClientId: "initializing-client",
+    version: 1,
+    method: "initialize",
+    params: { clientType: "vscode" },
+  });
+  await waitFor(() => senderFrames.find((frame) => frame.requestId === "sender-priority-init"));
+
+  writeFrame(senderSocket, {
+    type: "request",
+    requestId: "priority-request",
+    sourceClientId: "sender",
+    version: 1,
+    method: "desktop-owned-action",
+    params: { tag: "priority" },
+  });
+
+  const response = await waitForMessage(
+    senderFrames,
+    (frame) => frame.type === "response" && frame.requestId === "priority-request"
+  );
+  assert.equal(response.resultType, "success");
+  assert.deepEqual(response.result, { handledBy: "remodex" });
+  assert.equal(
+    desktop.frames.some((frame) => frame.type === "request" && frame.method === "desktop-owned-action"),
+    false
+  );
+  assert.equal(
+    remodex.frames.some((frame) => frame.type === "request" && frame.method === "desktop-owned-action"),
+    true
+  );
+});
+
 test("live owner hydrates existing threads before first mobile-owned snapshot", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-hydrate-");
   const frames = [];
@@ -1739,6 +1857,29 @@ test("conversation adapter tracks requests and resolved notifications", () => {
   });
   assert.deepEqual(update, { threadId: "thread-adapter", changed: true });
   assert.equal(conversations.get("thread-adapter").requests.length, 0);
+});
+
+test("conversation adapter ignores thread started notifications for unowned threads", () => {
+  const conversations = new Map();
+  const owned = new Set();
+  const update = applyAppServerMessageToConversationState({
+    conversations,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "thread-unowned-started",
+          sessionId: "session-unowned-started",
+          preview: "Desktop owned",
+          turns: [],
+        },
+      },
+    },
+  });
+
+  assert.equal(update, null);
+  assert.equal(conversations.has("thread-unowned-started"), false);
 });
 
 test("conversation adapter replaces synthetic user prompt with canonical userMessage items", () => {

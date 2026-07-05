@@ -67,6 +67,9 @@ function createDesktopIpcActionFollower({
     requestTimeoutMs,
     logPrefix,
     onEnvelope,
+    onConnected() {
+      probeHeldFollowerRequests();
+    },
     onDisconnect,
   });
   const rawStatesByThreadId = new Map();
@@ -203,7 +206,6 @@ function createDesktopIpcActionFollower({
     pendingRoutesByRequestId.clear();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
-    liveOwnerThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
@@ -280,6 +282,21 @@ function createDesktopIpcActionFollower({
         }
         // No discovery answer: keep holding and let the timer fallback decide.
       });
+  }
+
+  // IPC may finish connecting after the first probe returned no answer; retry
+  // still-held phone turns once the bus can actually discover peer owners.
+  function probeHeldFollowerRequests() {
+    for (const [threadId, queue] of heldFollowerRequestsByThreadId.entries()) {
+      if (!queue || queue.length === 0 || liveOwnerThreadIds.has(threadId)) {
+        continue;
+      }
+      const message = safeParseJSON(queue[0].rawMessage);
+      const route = message ? buildDesktopFollowerRoute(message) : null;
+      if (route && shouldHoldFollowerRequest(message, threadId)) {
+        probeDesktopOwnership(route);
+      }
+    }
   }
 
   function isDesktopRoutableThread(threadId) {
@@ -614,6 +631,7 @@ function createDesktopIpcClient({
   requestTimeoutMs,
   logPrefix,
   onEnvelope,
+  onConnected,
   onDisconnect,
 }) {
   let socket = null;
@@ -637,6 +655,7 @@ function createDesktopIpcClient({
       sendRequest("initialize", { clientType: "remodex-bridge" })
         .then((result) => {
           clientId = readString(result?.clientId) || clientId;
+          onConnected?.(clientId);
         })
         .catch((error) => {
           console.warn(`${logPrefix} desktop IPC initialize failed: ${error.message}`);
