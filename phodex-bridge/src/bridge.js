@@ -256,6 +256,11 @@ function startBridge({
       readConversationState: async (threadId) => seedConversationStateFromThreadRead(
         await sendCodexRequest("thread/read", { threadId })
       ),
+      forwardToLocalCodex: (rawMessage) => {
+        desktopIpcLiveOwner?.observeInbound(rawMessage);
+        forwardInboundRequestToCodex(rawMessage);
+      },
+      normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
     })
     : null;
@@ -640,6 +645,10 @@ function startBridge({
     if (handleBridgeManagedThreadTurnsListRequest(rawMessage, sendApplicationResponse)) {
       return;
     }
+    forwardInboundRequestToCodex(rawMessage);
+  }
+
+  function forwardInboundRequestToCodex(rawMessage) {
     const codexRequest = disableUnsupportedReasoningSummaryForTurnStart(rawMessage);
     rememberForwardedRequestMethod(rawMessage);
     rememberThreadFromMessage("phone", codexRequest);

@@ -124,6 +124,7 @@ function createDesktopIpcLiveOwner({
   const cachedThreadsByThreadId = new Map();
   const lastBroadcastStatesByThreadId = new Map();
   const fallbackTurnIdsByThreadId = new Map();
+  const pendingTurnStartParamsByThreadId = new Map();
   const dirtyThreadIds = new Set();
   let snapshotTimer = null;
 
@@ -183,6 +184,9 @@ function createDesktopIpcLiveOwner({
     const hadConversation = conversations.has(threadId);
     const hadCachedThread = cachedThreadsByThreadId.has(threadId);
     markOwnedThread(threadId);
+    if (method === "turn/start") {
+      rememberPendingTurnStart(threadId, message?.params);
+    }
     seedOwnedConversation(threadId, {
       cwd: readString(message?.params?.cwd),
     });
@@ -224,6 +228,7 @@ function createDesktopIpcLiveOwner({
     const update = applyAppServerMessageToConversationState({
       conversations,
       fallbackTurnIdsByThreadId,
+      pendingTurnStartParamsByThreadId,
       message,
       hostId,
       now,
@@ -250,9 +255,27 @@ function createDesktopIpcLiveOwner({
     cachedThreadsByThreadId.clear();
     lastBroadcastStatesByThreadId.clear();
     fallbackTurnIdsByThreadId.clear();
+    pendingTurnStartParamsByThreadId.clear();
     ownedThreadIds.clear();
     conversations.clear();
     ipc.close();
+  }
+
+  // Phone-origin prompts only exist in the inbound turn/start params, so cache
+  // them for the matching turn/started snapshot instead of losing the user row.
+  function rememberPendingTurnStart(threadId, params) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId) {
+      return;
+    }
+    const input = Array.isArray(params?.input) ? params.input : [];
+    if (input.length === 0) {
+      return;
+    }
+    pendingTurnStartParamsByThreadId.set(
+      normalizedThreadId,
+      sanitizeTurnStartParams(cloneJSON(params))
+    );
   }
 
   function markOwnedThread(threadId) {
@@ -275,6 +298,7 @@ function createDesktopIpcLiveOwner({
     pendingThreadHydrationsByThreadId.delete(normalizedThreadId);
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
     fallbackTurnIdsByThreadId.delete(normalizedThreadId);
+    pendingTurnStartParamsByThreadId.delete(normalizedThreadId);
     dirtyThreadIds.delete(normalizedThreadId);
   }
 
@@ -344,7 +368,10 @@ function createDesktopIpcLiveOwner({
         dirtyThreadIds.add(threadId);
         continue;
       }
-      broadcastConversationState(threadId);
+      if (!broadcastConversationState(threadId)) {
+        // Keep unsent snapshots dirty so the reconnect rebroadcast can retry them.
+        dirtyThreadIds.add(threadId);
+      }
     }
   }
 
@@ -383,14 +410,19 @@ function createDesktopIpcLiveOwner({
         dirtyThreadIds.add(threadId);
         continue;
       }
-      broadcastConversationState(threadId, { forceSnapshot: true });
+      if (broadcastConversationState(threadId, { forceSnapshot: true })) {
+        dirtyThreadIds.delete(threadId);
+      } else {
+        dirtyThreadIds.add(threadId);
+      }
     }
   }
 
+  // Returns false only when a pending state change could not be delivered yet.
   function broadcastConversationState(threadId, { forceSnapshot = false } = {}) {
     const conversationState = conversations.get(threadId);
     if (!conversationState || !ownedThreadIds.has(threadId)) {
-      return;
+      return true;
     }
     const currentState = cloneJSON(conversationState);
     const previousState = lastBroadcastStatesByThreadId.get(threadId) || null;
@@ -400,7 +432,7 @@ function createDesktopIpcLiveOwner({
         maxPatchBytes,
       });
       if (patches && patches.length === 0) {
-        return;
+        return true;
       }
       if (patches && ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
         hostId,
@@ -412,7 +444,7 @@ function createDesktopIpcLiveOwner({
         },
       })) {
         lastBroadcastStatesByThreadId.set(threadId, currentState);
-        return;
+        return true;
       }
     }
 
@@ -426,7 +458,9 @@ function createDesktopIpcLiveOwner({
       },
     })) {
       lastBroadcastStatesByThreadId.set(threadId, currentState);
+      return true;
     }
+    return false;
   }
 
   function handlePeerBroadcast(envelope) {
@@ -517,6 +551,7 @@ function createDesktopIpcLiveOwner({
       ? normalizedParams
       : codexParams;
     markOwnedThread(conversationId);
+    rememberPendingTurnStart(conversationId, nextCodexParams);
     return await sendCodexRequest("turn/start", nextCodexParams);
   }
 
@@ -701,6 +736,7 @@ function createSyntheticTurnId(threadId, now = () => Date.now()) {
 function applyAppServerMessageToConversationState({
   conversations,
   fallbackTurnIdsByThreadId = null,
+  pendingTurnStartParamsByThreadId = null,
   message,
   hostId = LOCAL_HOST_ID,
   now = () => Date.now(),
@@ -786,13 +822,16 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
-      upsertTurn(conversation, resolveTurnForConversation({
+      const upsertedTurn = upsertTurn(conversation, resolveTurnForConversation({
         conversation,
         turn,
         method,
         fallbackTurnIdsByThreadId,
         now,
       }), { now });
+      if (method === "turn/started") {
+        applyPendingTurnStartParams(conversation, upsertedTurn, pendingTurnStartParamsByThreadId);
+      }
       conversation.updatedAt = now();
       return { threadId, changed: true };
     }
@@ -1135,6 +1174,58 @@ function buildConversationTurn(turn, {
       ? cloneJSON(turn.items)
       : cloneJSON(previousTurn?.items || []),
   };
+}
+
+// Reattaches the cached turn/start prompt to a just-started turn so Desktop
+// followers still see the user message when turn/started arrives with no items.
+function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsByThreadId) {
+  if (!turn || !(pendingTurnStartParamsByThreadId instanceof Map)) {
+    return;
+  }
+  const threadId = readString(conversation?.id);
+  const pendingParams = threadId ? pendingTurnStartParamsByThreadId.get(threadId) : null;
+  if (!pendingParams) {
+    return;
+  }
+
+  pendingTurnStartParamsByThreadId.delete(threadId);
+  const input = Array.isArray(pendingParams.input) ? cloneJSON(pendingParams.input) : [];
+  if (input.length === 0) {
+    return;
+  }
+
+  turn.params = {
+    ...turn.params,
+    ...cloneJSON(pendingParams),
+  };
+  if (turnHasUserMessageItem(turn)) {
+    return;
+  }
+  const turnId = readString(turn.turnId) || readString(turn.id) || "turn";
+  turn.items.unshift({
+    id: `user-message-${turnId}`,
+    type: "userMessage",
+    content: input.map(userMessageContentFromTurnInput).filter(Boolean),
+  });
+}
+
+function turnHasUserMessageItem(turn) {
+  return turn.items.some((item) => {
+    const type = normalizeToken(item?.type);
+    return type === "usermessage"
+      || (type === "message" && normalizeToken(item?.role) === "user");
+  });
+}
+
+function userMessageContentFromTurnInput(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+  const type = normalizeToken(entry.type);
+  if (type === "inputtext" || type === "text") {
+    return { type: "text", text: readString(entry.text) };
+  }
+  return cloneJSON(entry);
 }
 
 function ensureConversationInMap(conversations, threadId, options = {}) {
@@ -1955,7 +2046,10 @@ function createDesktopIpcRouterServer({
       return;
     }
 
-    const routeKey = routedResponseKey(target.id, requestId);
+    // JSON-RPC request ids are only unique per connection, so forward a rewritten
+    // router-scoped id to keep concurrent same-id requests from colliding.
+    const routedRequestId = `remodex-routed-${now().toString(36)}-${randomUUID()}`;
+    const routeKey = routedResponseKey(target.id, routedRequestId);
     const timeout = setTimeout(() => {
       pendingRoutedResponses.delete(routeKey);
       writeEnvelopeToClient(sender, {
@@ -1970,10 +2064,12 @@ function createDesktopIpcRouterServer({
     timeout.unref?.();
     pendingRoutedResponses.set(routeKey, {
       sender,
+      senderRequestId: envelope.requestId,
       timeout,
     });
     if (!writeEnvelopeToClient(target, {
       ...envelope,
+      requestId: routedRequestId,
       sourceClientId: sender.id,
     })) {
       clearTimeout(timeout);
@@ -1997,7 +2093,10 @@ function createDesktopIpcRouterServer({
     }
     pendingRoutedResponses.delete(routeKey);
     clearTimeout(route.timeout);
-    writeEnvelopeToClient(route.sender, envelope);
+    writeEnvelopeToClient(route.sender, {
+      ...envelope,
+      requestId: route.senderRequestId,
+    });
   }
 
   async function answerClientDiscoveryRequest(sender, envelope) {
@@ -2080,7 +2179,7 @@ function createDesktopIpcRouterServer({
       clearTimeout(route.timeout);
       writeEnvelopeToClient(route.sender, {
         type: "response",
-        requestId: routeKey.slice(client.id.length + 1),
+        requestId: route.senderRequestId,
         resultType: "error",
         method: "",
         handledByClientId: client.id,

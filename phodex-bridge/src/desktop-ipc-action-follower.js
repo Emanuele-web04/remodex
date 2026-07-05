@@ -11,6 +11,7 @@ const path = require("path");
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
+const OWNERSHIP_PROBE_TIMEOUT_MS = 1_500;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const DESKTOP_RESUME_METHODS = new Set(["thread/read", "thread/resume"]);
@@ -50,11 +51,14 @@ const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline", "ca
 function createDesktopIpcActionFollower({
   sendApplicationResponse,
   readConversationState = null,
+  forwardToLocalCodex = null,
+  normalizeTurnStartParams = (params) => params,
   logPrefix = "[remodex]",
   socketPath = resolveDefaultIpcSocketPath(),
   netModule = net,
   now = () => Date.now(),
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
+  ownershipProbeTimeoutMs = OWNERSHIP_PROBE_TIMEOUT_MS,
 } = {}) {
   const ipc = createDesktopIpcClient({
     socketPath,
@@ -71,6 +75,9 @@ function createDesktopIpcActionFollower({
   const activeThreadIds = new Set();
   const recoveringThreadIds = new Set();
   const queuedChangesByThreadId = new Map();
+  const liveOwnerThreadIds = new Set();
+  const heldFollowerRequestsByThreadId = new Map();
+  const ownershipProbeDeadlinesByThreadId = new Map();
 
   function observeInbound(rawMessage) {
     const message = safeParseJSON(rawMessage);
@@ -87,6 +94,10 @@ function createDesktopIpcActionFollower({
         submitDesktopFollowerRequest(route, message);
         return true;
       }
+      if (shouldHoldFollowerRequest(message)) {
+        holdFollowerRequest(readThreadId(message.params), rawMessage);
+        return true;
+      }
     }
 
     if (!DESKTOP_RESUME_METHODS.has(method)) {
@@ -99,6 +110,9 @@ function createDesktopIpcActionFollower({
     }
 
     activeThreadIds.add(threadId);
+    if (!rawStatesByThreadId.has(threadId) && !liveOwnerThreadIds.has(threadId)) {
+      ownershipProbeDeadlinesByThreadId.set(threadId, now() + ownershipProbeTimeoutMs);
+    }
     ipc.ensureConnected();
     return false;
   }
@@ -110,6 +124,14 @@ function createDesktopIpcActionFollower({
     activeThreadIds.clear();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
+    liveOwnerThreadIds.clear();
+    ownershipProbeDeadlinesByThreadId.clear();
+    for (const queue of heldFollowerRequestsByThreadId.values()) {
+      for (const entry of queue) {
+        clearTimeout(entry.timer);
+      }
+    }
+    heldFollowerRequestsByThreadId.clear();
     ipc.close();
   }
 
@@ -120,13 +142,18 @@ function createDesktopIpcActionFollower({
     }
 
     const params = envelope.params || {};
+    const threadId = readString(params.conversationId) || readString(params.conversation_id);
     if (isRemodexLiveOwnerBroadcast(params)) {
+      if (threadId) {
+        releaseDesktopThreadState(threadId);
+      }
       return;
     }
-    const threadId = readString(params.conversationId) || readString(params.conversation_id);
     if (!threadId || !activeThreadIds.has(threadId)) {
       return;
     }
+    liveOwnerThreadIds.delete(threadId);
+    ownershipProbeDeadlinesByThreadId.delete(threadId);
 
     if (recoveringThreadIds.has(threadId)) {
       queueThreadChange(threadId, params.change);
@@ -143,6 +170,7 @@ function createDesktopIpcActionFollower({
         if (speculativeActions.length > 0) {
           rawStatesByThreadId.set(threadId, speculativeState);
           syncProjectedActions(threadId, speculativeActions);
+          releaseHeldFollowerRequests(threadId, { toDesktop: true });
           return;
         }
 
@@ -159,6 +187,7 @@ function createDesktopIpcActionFollower({
     rawStatesByThreadId.set(threadId, nextState);
     syncProjectedAssistantDeltas(threadId, previousState, nextState);
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
+    releaseHeldFollowerRequests(threadId, { toDesktop: true });
   }
 
   function onDisconnect() {
@@ -167,6 +196,88 @@ function createDesktopIpcActionFollower({
     pendingRoutesByRequestId.clear();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
+    liveOwnerThreadIds.clear();
+    ownershipProbeDeadlinesByThreadId.clear();
+    for (const threadId of Array.from(heldFollowerRequestsByThreadId.keys())) {
+      releaseHeldFollowerRequests(threadId, { toDesktop: false });
+    }
+  }
+
+  // The bridge's own live owner just claimed this thread's stream, so drop stale
+  // Desktop state instead of hijacking future phone requests into Desktop IPC.
+  function releaseDesktopThreadState(threadId) {
+    liveOwnerThreadIds.add(threadId);
+    ownershipProbeDeadlinesByThreadId.delete(threadId);
+    syncProjectedActions(threadId, []);
+    rawStatesByThreadId.delete(threadId);
+    assistantMessageTextsByThreadId.delete(threadId);
+    queuedChangesByThreadId.delete(threadId);
+    releaseHeldFollowerRequests(threadId, { toDesktop: false });
+  }
+
+  // A just-resumed Desktop-owned thread has no snapshot yet, so hold phone turn
+  // requests briefly instead of racing them into the local app-server. Holding is
+  // bounded to a short window after resume so purely local threads stay fast.
+  function shouldHoldFollowerRequest(message) {
+    if (typeof forwardToLocalCodex !== "function" || message?.id == null) {
+      return false;
+    }
+    const threadId = readThreadId(message?.params);
+    if (!threadId
+      || !activeThreadIds.has(threadId)
+      || rawStatesByThreadId.has(threadId)
+      || liveOwnerThreadIds.has(threadId)) {
+      return false;
+    }
+    const probeDeadline = ownershipProbeDeadlinesByThreadId.get(threadId);
+    if (!probeDeadline || now() > probeDeadline) {
+      ownershipProbeDeadlinesByThreadId.delete(threadId);
+      return false;
+    }
+    return true;
+  }
+
+  function holdFollowerRequest(threadId, rawMessage) {
+    const probeDeadline = ownershipProbeDeadlinesByThreadId.get(threadId) || 0;
+    const entry = {
+      rawMessage,
+      timer: setTimeout(() => {
+        const queue = heldFollowerRequestsByThreadId.get(threadId) || [];
+        const index = queue.indexOf(entry);
+        if (index < 0) {
+          return;
+        }
+        queue.splice(index, 1);
+        if (queue.length === 0) {
+          heldFollowerRequestsByThreadId.delete(threadId);
+        }
+        forwardToLocalCodex(rawMessage);
+      }, Math.max(0, probeDeadline - now())),
+    };
+    entry.timer.unref?.();
+    const queue = heldFollowerRequestsByThreadId.get(threadId) || [];
+    queue.push(entry);
+    heldFollowerRequestsByThreadId.set(threadId, queue);
+  }
+
+  function releaseHeldFollowerRequests(threadId, { toDesktop } = {}) {
+    const queue = heldFollowerRequestsByThreadId.get(threadId);
+    if (!queue || queue.length === 0) {
+      heldFollowerRequestsByThreadId.delete(threadId);
+      return;
+    }
+
+    heldFollowerRequestsByThreadId.delete(threadId);
+    for (const entry of queue) {
+      clearTimeout(entry.timer);
+      const message = toDesktop ? safeParseJSON(entry.rawMessage) : null;
+      const route = message ? desktopFollowerRouteForRequest(message) : null;
+      if (route) {
+        submitDesktopFollowerRequest(route, message);
+      } else {
+        forwardToLocalCodex?.(entry.rawMessage);
+      }
+    }
   }
 
   function syncProjectedActions(threadId, actions) {
@@ -304,7 +415,9 @@ function createDesktopIpcActionFollower({
   }
 
   function submitDesktopFollowerRequest(route, originalMessage) {
-    ipc.sendRequest(route.method, route.params)
+    Promise.resolve()
+      .then(() => resolveFollowerRequestParams(route))
+      .then((params) => ipc.sendRequest(route.method, params))
       .then((result) => {
         sendApplicationResponse(JSON.stringify({
           id: originalMessage.id,
@@ -321,6 +434,25 @@ function createDesktopIpcActionFollower({
           },
         }));
       });
+  }
+
+  // Desktop-followed turn starts must apply the same param normalization as
+  // requests forwarded straight to the local app-server.
+  async function resolveFollowerRequestParams(route) {
+    if (route.method !== "thread-follower-start-turn") {
+      return route.params;
+    }
+
+    const normalized = await Promise.resolve(
+      normalizeTurnStartParams(cloneJSON(route.params.turnStartParams))
+    );
+    const turnStartParams = normalized && typeof normalized === "object" && !Array.isArray(normalized)
+      ? normalized
+      : route.params.turnStartParams;
+    return {
+      ...route.params,
+      turnStartParams,
+    };
   }
 
   function queueThreadChange(threadId, change) {
@@ -376,6 +508,7 @@ function createDesktopIpcActionFollower({
     rawStatesByThreadId.set(threadId, nextState);
     syncProjectedAssistantDeltas(threadId, baselineState, nextState);
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
+    releaseHeldFollowerRequests(threadId, { toDesktop: true });
   }
 
   function syncProjectedAssistantDeltas(threadId, previousState, nextState) {

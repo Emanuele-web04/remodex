@@ -482,6 +482,215 @@ test("live owner seeds existing thread snapshots from thread reads before owners
   assert.equal(state.turns[1].turnId, "turn-new");
 });
 
+test("live owner keeps phone turn input in snapshots when turn/started has no items", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-user-input-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-user-input",
+    method: "turn/start",
+    params: {
+      threadId: "thread-user-input",
+      cwd: "/tmp/user-input",
+      input: [{ type: "input_text", text: "build the feature" }],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-user-input",
+      turn: {
+        id: "turn-user-input",
+        items: [],
+        status: "inProgress",
+        error: null,
+        startedAt: 2,
+        completedAt: null,
+        durationMs: null,
+      },
+    },
+  }));
+
+  const broadcast = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-user-input"
+      && frame.params?.change?.type === "snapshot"
+  );
+  const turn = broadcast.params.change.conversationState.turns[0];
+  assert.equal(turn.turnId, "turn-user-input");
+  assert.deepEqual(turn.params.input, [{ type: "input_text", text: "build the feature" }]);
+  assert.deepEqual(turn.items[0], {
+    id: "user-message-turn-user-input",
+    type: "userMessage",
+    content: [{ type: "text", text: "build the feature" }],
+  });
+});
+
+test("live owner router keeps same-id requests from different clients separate", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-routed-ids-");
+  let handlerSocket = null;
+  let firstSenderSocket = null;
+  let secondSenderSocket = null;
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    reconnectMs: 10,
+    requestTimeoutMs: 500,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+  t.after(() => {
+    owner.stopAll();
+    handlerSocket?.destroy();
+    firstSenderSocket?.destroy();
+    secondSenderSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-router-ids", input: [] },
+  }));
+  await waitFor(() => fs.existsSync(socketPath));
+
+  const handlerFrames = [];
+  handlerSocket = net.createConnection(socketPath);
+  attachFrameReader(handlerSocket, (frame) => {
+    handlerFrames.push(frame);
+    if (frame.type === "client-discovery-request") {
+      writeFrame(handlerSocket, {
+        type: "client-discovery-response",
+        requestId: frame.requestId,
+        response: { canHandle: frame.request?.method === "desktop-owned-action" },
+      });
+      return;
+    }
+    if (frame.type === "request" && frame.method === "desktop-owned-action") {
+      writeFrame(handlerSocket, {
+        type: "response",
+        requestId: frame.requestId,
+        resultType: "success",
+        method: frame.method,
+        handledByClientId: "handler",
+        result: { tag: frame.params?.tag },
+      });
+    }
+  });
+  await new Promise((resolve) => handlerSocket.once("connect", resolve));
+  writeFrame(handlerSocket, {
+    type: "request",
+    requestId: "handler-init",
+    sourceClientId: "initializing-client",
+    version: 1,
+    method: "initialize",
+    params: { clientType: "desktop" },
+  });
+  await waitFor(() => handlerFrames.find((frame) => frame.requestId === "handler-init"));
+
+  const connectSender = async (initId) => {
+    const frames = [];
+    const socket = net.createConnection(socketPath);
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.type === "client-discovery-request") {
+        writeFrame(socket, {
+          type: "client-discovery-response",
+          requestId: frame.requestId,
+          response: { canHandle: false },
+        });
+      }
+    });
+    await new Promise((resolve) => socket.once("connect", resolve));
+    writeFrame(socket, {
+      type: "request",
+      requestId: initId,
+      sourceClientId: "initializing-client",
+      version: 1,
+      method: "initialize",
+      params: { clientType: "vscode" },
+    });
+    await waitFor(() => frames.find((frame) => frame.requestId === initId));
+    return { socket, frames };
+  };
+
+  const firstSender = await connectSender("sender-one-init");
+  const secondSender = await connectSender("sender-two-init");
+  firstSenderSocket = firstSender.socket;
+  secondSenderSocket = secondSender.socket;
+
+  // Both clients reuse the same connection-scoped request id concurrently.
+  writeFrame(firstSender.socket, {
+    type: "request",
+    requestId: "1",
+    sourceClientId: "sender-one",
+    version: 1,
+    method: "desktop-owned-action",
+    params: { tag: "first" },
+  });
+  writeFrame(secondSender.socket, {
+    type: "request",
+    requestId: "1",
+    sourceClientId: "sender-two",
+    version: 1,
+    method: "desktop-owned-action",
+    params: { tag: "second" },
+  });
+
+  const firstResponse = await waitForMessage(
+    firstSender.frames,
+    (frame) => frame.type === "response" && frame.requestId === "1"
+  );
+  const secondResponse = await waitForMessage(
+    secondSender.frames,
+    (frame) => frame.type === "response" && frame.requestId === "1"
+  );
+  assert.equal(firstResponse.resultType, "success");
+  assert.deepEqual(firstResponse.result, { tag: "first" });
+  assert.equal(secondResponse.resultType, "success");
+  assert.deepEqual(secondResponse.result, { tag: "second" });
+
+  const routedRequests = handlerFrames.filter((frame) => (
+    frame.type === "request" && frame.method === "desktop-owned-action"
+  ));
+  assert.equal(routedRequests.length, 2);
+  assert.notEqual(routedRequests[0].requestId, routedRequests[1].requestId);
+});
+
 test("live owner hydrates existing threads before first mobile-owned snapshot", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-hydrate-");
   const frames = [];
