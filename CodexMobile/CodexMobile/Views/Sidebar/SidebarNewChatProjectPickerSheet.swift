@@ -31,7 +31,7 @@ struct SidebarNewChatProjectPickerSheet: View {
                                 projectRow(
                                     icon: AnyView(
                                         Group {
-                                            if choice.iconSystemName == "arrow.triangle.branch" {
+                                            if choice.iconSystemName == "remodex.worktree" {
                                                 CodexWorktreeIcon(pointSize: 16, weight: .medium)
                                             } else {
                                                 RemodexIcon.image(systemName: choice.iconSystemName)

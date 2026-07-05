@@ -141,7 +141,7 @@ struct SidebarThreadRowView: View {
             }
 
             // Snapshot-only pinned rows need an honest metadata hint until opening refreshes them.
-            if let runBadgeState {
+            if let runBadgeState, runBadgeState.isVisibleInSidebar {
                 SidebarThreadRunBadgeView(state: runBadgeState)
                     .frame(width: 28, alignment: .trailing)
             } else if showsTimestampRefreshIndicator {

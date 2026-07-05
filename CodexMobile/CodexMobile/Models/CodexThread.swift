@@ -413,7 +413,7 @@ extension CodexThread {
 
     // Reuses the same worktree detection across the sidebar, toolbar, and composer affordances.
     var isManagedWorktreeProject: Bool {
-        Self.projectIconSystemName(for: normalizedProjectPath) == "arrow.triangle.branch"
+        Self.projectIconSystemName(for: normalizedProjectPath) == "remodex.worktree"
     }
 
     // Distinguishes Codex-managed worktrees from the main repo in compact sidebar UIs.
@@ -435,7 +435,7 @@ extension CodexThread {
             return "bubble.left.and.bubble.right"
         }
 
-        return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "folder" : "arrow.triangle.branch"
+        return codexManagedWorktreeToken(for: normalizedProjectPath) == nil ? "folder" : "remodex.worktree"
     }
 
     // Shared path gate for every flow that needs to decide whether a cwd represents a real local project.

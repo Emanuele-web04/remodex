@@ -1,7 +1,7 @@
 // FILE: SidebarThreadRunBadgeView.swift
-// Purpose: Renders the compact run-state indicator dot for sidebar conversation rows.
+// Purpose: Renders compact active/failed run-state indicators for sidebar conversation rows.
 // Layer: View Component
-// Exports: SidebarThreadRunBadgeView
+// Exports: SidebarThreadRunBadgeView, CodexThreadRunBadgeState.isVisibleInSidebar
 // Depends on: SwiftUI, CodexThreadRunBadgeState
 
 import SwiftUI
@@ -10,8 +10,19 @@ struct SidebarThreadRunBadgeView: View {
     let state: CodexThreadRunBadgeState
 
     var body: some View {
+        switch state {
+        case .running:
+            SidebarThreadRunSpinner()
+        case .failed:
+            statusDot(color: .red)
+        case .ready:
+            EmptyView()
+        }
+    }
+
+    private func statusDot(color: Color) -> some View {
         Circle()
-            .fill(state.color)
+            .fill(color)
             .frame(width: 10, height: 10)
             .overlay(
                 Circle()
@@ -21,15 +32,41 @@ struct SidebarThreadRunBadgeView: View {
     }
 }
 
-private extension CodexThreadRunBadgeState {
-    var color: Color {
+extension CodexThreadRunBadgeState {
+    var isVisibleInSidebar: Bool {
         switch self {
         case .running:
-            return .blue
-        case .ready:
-            return .green
         case .failed:
-            return .red
+            return true
+        case .ready:
+            return false
         }
+    }
+}
+
+private struct SidebarThreadRunSpinner: View {
+    @State private var isSpinning = false
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.green.opacity(0.22), lineWidth: 1.5)
+            Circle()
+                .trim(from: 0.16, to: 0.72)
+                .stroke(
+                    Color.green,
+                    style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
+                )
+                .rotationEffect(.degrees(isSpinning ? 360 : 0))
+                .animation(
+                    .linear(duration: 0.85).repeatForever(autoreverses: false),
+                    value: isSpinning
+                )
+        }
+        .frame(width: 12, height: 12)
+        .onAppear {
+            isSpinning = true
+        }
+        .accessibilityHidden(true)
     }
 }

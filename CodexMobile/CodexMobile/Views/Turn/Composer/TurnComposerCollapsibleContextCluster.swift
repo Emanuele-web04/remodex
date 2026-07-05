@@ -53,7 +53,7 @@ struct TurnComposerCollapsibleContextCluster: View {
         if !hasWorkingDirectory {
             return "bubble.left.and.bubble.right"
         }
-        return isWorktreeProject ? "arrow.triangle.branch" : "laptopcomputer"
+        return isWorktreeProject ? "remodex.worktree" : "laptopcomputer"
     }
 
     var body: some View {

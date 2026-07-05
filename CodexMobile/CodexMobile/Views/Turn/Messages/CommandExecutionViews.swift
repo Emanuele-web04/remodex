@@ -725,21 +725,56 @@ enum CommandHumanizer {
 
     /// Leading icon (an SF Symbol name resolved to a Central asset by `RemodexIcon`)
     /// for a humanized command row, following synara's command classification:
-    /// inspect-style commands → magnifying glass, source control → branch,
-    /// everything else → console. (synara uses its filled octocat for git/gh; we
-    /// use a uniform stroke branch glyph so every row tints in a single color.)
+    /// inspect-style commands → magnifying glass, source control → GitHub mark,
+    /// everything else → console.
     static func iconSystemName(for raw: String) -> String {
-        let command = unwrapShell(raw)
+        let command = unwrapEnvironmentWrapper(unwrapShell(raw))
         let (tool, _) = splitToolAndArgs(command)
         switch tool {
         case "cat", "nl", "head", "tail", "sed", "less", "more",
              "rg", "grep", "ag", "ack", "find", "fd", "ls":
             return "magnifyingglass"
         case "git", "gh", "hub":
-            return "remodex.branch"
+            return "remodex.github"
         default:
             return "terminal"
         }
+    }
+
+    // Mirrors Synara's command-row classifier for GitHub CLI calls hidden behind
+    // simple `env` wrappers such as `env -u GH_TOKEN gh pr status`.
+    private static func unwrapEnvironmentWrapper(_ raw: String) -> String {
+        let tokens = raw.split(separator: " ").map(String.init)
+        guard let firstToken = tokens.first,
+              (firstToken as NSString).lastPathComponent.lowercased() == "env" else {
+            return raw
+        }
+
+        var index = 1
+        while index < tokens.count {
+            let token = tokens[index]
+            if token == "--" {
+                index += 1
+                break
+            }
+            if token.hasPrefix("-") {
+                index += 1
+                if token == "-u" || token == "--unset" || token == "-C" {
+                    index += 1
+                }
+                continue
+            }
+            if token.contains("=") {
+                index += 1
+                continue
+            }
+            break
+        }
+
+        guard index < tokens.count else {
+            return raw
+        }
+        return tokens[index...].joined(separator: " ")
     }
 
     // MARK: - Shell unwrapping

@@ -39,7 +39,7 @@ struct SidebarProjectSectionHeader: View {
 
     @ViewBuilder
     private var leadingIcon: some View {
-        if group.iconSystemName == "arrow.triangle.branch" {
+        if group.iconSystemName == "remodex.worktree" {
             CodexWorktreeIcon(pointSize: 16, weight: .medium)
                 .foregroundStyle(.primary)
         } else {

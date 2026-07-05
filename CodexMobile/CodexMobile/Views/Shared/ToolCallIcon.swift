@@ -140,10 +140,10 @@ enum ToolCallIcon {
         ("find", "magnifyingglass"),
         ("view", "magnifyingglass"),
         ("list", "magnifyingglass"),
-        // Source control. GitHub-specific rows use the real octocat mark (template-
-        // tinted so the row stays a single color); bare git keeps the branch glyph.
+        // Source control. Match Synara's compact work rows by using the GitHub
+        // mark for git/gh/GitHub activity instead of the generic branch glyph.
         ("github", "remodex.github"),
-        ("git", "remodex.branch"),
+        ("git", "remodex.github"),
         // Agents / sub-tasks
         ("subagent", "remodex.agent"),
         ("agent", "remodex.agent"),

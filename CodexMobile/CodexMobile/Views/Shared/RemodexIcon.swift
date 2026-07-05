@@ -86,6 +86,7 @@ enum RemodexIcon {
         "remodex.changes": "changes",
         "remodex.plan-mode": "central-planning",
         "remodex.skill": "central-building-blocks",
+        "remodex.worktree": "central-arrow-split-right",
         "server.rack": "central-server",
         "shift": "central-shift",
         "slider.horizontal.3": "central-settings-slider-three",
