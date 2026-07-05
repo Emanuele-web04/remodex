@@ -1242,6 +1242,123 @@ test("live owner yields ownership when a peer sends an untagged snapshot", async
   assert.equal(codexRequests.filter((request) => request.method === "turn/start").length, 0);
 });
 
+test("live owner drops cached conversation state when yielding to a peer owner", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-yield-state-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-yield-state",
+      input: [{ type: "input_text", text: "first prompt" }],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-yield-state",
+      turn: {
+        id: "turn-stale",
+        items: [],
+        status: "inProgress",
+        error: null,
+        startedAt: 1,
+        completedAt: null,
+        durationMs: null,
+      },
+    },
+  }));
+  await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.params?.conversationId === "thread-yield-state"
+      && frame.params?.change?.type === "snapshot"
+  );
+
+  // A peer owner claims the stream with an untagged snapshot.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    version: 6,
+    params: {
+      conversationId: "thread-yield-state",
+      change: {
+        type: "snapshot",
+        conversationState: { turns: [], requests: [] },
+      },
+    },
+  });
+  await wait(25);
+  assert.equal(owner._debugSnapshot("thread-yield-state"), null);
+
+  // Re-claiming from the phone must rebuild fresh state, not republish turn-stale.
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-yield-state",
+      input: [{ type: "input_text", text: "fresh prompt" }],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-yield-state",
+      turn: {
+        id: "turn-fresh",
+        items: [],
+        status: "inProgress",
+        error: null,
+        startedAt: 2,
+        completedAt: null,
+        durationMs: null,
+      },
+    },
+  }));
+
+  const reclaimBroadcast = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.params?.conversationId === "thread-yield-state"
+      && frame.params?.change?.type === "snapshot"
+      && frame.params.change.conversationState.turns.some((turn) => turn.turnId === "turn-fresh")
+  );
+  const turnIds = reclaimBroadcast.params.change.conversationState.turns.map((turn) => turn.turnId);
+  assert.deepEqual(turnIds, ["turn-fresh"]);
+});
+
 test("live owner routes follower approval responses back to app-server", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-approval-");
   const rawCodexMessages = [];

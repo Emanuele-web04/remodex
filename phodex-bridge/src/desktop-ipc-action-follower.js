@@ -78,6 +78,8 @@ function createDesktopIpcActionFollower({
   const liveOwnerThreadIds = new Set();
   const heldFollowerRequestsByThreadId = new Map();
   const ownershipProbeDeadlinesByThreadId = new Map();
+  const pendingOwnershipProbeThreadIds = new Set();
+  const desktopOwnedByProbeThreadIds = new Set();
 
   function observeInbound(rawMessage) {
     const message = safeParseJSON(rawMessage);
@@ -89,13 +91,14 @@ function createDesktopIpcActionFollower({
 
     const method = readString(message?.method);
     if (DESKTOP_FOLLOWER_REQUEST_METHODS.has(method)) {
-      const route = desktopFollowerRouteForRequest(message);
-      if (route) {
+      const route = buildDesktopFollowerRoute(message);
+      if (route && isDesktopRoutableThread(route.threadId)) {
         submitDesktopFollowerRequest(route, message);
         return true;
       }
-      if (shouldHoldFollowerRequest(message)) {
-        holdFollowerRequest(readThreadId(message.params), rawMessage);
+      if (route && shouldHoldFollowerRequest(message, route.threadId)) {
+        holdFollowerRequest(route.threadId, rawMessage);
+        probeDesktopOwnership(route);
         return true;
       }
     }
@@ -126,6 +129,8 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     liveOwnerThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
+    pendingOwnershipProbeThreadIds.clear();
+    desktopOwnedByProbeThreadIds.clear();
     for (const queue of heldFollowerRequestsByThreadId.values()) {
       for (const entry of queue) {
         clearTimeout(entry.timer);
@@ -154,6 +159,7 @@ function createDesktopIpcActionFollower({
     }
     liveOwnerThreadIds.delete(threadId);
     ownershipProbeDeadlinesByThreadId.delete(threadId);
+    desktopOwnedByProbeThreadIds.delete(threadId);
 
     if (recoveringThreadIds.has(threadId)) {
       queueThreadChange(threadId, params.change);
@@ -198,6 +204,8 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     liveOwnerThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
+    pendingOwnershipProbeThreadIds.clear();
+    desktopOwnedByProbeThreadIds.clear();
     for (const threadId of Array.from(heldFollowerRequestsByThreadId.keys())) {
       releaseHeldFollowerRequests(threadId, { toDesktop: false });
     }
@@ -208,6 +216,7 @@ function createDesktopIpcActionFollower({
   function releaseDesktopThreadState(threadId) {
     liveOwnerThreadIds.add(threadId);
     ownershipProbeDeadlinesByThreadId.delete(threadId);
+    desktopOwnedByProbeThreadIds.delete(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     assistantMessageTextsByThreadId.delete(threadId);
@@ -218,11 +227,10 @@ function createDesktopIpcActionFollower({
   // A just-resumed Desktop-owned thread has no snapshot yet, so hold phone turn
   // requests briefly instead of racing them into the local app-server. Holding is
   // bounded to a short window after resume so purely local threads stay fast.
-  function shouldHoldFollowerRequest(message) {
+  function shouldHoldFollowerRequest(message, threadId) {
     if (typeof forwardToLocalCodex !== "function" || message?.id == null) {
       return false;
     }
-    const threadId = readThreadId(message?.params);
     if (!threadId
       || !activeThreadIds.has(threadId)
       || rawStatesByThreadId.has(threadId)
@@ -235,6 +243,38 @@ function createDesktopIpcActionFollower({
       return false;
     }
     return true;
+  }
+
+  // Asks the IPC bus whether any client owns this thread so held requests resolve
+  // as soon as possible instead of waiting out the full post-resume window.
+  function probeDesktopOwnership(route) {
+    const threadId = route.threadId;
+    if (pendingOwnershipProbeThreadIds.has(threadId)) {
+      return;
+    }
+    pendingOwnershipProbeThreadIds.add(threadId);
+    ipc.sendDiscoveryRequest({
+      type: "request",
+      method: route.method,
+      params: route.params,
+    }, ownershipProbeTimeoutMs)
+      .then((canHandle) => {
+        pendingOwnershipProbeThreadIds.delete(threadId);
+        if (canHandle === true) {
+          desktopOwnedByProbeThreadIds.add(threadId);
+          releaseHeldFollowerRequests(threadId, { toDesktop: true });
+          return;
+        }
+        if (canHandle === false) {
+          ownershipProbeDeadlinesByThreadId.delete(threadId);
+          releaseHeldFollowerRequests(threadId, { toDesktop: false });
+        }
+        // No discovery answer: keep holding and let the timer fallback decide.
+      });
+  }
+
+  function isDesktopRoutableThread(threadId) {
+    return rawStatesByThreadId.has(threadId) || desktopOwnedByProbeThreadIds.has(threadId);
   }
 
   function holdFollowerRequest(threadId, rawMessage) {
@@ -271,8 +311,8 @@ function createDesktopIpcActionFollower({
     for (const entry of queue) {
       clearTimeout(entry.timer);
       const message = toDesktop ? safeParseJSON(entry.rawMessage) : null;
-      const route = message ? desktopFollowerRouteForRequest(message) : null;
-      if (route) {
+      const route = message ? buildDesktopFollowerRoute(message) : null;
+      if (route && isDesktopRoutableThread(route.threadId)) {
         submitDesktopFollowerRequest(route, message);
       } else {
         forwardToLocalCodex?.(entry.rawMessage);
@@ -360,7 +400,7 @@ function createDesktopIpcActionFollower({
       });
   }
 
-  function desktopFollowerRouteForRequest(message) {
+  function buildDesktopFollowerRoute(message) {
     const requestId = requestIdKey(message?.id);
     if (!requestId) {
       return null;
@@ -370,7 +410,7 @@ function createDesktopIpcActionFollower({
       ? message.params
       : {};
     const threadId = readThreadId(params);
-    if (!threadId || !rawStatesByThreadId.has(threadId)) {
+    if (!threadId) {
       return null;
     }
 
@@ -568,6 +608,7 @@ function createDesktopIpcClient({
   let isConnecting = false;
   let readBuffer = Buffer.alloc(0);
   const pendingRequests = new Map();
+  const pendingDiscoveries = new Map();
 
   function ensureConnected() {
     if (socket || isConnecting) {
@@ -639,6 +680,41 @@ function createDesktopIpcClient({
     });
   }
 
+  // Resolves true/false from a discovery answer, or null when nobody answers in
+  // time, so callers can fall back to their own timers.
+  function sendDiscoveryRequest(request, timeoutMs) {
+    ensureConnected();
+    if (!socket || socket.destroyed) {
+      return Promise.resolve(null);
+    }
+
+    const requestId = `remodex-discovery-${now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        pendingDiscoveries.delete(requestId);
+        resolve(null);
+      }, timeoutMs);
+      timeout.unref?.();
+
+      pendingDiscoveries.set(requestId, {
+        resolve,
+        timeout,
+      });
+      writeEnvelope({
+        type: "client-discovery-request",
+        requestId,
+        request,
+      }, (error) => {
+        if (!error) {
+          return;
+        }
+        clearTimeout(timeout);
+        pendingDiscoveries.delete(requestId);
+        resolve(null);
+      });
+    });
+  }
+
   function handleData(chunk) {
     readBuffer = Buffer.concat([readBuffer, chunk]);
     while (readBuffer.length >= FRAME_HEADER_BYTES) {
@@ -669,6 +745,17 @@ function createDesktopIpcClient({
           canHandle: false,
         },
       });
+      return;
+    }
+
+    if (envelope.type === "client-discovery-response") {
+      const requestId = requestIdKey(envelope.requestId);
+      const pendingDiscovery = requestId ? pendingDiscoveries.get(requestId) : null;
+      if (pendingDiscovery) {
+        pendingDiscoveries.delete(requestId);
+        clearTimeout(pendingDiscovery.timeout);
+        pendingDiscovery.resolve(Boolean(envelope.response?.canHandle));
+      }
       return;
     }
 
@@ -703,6 +790,11 @@ function createDesktopIpcClient({
       waiter.reject(new Error("Desktop IPC connection closed."));
     }
     pendingRequests.clear();
+    for (const pendingDiscovery of pendingDiscoveries.values()) {
+      clearTimeout(pendingDiscovery.timeout);
+      pendingDiscovery.resolve(null);
+    }
+    pendingDiscoveries.clear();
     onDisconnect();
   }
 
@@ -728,6 +820,7 @@ function createDesktopIpcClient({
   return {
     ensureConnected,
     sendRequest,
+    sendDiscoveryRequest,
     close,
   };
 }

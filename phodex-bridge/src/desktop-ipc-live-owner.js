@@ -484,12 +484,9 @@ function createDesktopIpcLiveOwner({
     }
 
     // Another Codex frontend is actively owning this stream. Drop bridge ownership
-    // so two owners do not fight over the same Desktop conversation state.
-    ownedThreadIds.delete(threadId);
-    dirtyThreadIds.delete(threadId);
-    lastBroadcastStatesByThreadId.delete(threadId);
-    fallbackTurnIdsByThreadId.delete(threadId);
-    pendingTurnStartParamsByThreadId.delete(threadId);
+    // and all cached conversation state so a later re-claim rehydrates fresh data
+    // instead of republishing stale turns and requests.
+    removeOwnedThread(threadId);
   }
 
   function isPeerOwnershipBroadcast(params) {
