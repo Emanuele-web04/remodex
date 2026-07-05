@@ -228,29 +228,20 @@ function createDesktopIpcActionFollower({
   }
 
   function onDisconnect() {
+    // Patch baselines are connection-scoped (Desktop re-sends a snapshot after
+    // reconnect), but the projector cache is not: keeping it lets the reconnect
+    // snapshot diff against already-mirrored content instead of replaying it.
     rawStatesByThreadId.clear();
-    conversationProjector.reset();
-    resolveAllProjectedActions();
     recoveringThreadIds.clear();
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
+    // Keep pending approval routes too: a transient disconnect proves nothing
+    // about the prompt's outcome, and falsely resolving it would dismiss a
+    // still-blocking approval on the phone. Reconnect snapshots reconcile them.
     // Keep held turns queued: a disconnect proves nothing about ownership. Their
     // hold timers route them through the bus (with a reconnect attempt), and only
     // a proven delivery failure falls back to the local app-server.
-  }
-
-  function resolveAllProjectedActions() {
-    for (const [requestId, route] of Array.from(pendingRoutesByRequestId.entries())) {
-      pendingRoutesByRequestId.delete(requestId);
-      sendApplicationResponse(JSON.stringify({
-        method: "serverRequest/resolved",
-        params: {
-          threadId: route.threadId,
-          requestId,
-        },
-      }));
-    }
   }
 
   // The bridge's own live owner just claimed this thread's stream, so drop stale
@@ -483,13 +474,7 @@ function createDesktopIpcActionFollower({
       }
 
       pendingRoutesByRequestId.delete(requestId);
-      sendApplicationResponse(JSON.stringify({
-        method: "serverRequest/resolved",
-        params: {
-          threadId,
-          requestId,
-        },
-      }));
+      sendApplicationResponse(JSON.stringify(projectedResolvedNotification(threadId, requestId)));
     }
 
     for (const action of actions) {
@@ -548,6 +533,20 @@ function createDesktopIpcActionFollower({
 
   function syncProjectedConversationState(threadId, nextState) {
     const output = conversationProjector.project(threadId, nextState);
+    if (output.type === "fullReplace") {
+      // Synthesized turn ids just became real: tell the phone to rebuild this
+      // thread from history instead of merging rows under stale synthetic ids.
+      sendApplicationResponse(JSON.stringify({
+        method: "thread/replaced",
+        params: {
+          threadId,
+          thread: cloneJSON(output.thread || null),
+          remodexDesktopMirror: true,
+          remodexDesktopIpcMirror: true,
+          remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+        },
+      }));
+    }
     for (const notification of output.notifications || []) {
       sendApplicationResponse(JSON.stringify(notification));
     }
@@ -602,13 +601,9 @@ function createDesktopIpcActionFollower({
     ipc.sendRequest(payload.method, payload.params)
       .then(() => {
         pendingRoutesByRequestId.delete(route.requestId);
-        sendApplicationResponse(JSON.stringify({
-          method: "serverRequest/resolved",
-          params: {
-            threadId: route.threadId,
-            requestId: route.requestId,
-          },
-        }));
+        sendApplicationResponse(JSON.stringify(
+          projectedResolvedNotification(route.threadId, route.requestId)
+        ));
       })
       .catch((error) => {
         console.warn(`${logPrefix} desktop action reply failed for ${route.threadId}: ${error.message}`);
@@ -1238,6 +1233,8 @@ function projectPendingDesktopAction(threadId, request) {
     params: {
       ...params,
       remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
       threadId: readString(params.threadId) || readString(params.thread_id) || threadId,
     },
   };
@@ -1284,6 +1281,21 @@ function isPatchChange(change) {
 
 function isRemodexLiveOwnerBroadcast(params) {
   return readString(params?.remodexOwnerSource) === REMODEX_LIVE_OWNER_SOURCE;
+}
+
+// Resolutions of Desktop-owned prompts are mirror events too; the tags let iOS
+// reconcile them without treating them as local runtime work.
+function projectedResolvedNotification(threadId, requestId) {
+  return {
+    method: "serverRequest/resolved",
+    params: {
+      threadId,
+      requestId,
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
+      remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+    },
+  };
 }
 
 function isPeerOwnershipSnapshot(params) {

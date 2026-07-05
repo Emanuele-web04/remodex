@@ -262,6 +262,9 @@ extension CodexService {
         case "thread/unarchived":
             handleThreadArchiveStateChanged(paramsObject, isArchived: false)
 
+        case "thread/replaced":
+            handleThreadReplaced(paramsObject)
+
         case "turn/started":
             handleTurnStarted(paramsObject)
 
@@ -385,10 +388,26 @@ extension CodexService {
         }
     }
 
+    // Mirrored metadata/lifecycle events describe list or prompt state, not live
+    // desktop work; they must never mark a thread as running.
+    private static let nonActivityDesktopMirrorMethods: Set<String> = [
+        "thread/archived",
+        "thread/unarchived",
+        "thread/replaced",
+        "thread/name/updated",
+        "thread/status/changed",
+        "thread/tokenUsage/updated",
+        "serverRequest/resolved",
+    ]
+
     private func noteDesktopMirroredActivityIfNeeded(
         method: String,
         paramsObject: IncomingParamsObject?
     ) {
+        if Self.nonActivityDesktopMirrorMethods.contains(method) {
+            return
+        }
+
         let isDesktopMirroredEvent = isDesktopMirroredBridgeEvent(paramsObject)
         let isMirrorActivityMethod = method.hasPrefix("item/")
             || method.hasPrefix("codex/event")
@@ -894,6 +913,16 @@ extension CodexService {
         }
 
         applyRemoteThreadArchiveState(threadId: threadId, isArchived: isArchived)
+    }
+
+    // The bridge rebuilt a mirrored thread under new canonical ids (synthetic
+    // turn ids became real), so refetch history instead of merging stale rows.
+    private func handleThreadReplaced(_ paramsObject: IncomingParamsObject?) {
+        guard let threadId = extractThreadID(from: paramsObject), !threadId.isEmpty else {
+            return
+        }
+
+        requestImmediateSync(threadId: threadId)
     }
 
     // Parses the real terminal outcome so UI can distinguish completion from interruption.

@@ -685,7 +685,15 @@ function startBridge({
     if (!method || parsed?.id == null) {
       return "";
     }
-    const threadId = extractThreadId(method, parsed.params) || "";
+    // extractThreadId only understands turn/thread start and completion params;
+    // archive, steer, interrupt, and compact requests need the generic fields so
+    // same-id requests for different threads never share a dedupe key.
+    const threadId = extractThreadId(method, parsed.params)
+      || readString(parsed?.params?.threadId)
+      || readString(parsed?.params?.thread_id)
+      || readString(parsed?.params?.conversationId)
+      || readString(parsed?.params?.conversation_id)
+      || "";
     return `${method}:${threadId}:${String(parsed.id)}`;
   }
 

@@ -56,6 +56,8 @@ test("projects desktop pending user input as an app-server request shape", () =>
       turnId: "turn-1",
       itemId: "item-1",
       remodexActionSource: "desktop-ipc-action-follower",
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
       questions: [{
         id: "q1",
         header: "Mode",
@@ -584,16 +586,25 @@ test("desktop conversation projector normalizes Desktop tool aliases for mobile 
     }],
   });
 
+  const startedItems = output.notifications
+    .filter((notification) => notification.method === "item/started")
+    .map((notification) => notification.params.item);
+  assert.deepEqual(
+    startedItems.map((item) => item.type),
+    ["toolCall", "toolCall", "toolCall"]
+  );
+  assert.deepEqual(
+    startedItems.map((item) => item.remodexDesktopIpcItemType),
+    ["mcpToolCall", "dynamicToolCall", "webSearch"]
+  );
+
+  // Only finished tools close at bootstrap; the running one keeps streaming.
   const completedItems = output.notifications
     .filter((notification) => notification.method === "item/completed")
     .map((notification) => notification.params.item);
   assert.deepEqual(
-    completedItems.map((item) => item.type),
-    ["toolCall", "toolCall", "toolCall"]
-  );
-  assert.deepEqual(
-    completedItems.map((item) => item.remodexDesktopIpcItemType),
-    ["mcpToolCall", "dynamicToolCall", "webSearch"]
+    completedItems.map((item) => item.id),
+    ["mcp-tool-alias", "web-search-alias"]
   );
 });
 
@@ -654,6 +665,226 @@ test("desktop conversation projector mirrors thread metadata changes", () => {
   );
   assert.equal(output.notifications[0].params.title, "New title");
   assert.deepEqual(output.notifications[1].params.status, { type: "active", activeFlags: [] });
+});
+
+test("desktop conversation projector mirrors token usage updates", () => {
+  const projector = createDesktopConversationProjector();
+  projector.project("thread-usage", {
+    turns: [{ turnId: "turn-usage", status: "completed", items: [] }],
+  });
+
+  const output = projector.project("thread-usage", {
+    latestTokenUsageInfo: {
+      totalTokens: 1200,
+      contextWindow: 200000,
+    },
+    turns: [{ turnId: "turn-usage", status: "completed", items: [] }],
+  });
+
+  assert.deepEqual(
+    output.notifications.map((notification) => notification.method),
+    ["thread/tokenUsage/updated"]
+  );
+  assert.deepEqual(output.notifications[0].params.usage, {
+    totalTokens: 1200,
+    contextWindow: 200000,
+  });
+  assert.equal(output.notifications[0].params.threadId, "thread-usage");
+  assert.equal(output.notifications[0].params.remodexDesktopMirror, true);
+});
+
+test("desktop conversation projector keeps running items open until they finish", () => {
+  const projector = createDesktopConversationProjector();
+  const bootstrap = projector.project("thread-running-item", {
+    turns: [{
+      turnId: "turn-running-item",
+      status: "inProgress",
+      items: [{
+        id: "command-running",
+        type: "commandExecution",
+        status: "inProgress",
+        command: "npm test",
+        aggregatedOutput: "",
+      }],
+    }],
+  });
+  assert.deepEqual(
+    bootstrap.notifications.map((notification) => notification.method),
+    ["thread/started", "turn/started", "item/started"]
+  );
+
+  const completed = projector.project("thread-running-item", {
+    turns: [{
+      turnId: "turn-running-item",
+      status: "inProgress",
+      items: [{
+        id: "command-running",
+        type: "commandExecution",
+        status: "completed",
+        command: "npm test",
+        aggregatedOutput: "ok\n",
+      }],
+    }],
+  });
+  assert.deepEqual(
+    completed.notifications.map((notification) => notification.method),
+    ["item/completed"]
+  );
+  assert.equal(completed.notifications[0].params.item.status, "completed");
+});
+
+test("desktop conversation projector reseeds evicted threads without replaying history", () => {
+  const projector = createDesktopConversationProjector({ maxCacheSize: 1 });
+  const snapshot = (threadId) => ({
+    turns: [{
+      turnId: `turn-${threadId}`,
+      status: "inProgress",
+      items: [{ id: `assistant-${threadId}`, type: "agentMessage", text: "hello" }],
+    }],
+  });
+
+  projector.project("thread-evict-a", snapshot("thread-evict-a"));
+  // Filling the cache with a second thread evicts the first.
+  projector.project("thread-evict-b", snapshot("thread-evict-b"));
+
+  const reseeded = projector.project("thread-evict-a", snapshot("thread-evict-a"));
+  assert.equal(reseeded.type, "baseline");
+  assert.deepEqual(reseeded.notifications, []);
+
+  // After the silent reseed, new activity flows again as ordinary diffs.
+  const followUp = projector.project("thread-evict-a", {
+    turns: [{
+      turnId: "turn-thread-evict-a",
+      status: "inProgress",
+      items: [{ id: "assistant-thread-evict-a", type: "agentMessage", text: "hello world" }],
+    }],
+  });
+  assert.deepEqual(
+    followUp.notifications.map((notification) => notification.method),
+    ["item/agentMessage/delta"]
+  );
+  assert.equal(followUp.notifications[0].params.delta, " world");
+});
+
+test("desktop IPC follower announces thread replacement when synthetic turn ids become real", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-full-replace-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-full-replace" },
+  }));
+  await waitFor(() => serverSocket);
+
+  // First snapshot carries a turn without any id, so the projector synthesizes one.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: "thread-full-replace",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            status: "inProgress",
+            items: [{ id: "assistant-replace", type: "agentMessage", text: "partial" }],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => message.method === "turn/started"));
+
+  // The next snapshot has the canonical turn id: the phone must be told to rebuild.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: "thread-full-replace",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            turnId: "turn-real-id",
+            status: "inProgress",
+            items: [{ id: "assistant-replace", type: "agentMessage", text: "partial" }],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+
+  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  const replaced = outbound.find((message) => message.method === "thread/replaced");
+  assert.equal(replaced.params.threadId, "thread-full-replace");
+  assert.equal(replaced.params.remodexDesktopMirror, true);
+  assert.equal(replaced.params.remodexDesktopIpcMirror, true);
+  assert.equal(replaced.params.thread.turns[0].turnId, "turn-real-id");
+
+  // The replacement bootstrap follows the announcement with the real turn id.
+  const replacedIndex = outbound.indexOf(replaced);
+  const followUpTurnStarted = outbound.slice(replacedIndex + 1)
+    .find((message) => message.method === "turn/started");
+  assert.equal(followUpTurnStarted.params.turnId, "turn-real-id");
+});
+
+test("desktop conversation projector bootstraps fresh after explicit removal", () => {
+  const projector = createDesktopConversationProjector({ maxCacheSize: 1 });
+  const snapshot = {
+    turns: [{
+      turnId: "turn-remove",
+      status: "inProgress",
+      items: [{ id: "assistant-remove", type: "agentMessage", text: "hello" }],
+    }],
+  };
+
+  projector.project("thread-remove", snapshot);
+  projector.remove("thread-remove");
+
+  const rebootstrapped = projector.project("thread-remove", snapshot);
+  assert.equal(rebootstrapped.type, "events");
+  assert.deepEqual(
+    rebootstrapped.notifications.map((notification) => notification.method),
+    ["thread/started", "turn/started", "item/started", "item/completed"]
+  );
 });
 
 test("projects Desktop conversation state into thread/read backfill shape", () => {
@@ -1255,7 +1486,7 @@ test("desktop IPC follower forwards pending actions and routes iOS replies back 
   });
 });
 
-test("desktop IPC follower resolves projected actions on IPC disconnect", async (t) => {
+test("desktop IPC follower keeps projected actions pending across IPC disconnects", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-disconnect-action-");
   let serverSocket = null;
 
@@ -1322,8 +1553,39 @@ test("desktop IPC follower resolves projected actions on IPC disconnect", async 
   });
   await waitFor(() => outbound.find((message) => message.id === "req-action-disconnect"));
 
-  serverSocket.destroy();
+  const previousSocket = serverSocket;
+  serverSocket = null;
+  previousSocket.destroy();
 
+  // A transient disconnect proves nothing about the prompt's outcome, so the
+  // phone-side approval must stay open instead of being falsely resolved.
+  await wait(150);
+  assert.equal(
+    outbound.some((message) => message.method === "serverRequest/resolved"
+      && message.params?.requestId === "req-action-disconnect"),
+    false
+  );
+
+  // Reconnect and deliver a snapshot where the prompt is gone: only now does the
+  // follower resolve it, tagged as a Desktop mirror event.
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-action-disconnect" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-action-disconnect",
+      change: {
+        type: "snapshot",
+        conversationState: { turns: [], requests: [] },
+      },
+    },
+  });
   await waitFor(
     () => outbound.find((message) => message.method === "serverRequest/resolved"
       && message.params?.requestId === "req-action-disconnect"),
@@ -1336,12 +1598,11 @@ test("desktop IPC follower resolves projected actions on IPC disconnect", async 
     params: {
       threadId: "thread-action-disconnect",
       requestId: "req-action-disconnect",
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
+      remodexActionSource: "desktop-ipc-action-follower",
     },
   });
-  assert.equal(follower.observeInbound(JSON.stringify({
-    id: "req-action-disconnect",
-    result: { answers: { q1: { answers: ["Yes"] } } },
-  })), false);
 });
 
 test("desktop IPC follower routes phone turns to Desktop-owned threads", async (t) => {

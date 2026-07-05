@@ -19,6 +19,9 @@ function createDesktopConversationProjector({
   maxCacheSize = 64,
 } = {}) {
   const cacheByThreadId = new Map();
+  // Threads whose cache was evicted for size were already mirrored to the phone;
+  // re-seeding them as a baseline avoids replaying their whole history again.
+  const evictedThreadIds = new Set();
 
   function project(threadId, rawState) {
     const normalizedThreadId = readString(threadId);
@@ -36,7 +39,14 @@ function createDesktopConversationProjector({
 
     let notifications;
     let type = "events";
-    if (!previousProjection) {
+    if (!previousProjection && evictedThreadIds.has(normalizedThreadId)) {
+      // Previously mirrored but evicted: reseed silently so the phone does not
+      // receive a duplicate bootstrap replay of already-delivered history.
+      evictedThreadIds.delete(normalizedThreadId);
+      type = "baseline";
+      notifications = [];
+      textSnapshots = snapshotItemTexts(nextProjection);
+    } else if (!previousProjection) {
       notifications = bootstrapNotifications(normalizedThreadId, nextProjection);
       textSnapshots = snapshotItemTexts(nextProjection);
     } else if (hasSynthesizedTurnIds(previousProjection) && !hasSynthesizedTurnIds(nextProjection)) {
@@ -86,11 +96,16 @@ function createDesktopConversationProjector({
   }
 
   function remove(threadId) {
-    cacheByThreadId.delete(readString(threadId));
+    const normalizedThreadId = readString(threadId);
+    cacheByThreadId.delete(normalizedThreadId);
+    // Explicit removals are semantic (archive, ownership change): a later
+    // re-follow of this thread should bootstrap fresh, not stay silent.
+    evictedThreadIds.delete(normalizedThreadId);
   }
 
   function reset() {
     cacheByThreadId.clear();
+    evictedThreadIds.clear();
   }
 
   function evictOldest() {
@@ -101,6 +116,7 @@ function createDesktopConversationProjector({
         return;
       }
       cacheByThreadId.delete(oldest[0]);
+      evictedThreadIds.add(oldest[0]);
     }
   }
 
@@ -141,6 +157,7 @@ function projectConversationState(threadId, rawState, { now = () => Date.now() }
     agentNickname: readString(rawState?.agentNickname) || readString(rawState?.agent_nickname) || null,
     agentRole: readString(rawState?.agentRole) || readString(rawState?.agent_role) || null,
     status: resolveThreadStatus(rawState, activeTurnId),
+    tokenUsage: cloneJSON(rawState?.latestTokenUsageInfo ?? rawState?.latest_token_usage_info ?? null),
     turns,
   };
 
@@ -218,7 +235,11 @@ function bootstrapNotifications(threadId, projection, { includeThreadStarted = t
   notifications.push(turnStartedNotification(threadId, activeTurn));
   for (const item of activeTurn.items) {
     notifications.push(itemStartedNotification(threadId, activeTurn.id, item));
-    notifications.push(itemCompletedNotification(threadId, activeTurn.id, item));
+    // Streaming items (running commands, in-flight tools) must not be closed
+    // prematurely; later diffs emit their deltas and eventual completion.
+    if (isTerminalItemState(item)) {
+      notifications.push(itemCompletedNotification(threadId, activeTurn.id, item));
+    }
   }
   return notifications;
 }
@@ -263,6 +284,18 @@ function diffThreadMetadata(previousThread, nextThread) {
       params: {
         threadId: nextThread.id,
         status: cloneJSON(nextThread.status || null),
+      },
+    }));
+  }
+
+  if (nextThread.tokenUsage != null
+    && JSON.stringify(previousThread.tokenUsage || null) !== JSON.stringify(nextThread.tokenUsage)) {
+    notifications.push(tagNotification({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: nextThread.id,
+        usage: cloneJSON(nextThread.tokenUsage),
+        tokenUsage: cloneJSON(nextThread.tokenUsage),
       },
     }));
   }
@@ -320,7 +353,11 @@ function diffTurnItems(threadId, previousProjection, nextProjection, textSnapsho
       const previousItem = previousItemsById.get(itemId) || null;
       if (!previousItem) {
         notifications.push(itemStartedNotification(threadId, nextTurn.id, nextItem));
-        notifications.push(itemCompletedNotification(threadId, nextTurn.id, nextItem));
+        // Only close items that are actually finished; a newly observed running
+        // item keeps streaming through later diffs on the active turn.
+        if (!isActiveTurn || isTerminalItemState(nextItem)) {
+          notifications.push(itemCompletedNotification(threadId, nextTurn.id, nextItem));
+        }
         continue;
       }
       if (JSON.stringify(previousItem) === JSON.stringify(nextItem)) {
@@ -633,6 +670,21 @@ function isActiveTurnStatus(value) {
     || normalizeToken(value) === "running"
     || normalizeToken(value) === "active"
     || normalizeToken(value) === "processing";
+}
+
+// Items without an explicit status (messages, reasoning) are complete as
+// delivered; only explicitly running items must stay open for streaming.
+function isTerminalItemState(item) {
+  const status = normalizeToken(item?.status);
+  if (!status) {
+    return true;
+  }
+  return status !== "inprogress"
+    && status !== "running"
+    && status !== "active"
+    && status !== "processing"
+    && status !== "pending"
+    && status !== "queued";
 }
 
 function hasSynthesizedTurnIds(projection) {

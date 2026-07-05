@@ -643,6 +643,26 @@ test("bridge maps Desktop IPC archive broadcasts to phone notifications", async 
   assert.equal(archiveMessage.params.threadId, "thread-ipc-archive");
   assert.equal(archiveMessage.params.cwd, "/repo");
   assert.equal(archiveMessage.params.remodexDesktopIpcMirror, true);
+
+  writeFrame(ipcServerSocket, {
+    type: "broadcast",
+    method: "thread-unarchived",
+    sourceClientId: "desktop",
+    version: 2,
+    params: {
+      hostId: "desktop",
+      conversationId: "thread-ipc-archive",
+      cwd: "/repo",
+    },
+  });
+
+  const unarchiveMessage = await waitForMessage(
+    relayMessages,
+    (message) => message.method === "thread/unarchived"
+  );
+  assert.equal(unarchiveMessage.params.threadId, "thread-ipc-archive");
+  assert.equal(unarchiveMessage.params.cwd, "/repo");
+  assert.equal(unarchiveMessage.params.remodexDesktopIpcMirror, true);
 });
 
 test("bridge observes held desktop IPC turns only after local fallback", async (t) => {
