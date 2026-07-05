@@ -1080,6 +1080,168 @@ test("live owner normalizes follower start-turn params before app-server request
   }]);
 });
 
+test("live owner keeps ownership when peer sends non-owner patch broadcasts", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-peer-patch-");
+  const codexRequests = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    async sendCodexRequest(method, params) {
+      codexRequests.push({ method, params });
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-peer-patch", input: [] },
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-follower",
+    version: 6,
+    params: {
+      conversationId: "thread-peer-patch",
+      change: {
+        type: "patches",
+        patches: [{ op: "add", path: ["requests", 0], value: { id: "peer-request" } }],
+      },
+    },
+  });
+  await wait(25);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "peer-patch-start-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-start-turn",
+    params: {
+      conversationId: "thread-peer-patch",
+      turnStartParams: {
+        input: [{ type: "text", text: "still bridge-owned" }],
+      },
+    },
+  });
+  const response = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "peer-patch-start-1"
+  );
+  assert.equal(response.resultType, "success");
+  assert.deepEqual(codexRequests.filter((request) => request.method === "turn/start").at(-1), {
+    method: "turn/start",
+    params: {
+      threadId: "thread-peer-patch",
+      input: [{ type: "text", text: "still bridge-owned" }],
+    },
+  });
+});
+
+test("live owner yields ownership when a peer sends an untagged snapshot", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-peer-snapshot-");
+  const codexRequests = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    async sendCodexRequest(method, params) {
+      codexRequests.push({ method, params });
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-peer-snapshot", input: [] },
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    version: 6,
+    params: {
+      conversationId: "thread-peer-snapshot",
+      change: {
+        type: "snapshot",
+        conversationState: { turns: [], requests: [] },
+      },
+    },
+  });
+  await wait(25);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "peer-snapshot-start-1",
+    sourceClientId: "desktop",
+    method: "thread-follower-start-turn",
+    params: {
+      conversationId: "thread-peer-snapshot",
+      turnStartParams: {
+        input: [{ type: "text", text: "should not route" }],
+      },
+    },
+  });
+  const response = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "peer-snapshot-start-1"
+  );
+  assert.equal(response.resultType, "error");
+  assert.equal(codexRequests.filter((request) => request.method === "turn/start").length, 0);
+});
+
 test("live owner routes follower approval responses back to app-server", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-approval-");
   const rawCodexMessages = [];
@@ -1182,6 +1344,71 @@ test("conversation adapter tracks requests and resolved notifications", () => {
   });
   assert.deepEqual(update, { threadId: "thread-adapter", changed: true });
   assert.equal(conversations.get("thread-adapter").requests.length, 0);
+});
+
+test("conversation adapter replaces synthetic user prompt with canonical userMessage items", () => {
+  const conversations = new Map();
+  const pendingTurnStartParamsByThreadId = new Map([[
+    "thread-canonical-user",
+    {
+      threadId: "thread-canonical-user",
+      input: [{ type: "input_text", text: "build the canonical path" }],
+      cwd: "/tmp/canonical-user",
+    },
+  ]]);
+  const owned = new Set(["thread-canonical-user"]);
+  const now = () => 42;
+
+  let update = applyAppServerMessageToConversationState({
+    conversations,
+    pendingTurnStartParamsByThreadId,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-canonical-user",
+        turn: {
+          id: "turn-canonical-user",
+          items: [],
+          status: "inProgress",
+          error: null,
+          startedAt: 1,
+        },
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-canonical-user", changed: true });
+  assert.deepEqual(
+    conversations.get("thread-canonical-user").turns[0].items.map((item) => item.id),
+    ["user-message-turn-canonical-user"]
+  );
+
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/started",
+      params: {
+        threadId: "thread-canonical-user",
+        turnId: "turn-canonical-user",
+        item: {
+          id: "canonical-user-message",
+          type: "userMessage",
+          content: [{ type: "text", text: "build the canonical path" }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-canonical-user", changed: true });
+  const userMessages = conversations.get("thread-canonical-user").turns[0].items
+    .filter((item) => item.type === "userMessage");
+  assert.deepEqual(userMessages, [{
+    id: "canonical-user-message",
+    type: "userMessage",
+    content: [{ type: "text", text: "build the canonical path" }],
+  }]);
 });
 
 test("conversation adapter keeps a stable fallback turn until a real turn id arrives", () => {

@@ -1174,6 +1174,106 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
   }
 });
 
+test("desktop IPC follower falls back locally when Desktop follower routing fails", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-local-fallback-");
+  const serverFrames = [];
+  const localForwards = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.method === "thread-follower-start-turn") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "error",
+          method: frame.method,
+          handledByClientId: "desktop",
+          error: "Desktop follower is gone",
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-route-fallback" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: "thread-route-fallback",
+      change: {
+        type: "snapshot",
+        conversationState: { turns: [], requests: [] },
+      },
+    },
+  });
+  await wait(25);
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-route-fallback",
+    method: "turn/start",
+    params: {
+      threadId: "thread-route-fallback",
+      input: [{ type: "input_text", text: "continue locally after failure" }],
+    },
+  }));
+  assert.equal(handled, true);
+  await waitFor(() => localForwards.length === 1);
+  assert.equal(localForwards[0].id, "phone-turn-start-route-fallback");
+  assert.equal(localForwards[0].method, "turn/start");
+  assert.equal(outbound.some((message) => message.id === "phone-turn-start-route-fallback"), false);
+
+  const handledAgain = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-route-fallback-2",
+    method: "turn/start",
+    params: {
+      threadId: "thread-route-fallback",
+      input: [{ type: "input_text", text: "stay local" }],
+    },
+  }));
+  assert.equal(handledAgain, false);
+  assert.equal(
+    serverFrames.filter((frame) => frame.method === "thread-follower-start-turn").length,
+    1
+  );
+});
+
 test("desktop IPC follower mirrors live assistant text growth from desktop state", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-assistant-delta-");
   let serverSocket = null;

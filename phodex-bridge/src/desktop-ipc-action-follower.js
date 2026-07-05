@@ -376,6 +376,7 @@ function createDesktopIpcActionFollower({
 
     if (method === "turn/start") {
       return {
+        threadId,
         method: "thread-follower-start-turn",
         params: {
           conversationId: threadId,
@@ -385,6 +386,7 @@ function createDesktopIpcActionFollower({
     }
     if (method === "turn/steer") {
       return {
+        threadId,
         method: "thread-follower-steer-turn",
         params: {
           conversationId: threadId,
@@ -395,6 +397,7 @@ function createDesktopIpcActionFollower({
     }
     if (method === "turn/interrupt") {
       return {
+        threadId,
         method: "thread-follower-interrupt-turn",
         params: {
           conversationId: threadId,
@@ -404,6 +407,7 @@ function createDesktopIpcActionFollower({
     }
     if (method === "thread/compact/start") {
       return {
+        threadId,
         method: "thread-follower-compact-thread",
         params: {
           conversationId: threadId,
@@ -426,6 +430,14 @@ function createDesktopIpcActionFollower({
       })
       .catch((error) => {
         console.warn(`${logPrefix} desktop follower request failed: ${error.message}`);
+        if (typeof forwardToLocalCodex === "function") {
+          const threadId = readString(route.threadId) || readString(route.params?.conversationId);
+          if (threadId) {
+            releaseDesktopThreadState(threadId);
+          }
+          forwardToLocalCodex(JSON.stringify(originalMessage));
+          return;
+        }
         sendApplicationResponse(JSON.stringify({
           id: originalMessage.id,
           error: {

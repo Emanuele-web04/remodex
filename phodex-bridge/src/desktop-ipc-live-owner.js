@@ -479,12 +479,25 @@ function createDesktopIpcLiveOwner({
     if (envelope.sourceClientId && envelope.sourceClientId === ipc.clientId) {
       return;
     }
+    if (!isPeerOwnershipBroadcast(params)) {
+      return;
+    }
 
     // Another Codex frontend is actively owning this stream. Drop bridge ownership
     // so two owners do not fight over the same Desktop conversation state.
     ownedThreadIds.delete(threadId);
     dirtyThreadIds.delete(threadId);
     lastBroadcastStatesByThreadId.delete(threadId);
+    fallbackTurnIdsByThreadId.delete(threadId);
+    pendingTurnStartParamsByThreadId.delete(threadId);
+  }
+
+  function isPeerOwnershipBroadcast(params) {
+    if (readString(params?.remodexOwnerSource) === REMODEX_LIVE_OWNER_SOURCE) {
+      return false;
+    }
+    const changeType = normalizeToken(params?.change?.type);
+    return changeType === "snapshot";
   }
 
   function canHandleFollowerRequest(envelope) {
@@ -1210,11 +1223,18 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
 }
 
 function turnHasUserMessageItem(turn) {
-  return turn.items.some((item) => {
-    const type = normalizeToken(item?.type);
-    return type === "usermessage"
-      || (type === "message" && normalizeToken(item?.role) === "user");
-  });
+  return turn.items.some((item) => isUserMessageItem(item));
+}
+
+function isUserMessageItem(item) {
+  const type = normalizeToken(item?.type);
+  return type === "usermessage"
+    || (type === "message" && normalizeToken(item?.role) === "user");
+}
+
+function isSyntheticUserMessageItem(turn, item) {
+  const turnId = readString(turn?.turnId) || readString(turn?.id) || "turn";
+  return isUserMessageItem(item) && readString(item?.id) === `user-message-${turnId}`;
 }
 
 function userMessageContentFromTurnInput(entry) {
@@ -1299,6 +1319,11 @@ function upsertItem(turn, item) {
       ...cloneJSON(item),
     };
     return;
+  }
+  if (isUserMessageItem(item)) {
+    turn.items = turn.items.filter((candidate) => (
+      !isSyntheticUserMessageItem(turn, candidate)
+    ));
   }
   turn.items.push(cloneJSON(item));
 }
