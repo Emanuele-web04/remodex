@@ -15,6 +15,7 @@ const {
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
   cloneJSON,
+  conversationSnapshotShowsActiveTurn,
   normalizeToken,
   readString,
   requestIdKey,
@@ -62,6 +63,10 @@ function createDesktopIpcActionFollower({
   sendApplicationResponse,
   readConversationState = null,
   forwardToLocalCodex = null,
+  // Synchronous authority check against the bridge's own live owner: threads
+  // streamed by the local app-server must never be held, served, or routed as
+  // Desktop-owned, regardless of what echoes arrive over the IPC bus.
+  isLocallyOwnedThread = () => false,
   normalizeTurnStartParams = (params) => params,
   logPrefix = "[remodex]",
   socketPath = resolveDefaultIpcSocketPath(),
@@ -77,9 +82,6 @@ function createDesktopIpcActionFollower({
     requestTimeoutMs,
     logPrefix,
     onEnvelope,
-    onConnected() {
-      probeHeldFollowerRequests();
-    },
     onDisconnect,
   });
   const rawStatesByThreadId = new Map();
@@ -92,9 +94,6 @@ function createDesktopIpcActionFollower({
   const liveOwnerThreadIds = new Set();
   const heldFollowerRequestsByThreadId = new Map();
   const ownershipProbeDeadlinesByThreadId = new Map();
-  const pendingOwnershipProbeTokensByThreadId = new Map();
-  const desktopOwnedByProbeThreadIds = new Set();
-  let nextOwnershipProbeToken = 0;
 
   function observeInbound(rawMessage, parsedMessage = null) {
     const message = parsedMessage ?? safeParseJSON(rawMessage);
@@ -113,7 +112,6 @@ function createDesktopIpcActionFollower({
       }
       if (route && shouldHoldFollowerRequest(message, route.threadId)) {
         holdFollowerRequest(route.threadId, rawMessage);
-        probeDesktopOwnership(route);
         return true;
       }
     }
@@ -132,7 +130,9 @@ function createDesktopIpcActionFollower({
     }
 
     activeThreadIds.add(threadId);
-    if (!rawStatesByThreadId.has(threadId) && !liveOwnerThreadIds.has(threadId)) {
+    if (!rawStatesByThreadId.has(threadId)
+      && !liveOwnerThreadIds.has(threadId)
+      && !isLocallyOwnedThread(threadId)) {
       ownershipProbeDeadlinesByThreadId.set(threadId, now() + ownershipProbeTimeoutMs);
     }
     ipc.ensureConnected();
@@ -149,8 +149,6 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     liveOwnerThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
-    pendingOwnershipProbeTokensByThreadId.clear();
-    desktopOwnedByProbeThreadIds.clear();
     for (const queue of heldFollowerRequestsByThreadId.values()) {
       for (const entry of queue) {
         clearTimeout(entry.timer);
@@ -186,12 +184,15 @@ function createDesktopIpcActionFollower({
     if (!threadId) {
       return;
     }
-    const peerOwnershipSnapshot = isPeerOwnershipSnapshot(params);
-    if (peerOwnershipSnapshot) {
+    if (isPeerOwnershipSnapshot(params)) {
+      // Mirrors the live owner's yield heuristic: only a snapshot showing an
+      // actively running peer turn releases the local-ownership guard.
       liveOwnerThreadIds.delete(threadId);
       ownershipProbeDeadlinesByThreadId.delete(threadId);
-      desktopOwnedByProbeThreadIds.delete(threadId);
-    } else if (liveOwnerThreadIds.has(threadId)) {
+    } else if (liveOwnerThreadIds.has(threadId) || isLocallyOwnedThread(threadId)) {
+      // Idle Desktop echoes of a locally-streamed thread must not become
+      // follower state: they would shadow the app-server as the source for
+      // reads and mirror ghost rows the phone already has.
       return;
     }
     if (!activeThreadIds.has(threadId)) {
@@ -248,8 +249,6 @@ function createDesktopIpcActionFollower({
     recoveringThreadIds.clear();
     baselineRecoveryStateByThreadId.clear();
     queuedChangesByThreadId.clear();
-    pendingOwnershipProbeTokensByThreadId.clear();
-    desktopOwnedByProbeThreadIds.clear();
     // Keep pending approval routes too: a transient disconnect proves nothing
     // about the prompt's outcome, and falsely resolving it would dismiss a
     // still-blocking approval on the phone. Reconnect snapshots reconcile them.
@@ -263,8 +262,6 @@ function createDesktopIpcActionFollower({
   function releaseDesktopThreadState(threadId) {
     liveOwnerThreadIds.add(threadId);
     ownershipProbeDeadlinesByThreadId.delete(threadId);
-    pendingOwnershipProbeTokensByThreadId.delete(threadId);
-    desktopOwnedByProbeThreadIds.delete(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
@@ -279,8 +276,6 @@ function createDesktopIpcActionFollower({
     liveOwnerThreadIds.delete(threadId);
     activeThreadIds.delete(threadId);
     ownershipProbeDeadlinesByThreadId.delete(threadId);
-    pendingOwnershipProbeTokensByThreadId.delete(threadId);
-    desktopOwnedByProbeThreadIds.delete(threadId);
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
@@ -291,7 +286,8 @@ function createDesktopIpcActionFollower({
 
   // A just-resumed Desktop-owned thread has no snapshot yet, so hold phone turn
   // requests briefly instead of racing them into the local app-server. Holding is
-  // bounded to a short window after resume so purely local threads stay fast.
+  // bounded to a short window after resume so purely local threads stay fast, and
+  // never applies to threads the bridge's own app-server stream owns.
   function shouldHoldFollowerRequest(message, threadId) {
     if (typeof forwardToLocalCodex !== "function" || message?.id == null) {
       return false;
@@ -299,7 +295,8 @@ function createDesktopIpcActionFollower({
     if (!threadId
       || !activeThreadIds.has(threadId)
       || rawStatesByThreadId.has(threadId)
-      || liveOwnerThreadIds.has(threadId)) {
+      || liveOwnerThreadIds.has(threadId)
+      || isLocallyOwnedThread(threadId)) {
       return false;
     }
     const probeDeadline = ownershipProbeDeadlinesByThreadId.get(threadId);
@@ -310,66 +307,17 @@ function createDesktopIpcActionFollower({
     return true;
   }
 
-  // Asks the IPC bus whether any client owns this thread so held requests resolve
-  // as soon as possible instead of waiting out the full post-resume window.
-  function probeDesktopOwnership(route) {
-    const threadId = route.threadId;
-    if (pendingOwnershipProbeTokensByThreadId.has(threadId)) {
-      return;
-    }
-    const probeToken = ++nextOwnershipProbeToken;
-    pendingOwnershipProbeTokensByThreadId.set(threadId, probeToken);
-    ipc.sendDiscoveryRequest({
-      type: "request",
-      method: route.method,
-      // Codex Desktop rejects discovery unless the nested request version matches
-      // the method version, so mirror the normal request envelope here.
-      version: METHOD_VERSION_BY_NAME.get(route.method) || 1,
-      params: route.params,
-    }, ownershipProbeTimeoutMs)
-      .then((canHandle) => {
-        if (pendingOwnershipProbeTokensByThreadId.get(threadId) !== probeToken) {
-          return;
-        }
-        pendingOwnershipProbeTokensByThreadId.delete(threadId);
-        if (liveOwnerThreadIds.has(threadId)) {
-          return;
-        }
-        if (canHandle === true) {
-          desktopOwnedByProbeThreadIds.add(threadId);
-          releaseHeldFollowerRequests(threadId, { toDesktop: true });
-          return;
-        }
-        // A negative discovery answer only means no currently connected client
-        // claimed the request. Keep holding so the bounded timer can route the
-        // request through the bus and only fall back locally after no-client-found.
-      });
-  }
-
-  // IPC may finish connecting after the first probe returned no answer; retry
-  // still-held phone turns once the bus can actually discover peer owners.
-  function probeHeldFollowerRequests() {
-    for (const [threadId, queue] of heldFollowerRequestsByThreadId.entries()) {
-      if (!queue || queue.length === 0 || liveOwnerThreadIds.has(threadId)) {
-        continue;
-      }
-      const message = safeParseJSON(queue[0].rawMessage);
-      const route = message ? buildDesktopFollowerRoute(message) : null;
-      if (route && shouldHoldFollowerRequest(message, threadId)) {
-        probeDesktopOwnership(route);
-      }
-    }
-  }
-
+  // Only a live Desktop snapshot stream proves Desktop ownership. Discovery
+  // answers and bus probes are not evidence: Desktop replies canHandle for
+  // conversations it merely has resumed, which hijacked phone-driven turns.
   function isDesktopRoutableThread(threadId) {
     return !liveOwnerThreadIds.has(threadId)
-      && (rawStatesByThreadId.has(threadId) || desktopOwnedByProbeThreadIds.has(threadId));
+      && !isLocallyOwnedThread(threadId)
+      && rawStatesByThreadId.has(threadId);
   }
 
   function holdFollowerRequest(threadId, rawMessage) {
     const probeDeadline = ownershipProbeDeadlinesByThreadId.get(threadId) || 0;
-    const message = safeParseJSON(rawMessage);
-    const method = readString(message?.method);
     const entry = {
       rawMessage,
       timer: setTimeout(() => {
@@ -382,49 +330,15 @@ function createDesktopIpcActionFollower({
         if (queue.length === 0) {
           heldFollowerRequestsByThreadId.delete(threadId);
         }
-        routeExpiredHeldRequestThroughBus(rawMessage);
+        // No Desktop snapshot arrived within the window: the local app-server is
+        // the authoritative runtime. Never divert unproven turns over the bus.
+        forwardToLocalCodex(rawMessage);
       }, Math.max(0, probeDeadline - now())),
     };
     entry.timer.unref?.();
     const queue = heldFollowerRequestsByThreadId.get(threadId) || [];
-    if (method === "turn/start") {
-      rejectQueuedHeldTurnStarts(queue);
-    }
     queue.push(entry);
     heldFollowerRequestsByThreadId.set(threadId, queue);
-  }
-
-  function rejectQueuedHeldTurnStarts(queue) {
-    for (let index = queue.length - 1; index >= 0; index -= 1) {
-      const entry = queue[index];
-      const message = safeParseJSON(entry.rawMessage);
-      if (readString(message?.method) !== "turn/start") {
-        continue;
-      }
-      queue.splice(index, 1);
-      clearTimeout(entry.timer);
-      rejectHeldFollowerRequest(message, "Superseded by a newer held turn/start request.");
-    }
-  }
-
-  // Codex Desktop's real IPC router ignores client-origin discovery probes, so an
-  // unanswered probe proves nothing. Route the expired request through the bus as
-  // a normal request: the router discovers a Desktop owner itself, and a proven
-  // no-handler error falls back to the local app-server via the delivery-failure
-  // path instead of double-running the turn on both runtimes.
-  function routeExpiredHeldRequestThroughBus(rawMessage) {
-    const message = safeParseJSON(rawMessage);
-    const route = message ? buildDesktopFollowerRoute(message) : null;
-    if (route) {
-      // The request is being routed definitively now, so a late discovery answer
-      // must not retroactively mark the thread Desktop-owned.
-      pendingOwnershipProbeTokensByThreadId.delete(route.threadId);
-    }
-    if (!route || liveOwnerThreadIds.has(route.threadId)) {
-      forwardToLocalCodex(rawMessage);
-      return;
-    }
-    submitDesktopFollowerRequest(route, message);
   }
 
   function releaseHeldFollowerRequests(threadId, { toDesktop } = {}) {
@@ -435,22 +349,25 @@ function createDesktopIpcActionFollower({
     }
 
     heldFollowerRequestsByThreadId.delete(threadId);
-    let releasedTurnStart = false;
+    let routedTurnStartToDesktop = false;
     for (const entry of queue) {
       clearTimeout(entry.timer);
       const originalMessage = safeParseJSON(entry.rawMessage);
-      if (readString(originalMessage?.method) === "turn/start") {
-        if (releasedTurnStart) {
-          rejectHeldFollowerRequest(originalMessage, "Superseded by another held turn/start request.");
-          continue;
-        }
-        releasedTurnStart = true;
-      }
+      const isTurnStart = readString(originalMessage?.method) === "turn/start";
       const message = toDesktop ? originalMessage : null;
       const route = message ? buildDesktopFollowerRoute(message) : null;
       if (route && isDesktopRoutableThread(route.threadId)) {
+        // Desktop runs one turn at a time; a second held turn/start would just
+        // fail there, so only the first one routes and the rest are rejected.
+        if (isTurnStart && routedTurnStartToDesktop) {
+          rejectHeldFollowerRequest(originalMessage, "Superseded by another held turn/start request.");
+          continue;
+        }
+        routedTurnStartToDesktop = routedTurnStartToDesktop || isTurnStart;
         submitDesktopFollowerRequest(route, message);
       } else {
+        // Local release preserves order and forwards everything: the app-server
+        // applies its own queueing/steering semantics like a direct send would.
         forwardToLocalCodex?.(entry.rawMessage);
       }
     }
@@ -519,7 +436,7 @@ function createDesktopIpcActionFollower({
       return false;
     }
     const threadId = readThreadId(message.params);
-    if (!threadId || liveOwnerThreadIds.has(threadId)) {
+    if (!threadId || liveOwnerThreadIds.has(threadId) || isLocallyOwnedThread(threadId)) {
       return false;
     }
     const rawState = rawStatesByThreadId.get(threadId);
@@ -860,7 +777,6 @@ function createDesktopIpcClient({
   requestTimeoutMs,
   logPrefix,
   onEnvelope,
-  onConnected,
   onDisconnect,
 }) {
   let socket = null;
@@ -868,7 +784,6 @@ function createDesktopIpcClient({
   let isConnecting = false;
   let readBuffer = Buffer.alloc(0);
   const pendingRequests = new Map();
-  const pendingDiscoveries = new Map();
 
   function ensureConnected() {
     if (socket || isConnecting) {
@@ -884,7 +799,6 @@ function createDesktopIpcClient({
       sendRequest("initialize", { clientType: "remodex-bridge" })
         .then((result) => {
           clientId = readString(result?.clientId) || clientId;
-          onConnected?.(clientId);
         })
         .catch((error) => {
           console.warn(`${logPrefix} desktop IPC initialize failed: ${error.message}`);
@@ -941,41 +855,6 @@ function createDesktopIpcClient({
     });
   }
 
-  // Resolves true/false from a discovery answer, or null when nobody answers in
-  // time, so callers can fall back to their own timers.
-  function sendDiscoveryRequest(request, timeoutMs) {
-    ensureConnected();
-    if (!socket || socket.destroyed) {
-      return Promise.resolve(null);
-    }
-
-    const requestId = `remodex-discovery-${now().toString(36)}-${Math.random().toString(16).slice(2)}`;
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        pendingDiscoveries.delete(requestId);
-        resolve(null);
-      }, timeoutMs);
-      timeout.unref?.();
-
-      pendingDiscoveries.set(requestId, {
-        resolve,
-        timeout,
-      });
-      writeEnvelope({
-        type: "client-discovery-request",
-        requestId,
-        request,
-      }, (error) => {
-        if (!error) {
-          return;
-        }
-        clearTimeout(timeout);
-        pendingDiscoveries.delete(requestId);
-        resolve(null);
-      });
-    });
-  }
-
   function handleData(chunk) {
     readBuffer = Buffer.concat([readBuffer, chunk]);
     while (readBuffer.length >= FRAME_HEADER_BYTES) {
@@ -1006,17 +885,6 @@ function createDesktopIpcClient({
           canHandle: false,
         },
       });
-      return;
-    }
-
-    if (envelope.type === "client-discovery-response") {
-      const requestId = requestIdKey(envelope.requestId);
-      const pendingDiscovery = requestId ? pendingDiscoveries.get(requestId) : null;
-      if (pendingDiscovery) {
-        pendingDiscoveries.delete(requestId);
-        clearTimeout(pendingDiscovery.timeout);
-        pendingDiscovery.resolve(Boolean(envelope.response?.canHandle));
-      }
       return;
     }
 
@@ -1058,11 +926,6 @@ function createDesktopIpcClient({
       waiter.reject(new Error("Desktop IPC connection closed."));
     }
     pendingRequests.clear();
-    for (const pendingDiscovery of pendingDiscoveries.values()) {
-      clearTimeout(pendingDiscovery.timeout);
-      pendingDiscovery.resolve(null);
-    }
-    pendingDiscoveries.clear();
     onDisconnect();
   }
 
@@ -1088,7 +951,6 @@ function createDesktopIpcClient({
   return {
     ensureConnected,
     sendRequest,
-    sendDiscoveryRequest,
     close,
   };
 }
@@ -1369,7 +1231,9 @@ function projectedResolvedNotification(threadId, requestId) {
 }
 
 function isPeerOwnershipSnapshot(params) {
-  return !isRemodexLiveOwnerBroadcast(params) && normalizeToken(params?.change?.type) === "snapshot";
+  return !isRemodexLiveOwnerBroadcast(params)
+    && normalizeToken(params?.change?.type) === "snapshot"
+    && conversationSnapshotShowsActiveTurn(params?.change);
 }
 
 function markDeliveryFailureError(error) {

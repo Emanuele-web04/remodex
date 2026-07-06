@@ -10,6 +10,7 @@ const {
   CLIENT_STATUS_CHANGED,
   DESKTOP_IPC_METHOD_VERSIONS: METHOD_VERSION_BY_NAME,
   cloneJSON,
+  conversationSnapshotShowsActiveTurn,
   isPlainJSONObject,
   normalizeToken,
   readString,
@@ -207,7 +208,11 @@ function createDesktopIpcLiveOwner({
       return;
     }
     if (method === "thread/unsubscribe") {
-      removeOwnedThread(threadId, { broadcastRemoval: true, reason: method });
+      // The phone leaving the screen does not release the thread: the local
+      // app-server session is still authoritative, and dropping ownership here
+      // let fallback mirrors and Desktop routing corrupt the timeline on the
+      // next reopen. Only thread/archive (or a peer actively running the
+      // conversation) releases bridge ownership.
       return;
     }
     if (method === "thread/unarchive") {
@@ -866,8 +871,14 @@ function createDesktopIpcLiveOwner({
     if (readString(params?.remodexOwnerSource) === REMODEX_LIVE_OWNER_SOURCE) {
       return false;
     }
-    const changeType = normalizeToken(params?.change?.type);
-    return changeType === "snapshot";
+    if (normalizeToken(params?.change?.type) !== "snapshot") {
+      return false;
+    }
+    // Desktop also broadcasts idle snapshots for conversations the user merely
+    // viewed (and re-broadcasts them when clients reconnect). Treating those as
+    // ownership claims silently handed phone-driven threads to Desktop; only a
+    // snapshot proving the peer runtime is executing a turn is a real claim.
+    return conversationSnapshotShowsActiveTurn(params.change);
   }
 
   function canHandleFollowerRequest(envelope) {

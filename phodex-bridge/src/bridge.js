@@ -278,6 +278,9 @@ function startBridge({
         observeDesktopIpcLiveOwnerInbound(rawMessage);
         forwardInboundRequestToCodex(rawMessage);
       },
+      // Threads streamed by the bridge's own app-server must never be held,
+      // served from Desktop echoes, or routed over the IPC bus.
+      isLocallyOwnedThread: (threadId) => Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId)),
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
     })

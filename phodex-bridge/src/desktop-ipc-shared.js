@@ -134,6 +134,19 @@ function readUserItemText(item) {
     .join("\n");
 }
 
+// A stream snapshot that carries an actively running turn is evidence the
+// sender's runtime is executing the conversation. Idle snapshots also arrive
+// for threads a peer merely viewed or re-broadcast on reconnect, so they are
+// not an ownership claim.
+function conversationSnapshotShowsActiveTurn(change) {
+  const conversationState = change?.conversationState || change?.conversation_state;
+  const turns = Array.isArray(conversationState?.turns) ? conversationState.turns : [];
+  return turns.some((turn) => {
+    const status = normalizeToken(turn?.status);
+    return status === "inprogress" || status === "running" || status === "active";
+  });
+}
+
 function safeParseJSON(value) {
   try {
     return JSON.parse(value);
@@ -174,6 +187,7 @@ module.exports = {
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
   cloneJSON,
+  conversationSnapshotShowsActiveTurn,
   isContextualUserText,
   isPlainJSONObject,
   isUserRoleItem,
