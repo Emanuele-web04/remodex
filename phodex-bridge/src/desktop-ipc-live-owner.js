@@ -40,7 +40,9 @@ const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const METHOD_VERSION_BY_NAME = new Map([
   ["initialize", 1],
   [CLIENT_STATUS_CHANGED, 1],
-  [THREAD_STREAM_STATE_CHANGED, 6],
+  // Codex's typed IPC contract pins thread-stream-state-changed at version 5;
+  // consumers validate the version, so advertising a higher one gets dropped.
+  [THREAD_STREAM_STATE_CHANGED, 5],
   [THREAD_ARCHIVED, 2],
   [THREAD_UNARCHIVED, 1],
   ["thread-follower-start-turn", 1],
@@ -444,7 +446,6 @@ function createDesktopIpcLiveOwner({
       unsubscribed: reason === "thread/unsubscribe" || Boolean(previousState?.unsubscribed),
     };
     ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
-      hostId,
       conversationId: threadId,
       version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
       remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
@@ -677,7 +678,6 @@ function createDesktopIpcLiveOwner({
         return true;
       }
       if (patches && ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
-        hostId,
         conversationId: threadId,
         version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
         remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
@@ -698,7 +698,6 @@ function createDesktopIpcLiveOwner({
     // Snapshot broadcasts serialize synchronously, so the live state can be
     // passed through; only the retained baseline needs its own copy.
     if (ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
-      hostId,
       conversationId: threadId,
       version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
       remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
@@ -978,6 +977,11 @@ function createDesktopIpcLiveOwner({
     observeInbound,
     observeOutbound,
     stopAll,
+    // True while the bridge's app-server stream is authoritative for this
+    // thread; used to keep fallback mirrors (rollout tail) silent.
+    isThreadOwned(threadId) {
+      return ownedThreadIds.has(readString(threadId));
+    },
     _debugSnapshot(threadId) {
       return cloneJSON(conversations.get(threadId) || null);
     },
@@ -989,6 +993,9 @@ function createDisabledDesktopIpcLiveOwner() {
     observeInbound() {},
     observeOutbound() {},
     stopAll() {},
+    isThreadOwned() {
+      return false;
+    },
   };
 }
 

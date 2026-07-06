@@ -17,6 +17,7 @@ const {
   TERMINAL_TASK_EVENT_TYPES,
   terminalEventClosesTrackedTurn,
 } = require("./rollout-turn-semantics");
+const { visibleUserPromptText } = require("./desktop-ipc-shared");
 
 // The phone batches each poll tick's notifications and settles its timeline
 // ~80ms after the batch ends (CodexService liveMirrorBatchFlushNanoseconds).
@@ -47,6 +48,10 @@ function createRolloutLiveMirrorController({
   activityHeartbeatMs = DEFAULT_ACTIVITY_HEARTBEAT_MS,
   staleActiveRunMaxAgeMs = DEFAULT_STALE_ACTIVE_RUN_MAX_AGE_MS,
   syntheticTerminalGraceMs = DEFAULT_SYNTHETIC_TERMINAL_GRACE_MS,
+  // Rollout tailing is the fallback mirror; when another live source already
+  // streams a thread (IPC follower state or bridge-owned app-server stream),
+  // emitting from the file too would double every row on the phone.
+  shouldSuppressThread = null,
 } = {}) {
   const mirrorsByThreadId = new Map();
 
@@ -71,7 +76,13 @@ function createRolloutLiveMirrorController({
     let mirror;
     mirror = createThreadRolloutLiveMirror({
       threadId,
-      sendApplicationResponse,
+      sendApplicationResponse: typeof shouldSuppressThread === "function"
+        ? (rawNotification) => {
+          if (!shouldSuppressThread(threadId)) {
+            sendApplicationResponse(rawNotification);
+          }
+        }
+        : sendApplicationResponse,
       logPrefix,
       fsModule,
       now,
@@ -554,7 +565,11 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
     }
 
     if (eventType === "user_message") {
-      const message = readString(payload.message) || readString(payload.text);
+      // Rollouts persist injected context (AGENTS.md instructions, IDE prompt
+      // wrappers) as user_message events; only the real request is a bubble.
+      const message = visibleUserPromptText(
+        readString(payload.message) || readString(payload.text)
+      );
       if (!message) {
         return [];
       }
@@ -1393,13 +1408,16 @@ function flushPendingUserMessageNotifications(state, turnId) {
     return [];
   }
 
-  return messages.map((pending) => createNotification("codex/event/user_message", {
-    threadId: state.threadId,
-    turnId: turnId || state.activeTurnId || "",
-    message: pending.message,
-    ...(pending.id ? { id: pending.id } : {}),
-    ...timestampParams(pending.timestamp),
-  }));
+  return messages
+    .map((pending) => ({ ...pending, message: visibleUserPromptText(pending.message) }))
+    .filter((pending) => pending.message)
+    .map((pending) => createNotification("codex/event/user_message", {
+      threadId: state.threadId,
+      turnId: turnId || state.activeTurnId || "",
+      message: pending.message,
+      ...(pending.id ? { id: pending.id } : {}),
+      ...timestampParams(pending.timestamp),
+    }));
 }
 
 function readUserMessageTimestamp(entry, payload = {}) {

@@ -254,6 +254,13 @@ function startBridge({
   const rolloutLiveMirror = !config.codexEndpoint
     ? createRolloutLiveMirrorController({
       sendApplicationResponse,
+      // One live source per thread: the IPC follower (Desktop-owned threads)
+      // and the bridge's own app-server stream (phone-owned threads) are both
+      // authoritative over the rollout file tail.
+      shouldSuppressThread: (threadId) => (
+        Boolean(desktopIpcActionFollower?.hasLiveThreadState(threadId))
+        || Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId))
+      ),
     })
     : null;
   const desktopIpcActionFollower = !config.codexEndpoint

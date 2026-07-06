@@ -186,6 +186,92 @@ test("desktop-origin bootstrap replays the pending user message and final assist
   );
 });
 
+test("desktop-origin bootstrap hides injected context and strips prompt wrappers", async (t) => {
+  const agentsContext = "# AGENTS.md instructions for /Users/me/proj\n\n<INSTRUCTIONS>\n## Skills\n- check-code\n</INSTRUCTIONS>";
+  const wrappedPrompt = "Some IDE context here\n\n## My request for Codex:\nreview the diff please";
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-context-filter",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      userMessage(agentsContext),
+      userMessage(wrappedPrompt),
+      taskStarted("turn-context-filter"),
+      agentMessage("Done", "final_answer"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-context-filter",
+    },
+  }));
+
+  await wait(30);
+
+  const userMessages = outbound.filter((message) => message.method === "codex/event/user_message");
+  assert.equal(userMessages.length, 1);
+  assert.equal(userMessages[0].params.message, "review the diff please");
+});
+
+test("rollout mirror suppression silences threads owned by another live source", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-suppressed",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      userMessage("hello there"),
+      taskStarted("turn-suppressed"),
+      agentMessage("streaming", "final_answer"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  let suppressed = true;
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+    shouldSuppressThread: () => suppressed,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-suppressed",
+    },
+  }));
+
+  await wait(30);
+  assert.deepEqual(outbound, []);
+});
+
 test("desktop-origin bootstrap emits terminal catch-up for completed runs", async (t) => {
   const { homeDir } = createTemporaryRolloutHome({
     threadId: "thread-terminal-completed",

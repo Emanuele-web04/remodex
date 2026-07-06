@@ -667,6 +667,141 @@ test("desktop conversation projector mirrors thread metadata changes", () => {
   assert.deepEqual(output.notifications[1].params.status, { type: "active", activeFlags: [] });
 });
 
+test("desktop conversation projector hides injected context from user bubbles", () => {
+  const projector = createDesktopConversationProjector();
+  const output = projector.project("thread-context", {
+    turns: [{
+      turnId: "turn-context",
+      status: "inProgress",
+      params: {
+        input: [
+          {
+            type: "text",
+            text: "# AGENTS.md instructions for /Users/me/proj\n<INSTRUCTIONS>## Skills\n- stuff\n</INSTRUCTIONS>",
+          },
+          {
+            type: "text",
+            text: "IDE context preamble\n\n## My request for Codex:\nfix the bug",
+          },
+        ],
+      },
+      items: [],
+    }],
+  });
+
+  const userStarts = output.notifications.filter((notification) => (
+    notification.method === "item/started"
+    && notification.params.item.type === "userMessage"
+  ));
+  assert.equal(userStarts.length, 1);
+  assert.deepEqual(userStarts[0].params.item.content, [
+    { type: "text", text: "fix the bug" },
+  ]);
+});
+
+test("desktop conversation projector skips userMessage items that only carry context", () => {
+  const projector = createDesktopConversationProjector();
+  const output = projector.project("thread-context-item", {
+    turns: [{
+      turnId: "turn-context-item",
+      status: "inProgress",
+      items: [
+        {
+          id: "context-only",
+          type: "userMessage",
+          content: [{
+            type: "text",
+            text: "# AGENTS.md instructions for /Users/me/proj\n<INSTRUCTIONS>rules</INSTRUCTIONS>",
+          }],
+        },
+        { id: "assistant-1", type: "agentMessage", text: "on it" },
+      ],
+    }],
+  });
+
+  const startedItemIds = output.notifications
+    .filter((notification) => notification.method === "item/started")
+    .map((notification) => notification.params.itemId);
+  assert.deepEqual(startedItemIds, ["assistant-1"]);
+});
+
+test("desktop IPC follower backs off baseline recovery instead of hot-looping", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-recovery-backoff-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  let readAttempts = 0;
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    async readConversationState() {
+      readAttempts += 1;
+      throw new Error("thread not loaded");
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-backoff" },
+  }));
+  await waitFor(() => serverSocket);
+
+  const patchBroadcast = (value) => ({
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-backoff",
+      change: {
+        type: "patches",
+        patches: [{ op: "replace", path: ["turns", 0, "items", 0, "text"], value }],
+      },
+    },
+  });
+
+  // A burst of patch-only broadcasts must trigger at most one immediate read
+  // attempt; retries wait for the backoff window instead of running per patch.
+  for (let index = 0; index < 5; index += 1) {
+    writeFrame(serverSocket, patchBroadcast(`delta ${index}`));
+  }
+  await wait(100);
+  assert.equal(readAttempts, 1);
+
+  // Failed recovery must not leak speculative timeline rows to the phone.
+  assert.deepEqual(
+    outbound.filter((message) => typeof message.method === "string"
+      && (message.method.startsWith("item/") || message.method.startsWith("turn/"))),
+    []
+  );
+});
+
 test("desktop conversation projector mirrors token usage updates", () => {
   const projector = createDesktopConversationProjector();
   projector.project("thread-usage", {

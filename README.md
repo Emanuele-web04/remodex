@@ -438,12 +438,13 @@ What is live today:
 
 - The iPhone conversation is live while the bridge session is connected.
 - The Mac-side Codex runtime is the real runtime doing the work.
-- Remodex-owned active threads are broadcast over the local Codex IPC bus as Desktop / VSCode-compatible `conversationState` updates. The first update is a full snapshot; later changes use Immer-style patches when they stay within size limits.
-- Codex Desktop or VSCode can follow those Remodex-owned threads and send continue, steer, interrupt, approval, and user-input actions back to the bridge through `thread-follower-*` IPC requests.
+- Desktop-owned threads mirror live to the phone: when you open a thread that Codex Desktop is running, the bridge follows Desktop's IPC `conversationState` stream and projects the timeline, approvals, archive state, title, status, and token usage to the phone.
+- Remodex-owned active threads are broadcast over the local Codex IPC bus as Desktop / VSCode-compatible `conversationState` updates, and the bridge answers `thread-follower-*` requests (continue, steer, interrupt, approvals, user input) from any IPC client that chooses to follow them.
 
 Current boundaries:
 
-- Remodex joins the local IPC bus when Codex Desktop or VSCode has created it. If no local IPC router is running, Remodex starts a compatible local router so Desktop / VSCode can connect later and receive the active thread snapshot.
+- Phone-to-Desktop is not a live GUI mirror: Codex Desktop renders conversations through its own embedded runtime and does not follow streams owned by external IPC clients. Phone-driven threads reach Desktop through the shared on-disk session store (`~/.codex/sessions`), so they appear in Desktop's sidebar and open with full history, but Desktop only catches up when it (re)mounts the thread.
+- Remodex joins the local IPC bus when Codex Desktop or VSCode has created it. If no local IPC router is running, Remodex starts a compatible local router.
 - IPC sync keeps a short debounce and falls back to a full snapshot when a patch would be too large or when a client reconnect requires a fresh baseline.
 - The IPC protocol is private to Codex clients, so future Codex Desktop / VSCode changes may require bridge updates.
 
@@ -499,7 +500,7 @@ Yes — set `REMODEX_CODEX_ENDPOINT=ws://host:port` to skip spawning a local `co
 With `REMODEX_DESKTOP_IPC_LIVE_SYNC=true`, Remodex broadcasts active phone-owned threads over the local Codex IPC bus. If no IPC router is available yet, Remodex starts one locally so Desktop or VSCode can connect later; disk persistence and the older refresh workaround remain fallbacks.
 
 **Does Remodex support true live sync between phone and `Codex.app`?**
-Yes, for active Remodex-owned threads when the local Codex IPC bus is available. The bridge acts as the thread owner, broadcasts Desktop / VSCode-compatible `conversationState`, and accepts follower requests back from those UIs.
+Desktop-to-phone: yes — threads running in Codex Desktop mirror live to the phone over the local IPC bus. Phone-to-Desktop: not as a live GUI mirror, because Codex Desktop only renders conversations owned by its own runtime; phone-driven threads reach Desktop through the shared session store on disk and appear when Desktop mounts them (the hand-off button and the optional refresh workaround make that switch explicit).
 
 **Can I self-host the relay?**
 Yes. That is the intended forking path. The transport and push-service code are in [`relay/`](relay/); point `REMODEX_RELAY` at the instance you run.

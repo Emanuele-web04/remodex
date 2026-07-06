@@ -6,9 +6,11 @@
 
 const {
   cloneJSON,
+  isContextualUserText,
   normalizeToken,
   readString,
   readText,
+  visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
@@ -223,12 +225,13 @@ function projectTurn(threadId, rawTurn, index, { itemCache = null } = {}) {
     || `ipc-turn-${index}`;
   const status = normalizeTurnStatus(rawTurn.status);
   const paramsInput = Array.isArray(rawTurn?.params?.input) ? cloneJSON(rawTurn.params.input) : [];
+  const visibleInput = sanitizeUserInputEntries(paramsInput);
   const items = [];
-  if (paramsInput.length > 0) {
+  if (visibleInput.length > 0) {
     items.push({
       id: `${turnId}:input`,
       type: "userMessage",
-      content: paramsInput,
+      content: visibleInput,
     });
   }
 
@@ -247,12 +250,16 @@ function projectTurn(threadId, rawTurn, index, { itemCache = null } = {}) {
     // that survived copy-on-write untouched can reuse their previous clone.
     const cachedItem = itemCache?.get(item);
     if (cachedItem) {
-      items.push(cachedItem);
+      if (cachedItem !== SKIPPED_ITEM) {
+        items.push(cachedItem);
+      }
       continue;
     }
     const projectedItem = projectItemForMobile(item, itemType);
-    itemCache?.set(item, projectedItem);
-    items.push(projectedItem);
+    itemCache?.set(item, projectedItem ?? SKIPPED_ITEM);
+    if (projectedItem) {
+      items.push(projectedItem);
+    }
   }
 
   return {
@@ -778,9 +785,60 @@ function sameUserInput(content, paramsInput) {
   return JSON.stringify(content || []) === JSON.stringify(paramsInput || []);
 }
 
+// Sentinel so the item cache can also remember "this raw item projects to nothing".
+const SKIPPED_ITEM = Symbol("remodex-skipped-item");
+
+// Drops injected context fragments (AGENTS.md instructions, IDE wrappers) and
+// strips prompt-request wrappers so only the real user request reaches mobile.
+function sanitizeUserInputEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  const sanitized = [];
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      const visible = visibleUserPromptText(entry);
+      if (visible) {
+        sanitized.push(visible);
+      }
+      continue;
+    }
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const text = readString(entry.text);
+    if (!text) {
+      sanitized.push(entry);
+      continue;
+    }
+    if (isContextualUserText(text)) {
+      continue;
+    }
+    const visible = visibleUserPromptText(text);
+    if (!visible) {
+      continue;
+    }
+    sanitized.push(visible === text ? entry : { ...entry, text: visible });
+  }
+  return sanitized;
+}
+
 // Desktop IPC uses richer tool aliases than the mobile app-server timeline.
 // Keep the original type as metadata, but emit the generic shape iOS already decodes.
+// Returns null when the item has nothing user-visible left after sanitizing.
 function projectItemForMobile(item, itemType = normalizeToken(item?.type)) {
+  if (itemType === "usermessage") {
+    const visibleContent = sanitizeUserInputEntries(
+      Array.isArray(item?.content) ? item.content : []
+    );
+    if (visibleContent.length === 0) {
+      return null;
+    }
+    const projected = cloneJSON(item);
+    projected.content = cloneJSON(visibleContent);
+    return projected;
+  }
+
   const projected = cloneJSON(item);
   if (!isGenericToolCallItemType(itemType)) {
     return projected;

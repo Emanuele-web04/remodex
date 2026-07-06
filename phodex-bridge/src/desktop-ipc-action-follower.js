@@ -24,6 +24,13 @@ const {
 
 const REQUEST_TIMEOUT_MS = 10_000;
 const OWNERSHIP_PROBE_TIMEOUT_MS = 1_500;
+// Fresh Desktop threads are not materialized in the local thread store yet, so
+// baseline reads fail until the rollout flushes; retry with backoff instead of
+// hammering thread/read on every patch broadcast.
+const MAX_BASELINE_RECOVERY_ATTEMPTS = 5;
+const BASELINE_RECOVERY_BASE_DELAY_MS = 1_000;
+const BASELINE_RECOVERY_MAX_DELAY_MS = 15_000;
+const MAX_QUEUED_CHANGES_PER_THREAD = 300;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const DESKTOP_STATE_READ_METHODS = new Set(["thread/read", "thread/resume", "thread/turns/list"]);
@@ -90,6 +97,7 @@ function createDesktopIpcActionFollower({
   const activeThreadIds = new Set();
   const recoveringThreadIds = new Set();
   const queuedChangesByThreadId = new Map();
+  const baselineRecoveryStateByThreadId = new Map();
   const liveOwnerThreadIds = new Set();
   const heldFollowerRequestsByThreadId = new Map();
   const ownershipProbeDeadlinesByThreadId = new Map();
@@ -146,6 +154,7 @@ function createDesktopIpcActionFollower({
     pendingRoutesByRequestId.clear();
     activeThreadIds.clear();
     recoveringThreadIds.clear();
+    baselineRecoveryStateByThreadId.clear();
     queuedChangesByThreadId.clear();
     liveOwnerThreadIds.clear();
     ownershipProbeDeadlinesByThreadId.clear();
@@ -229,6 +238,12 @@ function createDesktopIpcActionFollower({
     }
 
     rawStatesByThreadId.set(threadId, nextState);
+    // A usable state arrived: recovery bookkeeping and pre-baseline queued
+    // patches are obsolete (snapshots replace state wholesale).
+    baselineRecoveryStateByThreadId.delete(threadId);
+    if (!isPatchChange(params.change)) {
+      queuedChangesByThreadId.delete(threadId);
+    }
     syncProjectedConversationState(threadId, nextState);
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
     releaseHeldFollowerRequests(threadId, { toDesktop: true });
@@ -240,6 +255,7 @@ function createDesktopIpcActionFollower({
     // snapshot diff against already-mirrored content instead of replaying it.
     rawStatesByThreadId.clear();
     recoveringThreadIds.clear();
+    baselineRecoveryStateByThreadId.clear();
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
@@ -262,6 +278,7 @@ function createDesktopIpcActionFollower({
     rawStatesByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
+    baselineRecoveryStateByThreadId.delete(threadId);
     releaseHeldFollowerRequests(threadId, { toDesktop: false });
   }
 
@@ -277,6 +294,7 @@ function createDesktopIpcActionFollower({
     rawStatesByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
+    baselineRecoveryStateByThreadId.delete(threadId);
     rejectHeldFollowerRequests(threadId, "This thread is no longer available for Desktop routing.");
   }
 
@@ -744,6 +762,11 @@ function createDesktopIpcActionFollower({
 
     const queuedChanges = queuedChangesByThreadId.get(threadId) || [];
     queuedChanges.push(change);
+    // Patches without a baseline are useless beyond a bound; keep the tail so
+    // memory stays flat while recovery waits for the thread to materialize.
+    if (queuedChanges.length > MAX_QUEUED_CHANGES_PER_THREAD) {
+      queuedChanges.splice(0, queuedChanges.length - MAX_QUEUED_CHANGES_PER_THREAD);
+    }
     queuedChangesByThreadId.set(threadId, queuedChanges);
   }
 
@@ -752,21 +775,41 @@ function createDesktopIpcActionFollower({
       || rawStatesByThreadId.has(threadId)) {
       return;
     }
+    const recoveryState = baselineRecoveryStateByThreadId.get(threadId) || {
+      attempts: 0,
+      nextAttemptAt: 0,
+    };
+    if (recoveryState.attempts >= MAX_BASELINE_RECOVERY_ATTEMPTS) {
+      // Give up until a snapshot arrives; a fresh snapshot resets this state.
+      return;
+    }
+    if (now() < recoveryState.nextAttemptAt) {
+      return;
+    }
+    recoveryState.attempts += 1;
+    recoveryState.nextAttemptAt = now() + Math.min(
+      BASELINE_RECOVERY_MAX_DELAY_MS,
+      BASELINE_RECOVERY_BASE_DELAY_MS * (2 ** (recoveryState.attempts - 1))
+    );
+    baselineRecoveryStateByThreadId.set(threadId, recoveryState);
 
     recoveringThreadIds.add(threadId);
     Promise.resolve()
       .then(() => readConversationState(threadId))
       .then((baselineState) => {
         if (!baselineState || typeof baselineState !== "object") {
-          recoverThreadBaselineFromQueuedChanges(threadId, null);
           return;
         }
 
+        baselineRecoveryStateByThreadId.delete(threadId);
         recoverThreadBaselineFromQueuedChanges(threadId, baselineState);
       })
       .catch((error) => {
-        console.warn(`${logPrefix} desktop IPC baseline recovery failed for ${threadId}: ${error.message}`);
-        recoverThreadBaselineFromQueuedChanges(threadId, null);
+        if (recoveryState.attempts === 1
+          || recoveryState.attempts === MAX_BASELINE_RECOVERY_ATTEMPTS) {
+          console.warn(`${logPrefix} desktop IPC baseline recovery failed for ${threadId} (attempt ${recoveryState.attempts}/${MAX_BASELINE_RECOVERY_ATTEMPTS}): ${error.message}`);
+        }
+        // Keep queued changes: a later attempt or snapshot may still recover.
       })
       .finally(() => {
         recoveringThreadIds.delete(threadId);
@@ -799,6 +842,11 @@ function createDesktopIpcActionFollower({
   return {
     observeInbound,
     stopAll,
+    // True while this thread has live Desktop-owned IPC state mirrored to the
+    // phone; used to keep fallback mirrors (rollout tail) silent.
+    hasLiveThreadState(threadId) {
+      return rawStatesByThreadId.has(readString(threadId));
+    },
   };
 }
 
