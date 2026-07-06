@@ -25,6 +25,8 @@ struct TerminalScreen: View {
     @State private var didApplyPreferredWorkingDirectory = false
     @State private var pendingModifier: TerminalPendingModifier?
     @State private var selectedModifier: TerminalPendingModifier = .ctrl
+    @State private var terminalTextReader = GhosttyTerminalTextReader()
+    @State private var selectableTextState: TerminalSelectableTextState?
     @AppStorage("codex.terminal.fontSize") private var terminalFontSize = remodexTerminalDefaultFontSize
 
     let preferredWorkingDirectory: String?
@@ -195,6 +197,12 @@ struct TerminalScreen: View {
         activeSnapshot.status == .running && UIPasteboard.general.hasStrings
     }
 
+    // The selectable-text sheet mirrors the native Ghostty grid; the fallback
+    // surface already renders selectable SwiftUI text inline.
+    private var canSelectTerminalText: Bool {
+        isNativeTerminalAvailable && !activeSnapshot.bufferData.isEmpty
+    }
+
     var body: some View {
         ZStack {
             Color(hexString: theme.background)
@@ -227,6 +235,7 @@ struct TerminalScreen: View {
                     isRunning: isRunning,
                     hasConnectionConfiguration: hasConnectionConfiguration,
                     canPaste: canPasteIntoActiveTerminal,
+                    canSelectText: canSelectTerminalText,
                     canClear: !activeSnapshot.bufferData.isEmpty,
                     canResetKnownHost: !profileResolvedFromConnection.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                     onSelectSession: selectTerminalSession,
@@ -234,6 +243,7 @@ struct TerminalScreen: View {
                     onToggleConnection: toggleTerminalConnection,
                     onOpenConnectionEditor: showConnectionEditor,
                     onPaste: pasteIntoActiveTerminal,
+                    onSelectText: presentSelectableTerminalText,
                     onClear: clearTerminal,
                     onResetKnownHost: resetKnownHost,
                     onAdjustFontSize: adjustFontSize
@@ -253,6 +263,13 @@ struct TerminalScreen: View {
                     onDirectionalInput: sendDirectionalInput
                 )
             }
+        }
+        .sheet(item: $selectableTextState) { state in
+            TerminalSelectableTextSheet(
+                state: state,
+                fontSize: CGFloat(terminalFontSize),
+                theme: theme
+            )
         }
         .sheet(isPresented: $isShowingConnectionEditor) {
             TerminalConnectionEditorSheet(
@@ -301,7 +318,8 @@ struct TerminalScreen: View {
                     onResize: resizeTerminal,
                     onNativeAvailabilityChanged: { isAvailable in
                         isNativeTerminalAvailable = isAvailable
-                    }
+                    },
+                    textReader: terminalTextReader
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 // Keep a small vertical breathing room from the toolbar / accessory bar
@@ -383,6 +401,18 @@ struct TerminalScreen: View {
 
     private func showConnectionEditor() {
         isShowingConnectionEditor = true
+    }
+
+    private func presentSelectableTerminalText() {
+        guard let text = terminalTextReader.visibleText() ?? fallbackSelectableTerminalText else { return }
+        selectableTextState = TerminalSelectableTextState(text: text)
+    }
+
+    private var fallbackSelectableTerminalText: String? {
+        let rawText = String(decoding: activeSnapshot.bufferData, as: UTF8.self)
+        // Prevents a dead menu tap during transient native-view remounts; the
+        // live Ghostty reader remains preferred whenever it is available.
+        return TerminalSelectableTextNormalizer.normalizedText(from: rawText)
     }
 
     private func saveConnectionAndOpen() async {
