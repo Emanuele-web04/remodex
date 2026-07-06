@@ -1893,7 +1893,11 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
     assert.equal(handledRoute, true);
     await waitFor(() => serverFrames.find((frame) => frame.method === request.expectedMethod));
     const routedFrame = serverFrames.find((frame) => frame.method === request.expectedMethod);
-    assert.equal(routedFrame.version, 1);
+    // Versions mirror Codex Desktop's bundled method map (interrupt is v2).
+    assert.equal(
+      routedFrame.version,
+      request.expectedMethod === "thread-follower-interrupt-turn" ? 2 : 1
+    );
     assert.deepEqual(routedFrame.params, request.expectedParams);
     await waitFor(() => outbound.find((message) => message.id === request.id));
     assert.deepEqual(outbound.find((message) => message.id === request.id), {

@@ -45,18 +45,19 @@ const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const METHOD_VERSION_BY_NAME = new Map([
   ["initialize", 1],
   [CLIENT_STATUS_CHANGED, 1],
-  // Codex's typed IPC contract pins thread-stream-state-changed at version 5;
-  // consumers validate the version, so advertising a higher one gets dropped.
-  [THREAD_STREAM_STATE_CHANGED, 5],
+  // Codex Desktop's bundled method map pins thread-stream-state-changed at
+  // version 8 and validates it, so broadcasts must advertise exactly that.
+  [THREAD_STREAM_STATE_CHANGED, 8],
   [THREAD_ARCHIVED, 2],
   [THREAD_UNARCHIVED, 1],
   ["thread-follower-start-turn", 1],
+  ["thread-follower-load-complete-history", 1],
   ["thread-follower-compact-thread", 1],
   ["thread-follower-steer-turn", 1],
-  ["thread-follower-interrupt-turn", 1],
+  ["thread-follower-interrupt-turn", 2],
   ["thread-follower-set-model-and-reasoning", 1],
   ["thread-follower-set-collaboration-mode", 1],
-  ["thread-follower-edit-last-user-turn", 1],
+  ["thread-follower-edit-last-user-turn", 2],
   ["thread-follower-command-approval-decision", 1],
   ["thread-follower-file-approval-decision", 1],
   ["thread-follower-permissions-request-approval-response", 1],
@@ -68,6 +69,7 @@ const METHOD_VERSION_BY_NAME = new Map([
 
 const SUPPORTED_FOLLOWER_REQUEST_METHODS = new Set([
   "thread-follower-start-turn",
+  "thread-follower-load-complete-history",
   "thread-follower-compact-thread",
   "thread-follower-steer-turn",
   "thread-follower-interrupt-turn",
@@ -151,6 +153,10 @@ function createDesktopIpcLiveOwner({
   const cachedThreadsByThreadId = new Map();
   const lastBroadcastStatesByThreadId = new Map();
   const fallbackTurnIdsByThreadId = new Map();
+  // Desktop followers track monotonic stream revisions: patches apply only when
+  // baseRevision matches their last-seen revision, and load-complete-history
+  // waits for the snapshot carrying the returned revision.
+  const streamRevisionsByThreadId = new Map();
   const announcedSidebarThreadIds = new Set();
   const sidebarRefreshTimersByThreadId = new Map();
   const pendingTurnStartParamsByThreadId = new Map();
@@ -305,6 +311,7 @@ function createDesktopIpcLiveOwner({
     cachedThreadsByThreadId.clear();
     lastBroadcastStatesByThreadId.clear();
     fallbackTurnIdsByThreadId.clear();
+    streamRevisionsByThreadId.clear();
     for (const timer of sidebarRefreshTimersByThreadId.values()) {
       clearTimeout(timer);
     }
@@ -428,6 +435,7 @@ function createDesktopIpcLiveOwner({
     pendingThreadHydrationsByThreadId.delete(normalizedThreadId);
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
     fallbackTurnIdsByThreadId.delete(normalizedThreadId);
+    streamRevisionsByThreadId.delete(normalizedThreadId);
     cancelSidebarAnnouncement(normalizedThreadId);
     announcedSidebarThreadIds.delete(normalizedThreadId);
     pendingTurnStartParamsByThreadId.delete(normalizedThreadId);
@@ -712,6 +720,7 @@ function createDesktopIpcLiveOwner({
     if (!conversationState || !ownedThreadIds.has(threadId)) {
       return true;
     }
+    const currentRevision = streamRevisionsByThreadId.get(threadId) ?? 0;
     const previousState = lastBroadcastStatesByThreadId.get(threadId) || null;
     if (!forceSnapshot && previousState) {
       // Diff straight against the live state: every patch value is deep-cloned
@@ -726,13 +735,17 @@ function createDesktopIpcLiveOwner({
       }
       if (patches && ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
         conversationId: threadId,
+        hostId,
         version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
         remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
         change: {
           type: "patches",
+          baseRevision: currentRevision,
+          revision: currentRevision + 1,
           patches,
         },
       })) {
+        streamRevisionsByThreadId.set(threadId, currentRevision + 1);
         // The baseline advances by replaying the emitted patches (their values
         // are already private clones); a full clone happens only if that fails.
         if (!applyPatchesToBaselineState(previousState, patches)) {
@@ -746,13 +759,16 @@ function createDesktopIpcLiveOwner({
     // passed through; only the retained baseline needs its own copy.
     if (ipc.sendBroadcast(THREAD_STREAM_STATE_CHANGED, {
       conversationId: threadId,
+      hostId,
       version: METHOD_VERSION_BY_NAME.get(THREAD_STREAM_STATE_CHANGED) || 1,
       remodexOwnerSource: REMODEX_LIVE_OWNER_SOURCE,
       change: {
         type: "snapshot",
+        revision: currentRevision + 1,
         conversationState,
       },
     })) {
+      streamRevisionsByThreadId.set(threadId, currentRevision + 1);
       lastBroadcastStatesByThreadId.set(threadId, cloneJSON(conversationState));
       return true;
     }
@@ -817,6 +833,8 @@ function createDesktopIpcLiveOwner({
     switch (method) {
       case "thread-follower-start-turn":
         return await handleFollowerStartTurn(conversationId, params);
+      case "thread-follower-load-complete-history":
+        return await handleFollowerLoadCompleteHistory(conversationId);
       case "thread-follower-compact-thread":
         return await sendCodexRequest("thread/compact/start", { threadId: conversationId });
       case "thread-follower-steer-turn":
@@ -850,6 +868,33 @@ function createDesktopIpcLiveOwner({
       default:
         throw new Error(`Unsupported follower request: ${method}`);
     }
+  }
+
+  // Desktop calls this when it opens a followed conversation: it wants the
+  // owner's complete history in the stream, then waits for a snapshot carrying
+  // the returned revision before rendering. Rehydrate from the app-server so
+  // history is complete, then force-broadcast a fresh snapshot.
+  async function handleFollowerLoadCompleteHistory(conversationId) {
+    try {
+      const result = await sendCodexRequest("thread/read", { threadId: conversationId });
+      const thread = readThreadFromPayload(result);
+      if (thread?.id) {
+        rememberCachedThread(thread.id, thread);
+        if (ownedThreadIds.has(thread.id)) {
+          upsertConversationFromThread(thread);
+        }
+      }
+    } catch {
+      // Not materialized yet: the live conversation state is still authoritative.
+    }
+    if (!broadcastConversationState(conversationId, { forceSnapshot: true })) {
+      throw new Error("no-client-found: thread stream owner became unavailable");
+    }
+    const revision = streamRevisionsByThreadId.get(conversationId);
+    if (revision == null) {
+      throw new Error("no-client-found: thread stream owner became unavailable");
+    }
+    return { revision };
   }
 
   async function handleFollowerStartTurn(conversationId, params) {

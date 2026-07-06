@@ -59,7 +59,8 @@ const METHOD_VERSION_BY_NAME = new Map([
   ["thread-follower-start-turn", 1],
   ["thread-follower-compact-thread", 1],
   ["thread-follower-steer-turn", 1],
-  ["thread-follower-interrupt-turn", 1],
+  // Matches Codex Desktop's bundled method map, which validates versions.
+  ["thread-follower-interrupt-turn", 2],
   ["thread-follower-command-approval-decision", 1],
   ["thread-follower-file-approval-decision", 1],
   ["thread-follower-submit-user-input", 1],

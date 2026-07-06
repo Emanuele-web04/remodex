@@ -110,8 +110,8 @@ test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", as
     frames,
     (frame) => frame.type === "broadcast" && frame.method === "thread-stream-state-changed"
   );
-  assert.equal(broadcast.version, 5);
-  assert.equal(broadcast.params.version, 5);
+  assert.equal(broadcast.version, 8);
+  assert.equal(broadcast.params.version, 8);
   assert.equal(broadcast.params.conversationId, "thread-live-owner");
     assert.equal(broadcast.params.remodexOwnerSource, "desktop-ipc-live-owner");
   assert.equal(broadcast.params.change.type, "snapshot");
@@ -221,8 +221,8 @@ test("live owner broadcasts patches after the first owned thread snapshot", asyn
         && JSON.stringify(patch.path) === JSON.stringify(["turns", 0])
       ))
   );
-  assert.equal(turnPatchBroadcast.version, 5);
-  assert.equal(turnPatchBroadcast.params.version, 5);
+  assert.equal(turnPatchBroadcast.version, 8);
+  assert.equal(turnPatchBroadcast.params.version, 8);
 
   owner.observeOutbound(JSON.stringify({
     method: "item/agentMessage/delta",
@@ -315,8 +315,8 @@ test("live owner starts a local IPC router when no Codex IPC socket exists", asy
       && frame.params?.conversationId === "thread-router-owned"
       && frame.params?.change?.type === "snapshot"
   );
-  assert.equal(snapshot.version, 5);
-  assert.equal(snapshot.params.version, 5);
+  assert.equal(snapshot.version, 8);
+  assert.equal(snapshot.params.version, 8);
   assert.equal(snapshot.params.change.conversationState.id, "thread-router-owned");
 
   writeFrame(desktopSocket, {
@@ -1427,7 +1427,7 @@ test("live owner broadcasts a removed snapshot before archive cleanup", async (t
       && frame.params?.remodexOwnerReleased === true
   );
   assert.equal(removed.params.remodexOwnerSource, "desktop-ipc-live-owner");
-  assert.equal(removed.params.version, 5);
+  assert.equal(removed.params.version, 8);
   assert.equal(removed.params.change.type, "snapshot");
   assert.deepEqual(removed.params.change.conversationState.turns, []);
   assert.deepEqual(removed.params.change.conversationState.requests, []);
@@ -1910,6 +1910,101 @@ test("live owner refuses queued follow-ups instead of silently dropping them", a
   );
   assert.equal(response.resultType, "error");
   assert.match(response.error, /not supported/i);
+});
+
+test("live owner serves follower load-complete-history with a fresh snapshot revision", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-load-history-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    async sendCodexRequest(method, params) {
+      if (method === "thread/read") {
+        return {
+          thread: {
+            id: params.threadId,
+            name: "History thread",
+            cwd: "/tmp/history",
+            turns: [{
+              id: "turn-history-1",
+              status: "completed",
+              items: [{ id: "assistant-history", type: "agentMessage", text: "done earlier" }],
+              startedAt: 1,
+            }],
+          },
+        };
+      }
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "history-turn-1",
+    method: "turn/start",
+    params: {
+      threadId: "thread-history",
+      input: [{ type: "text", text: "continue" }],
+    },
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "load-history-1",
+    sourceClientId: "desktop",
+    version: 1,
+    method: "thread-follower-load-complete-history",
+    params: { conversationId: "thread-history" },
+  });
+
+  const response = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "load-history-1"
+  );
+  assert.equal(response.resultType, "success");
+  assert.equal(typeof response.result.revision, "number");
+
+  // The snapshot carrying that revision must have been broadcast, complete
+  // with hydrated history, so the Desktop follower can render it.
+  const snapshot = frames.find((frame) => (
+    frame.type === "broadcast"
+    && frame.method === "thread-stream-state-changed"
+    && frame.params?.conversationId === "thread-history"
+    && frame.params?.change?.type === "snapshot"
+    && frame.params?.change?.revision === response.result.revision
+  ));
+  assert.ok(snapshot, "expected snapshot broadcast with the returned revision");
+  assert.equal(snapshot.params.hostId, "local");
+  assert.equal(snapshot.version, 8);
+  const turnIds = snapshot.params.change.conversationState.turns.map((turn) => turn.turnId);
+  assert.ok(turnIds.includes("turn-history-1"));
 });
 
 test("live owner announces phone threads to the Desktop sidebar once", async (t) => {
