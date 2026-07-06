@@ -2987,6 +2987,49 @@ test("conversation adapter dedupes synthetic user prompt after fallback turn id 
   }]);
 });
 
+test("conversation adapter propagates phone turn model and effort to composer fields", () => {
+  const conversations = new Map();
+  const pendingTurnStartParamsByThreadId = new Map([[
+    "thread-model-meta",
+    [{
+      params: {
+        threadId: "thread-model-meta",
+        input: [{ type: "input_text", text: "use my model" }],
+        model: "gpt-5.5",
+        effort: "medium",
+      },
+    }],
+  ]]);
+  const owned = new Set(["thread-model-meta"]);
+  const now = () => 21;
+
+  applyAppServerMessageToConversationState({
+    conversations,
+    pendingTurnStartParamsByThreadId,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-model-meta",
+        turn: {
+          id: "turn-model-meta",
+          items: [],
+          status: "inProgress",
+          error: null,
+          startedAt: 1,
+        },
+      },
+    },
+  });
+
+  const conversation = conversations.get("thread-model-meta");
+  assert.equal(conversation.latestModel, "gpt-5.5");
+  assert.equal(conversation.latestReasoningEffort, "medium");
+  assert.equal(conversation.latestCollaborationMode.settings.model, "gpt-5.5");
+  assert.equal(conversation.latestCollaborationMode.settings.reasoning_effort, "medium");
+});
+
 test("conversation adapter consumes pending turn starts FIFO for rapid consecutive turns", () => {
   const conversations = new Map();
   const pendingTurnStartParamsByThreadId = new Map([[

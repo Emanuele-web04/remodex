@@ -1609,6 +1609,8 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
     return;
   }
 
+  applyTurnRuntimeMetadata(conversation, pendingParams);
+
   const input = Array.isArray(pendingParams.input) ? cloneJSON(pendingParams.input) : [];
   if (input.length === 0) {
     return;
@@ -1628,6 +1630,41 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
     remodexSyntheticUserMessage: true,
     content: input.map(userMessageContentFromTurnInput).filter(Boolean),
   });
+}
+
+// Desktop's composer reads the followed thread's model/effort from the
+// conversation-level fields; without them it falls back to showing "Custom".
+function applyTurnRuntimeMetadata(conversation, turnParams) {
+  if (!conversation || !turnParams) {
+    return;
+  }
+  const model = readString(turnParams.model);
+  const effort = readString(turnParams.effort);
+  if (model) {
+    conversation.previousTurnModel = conversation.latestModel || null;
+    conversation.latestModel = model;
+  }
+  if (effort) {
+    conversation.latestReasoningEffort = effort;
+  }
+  if (turnParams.collaborationMode && typeof turnParams.collaborationMode === "object") {
+    conversation.latestCollaborationMode = cloneJSON(turnParams.collaborationMode);
+    return;
+  }
+  if (!model && !effort) {
+    return;
+  }
+  const settings = conversation.latestCollaborationMode?.settings;
+  conversation.latestCollaborationMode = {
+    mode: conversation.latestCollaborationMode?.mode || "default",
+    settings: {
+      ...(settings && typeof settings === "object" ? settings : {
+        developer_instructions: null,
+      }),
+      model: model || settings?.model || "",
+      reasoning_effort: effort || settings?.reasoning_effort || null,
+    },
+  };
 }
 
 function turnHasUserMessageItem(turn) {
