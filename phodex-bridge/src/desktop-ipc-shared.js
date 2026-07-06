@@ -10,6 +10,37 @@ const path = require("path");
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
 
+const CLIENT_STATUS_CHANGED = "client-status-changed";
+
+// Single source of truth for Codex Desktop's IPC method versions. Desktop's
+// bundled map validates versions on both requests and broadcasts, and this
+// table already drifted once while it lived in two modules.
+const DESKTOP_IPC_METHOD_VERSIONS = new Map([
+  ["initialize", 1],
+  [CLIENT_STATUS_CHANGED, 1],
+  // Desktop pins thread-stream-state-changed at version 8 and drops mismatches.
+  ["thread-stream-state-changed", 8],
+  ["thread-archived", 2],
+  ["thread-unarchived", 1],
+  ["thread-read-state-changed", 1],
+  ["thread-queued-followups-changed", 1],
+  ["thread-follower-start-turn", 1],
+  ["thread-follower-load-complete-history", 1],
+  ["thread-follower-update-thread-settings", 1],
+  ["thread-follower-compact-thread", 1],
+  ["thread-follower-steer-turn", 1],
+  ["thread-follower-interrupt-turn", 2],
+  ["thread-follower-set-model-and-reasoning", 1],
+  ["thread-follower-set-collaboration-mode", 1],
+  ["thread-follower-edit-last-user-turn", 2],
+  ["thread-follower-command-approval-decision", 1],
+  ["thread-follower-file-approval-decision", 1],
+  ["thread-follower-permissions-request-approval-response", 1],
+  ["thread-follower-submit-user-input", 1],
+  ["thread-follower-submit-mcp-server-elicitation-response", 1],
+  ["thread-follower-set-queued-follow-ups-state", 1],
+]);
+
 // Codex injects project/context instructions as plain text fragments inside the
 // turn input. Desktop hides them via these exact markers (see codex-rs
 // memories/write phase1 and tui ide_context/prompt.rs); mirrored user bubbles
@@ -68,6 +99,10 @@ function cloneJSON(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function isPlainJSONObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
 function safeParseJSON(value) {
   try {
     return JSON.parse(value);
@@ -103,10 +138,13 @@ function resolveDefaultIpcSocketPath() {
 }
 
 module.exports = {
+  CLIENT_STATUS_CHANGED,
+  DESKTOP_IPC_METHOD_VERSIONS,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
   cloneJSON,
   isContextualUserText,
+  isPlainJSONObject,
   normalizeToken,
   readString,
   readText,

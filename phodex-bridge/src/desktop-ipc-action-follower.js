@@ -11,6 +11,7 @@ const {
   projectDesktopConversationStateToThread,
 } = require("./desktop-ipc-conversation-projector");
 const {
+  DESKTOP_IPC_METHOD_VERSIONS: METHOD_VERSION_BY_NAME,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
   cloneJSON,
@@ -53,17 +54,6 @@ const REPLY_METHOD_BY_ACTION_METHOD = new Map([
   ["item/fileRead/requestApproval", "thread-follower-file-approval-decision"],
   ["item/permissions/requestApproval", "thread-follower-file-approval-decision"],
   ["item/tool/requestUserInput", "thread-follower-submit-user-input"],
-]);
-const METHOD_VERSION_BY_NAME = new Map([
-  ["initialize", 1],
-  ["thread-follower-start-turn", 1],
-  ["thread-follower-compact-thread", 1],
-  ["thread-follower-steer-turn", 1],
-  // Matches Codex Desktop's bundled method map, which validates versions.
-  ["thread-follower-interrupt-turn", 2],
-  ["thread-follower-command-approval-decision", 1],
-  ["thread-follower-file-approval-decision", 1],
-  ["thread-follower-submit-user-input", 1],
 ]);
 const APPROVAL_DECISIONS = new Set(["accept", "acceptForSession", "decline", "cancel"]);
 
