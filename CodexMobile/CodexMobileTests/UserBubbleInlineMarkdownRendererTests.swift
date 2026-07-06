@@ -65,6 +65,31 @@ final class UserBubbleInlineMarkdownRendererTests: XCTestCase {
 
         XCTAssertFalse(rendered.visibleText.isEmpty)
     }
+
+    // MARK: - Block markdown detection
+
+    func testPlainAndInlineOnlyTextIsNotBlockMarkdown() {
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("is this safe to merge?"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("Use **bold** and `code` here."))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("run ls *.swift"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("*.swift files only"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("the answer is 10. maybe 11"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("#hashtag without space"))
+    }
+
+    func testFencedCodeIsBlockMarkdown() {
+        XCTAssertTrue(
+            UserBubbleBlockMarkdownDetector.containsBlockMarkdown("fix this:\n```swift\nlet x = 1\n```")
+        )
+    }
+
+    func testHeadingListQuoteAndTableAreBlockMarkdown() {
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("# Plan\nreview the diff"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("check:\n- reconnect\n- pairing"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("steps:\n1. build\n2. run"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("> quoted reply"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("| a | b |\n| - | - |"))
+    }
 }
 
 private extension UserBubbleInlineMarkdownRenderResult {

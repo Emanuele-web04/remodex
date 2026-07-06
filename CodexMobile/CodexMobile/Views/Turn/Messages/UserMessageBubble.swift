@@ -122,24 +122,37 @@ struct UserMessageBubble: View {
     @ViewBuilder
     private func userBubbleTextContent(_ renderModel: UserBubbleRenderModel, bubbleColor: UserBubbleColor) -> some View {
         if isProgressiveTextWindow {
-            userBubbleText(renderModel.text, bubbleColor: bubbleColor)
+            userBubbleText(renderModel, bubbleColor: bubbleColor)
         } else {
             UserBubbleTextBlock(
                 contentIdentity: message.id,
                 rawText: renderModel.text,
-                contentResetKey: renderModel.textFingerprint
+                contentResetKey: renderModel.textFingerprint,
+                collapsesWithLineLimit: !renderModel.usesBlockMarkdown
             ) {
-                userBubbleText(renderModel.text, bubbleColor: bubbleColor)
+                userBubbleText(renderModel, bubbleColor: bubbleColor)
             }
         }
     }
 
-    private func userBubbleText(_ rawText: String, bubbleColor: UserBubbleColor) -> some View {
-        UserBubbleInlineMarkdownText(
-            rawText,
-            foreground: userBubbleForeground(for: bubbleColor)
-        )
-            .font(AppFont.body())
+    // Simple prompts keep the lightweight inline renderer; block-level markdown
+    // (fences, headings, lists, quotes, tables) takes the assistant pipeline.
+    @ViewBuilder
+    private func userBubbleText(_ renderModel: UserBubbleRenderModel, bubbleColor: UserBubbleColor) -> some View {
+        let foreground = userBubbleForeground(for: bubbleColor)
+        if renderModel.usesBlockMarkdown {
+            MarkdownTextView(
+                text: renderModel.text,
+                profile: .userProse,
+                constrainsToAvailableWidth: true,
+                linkColor: foreground
+            )
+            .foregroundStyle(foreground)
+            .tint(foreground)
+        } else {
+            UserBubbleInlineMarkdownText(renderModel.text, foreground: foreground)
+                .font(AppFont.body())
+        }
     }
 }
 
@@ -147,6 +160,7 @@ private struct UserBubbleRenderModel: Equatable {
     let text: String
     let textFingerprint: String
     let chips: [TurnMentionChipRef]
+    let usesBlockMarkdown: Bool
 }
 
 enum UserBubbleRenderModelCache {
@@ -266,7 +280,8 @@ private enum UserBubbleMentionExtractor {
         return UserBubbleRenderModel(
             text: displayText,
             textFingerprint: TurnTextCacheKey.stableFingerprint(for: displayText),
-            chips: chips
+            chips: chips,
+            usesBlockMarkdown: UserBubbleBlockMarkdownDetector.containsBlockMarkdown(displayText)
         )
     }
 
@@ -396,6 +411,25 @@ private struct UserBubblePreviewCatalog: View {
                         skillMentions: ["frontend-design"],
                         actionText: "/review run on local changes $frontend-design",
                         bubbleColor: .blue
+                    )
+                }
+
+                previewSection("Block markdown") {
+                    bubblePreview(
+                        text: """
+                        Fix this snippet:
+
+                        ```swift
+                        // TODO: guard against nil
+                        let value = cache[key]!
+                        ```
+
+                        Then check:
+                        - the reconnect path
+                        - the pairing flow
+                        """,
+                        actionText: "Fix this snippet",
+                        bubbleColor: .green
                     )
                 }
             }

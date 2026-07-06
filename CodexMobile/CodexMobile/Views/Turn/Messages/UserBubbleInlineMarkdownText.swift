@@ -1,7 +1,7 @@
 // FILE: UserBubbleInlineMarkdownText.swift
 // Purpose: Renders lightweight inline markdown inside user prompt bubbles.
 // Layer: View Support
-// Exports: UserBubbleInlineMarkdownText, UserBubbleInlineMarkdownRenderer
+// Exports: UserBubbleInlineMarkdownText, UserBubbleInlineMarkdownRenderer, UserBubbleBlockMarkdownDetector
 // Depends on: Foundation, SwiftUI, TurnMessageCacheCore, TurnMessageRegexCache
 
 import Foundation
@@ -32,6 +32,57 @@ struct UserBubbleInlineMarkdownText: View {
 enum UserBubbleInlineMarkdownRenderResult {
     case plain
     case rich(AttributedString)
+}
+
+// Detects block-level markdown the inline renderer cannot express; those user
+// messages take the shared MarkdownTextView pipeline used by assistant rows.
+enum UserBubbleBlockMarkdownDetector {
+    static func containsBlockMarkdown(_ rawText: String) -> Bool {
+        if rawText.contains("```") || rawText.contains("~~~") {
+            return true
+        }
+
+        return rawText
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .contains { isBlockSyntaxLine($0.drop(while: { $0 == " " || $0 == "\t" })) }
+    }
+
+    private static func isBlockSyntaxLine(_ line: Substring) -> Bool {
+        guard let first = line.first else {
+            return false
+        }
+
+        switch first {
+        case "#":
+            let hashes = line.prefix(while: { $0 == "#" })
+            return hashes.count <= 6 && line.dropFirst(hashes.count).first == " "
+        case "-", "*", "+":
+            return line.dropFirst().first == " " || isThematicBreak(line)
+        case ">":
+            return true
+        case "|":
+            return line.dropFirst().contains("|")
+        default:
+            return isOrderedListItem(line)
+        }
+    }
+
+    private static func isOrderedListItem(_ line: Substring) -> Bool {
+        let digits = line.prefix(while: { $0.isASCII && $0.isNumber })
+        guard !digits.isEmpty, digits.count <= 3 else {
+            return false
+        }
+
+        let rest = line.dropFirst(digits.count)
+        return rest.hasPrefix(". ") || rest.hasPrefix(") ")
+    }
+
+    private static func isThematicBreak(_ line: Substring) -> Bool {
+        guard let marker = line.first, line.count >= 3 else {
+            return false
+        }
+        return line.allSatisfy { $0 == marker }
+    }
 }
 
 enum UserBubbleInlineMarkdownRenderer {

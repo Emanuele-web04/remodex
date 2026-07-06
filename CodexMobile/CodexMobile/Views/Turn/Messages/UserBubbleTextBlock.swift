@@ -2,9 +2,10 @@
 // Purpose: Collapses long user messages without making MessageRow own the state.
 // Layer: View Component
 // Exports: UserBubbleTextBlock
-// Depends on: SwiftUI
+// Depends on: SwiftUI, UIKit
 
 import SwiftUI
+import UIKit
 
 struct UserBubbleTextBlock<Content: View>: View {
     private static var collapseLineLimit: Int { 10 }
@@ -14,6 +15,9 @@ struct UserBubbleTextBlock<Content: View>: View {
     let contentIdentity: String
     let rawText: String
     var contentResetKey: String? = nil
+    // Block markdown renders through StructuredText, which opts out of lineLimit;
+    // those bubbles collapse by capping the rendered height instead.
+    var collapsesWithLineLimit: Bool = true
     @ViewBuilder let content: () -> Content
 
     @State private var isExpanded = false
@@ -40,10 +44,15 @@ struct UserBubbleTextBlock<Content: View>: View {
         "\(contentIdentity)|\(contentResetKey ?? TurnTextCacheKey.stableFingerprint(for: rawText))"
     }
 
+    // Follows Dynamic Type so the height-capped collapse shows roughly the same
+    // amount of content as the lineLimit-based one.
+    private static var collapsedContentMaxHeight: CGFloat {
+        UIFont.preferredFont(forTextStyle: .body).lineHeight * CGFloat(collapseLineLimit)
+    }
+
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
-            content()
-                .lineLimit(canCollapse ? (isExpanded ? nil : Self.collapseLineLimit) : nil)
+            collapsibleContent
 
             if canCollapse {
                 Button(isExpanded ? "Show less" : "Show more") {
@@ -58,6 +67,21 @@ struct UserBubbleTextBlock<Content: View>: View {
         }
         .onChange(of: collapseResetKey) { _, _ in
             isExpanded = false
+        }
+    }
+
+    @ViewBuilder
+    private var collapsibleContent: some View {
+        let isCollapsed = canCollapse && !isExpanded
+        if collapsesWithLineLimit {
+            content()
+                .lineLimit(isCollapsed ? Self.collapseLineLimit : nil)
+        } else {
+            content()
+                .frame(maxHeight: isCollapsed ? Self.collapsedContentMaxHeight : nil, alignment: .top)
+                .clipped()
+                // Clipped overflow still hit-tests; disable taps until expanded.
+                .allowsHitTesting(!isCollapsed)
         }
     }
 }
