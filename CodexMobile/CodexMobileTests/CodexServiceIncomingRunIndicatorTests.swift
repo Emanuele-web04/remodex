@@ -116,6 +116,37 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(userRows.first?.text, "stessa richiesta")
     }
 
+    // A mirrored item/completed proves finished work: an idle Desktop thread
+    // mirroring its prompt this way must not light up the running indicator.
+    func testDesktopMirroredItemCompletedAloneDoesNotMarkThreadRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "item": .object([
+                    "id": .string("\(turnID):input"),
+                    "type": .string("userMessage"),
+                    "content": .array([
+                        .object([
+                            "type": .string("text"),
+                            "text": .string("vecchio prompt idle"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        XCTAssertFalse(service.runningThreadIDs.contains(threadID))
+        XCTAssertFalse(service.isDesktopMirroredRunning(threadID))
+        XCTAssertNil(service.activeTurnID(for: threadID))
+    }
+
     func testTodoListItemLifecycleRendersAsPlanRow() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

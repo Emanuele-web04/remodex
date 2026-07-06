@@ -66,6 +66,7 @@ test("voice/transcribe returns transcribed text without exposing auth tokens", a
   assert.equal(fetchCalls[0].options.method, "POST");
   assert.equal(fetchCalls[0].options.headers.Authorization.startsWith("Bearer "), true);
   assert.equal(fetchCalls[0].options.headers["ChatGPT-Account-Id"], undefined);
+  assert.match(fetchCalls[0].options.headers["User-Agent"], /Safari/);
   assert.deepEqual(responses, [{
     id: "voice-1",
     result: {
@@ -907,7 +908,7 @@ test("voice/prewarm preconnects to the provider and pre-loads auth", async () =>
   assert.equal(handled, true);
   await tick();
 
-  assert.deepEqual(responses, [{ id: "voice-prewarm-1", result: { ok: true, formats: ["wav"] } }]);
+  assert.deepEqual(responses, [{ id: "voice-prewarm-1", result: { ok: true, formats: ["wav", "m4a"] } }]);
   assert.equal(authRequestCount, 1);
   assert.equal(fetchCalls.length, 1);
   assert.equal(fetchCalls[0].url, "https://chatgpt.com/");
@@ -963,6 +964,43 @@ test("voice/transcribe accepts valid M4A clips and uploads them as audio/mp4", a
   assert.equal(formAppends[0][0], "file");
   assert.equal(formAppends[0][1].type, "audio/mp4");
   assert.equal(formAppends[0][2], "voice.m4a");
+});
+
+test("voice/transcribe accepts mono AAC clips whose sample entry reports 2 channels", async () => {
+  // CoreAudio writes channelCount=2 in the mp4a sample entry even for mono AAC,
+  // so Remodex-generated clips from AVAudioFile must not be rejected.
+  const responses = [];
+  const handler = createVoiceHandler({
+    sendCodexRequest: async () => ({
+      authMethod: "chatgpt",
+      authToken: "chatgpt-token",
+      requiresOpenaiAuth: false,
+    }),
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return { text: "coreaudio m4a transcript" };
+      },
+    }),
+  });
+
+  handler.handleVoiceRequest(JSON.stringify({
+    id: "voice-m4a-coreaudio-channels",
+    method: "voice/transcribe",
+    params: {
+      mimeType: "audio/mp4",
+      audioBase64: makeTestM4ABase64({ durationSeconds: 1, channelCount: 2 }),
+      sampleRateHz: 24_000,
+      durationMs: 1_000,
+    },
+  }), (response) => {
+    responses.push(JSON.parse(response));
+  });
+
+  await tick();
+
+  assert.equal(responses[0].result?.text, "coreaudio m4a transcript");
 });
 
 test("voice/transcribe rejects M4A clips whose mvhd duration exceeds the limit", async () => {

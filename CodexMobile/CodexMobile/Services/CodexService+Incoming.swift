@@ -435,7 +435,13 @@ extension CodexService {
             return
         }
 
-        if isDesktopMirroredEvent && method != "turn/completed" {
+        // Completion events prove work finished, not that work is in progress.
+        // Idle Desktop turns mirror user prompts through item/completed alone,
+        // so letting completions start running UI showed phantom running chats.
+        let isCompletionOnlyMirrorMethod = method == "item/completed"
+            || method == "codex/event/item_completed"
+
+        if isDesktopMirroredEvent && method != "turn/completed" && !isCompletionOnlyMirrorMethod {
             if !threadHasActiveOrRunningTurn(threadId) {
                 markThreadAsRunning(threadId)
             }

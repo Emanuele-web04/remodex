@@ -2017,8 +2017,8 @@ test("desktop IPC follower keeps held turns queued across a transient IPC discon
   }));
   assert.equal(handled, true);
 
-  // Drop the IPC connection while the turn is still held: the disconnect alone
-  // must not flush it early.
+  // Drop the IPC connection while the turn is still held: it must stay queued
+  // instead of running locally on unproven ownership.
   await waitFor(() => serverSocket);
   const firstSocket = serverSocket;
   serverSocket = null;
@@ -2026,15 +2026,14 @@ test("desktop IPC follower keeps held turns queued across a transient IPC discon
   await wait(50);
   assert.deepEqual(localForwards, []);
 
-  // With no Desktop snapshot by the hold deadline, the local app-server is
-  // authoritative: the turn forwards locally and never rides the bus.
-  await waitFor(() => localForwards.some((message) => message.id === "phone-turn-start-hold-disconnect"), 2_000);
-  assert.equal(localForwards[0].method, "turn/start");
-  assert.equal(
-    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
-    false
-  );
-  assert.deepEqual(outbound, []);
+  // At the hold deadline the request routes through the bus over a reconnect.
+  await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"), 2_000);
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-hold-disconnect"), 1_000);
+  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-hold-disconnect"), {
+    id: "phone-turn-start-hold-disconnect",
+    result: { turn: { id: "turn-after-reconnect" } },
+  });
+  assert.deepEqual(localForwards, []);
 });
 
 test("desktop IPC follower keeps live owner routing guard across IPC disconnects", async (t) => {
@@ -2138,6 +2137,12 @@ test("desktop IPC follower accepts peer ownership snapshots before a phone resum
           handledByClientId: "router",
           result: { clientId: "remodex-test" },
         });
+      } else if (frame.type === "client-discovery-request") {
+        writeFrame(socket, {
+          type: "client-discovery-response",
+          requestId: frame.requestId,
+          response: { canHandle: true },
+        });
       } else if (frame.method === "thread-follower-start-turn") {
         writeFrame(socket, {
           type: "response",
@@ -2157,13 +2162,6 @@ test("desktop IPC follower accepts peer ownership snapshots before a phone resum
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  const activePeerSnapshot = {
-    type: "snapshot",
-    conversationState: {
-      turns: [{ id: "turn-peer-running", status: "inProgress", items: [] }],
-      requests: [],
-    },
-  };
   const outbound = [];
   const follower = createDesktopIpcActionFollower({
     socketPath,
@@ -2192,8 +2190,6 @@ test("desktop IPC follower accepts peer ownership snapshots before a phone resum
       change: { type: "snapshot", conversationState: { turns: [], requests: [] } },
     },
   });
-  // Desktop takes over by actively running the conversation; the running-turn
-  // snapshot clears the live-owner guard even before the phone resumes it.
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
@@ -2201,7 +2197,7 @@ test("desktop IPC follower accepts peer ownership snapshots before a phone resum
     version: 6,
     params: {
       conversationId: "thread-peer-before-resume",
-      change: activePeerSnapshot,
+      change: { type: "snapshot", conversationState: { turns: [], requests: [] } },
     },
   });
   await wait(25);
@@ -2218,24 +2214,13 @@ test("desktop IPC follower accepts peer ownership snapshots before a phone resum
       input: [{ type: "input_text", text: "desktop owns now" }],
     },
   })), true);
-  // The post-resume snapshot builds follower state and releases the held turn.
-  writeFrame(serverSocket, {
-    type: "broadcast",
-    method: "thread-stream-state-changed",
-    sourceClientId: "desktop-owner",
-    version: 6,
-    params: {
-      conversationId: "thread-peer-before-resume",
-      change: activePeerSnapshot,
-    },
-  });
 
   await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"), 1_000);
   await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-peer-before-resume"), 1_000);
-  assert.equal(
-    outbound.find((message) => message.id === "phone-turn-start-peer-before-resume").result?.turn?.id,
-    "turn-peer-snapshot"
-  );
+  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-peer-before-resume"), {
+    id: "phone-turn-start-peer-before-resume",
+    result: { turn: { id: "turn-peer-snapshot" } },
+  });
 });
 
 test("desktop IPC follower ignores peer patches while the live owner owns a thread", async (t) => {
@@ -2331,6 +2316,65 @@ test("desktop IPC follower ignores peer patches while the live owner owns a thre
   );
 });
 
+test("desktop IPC follower ignores Desktop echoes for locally owned threads", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-local-owner-echo-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    requestTimeoutMs: 500,
+    // Simulates the bridge's live owner claiming the thread before any
+    // live-owner broadcast has been observed on this socket.
+    isLocallyOwnedThread: (threadId) => threadId === "thread-local-echo",
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-local-echo" },
+  }));
+  await waitFor(() => serverSocket);
+
+  // An untagged Desktop snapshot of the locally-streamed thread must not become
+  // follower state that would shadow the app-server for reads.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-echo",
+    version: 6,
+    params: {
+      conversationId: "thread-local-echo",
+      change: { type: "snapshot", conversationState: { turns: [], requests: [] } },
+    },
+  });
+  await wait(25);
+
+  assert.equal(follower.hasLiveThreadState("thread-local-echo"), false);
+});
+
 test("desktop IPC follower holds quick phone turns until the desktop snapshot arrives", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-hold-turn-");
   const serverFrames = [];
@@ -2424,15 +2468,12 @@ test("desktop IPC follower holds quick phone turns until the desktop snapshot ar
   assert.deepEqual(localForwards, []);
 });
 
-test("desktop IPC follower keeps held phone turns local when no desktop snapshot arrives", async (t) => {
-  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-hold-local-");
+test("desktop IPC follower routes held phone turns once discovery confirms desktop ownership", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-owned-");
   const serverFrames = [];
   const localForwards = [];
   let serverSocket = null;
 
-  // Desktop replies canHandle for conversations it merely has resumed, so a
-  // discovery answer must never be treated as ownership; only a live snapshot
-  // stream may route phone turns to Desktop.
   const server = net.createServer((socket) => {
     serverSocket = socket;
     attachFrameReader(socket, (frame) => {
@@ -2447,69 +2488,21 @@ test("desktop IPC follower keeps held phone turns local when no desktop snapshot
           result: { clientId: "remodex-test" },
         });
       } else if (frame.type === "client-discovery-request") {
+        // Codex Desktop only invokes handlers when the nested request version
+        // matches the method version, so a missing version must read as false.
         writeFrame(socket, {
           type: "client-discovery-response",
           requestId: frame.requestId,
-          response: { canHandle: true },
+          response: { canHandle: frame.request?.version === 1 },
         });
-      }
-    });
-  });
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  t.after(() => {
-    server.close();
-    serverSocket?.destroy();
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  const follower = createDesktopIpcActionFollower({
-    socketPath,
-    sendApplicationResponse() {},
-    forwardToLocalCodex(rawMessage) {
-      localForwards.push(JSON.parse(rawMessage));
-    },
-    requestTimeoutMs: 500,
-    ownershipProbeTimeoutMs: 100,
-  });
-  t.after(() => follower.stopAll());
-
-  follower.observeInbound(JSON.stringify({
-    method: "thread/resume",
-    params: { threadId: "thread-hold-local" },
-  }));
-  const handled = follower.observeInbound(JSON.stringify({
-    id: "phone-turn-start-hold-local",
-    method: "turn/start",
-    params: {
-      threadId: "thread-hold-local",
-      input: [{ type: "input_text", text: "stay local" }],
-    },
-  }));
-  assert.equal(handled, true);
-
-  await waitFor(() => localForwards.some((message) => message.id === "phone-turn-start-hold-local"), 1_000);
-  assert.equal(localForwards[0].method, "turn/start");
-  assert.equal(
-    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
-    false
-  );
-});
-
-test("desktop IPC follower never holds turns for locally owned threads", async (t) => {
-  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-local-owned-");
-  let serverSocket = null;
-
-  const server = net.createServer((socket) => {
-    serverSocket = socket;
-    attachFrameReader(socket, (frame) => {
-      if (frame.method === "initialize") {
+      } else if (frame.method === "thread-follower-start-turn") {
         writeFrame(socket, {
           type: "response",
           requestId: frame.requestId,
           resultType: "success",
-          method: "initialize",
-          handledByClientId: "router",
-          result: { clientId: "remodex-test" },
+          method: frame.method,
+          handledByClientId: "desktop",
+          result: { turn: { id: "turn-probe-owned" } },
         });
       }
     });
@@ -2521,13 +2514,15 @@ test("desktop IPC follower never holds turns for locally owned threads", async (
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  const outbound = [];
   const follower = createDesktopIpcActionFollower({
     socketPath,
-    sendApplicationResponse() {},
-    forwardToLocalCodex() {
-      assert.fail("locally owned turns must flow through the normal bridge path");
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
     },
-    isLocallyOwnedThread: (threadId) => threadId === "thread-local-owned",
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
     requestTimeoutMs: 500,
     ownershipProbeTimeoutMs: 2_000,
   });
@@ -2535,99 +2530,27 @@ test("desktop IPC follower never holds turns for locally owned threads", async (
 
   follower.observeInbound(JSON.stringify({
     method: "thread/resume",
-    params: { threadId: "thread-local-owned" },
+    params: { threadId: "thread-probe-owned" },
   }));
-  // Immediately after resume and inside the hold window: the live owner's
-  // authority must win, so the follower does not intercept the turn at all.
   const handled = follower.observeInbound(JSON.stringify({
-    id: "phone-turn-start-local-owned",
+    id: "phone-turn-start-probe",
     method: "turn/start",
     params: {
-      threadId: "thread-local-owned",
-      input: [{ type: "input_text", text: "run locally right away" }],
+      threadId: "thread-probe-owned",
+      input: [{ type: "input_text", text: "route via probe" }],
     },
   }));
-  assert.equal(handled, false);
-});
+  assert.equal(handled, true);
 
-test("desktop IPC follower does not serve reads or mirror echoes for locally owned threads", async (t) => {
-  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-local-owned-read-");
-  const outbound = [];
-  let serverSocket = null;
-
-  const server = net.createServer((socket) => {
-    serverSocket = socket;
-    attachFrameReader(socket, (frame) => {
-      if (frame.method === "initialize") {
-        writeFrame(socket, {
-          type: "response",
-          requestId: frame.requestId,
-          resultType: "success",
-          method: "initialize",
-          handledByClientId: "router",
-          result: { clientId: "remodex-test" },
-        });
-      }
-    });
+  await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-start-turn"), 1_000);
+  const turnStartFrame = serverFrames.find((frame) => frame.method === "thread-follower-start-turn");
+  assert.equal(turnStartFrame.params.conversationId, "thread-probe-owned");
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-probe"));
+  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-probe"), {
+    id: "phone-turn-start-probe",
+    result: { turn: { id: "turn-probe-owned" } },
   });
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  t.after(() => {
-    server.close();
-    serverSocket?.destroy();
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  const follower = createDesktopIpcActionFollower({
-    socketPath,
-    sendApplicationResponse(message) {
-      outbound.push(JSON.parse(message));
-    },
-    forwardToLocalCodex() {},
-    isLocallyOwnedThread: (threadId) => threadId === "thread-local-echo",
-    requestTimeoutMs: 500,
-  });
-  t.after(() => follower.stopAll());
-
-  follower.observeInbound(JSON.stringify({
-    method: "thread/resume",
-    params: { threadId: "thread-local-echo" },
-  }));
-  await waitFor(() => serverSocket);
-
-  // Desktop echoes an idle snapshot of the bridge-owned thread: it must not
-  // become follower state that shadows the app-server for reads/mirroring.
-  writeFrame(serverSocket, {
-    type: "broadcast",
-    method: "thread-stream-state-changed",
-    sourceClientId: "desktop-viewer",
-    version: 6,
-    params: {
-      conversationId: "thread-local-echo",
-      change: {
-        type: "snapshot",
-        conversationState: {
-          turns: [{
-            id: "turn-echo",
-            status: "completed",
-            items: [{ id: "assistant-echo", type: "agentMessage", text: "stale echo" }],
-          }],
-          requests: [],
-        },
-      },
-    },
-  });
-  await wait(50);
-
-  assert.equal(follower.hasLiveThreadState("thread-local-echo"), false);
-  assert.deepEqual(outbound, []);
-
-  // thread/read must keep flowing to the local app-server, not the echo.
-  const served = follower.observeInbound(JSON.stringify({
-    id: "read-local-echo",
-    method: "thread/read",
-    params: { threadId: "thread-local-echo" },
-  }));
-  assert.equal(served, false);
+  assert.deepEqual(localForwards, []);
 });
 
 test("desktop IPC follower coalesces duplicate held turn starts for a thread", async (t) => {
@@ -2647,6 +2570,12 @@ test("desktop IPC follower coalesces duplicate held turn starts for a thread", a
           method: "initialize",
           handledByClientId: "router",
           result: { clientId: "remodex-test" },
+        });
+      } else if (frame.type === "client-discovery-request") {
+        writeFrame(socket, {
+          type: "client-discovery-response",
+          requestId: frame.requestId,
+          response: { canHandle: true },
         });
       } else if (frame.method === "thread-follower-start-turn") {
         writeFrame(socket, {
@@ -2686,30 +2615,288 @@ test("desktop IPC follower coalesces duplicate held turn starts for a thread", a
     params: { threadId: "thread-held-coalesce" },
   }));
   assert.equal(follower.observeInbound(JSON.stringify({
-    id: "phone-turn-start-coalesce-first",
+    id: "phone-turn-start-coalesce-old",
     method: "turn/start",
     params: {
       threadId: "thread-held-coalesce",
-      input: [{ type: "input_text", text: "first message" }],
+      input: [{ type: "input_text", text: "old duplicate" }],
     },
   })), true);
   assert.equal(follower.observeInbound(JSON.stringify({
-    id: "phone-turn-start-coalesce-second",
+    id: "phone-turn-start-coalesce-new",
     method: "turn/start",
     params: {
       threadId: "thread-held-coalesce",
-      input: [{ type: "input_text", text: "second message" }],
+      input: [{ type: "input_text", text: "new duplicate" }],
     },
   })), true);
 
-  await waitFor(() => serverSocket);
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-coalesce-old"), 1_000);
+  assert.equal(outbound.find((message) => message.id === "phone-turn-start-coalesce-old").error?.code, -32000);
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-coalesce-new"), 1_000);
+  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-coalesce-new"), {
+    id: "phone-turn-start-coalesce-new",
+    result: { turn: { id: "turn-coalesced" } },
+  });
+  const routedStarts = serverFrames.filter((frame) => frame.method === "thread-follower-start-turn");
+  assert.equal(routedStarts.length, 1);
+  assert.equal(routedStarts[0].params.turnStartParams.input[0].text, "new duplicate");
+});
+
+test("desktop IPC follower retries held ownership probes after IPC connects", async (t) => {
+  const outbound = [];
+  const localForwards = [];
+  const writtenFrames = [];
+  let fakeSocket = null;
+
+  const netModule = {
+    createConnection() {
+      fakeSocket = new EventEmitter();
+      fakeSocket.destroyed = true;
+      fakeSocket.write = (buffer, callback = () => {}) => {
+        const frame = parseFrameBuffer(buffer);
+        writtenFrames.push(frame);
+        callback();
+        if (frame.method === "initialize") {
+          setImmediate(() => emitFrame(fakeSocket, {
+            type: "response",
+            requestId: frame.requestId,
+            resultType: "success",
+            method: "initialize",
+            handledByClientId: "router",
+            result: { clientId: "remodex-test" },
+          }));
+        } else if (frame.type === "client-discovery-request") {
+          setImmediate(() => emitFrame(fakeSocket, {
+            type: "client-discovery-response",
+            requestId: frame.requestId,
+            response: { canHandle: true },
+          }));
+        } else if (frame.method === "thread-follower-start-turn") {
+          setImmediate(() => emitFrame(fakeSocket, {
+            type: "response",
+            requestId: frame.requestId,
+            resultType: "success",
+            method: frame.method,
+            handledByClientId: "desktop",
+            result: { turn: { id: "turn-connect-probe" } },
+          }));
+        }
+      };
+      fakeSocket.destroy = () => {
+        fakeSocket.destroyed = true;
+        fakeSocket.emit("close");
+      };
+      setTimeout(() => {
+        fakeSocket.destroyed = false;
+        fakeSocket.emit("connect");
+      }, 25);
+      return fakeSocket;
+    },
+  };
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath: "/tmp/remodex-fake-ipc",
+    netModule,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 1_000,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-connect-probe" },
+  }));
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-connect-probe",
+    method: "turn/start",
+    params: {
+      threadId: "thread-connect-probe",
+      input: [{ type: "input_text", text: "route after connect" }],
+    },
+  }));
+  assert.equal(handled, true);
+  assert.equal(writtenFrames.some((frame) => frame.type === "client-discovery-request"), false);
+
+  await waitFor(() => writtenFrames.some((frame) => frame.type === "client-discovery-request"), 1_000);
+  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-connect-probe"), 1_000);
+  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-connect-probe"), {
+    id: "phone-turn-start-connect-probe",
+    result: { turn: { id: "turn-connect-probe" } },
+  });
+  assert.deepEqual(localForwards, []);
+});
+
+test("desktop IPC follower ignores stale positive discovery after a held turn already expired", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-expired-");
+  const serverFrames = [];
+  const localForwards = [];
+  let serverSocket = null;
+  let discoveryRequestFrame = null;
+
+  // Ignores discovery probes, and reports no handler for routed requests so the
+  // expired hold falls back to the local app-server.
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.type === "client-discovery-request") {
+        discoveryRequestFrame = frame;
+      } else if (frame.type === "request" && frame.method?.startsWith("thread-follower-")) {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "error",
+          error: "no-client-found",
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 100,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-probe-expired" },
+  }));
+  const firstHandled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-expired-probe",
+    method: "turn/start",
+    params: {
+      threadId: "thread-probe-expired",
+      input: [{ type: "input_text", text: "expires before discovery answers" }],
+    },
+  }));
+  assert.equal(firstHandled, true);
+
+  // The hold expires and the request falls back to the local app-server.
+  await waitFor(() => localForwards.some((message) => message.id === "phone-turn-start-expired-probe"), 1_000);
+  assert.ok(discoveryRequestFrame);
+
+  // A very late positive discovery answer must not flip the thread to Desktop.
+  writeFrame(serverSocket, {
+    type: "client-discovery-response",
+    requestId: discoveryRequestFrame.requestId,
+    response: { canHandle: true },
+  });
+  await wait(25);
+
+  const secondHandled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-after-expired-probe",
+    method: "turn/start",
+    params: {
+      threadId: "thread-probe-expired",
+      input: [{ type: "input_text", text: "must not route to desktop" }],
+    },
+  }));
+  assert.equal(secondHandled, false);
+});
+
+test("desktop IPC follower ignores stale positive discovery after live owner claims a thread", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-stale-");
+  const serverFrames = [];
+  const localForwards = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.method === "thread-follower-start-turn") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: frame.method,
+          handledByClientId: "desktop",
+          result: { turn: { id: "turn-should-not-route" } },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 5_000,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-probe-stale" },
+  }));
+  const firstHandled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-stale-probe",
+    method: "turn/start",
+    params: {
+      threadId: "thread-probe-stale",
+      input: [{ type: "input_text", text: "hold before owner claim" }],
+    },
+  }));
+  assert.equal(firstHandled, true);
+
+  await waitFor(() => (
+    serverFrames.find((frame) => frame.type === "client-discovery-request")
+  ), 1_000);
+  const discoveryRequest = serverFrames.find((frame) => frame.type === "client-discovery-request");
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
-    sourceClientId: "desktop",
+    sourceClientId: "remodex-owner",
     version: 6,
     params: {
-      conversationId: "thread-held-coalesce",
+      conversationId: "thread-probe-stale",
+      remodexOwnerSource: "desktop-ipc-live-owner",
       change: {
         type: "snapshot",
         conversationState: { turns: [], requests: [] },
@@ -2717,18 +2904,28 @@ test("desktop IPC follower coalesces duplicate held turn starts for a thread", a
     },
   });
 
-  // Desktop runs one turn at a time: the user's first message routes, the
-  // duplicate is rejected instead of silently double-running.
-  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-coalesce-first"), 1_000);
-  assert.deepEqual(outbound.find((message) => message.id === "phone-turn-start-coalesce-first"), {
-    id: "phone-turn-start-coalesce-first",
-    result: { turn: { id: "turn-coalesced" } },
+  await waitFor(() => localForwards.some((message) => message.id === "phone-turn-start-stale-probe"), 1_000);
+  writeFrame(serverSocket, {
+    type: "client-discovery-response",
+    requestId: discoveryRequest.requestId,
+    response: { canHandle: true },
   });
-  await waitFor(() => outbound.find((message) => message.id === "phone-turn-start-coalesce-second"), 1_000);
-  assert.equal(outbound.find((message) => message.id === "phone-turn-start-coalesce-second").error?.code, -32000);
-  const routedStarts = serverFrames.filter((frame) => frame.method === "thread-follower-start-turn");
-  assert.equal(routedStarts.length, 1);
-  assert.equal(routedStarts[0].params.turnStartParams.input[0].text, "first message");
+  await wait(25);
+
+  const secondHandled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-after-stale-probe",
+    method: "turn/start",
+    params: {
+      threadId: "thread-probe-stale",
+      input: [{ type: "input_text", text: "must stay local" }],
+    },
+  }));
+  assert.equal(secondHandled, false);
+  await wait(25);
+  assert.equal(
+    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
+    false
+  );
 });
 
 test("desktop IPC follower cancels held turns when the live owner removes a thread", async (t) => {
@@ -2797,7 +2994,10 @@ test("desktop IPC follower cancels held turns when the live owner removes a thre
   }));
   assert.equal(handled, true);
 
-  await waitFor(() => serverSocket);
+  await waitFor(() => (
+    serverFrames.find((frame) => frame.type === "client-discovery-request")
+  ), 1_000);
+  const discoveryRequest = serverFrames.find((frame) => frame.type === "client-discovery-request");
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
@@ -2815,6 +3015,13 @@ test("desktop IPC follower cancels held turns when the live owner removes a thre
   });
 
   await waitFor(() => outbound.some((message) => message.id === "phone-turn-start-removed"), 1_000);
+  writeFrame(serverSocket, {
+    type: "client-discovery-response",
+    requestId: discoveryRequest.requestId,
+    response: { canHandle: true },
+  });
+  await wait(25);
+
   const errorResponse = outbound.find((message) => message.id === "phone-turn-start-removed");
   assert.equal(errorResponse.error.code, -32000);
   assert.deepEqual(localForwards, []);
@@ -2822,6 +3029,159 @@ test("desktop IPC follower cancels held turns when the live owner removes a thre
     serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
     false
   );
+});
+
+test("desktop IPC follower keeps held phone turns queued when discovery denies ownership", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-probe-denied-");
+  const serverFrames = [];
+  const localForwards = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.type === "client-discovery-request") {
+        writeFrame(socket, {
+          type: "client-discovery-response",
+          requestId: frame.requestId,
+          response: { canHandle: false },
+        });
+      } else if (frame.type === "request" && frame.method === "thread-follower-start-turn") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "error",
+          error: "no-client-found",
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 120,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-probe-denied" },
+  }));
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-denied",
+    method: "turn/start",
+    params: {
+      threadId: "thread-probe-denied",
+      input: [{ type: "input_text", text: "local thread" }],
+    },
+  }));
+  assert.equal(handled, true);
+
+  await waitFor(() => serverFrames.some((frame) => frame.type === "client-discovery-request"), 1_000);
+  await wait(30);
+  assert.deepEqual(localForwards, []);
+  assert.equal(
+    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
+    false
+  );
+
+  // The timer-routed request can still fall back locally after a real no-client-found.
+  await waitFor(() => localForwards.length > 0, 1_000);
+  assert.equal(localForwards[0].id, "phone-turn-start-denied");
+  assert.equal(
+    serverFrames.some((frame) => frame.method === "thread-follower-start-turn"),
+    true
+  );
+});
+
+test("desktop IPC follower forwards held phone turns to local codex when no snapshot arrives", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-hold-timeout-");
+  const serverFrames = [];
+  const localForwards = [];
+  let serverSocket = null;
+
+  // Models Codex Desktop's real router: client-origin discovery probes are
+  // ignored, but routed requests get a no-client-found error when nobody owns
+  // the thread.
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.type === "request" && frame.method?.startsWith("thread-follower-")) {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "error",
+          error: "no-client-found",
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 100,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-hold-timeout" },
+  }));
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-start-timeout",
+    method: "turn/start",
+    params: {
+      threadId: "thread-hold-timeout",
+      input: [{ type: "input_text", text: "no desktop here" }],
+    },
+  }));
+  assert.equal(handled, true);
+
+  await waitFor(() => localForwards.length > 0, 1_000);
+  assert.equal(localForwards[0].id, "phone-turn-start-timeout");
+  assert.equal(localForwards[0].method, "turn/start");
 });
 
 test("desktop IPC follower ignores Remodex-owned live owner broadcasts", async (t) => {
@@ -2900,6 +3260,124 @@ test("desktop IPC follower ignores Remodex-owned live owner broadcasts", async (
 
   await wait(50);
   assert.deepEqual(outbound, []);
+});
+
+test("desktop IPC follower stops serving stale active-turn caches to phone reads", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-stale-active-read-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let fakeNow = 1_000_000;
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    now: () => fakeNow,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-stale-active" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 6,
+    params: {
+      conversationId: "thread-stale-active",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-stale-active",
+            status: "inProgress",
+            items: [],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => follower.hasLiveThreadState("thread-stale-active"));
+
+  // While Desktop keeps the stream fresh, cached reads answer immediately.
+  const freshServed = follower.observeInbound(JSON.stringify({
+    id: "read-fresh",
+    method: "thread/read",
+    params: { threadId: "thread-stale-active" },
+  }));
+  assert.equal(freshServed, true);
+  assert.equal(outbound.some((message) => message.id === "read-fresh"), true);
+
+  // Desktop went silent while the cache still claims an active turn: the cache
+  // is stale evidence, so the read must fall through to the local app-server
+  // instead of pinning a phantom running indicator on the phone.
+  fakeNow += 21_000;
+  const staleServed = follower.observeInbound(JSON.stringify({
+    id: "read-stale",
+    method: "thread/read",
+    params: { threadId: "thread-stale-active" },
+  }));
+  assert.equal(staleServed, false);
+  assert.equal(outbound.some((message) => message.id === "read-stale"), false);
+
+  // Idle cached threads have no phantom-running risk: they stay servable.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 6,
+    params: {
+      conversationId: "thread-stale-active",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-stale-active",
+            status: "completed",
+            items: [],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => message.method === "turn/completed"));
+  fakeNow += 60_000;
+  const idleServed = follower.observeInbound(JSON.stringify({
+    id: "read-idle",
+    method: "thread/read",
+    params: { threadId: "thread-stale-active" },
+  }));
+  assert.equal(idleServed, true);
+  assert.equal(outbound.some((message) => message.id === "read-idle"), true);
 });
 
 function attachFrameReader(socket, onFrame) {

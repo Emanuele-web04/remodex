@@ -24,6 +24,12 @@ const NEW_THREAD_DEEP_LINK = "codex://threads/new";
 class CodexDesktopRefresher {
   constructor({
     enabled = true,
+    // When desktop IPC live sync streams conversation content, the refresher's
+    // only remaining job is navigation: bring Codex to the phone-driven thread
+    // when a phone message starts. Mid-run and completion refreshes are content
+    // reload workarounds from the pre-IPC era and would repeatedly deep-link
+    // and steal focus, so navigation-only mode drops them.
+    navigationOnly = false,
     debounceMs = DEFAULT_DEBOUNCE_MS,
     refreshCommand = "",
     bundleId = DEFAULT_BUNDLE_ID,
@@ -40,6 +46,7 @@ class CodexDesktopRefresher {
     customRefreshFailureThreshold = DEFAULT_CUSTOM_REFRESH_FAILURE_THRESHOLD,
   } = {}) {
     this.enabled = enabled;
+    this.navigationOnly = navigationOnly;
     this.debounceMs = debounceMs;
     this.refreshCommand = refreshCommand;
     this.bundleId = bundleId;
@@ -126,6 +133,9 @@ class CodexDesktopRefresher {
     const method = parsed.method;
     if (method === "turn/completed") {
       this.clearFallbackTimer();
+      if (this.navigationOnly) {
+        return;
+      }
       const turnId = extractTurnId(parsed);
       if (turnId && turnId === this.lastTurnIdRefreshed) {
         this.log(`refresh skipped (debounced): completion already refreshed for ${turnId}`);
@@ -372,7 +382,7 @@ class CodexDesktopRefresher {
 
   // Keeps one lightweight rollout watcher alive for the current Remodex-controlled thread.
   ensureWatcher(threadId) {
-    if (!this.canRefresh() || !threadId) {
+    if (this.navigationOnly || !this.canRefresh() || !threadId) {
       return;
     }
 
@@ -559,7 +569,13 @@ function readBridgeConfig({
     ? daemonConfig.keepMacAwakeEnabled
     : null;
   // The deep-link refresh workaround stays opt-in; local IPC live sync is the primary desktop path.
-  const defaultRefreshEnabled = false;
+  // Once opted in, the persisted choice must survive restarts: `remodex restart`
+  // rewrites daemon-config.json from this computed config, so ignoring the
+  // persisted flag silently disabled the refresher on every restart.
+  const persistedRefreshEnabled = typeof daemonConfig.refreshEnabled === "boolean"
+    ? daemonConfig.refreshEnabled
+    : null;
+  const defaultRefreshEnabled = persistedRefreshEnabled == null ? false : persistedRefreshEnabled;
   return {
     relayUrl,
     pushServiceUrl: readFirstDefinedEnv(

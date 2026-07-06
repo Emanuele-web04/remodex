@@ -243,7 +243,15 @@ function projectTurn(threadId, rawTurn, index, { itemCache = null } = {}) {
     if (!isSupportedItemType(itemType)) {
       continue;
     }
-    if (itemType === "usermessage" && sameUserInput(item.content, paramsInput)) {
+    // Desktop stores the prompt both in turn params and as a canonical
+    // userMessage item, often with different entry shapes (extra fields,
+    // wrapper text). Matching on the sanitized visible text instead of raw
+    // JSON equality keeps one user row; the strict shape check alone let the
+    // same prompt through twice and duplicated it on the phone via history.
+    if (itemType === "usermessage"
+      && visibleInput.length > 0
+      && (sameUserInput(item.content, paramsInput)
+        || sameVisibleUserText(item.content, visibleInput))) {
       continue;
     }
     // Projected items are treated as immutable by every consumer, so raw items
@@ -783,6 +791,12 @@ function stripRequestWrapper(text) {
 
 function sameUserInput(content, paramsInput) {
   return JSON.stringify(content || []) === JSON.stringify(paramsInput || []);
+}
+
+function sameVisibleUserText(content, visibleInput) {
+  const itemText = renderUserInputText(sanitizeUserInputEntries(content)).trim();
+  const paramsText = renderUserInputText(visibleInput).trim();
+  return Boolean(itemText) && itemText === paramsText;
 }
 
 // Sentinel so the item cache can also remember "this raw item projects to nothing".

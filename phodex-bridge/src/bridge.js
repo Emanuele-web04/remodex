@@ -171,6 +171,9 @@ function startBridge({
   const notificationSecret = randomBytes(24).toString("hex");
   const desktopRefresher = new CodexDesktopRefresher({
     enabled: config.refreshEnabled,
+    // With IPC live sync streaming content, deep-link refreshes are only needed
+    // to navigate Desktop onto the phone-driven thread, not to reload content.
+    navigationOnly: config.desktopIpcLiveSyncEnabled,
     debounceMs: config.refreshDebounceMs,
     refreshCommand: config.refreshCommand,
     bundleId: config.codexBundleId,
@@ -288,6 +291,7 @@ function startBridge({
   const desktopIpcLiveOwner = !config.codexEndpoint
     ? createDesktopIpcLiveOwner({
       enabled: config.desktopIpcLiveSyncEnabled !== false,
+      sendApplicationResponse,
       sendCodexRequest,
       sendRawCodexMessage: (rawMessage) => codex.send(rawMessage),
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
@@ -584,7 +588,7 @@ function startBridge({
     pushNotificationTracker.handleOutbound(message, parsedMessage);
     rememberThreadFromMessage("codex", message, parsedMessage);
     secureTransport.queueOutboundApplicationMessage(
-      sanitizeRelayBoundCodexMessage(message),
+      sanitizeRelayBoundCodexMessage(message, parsedMessage),
       sendRelayWireMessage
     );
   });
@@ -1042,16 +1046,22 @@ function startBridge({
   }
 
   // Replaces huge inline desktop-history images with lightweight references before relay encryption.
-  function sanitizeRelayBoundCodexMessage(rawMessage) {
+  function sanitizeRelayBoundCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
     const normalizedMessage = normalizeRelayBoundJsonRpcMessage(rawMessage, {
       pendingRequestMethodsById: relaySanitizedResponseMethodsById,
+      parsedMessage,
     });
     if (!normalizedMessage) {
       return null;
     }
 
-    const parsed = safeParseJSON(normalizedMessage);
+    // Streaming deltas hit this path dozens of times per second; when the
+    // envelope passed through normalization untouched, reuse the parse the
+    // caller already paid for instead of re-parsing the same bytes.
+    const parsed = normalizedMessage === rawMessage && parsedMessage
+      ? parsedMessage
+      : safeParseJSON(normalizedMessage);
     if (isContextualUserItemNotification(parsed)) {
       return null;
     }
@@ -2383,8 +2393,10 @@ function measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay, requ
 // Keeps app-server responses in the JSON-RPC shape that the App Store iOS client decodes.
 function normalizeRelayBoundJsonRpcMessage(rawMessage, {
   pendingRequestMethodsById = null,
+  // Optional pre-parsed envelope shared by the caller; treated as read-only.
+  parsedMessage = null,
 } = {}) {
-  const parsed = parseBridgeJSON(rawMessage);
+  const parsed = parsedMessage ?? parseBridgeJSON(rawMessage);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return null;
   }

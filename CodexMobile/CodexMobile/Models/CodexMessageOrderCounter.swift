@@ -26,7 +26,17 @@ nonisolated enum CodexMessageOrderCounter {
     /// Seeds the counter so new messages always sort after existing persisted ones.
     /// Call this once after loading messages from disk.
     static func seed(from allMessages: [String: [CodexMessage]]) {
-        let maxExisting = allMessages.values.flatMap { $0 }.map(\.orderIndex).max() ?? -1
+        advance(past: allMessages.values.flatMap { $0 }.map(\.orderIndex).max() ?? -1)
+    }
+
+    /// Seeds the counter from a single thread's messages. Incremental updates
+    /// only ever raise order indices within one thread, so scanning the whole
+    /// message store again would be wasted work.
+    static func seed(fromThreadMessages messages: [CodexMessage]) {
+        advance(past: messages.map(\.orderIndex).max() ?? -1)
+    }
+
+    private static func advance(past maxExisting: Int) {
         lock.lock()
         defer { lock.unlock() }
         if maxExisting >= counter {

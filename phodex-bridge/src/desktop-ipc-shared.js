@@ -57,9 +57,11 @@ function isContextualUserText(text) {
   if (!trimmed) {
     return false;
   }
-  return CONTEXT_FRAGMENT_MARKERS.some(({ start, end }) => (
-    trimmed.startsWith(start) && trimmed.endsWith(end)
-  ));
+  // Newer runtimes concatenate several fragments into one user item (for
+  // example AGENTS.md instructions followed by environment_context), so the
+  // opening and closing markers may come from different fragment kinds.
+  return CONTEXT_FRAGMENT_MARKERS.some(({ start }) => trimmed.startsWith(start))
+    && CONTEXT_FRAGMENT_MARKERS.some(({ end }) => trimmed.endsWith(end));
 }
 
 // Mirrors Desktop's extract_prompt_request: IDE-context prompts embed the real
@@ -76,6 +78,41 @@ function visibleUserPromptText(text) {
     return text;
   }
   return text.slice(requestIndex + PROMPT_REQUEST_BEGIN.length).trim();
+}
+
+// Extracts the visible human prompt from turn-start input entries while dropping
+// injected context fragments. Used by Desktop IPC and rollout mirrors.
+function visibleUserPromptFromInputEntries(input) {
+  const entries = Array.isArray(input) ? input : [input];
+  return entries
+    .map(readInputEntryText)
+    .map((text) => visibleUserPromptText(text).trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function readInputEntryText(entry) {
+  if (typeof entry === "string") {
+    return entry;
+  }
+  if (!entry || typeof entry !== "object") {
+    return "";
+  }
+  if (typeof entry.text === "string") {
+    return entry.text;
+  }
+  if (typeof entry.message === "string") {
+    return entry.message;
+  }
+  if (typeof entry.content === "string") {
+    return entry.content;
+  }
+  const content = Array.isArray(entry.content) ? entry.content : [];
+  return content
+    .map(readInputEntryText)
+    .filter(Boolean)
+    .join("\n");
 }
 
 function readString(value) {
@@ -137,7 +174,8 @@ function readUserItemText(item) {
 // A stream snapshot that carries an actively running turn is evidence the
 // sender's runtime is executing the conversation. Idle snapshots also arrive
 // for threads a peer merely viewed or re-broadcast on reconnect, so they are
-// not an ownership claim.
+// weaker claims: strong enough to take over an idle thread, but never one the
+// local app-server is still running.
 function conversationSnapshotShowsActiveTurn(change) {
   const conversationState = change?.conversationState || change?.conversation_state;
   const turns = Array.isArray(conversationState?.turns) ? conversationState.turns : [];
@@ -199,5 +237,6 @@ module.exports = {
   resolveDefaultIpcSocketPath,
   safeParseJSON,
   visibleUserPromptText,
+  visibleUserPromptFromInputEntries,
   writeFrame,
 };

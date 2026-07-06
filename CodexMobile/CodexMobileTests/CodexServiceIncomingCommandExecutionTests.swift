@@ -1173,6 +1173,282 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(userRows.last?.turnId, turnID)
     }
 
+    func testHistoryUserMessageRebindsConfirmedIdentitylessDesktopMirror() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date()
+
+        let existing = [
+            CodexMessage(
+                id: "desktop-live-mirror",
+                threadId: threadID,
+                role: .user,
+                text: "okok",
+                createdAt: now,
+                turnId: nil,
+                itemId: nil,
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "user-history",
+                threadId: threadID,
+                role: .user,
+                text: "okok",
+                createdAt: now.addingTimeInterval(0.4),
+                turnId: turnID,
+                itemId: "user-history-item",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let userRows = merged.filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].id, "desktop-live-mirror")
+        XCTAssertEqual(userRows[0].turnId, turnID)
+        XCTAssertEqual(userRows[0].itemId, "user-history-item")
+        XCTAssertEqual(userRows[0].text, "okok")
+    }
+
+    func testDesktopMirroredUserMessageEventAndItemStartedDoNotDuplicate() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "user-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "codex/event/user_message",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "message": .string("okok"),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("userMessage"),
+                    "content": .array([
+                        .object([
+                            "type": .string("text"),
+                            "text": .string("okok"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        let userRows = service.messages(for: threadID).filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].text, "okok")
+        XCTAssertEqual(userRows[0].turnId, turnID)
+        XCTAssertEqual(userRows[0].deliveryState, .confirmed)
+    }
+
+    // Desktop snapshots without raw turn ids project the same prompt under
+    // synthetic identity ("ipc-turn-N" / "<turnId>:input"); that replay must
+    // merge into the turn-bound row instead of duplicating the bubble.
+    func testDesktopMirroredSyntheticIdentityReplayDoesNotDuplicateUserRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "codex/event/user_message",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "id": .string("\(turnID):input"),
+                "message": .string("jamm bell"),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string("ipc-turn-3"),
+                "remodexDesktopMirror": .bool(true),
+                "item": .object([
+                    "id": .string("ipc-turn-3:input"),
+                    "type": .string("userMessage"),
+                    "content": .array([
+                        .object([
+                            "type": .string("text"),
+                            "text": .string("jamm bell"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        let userRows = service.messages(for: threadID).filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].text, "jamm bell")
+        XCTAssertEqual(userRows[0].turnId, turnID)
+        XCTAssertEqual(userRows[0].itemId, "\(turnID):input")
+    }
+
+    // Rollout mirrors can flush the prompt without a resolved turn id; that
+    // event must merge into the already turn-bound row of the same prompt.
+    func testDesktopMirroredTurnlessUserMessageMergesIntoTurnBoundRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "codex/event/user_message",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "message": .string("okok"),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+        service.handleNotification(
+            method: "codex/event/user_message",
+            params: .object([
+                "threadId": .string(threadID),
+                "message": .string("okok"),
+                "remodexDesktopMirror": .bool(true),
+                "remodexRolloutLiveMirror": .bool(true),
+            ])
+        )
+
+        let userRows = service.messages(for: threadID).filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].turnId, turnID)
+    }
+
+    // Follower-served thread/read projects prompts with synthetic identity and
+    // thread-level fallback dates; history merge must bind them to the live row
+    // and keep its real identity instead of appending a second bubble.
+    func testHistoryUserMessageWithSyntheticDesktopIdentityMergesIntoRealRow() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+
+        let existing = [
+            CodexMessage(
+                id: "user-live-mirror",
+                threadId: threadID,
+                role: .user,
+                text: "jamm bell",
+                createdAt: now,
+                turnId: turnID,
+                itemId: "\(turnID):input",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "user-projected-history",
+                threadId: threadID,
+                role: .user,
+                text: "jamm bell",
+                createdAt: now.addingTimeInterval(-1_380),
+                turnId: "ipc-turn-0",
+                itemId: "ipc-turn-0:input",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let userRows = merged.filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].id, "user-live-mirror")
+        XCTAssertEqual(userRows[0].turnId, turnID)
+    }
+
+    // The reverse direction: a provisional synthetic row created from a projected
+    // mirror must rebind to the real app-server history identity.
+    func testHistoryUserMessageUpgradesSyntheticDesktopIdentityToRealIdentity() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let now = Date(timeIntervalSince1970: 1_779_654_720)
+
+        let existing = [
+            CodexMessage(
+                id: "user-projected-mirror",
+                threadId: threadID,
+                role: .user,
+                text: "jamm bell",
+                createdAt: now,
+                turnId: "ipc-turn-0",
+                itemId: "ipc-turn-0:input",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+        let history = [
+            CodexMessage(
+                id: "user-history",
+                threadId: threadID,
+                role: .user,
+                text: "jamm bell",
+                createdAt: now.addingTimeInterval(0.4),
+                turnId: turnID,
+                itemId: "user-history-item",
+                isStreaming: false,
+                deliveryState: .confirmed
+            ),
+        ]
+
+        let merged = service.mergeHistoryMessages(existing, history)
+        let userRows = merged.filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 1)
+        XCTAssertEqual(userRows[0].id, "user-projected-mirror")
+        XCTAssertEqual(userRows[0].turnId, turnID)
+        XCTAssertEqual(userRows[0].itemId, "user-history-item")
+    }
+
+    // Intentional repeats stay separate: two prompts with distinct real turn ids
+    // must not collapse even though the text matches.
+    func testDesktopMirroredRepeatedSendsWithDistinctRealTurnIdsStaySeparate() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let firstTurnID = "turn-\(UUID().uuidString)"
+        let secondTurnID = "turn-\(UUID().uuidString)"
+
+        for turnID in [firstTurnID, secondTurnID] {
+            service.handleNotification(
+                method: "codex/event/user_message",
+                params: .object([
+                    "threadId": .string(threadID),
+                    "turnId": .string(turnID),
+                    "message": .string("okok"),
+                    "remodexDesktopMirror": .bool(true),
+                ])
+            )
+        }
+
+        let userRows = service.messages(for: threadID).filter { $0.role == .user }
+
+        XCTAssertEqual(userRows.count, 2)
+        XCTAssertEqual(Set(userRows.compactMap(\.turnId)), [firstTurnID, secondTurnID])
+    }
+
     func testHistoryUserMessageRebindsFallbackTimestampEchoToRealDatedRow() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

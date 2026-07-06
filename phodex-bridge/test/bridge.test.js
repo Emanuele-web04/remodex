@@ -184,6 +184,22 @@ test("normalizeRelayBoundJsonRpcMessage keeps server-origin approval requests", 
   assert.equal(normalizeRelayBoundJsonRpcMessage(raw), raw);
 });
 
+test("normalizeRelayBoundJsonRpcMessage accepts a pre-parsed passthrough envelope", () => {
+  const parsedMessage = {
+    method: "turn/completed",
+    params: {
+      threadId: "thread-preparsed",
+      turnId: "turn-preparsed",
+    },
+  };
+  const raw = JSON.stringify(parsedMessage);
+
+  assert.equal(
+    normalizeRelayBoundJsonRpcMessage(raw, { parsedMessage }),
+    raw
+  );
+});
+
 test("disableUnsupportedReasoningSummaryForTurnStart disables summaries for Codex Spark", () => {
   const raw = JSON.stringify({
     id: "req-turn-start",

@@ -693,6 +693,16 @@ extension CodexService {
 
     // Marks thread as actively running while ensuring stale outcomes are cleared.
     func markThreadAsRunning(_ threadId: String) {
+        // Streaming deltas re-assert running on every chunk; when nothing would
+        // change, skip the busy-roots rebuild and timeline refresh entirely so
+        // token streaming stays O(1) instead of O(threads) per delta.
+        if runningThreadIDs.contains(threadId),
+           threadsPendingCompletionHaptic.contains(threadId),
+           latestTurnTerminalStateByThread[threadId] == nil,
+           !readyThreadIDs.contains(threadId),
+           !failedThreadIDs.contains(threadId) {
+            return
+        }
         runningThreadIDs.insert(threadId)
         threadsPendingCompletionHaptic.insert(threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
@@ -1388,6 +1398,7 @@ extension CodexService {
         turnId: String?,
         text: String,
         fileMentions: [String] = [],
+        itemId: String? = nil,
         createdAt: Date? = nil
     ) {
         let trimmedText = Self.normalizedMessageText(text)
@@ -1395,22 +1406,40 @@ extension CodexService {
             return
         }
 
+        let normalizedItemId = Self.normalizedHistoryIdentifier(itemId)
         if let existingIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
-            candidate.role == .user
-                && Self.userMessageMatchesTextForHistory(candidate, text: trimmedText)
-                && (
-                    (turnId != nil && (candidate.turnId == nil || candidate.turnId == turnId))
-                        || (turnId == nil && candidate.turnId == nil)
-                )
+            guard candidate.role == .user else {
+                return false
+            }
+            if let normalizedItemId,
+               Self.normalizedHistoryIdentifier(candidate.itemId) == normalizedItemId {
+                return true
+            }
+            return Self.userMessageMatchesTextForHistory(candidate, text: trimmedText)
+                && Self.mirroredUserTurnIdentityAllowsMerge(candidate.turnId, turnId)
         }) {
             var didMutate = false
             if messagesByThread[threadId]?[existingIndex].deliveryState != .confirmed {
                 messagesByThread[threadId]?[existingIndex].deliveryState = .confirmed
                 didMutate = true
             }
-            if messagesByThread[threadId]?[existingIndex].turnId == nil {
-                messagesByThread[threadId]?[existingIndex].turnId = turnId
-                didMutate = true
+            if let turnId {
+                let existingTurnId = messagesByThread[threadId]?[existingIndex].turnId
+                if existingTurnId == nil
+                    || (Self.isSyntheticDesktopTurnIdentifier(existingTurnId)
+                        && !Self.isSyntheticDesktopTurnIdentifier(turnId)) {
+                    messagesByThread[threadId]?[existingIndex].turnId = turnId
+                    didMutate = true
+                }
+            }
+            if let normalizedItemId {
+                let existingItemId = Self.normalizedHistoryIdentifier(messagesByThread[threadId]?[existingIndex].itemId)
+                if existingItemId == nil
+                    || (Self.isSyntheticDesktopUserItemIdentifier(existingItemId)
+                        && !Self.isSyntheticDesktopUserItemIdentifier(normalizedItemId)) {
+                    messagesByThread[threadId]?[existingIndex].itemId = normalizedItemId
+                    didMutate = true
+                }
             }
             if (messagesByThread[threadId]?[existingIndex].fileMentions.isEmpty ?? true), !fileMentions.isEmpty {
                 messagesByThread[threadId]?[existingIndex].fileMentions = fileMentions
@@ -1449,6 +1478,7 @@ extension CodexService {
                 fileMentions: fileMentions,
                 createdAt: createdAt ?? Date(),
                 turnId: turnId,
+                itemId: normalizedItemId,
                 deliveryState: .confirmed,
                 orderIndex: orderIndex
             )
@@ -1473,7 +1503,8 @@ extension CodexService {
             }
             messagesByThread[threadId]?[index].orderIndex = currentOrder + 1
         }
-        CodexMessageOrderCounter.seed(from: messagesByThread)
+        // Only this thread's indices moved; other threads cannot raise the max.
+        CodexMessageOrderCounter.seed(fromThreadMessages: messagesByThread[threadId] ?? [])
         return turnAnchor
     }
 

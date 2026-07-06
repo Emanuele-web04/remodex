@@ -17,7 +17,7 @@ const {
   TERMINAL_TASK_EVENT_TYPES,
   terminalEventClosesTrackedTurn,
 } = require("./rollout-turn-semantics");
-const { visibleUserPromptText } = require("./desktop-ipc-shared");
+const { visibleUserPromptFromInputEntries } = require("./desktop-ipc-shared");
 
 // The phone batches each poll tick's notifications and settles its timeline
 // ~80ms after the batch ends (CodexService liveMirrorBatchFlushNanoseconds).
@@ -567,7 +567,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
     if (eventType === "user_message") {
       // Rollouts persist injected context (AGENTS.md instructions, IDE prompt
       // wrappers) as user_message events; only the real request is a bubble.
-      const message = visibleUserPromptText(
+      const message = visibleUserPromptFromInputEntries(
         readString(payload.message) || readString(payload.text)
       );
       if (!message) {
@@ -588,6 +588,7 @@ function synthesizeNotificationsFromRolloutEntry(entry, state, { nowMs = Date.no
         threadId: state.threadId,
         turnId,
         message,
+        ...(readString(payload.id) ? { id: readString(payload.id) } : {}),
         ...timestampParams(readUserMessageTimestamp(entry, payload)),
       }));
       return notifications;
@@ -1408,12 +1409,15 @@ function flushPendingUserMessageNotifications(state, turnId) {
     return [];
   }
 
+  const resolvedTurnId = readString(turnId) || readString(state.activeTurnId);
   return messages
-    .map((pending) => ({ ...pending, message: visibleUserPromptText(pending.message) }))
+    .map((pending) => ({ ...pending, message: visibleUserPromptFromInputEntries(pending.message) }))
     .filter((pending) => pending.message)
     .map((pending) => createNotification("codex/event/user_message", {
       threadId: state.threadId,
-      turnId: turnId || state.activeTurnId || "",
+      // An empty turnId reads as "no turn identity" on the phone and blocks
+      // dedup against the turn-bound row of the same prompt; omit it instead.
+      ...(resolvedTurnId ? { turnId: resolvedTurnId } : {}),
       message: pending.message,
       ...(pending.id ? { id: pending.id } : {}),
       ...timestampParams(pending.timestamp),

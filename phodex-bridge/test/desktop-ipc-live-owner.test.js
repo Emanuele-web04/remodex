@@ -1092,6 +1092,7 @@ test("live owner resumes snapshots when existing thread hydration fails", async 
 test("live owner handles discovery and start-turn follower requests for owned threads", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-follower-");
   const codexRequests = [];
+  const appNotifications = [];
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -1122,12 +1123,16 @@ test("live owner handles discovery and start-turn follower requests for owned th
     snapshotDebounceMs: 1,
     async sendCodexRequest(method, params) {
       codexRequests.push({ method, params });
+      assert.equal(appNotifications.length, 0);
       return {
         turn: {
           id: "turn-from-follower",
           status: "inProgress",
         },
       };
+    },
+    sendApplicationResponse(message) {
+      appNotifications.push(JSON.parse(message));
     },
     sendRawCodexMessage() {},
   });
@@ -1182,7 +1187,10 @@ test("live owner handles discovery and start-turn follower requests for owned th
     params: {
       conversationId: "thread-owned",
       turnStartParams: {
-        input: [{ type: "text", text: "continue" }],
+        input: [
+          { type: "text", text: "# AGENTS.md instructions for /tmp/project\n<INSTRUCTIONS>rules</INSTRUCTIONS>" },
+          { type: "input_text", text: "continue" },
+        ],
         model: "gpt-test",
         attachments: [{ id: "client-only" }],
       },
@@ -1208,10 +1216,23 @@ test("live owner handles discovery and start-turn follower requests for owned th
     method: "turn/start",
     params: {
       threadId: "thread-owned",
-      input: [{ type: "text", text: "continue" }],
+      input: [
+        { type: "text", text: "# AGENTS.md instructions for /tmp/project\n<INSTRUCTIONS>rules</INSTRUCTIONS>" },
+        { type: "input_text", text: "continue" },
+      ],
       model: "gpt-test",
     },
   }]);
+  assert.equal(appNotifications.length, 1);
+  assert.equal(appNotifications[0].method, "codex/event/user_message");
+  assert.equal(appNotifications[0].params.threadId, "thread-owned");
+  assert.equal(appNotifications[0].params.turnId, "turn-from-follower");
+  // The synthetic prompt identity must match the conversation projector's
+  // "<turnId>:input" scheme so the phone can dedupe later projected mirrors.
+  assert.equal(appNotifications[0].params.id, "turn-from-follower:input");
+  assert.equal(appNotifications[0].params.message, "continue");
+  assert.equal(appNotifications[0].params.remodexDesktopMirror, true);
+  assert.equal(appNotifications[0].params.remodexDesktopIpcMirror, true);
 });
 
 test("live owner dedupes held phone turn starts routed back through follower IPC", async (t) => {
@@ -2565,7 +2586,7 @@ test("live owner keeps ownership when peer sends non-owner patch broadcasts", as
   });
 });
 
-test("live owner yields ownership when a peer snapshot shows an actively running turn", async (t) => {
+test("live owner yields ownership when a peer sends an untagged snapshot", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-peer-snapshot-");
   const codexRequests = [];
   let serverSocket = null;
@@ -2617,10 +2638,7 @@ test("live owner yields ownership when a peer snapshot shows an actively running
       conversationId: "thread-peer-snapshot",
       change: {
         type: "snapshot",
-        conversationState: {
-          turns: [{ id: "turn-peer-running", status: "inProgress", items: [] }],
-          requests: [],
-        },
+        conversationState: { turns: [], requests: [] },
       },
     },
   });
@@ -2646,9 +2664,8 @@ test("live owner yields ownership when a peer snapshot shows an actively running
   assert.equal(codexRequests.filter((request) => request.method === "turn/start").length, 0);
 });
 
-test("live owner keeps ownership when a peer sends an idle untagged snapshot", async (t) => {
-  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-idle-snapshot-");
-  const codexRequests = [];
+test("live owner keeps mid-run threads when a peer sends an idle snapshot", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-idle-claim-");
   let serverSocket = null;
 
   const server = net.createServer((socket) => {
@@ -2676,92 +2693,6 @@ test("live owner keeps ownership when a peer sends an idle untagged snapshot", a
 
   const owner = createDesktopIpcLiveOwner({
     socketPath,
-    async sendCodexRequest(method, params) {
-      codexRequests.push({ method, params });
-      return { result: { turn: { id: "turn-from-follower" } } };
-    },
-    sendRawCodexMessage() {},
-  });
-
-  owner.observeInbound(JSON.stringify({
-    method: "turn/start",
-    params: { threadId: "thread-idle-snapshot", input: [] },
-  }));
-  await waitFor(() => serverSocket);
-
-  // Desktop re-broadcasts idle snapshots for conversations the user merely
-  // viewed; those must not strip the bridge's ownership of a phone thread.
-  writeFrame(serverSocket, {
-    type: "broadcast",
-    method: "thread-stream-state-changed",
-    sourceClientId: "desktop-viewer",
-    version: 6,
-    params: {
-      conversationId: "thread-idle-snapshot",
-      change: {
-        type: "snapshot",
-        conversationState: {
-          turns: [{ id: "turn-done", status: "completed", items: [] }],
-          requests: [],
-        },
-      },
-    },
-  });
-  await wait(25);
-  assert.equal(owner.isThreadOwned("thread-idle-snapshot"), true);
-
-  writeFrame(serverSocket, {
-    type: "request",
-    requestId: "idle-snapshot-start-1",
-    sourceClientId: "desktop",
-    method: "thread-follower-start-turn",
-    params: {
-      conversationId: "thread-idle-snapshot",
-      turnStartParams: {
-        input: [{ type: "text", text: "still bridge-owned" }],
-      },
-    },
-  });
-  const response = await waitForFrame(
-    serverSocket,
-    (frame) => frame.type === "response" && frame.requestId === "idle-snapshot-start-1"
-  );
-  assert.equal(response.resultType, "success");
-  assert.equal(codexRequests.filter((request) => request.method === "turn/start").length, 1);
-});
-
-test("live owner keeps ownership when the phone unsubscribes from a thread", async (t) => {
-  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-unsubscribe-");
-  const frames = [];
-  let serverSocket = null;
-
-  const server = net.createServer((socket) => {
-    serverSocket = socket;
-    attachFrameReader(socket, (frame) => {
-      frames.push(frame);
-      if (frame.method === "initialize") {
-        writeFrame(socket, {
-          type: "response",
-          requestId: frame.requestId,
-          resultType: "success",
-          method: "initialize",
-          handledByClientId: "router",
-          result: { clientId: "remodex-owner-test" },
-        });
-      }
-    });
-  });
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  t.after(() => {
-    owner.stopAll();
-    server.close();
-    serverSocket?.destroy();
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  const owner = createDesktopIpcLiveOwner({
-    socketPath,
-    snapshotDebounceMs: 1,
     sendCodexRequest: async () => ({ ok: true }),
     sendRawCodexMessage() {},
   });
@@ -2769,30 +2700,109 @@ test("live owner keeps ownership when the phone unsubscribes from a thread", asy
   owner.observeInbound(JSON.stringify({
     method: "turn/start",
     params: {
-      threadId: "thread-unsubscribe-keep",
-      input: [{ type: "input_text", text: "keep me owned" }],
+      threadId: "thread-idle-claim",
+      input: [{ type: "text", text: "running prompt" }],
     },
   }));
-  await waitForMessage(
-    frames,
-    (frame) => frame.type === "broadcast"
-      && frame.params?.conversationId === "thread-unsubscribe-keep"
-      && frame.params?.change?.type === "snapshot"
-  );
+  await waitFor(() => serverSocket);
 
-  // The phone backgrounds the chat: the local app-server session is still
-  // authoritative, so no release broadcast and no ownership drop.
+  // Desktop re-broadcasts idle snapshots for threads the user merely viewed;
+  // those must not steal a thread whose local turn is still in flight.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    version: 6,
+    params: {
+      conversationId: "thread-idle-claim",
+      change: {
+        type: "snapshot",
+        conversationState: { turns: [], requests: [] },
+      },
+    },
+  });
+  await wait(25);
+  assert.equal(owner.isThreadOwned("thread-idle-claim"), true);
+
+  // A snapshot proving the peer runtime is executing the turn is a real claim.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-owner",
+    version: 6,
+    params: {
+      conversationId: "thread-idle-claim",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{ id: "turn-peer-1", status: "inProgress" }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => !owner.isThreadOwned("thread-idle-claim"));
+});
+
+test("live owner releases idle threads on unsubscribe but keeps running ones", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-unsub-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  // An owned thread with no turn in flight releases when the phone leaves it.
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: { threadId: "thread-unsub-idle", input: [] },
+  }));
+  assert.equal(owner.isThreadOwned("thread-unsub-idle"), true);
   owner.observeInbound(JSON.stringify({
     method: "thread/unsubscribe",
-    params: { threadId: "thread-unsubscribe-keep" },
+    params: { threadId: "thread-unsub-idle" },
   }));
-  await wait(25);
+  assert.equal(owner.isThreadOwned("thread-unsub-idle"), false);
 
-  assert.equal(owner.isThreadOwned("thread-unsubscribe-keep"), true);
-  assert.equal(
-    frames.some((frame) => frame.params?.remodexOwnerReleased === true),
-    false
-  );
+  // A thread whose local turn is still executing stays owned: releasing it
+  // mid-run corrupts the timeline on the next reopen.
+  owner.observeInbound(JSON.stringify({
+    method: "turn/start",
+    params: {
+      threadId: "thread-unsub-running",
+      input: [{ type: "text", text: "still running" }],
+    },
+  }));
+  owner.observeInbound(JSON.stringify({
+    method: "thread/unsubscribe",
+    params: { threadId: "thread-unsub-running" },
+  }));
+  assert.equal(owner.isThreadOwned("thread-unsub-running"), true);
 });
 
 test("live owner drops cached conversation state when yielding to a peer owner", async (t) => {
@@ -2860,7 +2870,8 @@ test("live owner drops cached conversation state when yielding to a peer owner",
       && frame.params?.change?.type === "snapshot"
   );
 
-  // A peer owner claims the stream with a snapshot showing a running turn.
+  // A peer owner claims the stream with a snapshot proving it is executing the
+  // turn; the local turn is still marked running, so an idle echo would not do.
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
@@ -2871,7 +2882,7 @@ test("live owner drops cached conversation state when yielding to a peer owner",
       change: {
         type: "snapshot",
         conversationState: {
-          turns: [{ id: "turn-peer-active", status: "inProgress", items: [] }],
+          turns: [{ id: "turn-peer-claim", status: "inProgress" }],
           requests: [],
         },
       },

@@ -17,6 +17,7 @@ const {
   requestIdKey,
   resolveDefaultIpcSocketPath,
   safeParseJSON,
+  visibleUserPromptFromInputEntries,
 } = require("./desktop-ipc-shared");
 const {
   LOCAL_HOST_ID,
@@ -102,6 +103,7 @@ const ALLOWED_TURN_START_PARAM_KEYS = new Set([
 function createDesktopIpcLiveOwner({
   enabled = true,
   hostId = LOCAL_HOST_ID,
+  sendApplicationResponse = null,
   sendCodexRequest,
   sendRawCodexMessage,
   normalizeTurnStartParams = (params) => params,
@@ -119,6 +121,9 @@ function createDesktopIpcLiveOwner({
   if (!enabled || typeof sendCodexRequest !== "function" || typeof sendRawCodexMessage !== "function") {
     return createDisabledDesktopIpcLiveOwner();
   }
+  const sendPhoneNotification = typeof sendApplicationResponse === "function"
+    ? sendApplicationResponse
+    : () => {};
 
   const conversations = new Map();
   const ownedThreadIds = new Set();
@@ -208,11 +213,12 @@ function createDesktopIpcLiveOwner({
       return;
     }
     if (method === "thread/unsubscribe") {
-      // The phone leaving the screen does not release the thread: the local
-      // app-server session is still authoritative, and dropping ownership here
-      // let fallback mirrors and Desktop routing corrupt the timeline on the
-      // next reopen. Only thread/archive (or a peer actively running the
-      // conversation) releases bridge ownership.
+      // The phone leaving the screen releases idle threads, but a thread whose
+      // local turn is still executing stays owned: dropping it mid-run lets
+      // fallback mirrors and Desktop routing corrupt the timeline on reopen.
+      if (!hasActiveLocalTurn(threadId)) {
+        removeOwnedThread(threadId, { broadcastRemoval: true, reason: method });
+      }
       return;
     }
     if (method === "thread/unarchive") {
@@ -860,6 +866,13 @@ function createDesktopIpcLiveOwner({
     if (!isPeerOwnershipBroadcast(params)) {
       return;
     }
+    if (hasActiveLocalTurn(threadId) && !conversationSnapshotShowsActiveTurn(params.change)) {
+      // Desktop re-broadcasts idle snapshots for threads the user merely viewed
+      // (and replays them on reconnect). Those may claim an idle thread, but a
+      // thread whose local turn is still running yields only to a peer snapshot
+      // proving the peer runtime is executing it.
+      return;
+    }
 
     // Another Codex frontend is actively owning this stream. Drop bridge ownership
     // and all cached conversation state so a later re-claim rehydrates fresh data
@@ -871,14 +884,8 @@ function createDesktopIpcLiveOwner({
     if (readString(params?.remodexOwnerSource) === REMODEX_LIVE_OWNER_SOURCE) {
       return false;
     }
-    if (normalizeToken(params?.change?.type) !== "snapshot") {
-      return false;
-    }
-    // Desktop also broadcasts idle snapshots for conversations the user merely
-    // viewed (and re-broadcasts them when clients reconnect). Treating those as
-    // ownership claims silently handed phone-driven threads to Desktop; only a
-    // snapshot proving the peer runtime is executing a turn is a real claim.
-    return conversationSnapshotShowsActiveTurn(params.change);
+    const changeType = normalizeToken(params?.change?.type);
+    return changeType === "snapshot";
   }
 
   function canHandleFollowerRequest(envelope) {
@@ -980,13 +987,21 @@ function createDesktopIpcLiveOwner({
       ? normalizedParams
       : codexParams;
     markOwnedThread(conversationId);
+    const senderRequestId = params.senderRequestId || params.sender_request_id;
+    const isKnownHeldPhoneStart = Boolean(
+      requestIdKey(senderRequestId)
+      && pendingTurnStartEntriesByRequestId.has(requestIdKey(senderRequestId))
+    );
     const pendingEntry = rememberPendingTurnStart(
       conversationId,
       nextCodexParams,
-      params.senderRequestId || params.sender_request_id
+      senderRequestId
     );
     try {
       const turnStartResult = await sendCodexRequest("turn/start", nextCodexParams);
+      if (!isKnownHeldPhoneStart) {
+        mirrorFollowerUserPromptToPhone(conversationId, nextCodexParams, turnStartResult);
+      }
       // Codex Desktop's own thread-follower-start-turn-for-host handler replies
       // with { result: <turnStartResult> }; a follower reads response.result.turn
       // off that wrapper. Returning the raw result made Desktop read `.turn` on
@@ -996,6 +1011,32 @@ function createDesktopIpcLiveOwner({
       discardPendingTurnStartEntry(conversationId, pendingEntry);
       throw error;
     }
+  }
+
+  function mirrorFollowerUserPromptToPhone(threadId, turnStartParams, turnStartResult = null) {
+    const text = visibleUserPromptFromInputEntries(turnStartParams?.input);
+    if (!text) {
+      return;
+    }
+    const turnId = readString(turnStartResult?.turn?.id)
+      || readString(turnStartResult?.turnId)
+      || readString(turnStartResult?.turn_id);
+    sendPhoneNotification(JSON.stringify({
+      method: "codex/event/user_message",
+      params: {
+        threadId,
+        // Mirror the conversation projector's synthetic prompt identity
+        // ("<turnId>:input") so later projected snapshots and history reads
+        // reconcile into this row instead of appending a duplicate bubble.
+        ...(turnId ? { turnId, id: `${turnId}:input` } : {}),
+        message: text,
+        text,
+        remodexDesktopMirror: true,
+        remodexDesktopIpcMirror: true,
+        remodexActionSource: REMODEX_LIVE_OWNER_SOURCE,
+        createdAt: now(),
+      },
+    }));
   }
 
   async function handleFollowerSteerTurn(conversationId, params) {
@@ -1257,6 +1298,20 @@ function createDesktopIpcLiveOwner({
       merged.collaborationMode = cloneJSON(overrides.collaborationMode);
     }
     return merged;
+  }
+
+  // True while the bridge's app-server is executing a turn for this thread, or
+  // has just been asked to start one (pending starts clear on error or on the
+  // matching turn/started snapshot). Such threads must not be handed to peers.
+  function hasActiveLocalTurn(threadId) {
+    if (pendingTurnStartParamsByThreadId.has(threadId)) {
+      return true;
+    }
+    const turns = conversations.get(threadId)?.turns || [];
+    return turns.some((turn) => {
+      const status = normalizeToken(turn?.status);
+      return status === "inprogress" || status === "running" || status === "active";
+    });
   }
 
   function activeTurnIdForConversation(conversationId) {

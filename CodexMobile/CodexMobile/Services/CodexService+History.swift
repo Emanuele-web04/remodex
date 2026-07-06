@@ -904,6 +904,15 @@ extension CodexService {
                    !fallbackCandidates.isEmpty {
                     continue
                 }
+
+                // Desktop-projected rows with synthetic identity that ambiguously
+                // match several real rows are already represented; appending them
+                // duplicates the prompt instead of preserving an intentional repeat.
+                if fallbackCandidates.count > 1,
+                   isSyntheticDesktopTurnIdentifier(message.turnId)
+                    || isSyntheticDesktopUserItemIdentifier(message.itemId) {
+                    continue
+                }
             }
 
             if message.role == .user,
@@ -1074,9 +1083,18 @@ extension CodexService {
 
         if value.turnId == nil {
             value.turnId = serverMessage.turnId
+        } else if value.role == .user,
+                  let serverTurnId = normalizedHistoryIdentifier(serverMessage.turnId),
+                  isSyntheticDesktopTurnIdentifier(value.turnId),
+                  !isSyntheticDesktopTurnIdentifier(serverTurnId) {
+            value.turnId = serverTurnId
         }
         let localItemId = normalizedHistoryIdentifier(value.itemId)
         let serverItemId = normalizedHistoryIdentifier(serverMessage.itemId)
+        let shouldUpgradeSyntheticUserItemId = value.role == .user
+            && serverItemId != nil
+            && isSyntheticDesktopUserItemIdentifier(localItemId)
+            && !isSyntheticDesktopUserItemIdentifier(serverItemId)
         let shouldAttachMissingItemId = localItemId == nil
         let shouldRebindRunningAssistantItem = preservesRunningPresentation
             && value.role == .assistant
@@ -1085,6 +1103,7 @@ extension CodexService {
             && localItemId != serverItemId
             && !hasStableAssistantIdentity(localItemId)
         if shouldAttachMissingItemId
+            || shouldUpgradeSyntheticUserItemId
             || shouldRebindRunningAssistantItem
             || (
                 value.role == .system
@@ -1397,6 +1416,39 @@ extension CodexService {
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // Desktop-projected snapshots synthesize turn ids ("ipc-turn-N") and prompt
+    // item ids ("<turnId>:input") when the raw Desktop state lacks the real
+    // identifiers. Those ids are provisional: the same prompt can also arrive
+    // under its real app-server identity, so synthetic ids must merge with the
+    // real row (and upgrade to its identity) instead of forming a second row.
+    nonisolated static func isSyntheticDesktopTurnIdentifier(_ turnId: String?) -> Bool {
+        guard let turnId = normalizedHistoryIdentifier(turnId) else {
+            return false
+        }
+        return turnId.hasPrefix("ipc-turn-")
+    }
+
+    nonisolated static func isSyntheticDesktopUserItemIdentifier(_ itemId: String?) -> Bool {
+        guard let itemId = normalizedHistoryIdentifier(itemId) else {
+            return false
+        }
+        return itemId.hasSuffix(":input")
+    }
+
+    // Turn identities are mergeable when either side lacks a real turn id;
+    // two distinct real turn ids stay separate so intentionally repeated
+    // sends keep one row per turn.
+    nonisolated static func mirroredUserTurnIdentityAllowsMerge(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhsTurnId = normalizedHistoryIdentifier(lhs),
+              let rhsTurnId = normalizedHistoryIdentifier(rhs) else {
+            return true
+        }
+        if lhsTurnId == rhsTurnId {
+            return true
+        }
+        return isSyntheticDesktopTurnIdentifier(lhsTurnId) || isSyntheticDesktopTurnIdentifier(rhsTurnId)
     }
 
     // Mirrors t3code's provider-message identity as closely as the mobile schema allows.
@@ -1721,7 +1773,10 @@ extension CodexService {
         ) else {
             return false
         }
-        return candidateTurnId == nil || candidateTurnId == turnId
+        return candidateTurnId == nil
+            || candidateTurnId == turnId
+            || isSyntheticDesktopTurnIdentifier(candidateTurnId)
+            || isSyntheticDesktopTurnIdentifier(turnId)
     }
 
     nonisolated static func shouldReconcilePendingUserHistoryMessage(
@@ -1788,12 +1843,19 @@ extension CodexService {
         in merged: [CodexMessage],
         message: CodexMessage
     ) -> [Int] {
+        let incomingItemId = normalizedHistoryIdentifier(message.itemId)
         guard message.role == .user,
-              normalizedHistoryIdentifier(message.itemId) == nil else {
+              incomingItemId == nil || isSyntheticDesktopUserItemIdentifier(incomingItemId) else {
             return []
         }
 
-        let incomingTurnId = normalizedHistoryIdentifier(message.turnId)
+        let rawIncomingTurnId = normalizedHistoryIdentifier(message.turnId)
+        let incomingTurnIdIsSynthetic = isSyntheticDesktopTurnIdentifier(rawIncomingTurnId)
+        let incomingTurnId = incomingTurnIdIsSynthetic ? nil : rawIncomingTurnId
+        // Synthetic Desktop identity marks a projected row whose prompt the
+        // timeline may already hold under its real identity; projected snapshots
+        // also stamp thread-level fallback dates, so timestamps cannot veto.
+        let incomingHasSyntheticIdentity = incomingTurnIdIsSynthetic || incomingItemId != nil
         let incomingHasFallbackTimestamp = hasFallbackHistoryTimestamp(message.createdAt)
 
         return merged.indices.filter { index in
@@ -1810,9 +1872,13 @@ extension CodexService {
                 return false
             }
 
-            let candidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+            let rawCandidateTurnId = normalizedHistoryIdentifier(candidate.turnId)
+            let candidateTurnId = isSyntheticDesktopTurnIdentifier(rawCandidateTurnId) ? nil : rawCandidateTurnId
             if let incomingTurnId, let candidateTurnId {
                 return incomingTurnId == candidateTurnId
+            }
+            if incomingHasSyntheticIdentity {
+                return true
             }
             if incomingHasFallbackTimestamp {
                 return true
