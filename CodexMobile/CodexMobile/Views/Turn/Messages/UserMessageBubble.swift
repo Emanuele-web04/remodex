@@ -122,15 +122,15 @@ struct UserMessageBubble: View {
     @ViewBuilder
     private func userBubbleTextContent(_ renderModel: UserBubbleRenderModel, bubbleColor: UserBubbleColor) -> some View {
         if isProgressiveTextWindow {
-            userBubbleText(renderModel, bubbleColor: bubbleColor)
+            userBubbleText(renderModel, bubbleColor: bubbleColor, isCollapsed: false)
         } else {
             UserBubbleTextBlock(
                 contentIdentity: message.id,
                 rawText: renderModel.text,
                 contentResetKey: renderModel.textFingerprint,
                 collapsesWithLineLimit: !renderModel.usesBlockMarkdown
-            ) {
-                userBubbleText(renderModel, bubbleColor: bubbleColor)
+            ) { isCollapsed in
+                userBubbleText(renderModel, bubbleColor: bubbleColor, isCollapsed: isCollapsed)
             }
         }
     }
@@ -138,11 +138,19 @@ struct UserMessageBubble: View {
     // Simple prompts keep the lightweight inline renderer; block-level markdown
     // (fences, headings, lists, quotes, tables) takes the assistant pipeline.
     @ViewBuilder
-    private func userBubbleText(_ renderModel: UserBubbleRenderModel, bubbleColor: UserBubbleColor) -> some View {
+    private func userBubbleText(
+        _ renderModel: UserBubbleRenderModel,
+        bubbleColor: UserBubbleColor,
+        isCollapsed: Bool
+    ) -> some View {
         let foreground = userBubbleForeground(for: bubbleColor)
         if renderModel.usesBlockMarkdown {
+            // While collapsed, lay out only a bounded preview instead of the full
+            // message clipped to bubble height; expanding renders the full text.
             MarkdownTextView(
-                text: renderModel.text,
+                text: isCollapsed
+                    ? UserBubbleCollapsedMarkdownPreview.previewText(for: renderModel.text)
+                    : renderModel.text,
                 profile: .userProse,
                 constrainsToAvailableWidth: true,
                 linkColor: foreground

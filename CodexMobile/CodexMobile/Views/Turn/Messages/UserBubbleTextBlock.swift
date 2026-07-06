@@ -18,7 +18,8 @@ struct UserBubbleTextBlock<Content: View>: View {
     // Block markdown renders through StructuredText, which opts out of lineLimit;
     // those bubbles collapse by capping the rendered height instead.
     var collapsesWithLineLimit: Bool = true
-    @ViewBuilder let content: () -> Content
+    // Receives the collapsed state so callers can render a cheaper preview while collapsed.
+    @ViewBuilder let content: (_ isCollapsed: Bool) -> Content
 
     @State private var isExpanded = false
 
@@ -74,10 +75,10 @@ struct UserBubbleTextBlock<Content: View>: View {
     private var collapsibleContent: some View {
         let isCollapsed = canCollapse && !isExpanded
         if collapsesWithLineLimit {
-            content()
+            content(isCollapsed)
                 .lineLimit(isCollapsed ? Self.collapseLineLimit : nil)
         } else {
-            content()
+            content(isCollapsed)
                 .frame(maxHeight: isCollapsed ? Self.collapsedContentMaxHeight : nil, alignment: .top)
                 .clipped()
                 // Clipped overflow still hit-tests; disable taps until expanded.
