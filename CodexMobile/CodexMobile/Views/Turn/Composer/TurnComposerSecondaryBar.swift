@@ -1,21 +1,20 @@
 // FILE: TurnComposerSecondaryBar.swift
-// Purpose: Owns the secondary composer controls shown above the main input card.
+// Purpose: Owns the secondary composer accessories above the main input card: a centered
+//          file-change capsule and a horizontally scrollable carousel (chevron, plan, queued).
 // Layer: View Component
 // Exports: TurnComposerSecondaryBar
-// Depends on: SwiftUI, TurnComposerCollapsibleContextCluster
+// Depends on: SwiftUI, TurnComposerCollapsibleContextCluster, PlanAccessoryCard, QueuedStatusCapsule
 
 import SwiftUI
 
 struct TurnComposerSecondaryBar: View {
     let isInputFocused: Bool
-    // At rest the composer collapses to a capsule; keep only the worktree/branch
-    // chevron floating above it (no file-change capsule, no focus gate) so the
-    // picker stays reachable without expanding the composer.
-    var isComposerCollapsed: Bool = false
     let isEmptyThread: Bool
     let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
     var activeFileChangeStatus: FileChangeStatusSnapshot? = nil
+    var queuedDraftCount: Int = 0
+    var onTapQueuedDrafts: () -> Void = {}
 
     let showsGitBranchSelector: Bool
     let isGitBranchSelectorEnabled: Bool
@@ -36,31 +35,52 @@ struct TurnComposerSecondaryBar: View {
     let canHandOffToWorktree: Bool
     let onTapCreateWorktree: () -> Void
 
+    @Environment(\.pinnedPlanAccessory) private var pinnedPlanAccessory
+
+    private var hasCarouselContent: Bool {
+        hasWorkingDirectory || pinnedPlanAccessory != nil || queuedDraftCount > 0
+    }
+
     var body: some View {
-        Group {
-            if isComposerCollapsed {
-                HStack(spacing: 0) {
-                    contextCluster
-
-                    Spacer(minLength: 0)
+        // The row stays visible while the composer rests as a collapsed capsule
+        // and hides only when the keyboard takes the space.
+        if !isInputFocused, hasCarouselContent || activeFileChangeStatus != nil {
+            VStack(spacing: 8) {
+                if let activeFileChangeStatus {
+                    FileChangeStatusCapsule(snapshot: activeFileChangeStatus)
+                        .transition(.opacity.combined(with: .scale(scale: 0.94)))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.opacity)
-            } else if !isInputFocused {
-                HStack(spacing: 0) {
-                    contextCluster
 
-                    Spacer(minLength: 12)
+                if hasCarouselContent {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            if hasWorkingDirectory {
+                                contextCluster
+                            }
 
-                    if let activeFileChangeStatus {
-                        FileChangeStatusCapsule(snapshot: activeFileChangeStatus)
-                            .transition(.opacity.combined(with: .scale(scale: 0.94, anchor: .trailing)))
+                            if let pinnedPlanAccessory {
+                                PlanAccessoryCard(
+                                    snapshot: pinnedPlanAccessory.snapshot,
+                                    onTap: pinnedPlanAccessory.onTap
+                                )
+                                .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                            }
+
+                            if queuedDraftCount > 0 {
+                                QueuedStatusCapsule(count: queuedDraftCount, onTap: onTapQueuedDrafts)
+                                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                            }
+                        }
                     }
+                    .scrollBounceBehavior(.basedOnSize)
+                    // Let the capsules' glass shadows breathe past the scroll bounds.
+                    .scrollClipDisabled()
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .animation(.spring(response: 0.28, dampingFraction: 0.88), value: activeFileChangeStatus)
             }
+            .frame(maxWidth: .infinity)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .animation(.spring(response: 0.28, dampingFraction: 0.88), value: activeFileChangeStatus)
+            .animation(.spring(response: 0.28, dampingFraction: 0.88), value: queuedDraftCount > 0)
         }
     }
 

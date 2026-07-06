@@ -1,7 +1,7 @@
 // FILE: TurnPlanModeComponents.swift
 // Purpose: Renders inline plan cards, composer plan affordances, and structured question cards.
 // Layer: View Component
-// Exports: PlanSystemCard, PlanExecutionAccessory, PlanExecutionSheet, StructuredUserInputAccessory,
+// Exports: PlanSystemCard, PlanExecutionSheet, StructuredUserInputAccessory,
 //   StructuredUserInputSheet, StructuredUserInputCard
 // Depends on: SwiftUI, CodexService, CodexMessage, StructuredUserInputCardView
 
@@ -382,20 +382,6 @@ private struct PlanResultActionButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(title)
-    }
-}
-
-struct PlanExecutionAccessory: View {
-    let message: CodexMessage
-    let onTap: () -> Void
-
-    // Maps the live message into a previewable snapshot so the visual card can stay isolated.
-    private var snapshot: PlanAccessorySnapshot {
-        PlanAccessorySnapshot(message: message)
-    }
-
-    var body: some View {
-        PlanAccessoryCard(snapshot: snapshot, onTap: onTap)
     }
 }
 

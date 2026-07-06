@@ -14,12 +14,8 @@ struct FileChangeStatusSnapshot: Equatable {
     let detailBodyText: String
     let messageID: String
 
-    var title: String {
-        fileCount == 1 ? "1 file changed" : "\(fileCount) files changed"
-    }
-
     var compactTitle: String {
-        fileCount == 1 ? "1 change" : "\(fileCount) changes"
+        fileCount == 1 ? "1 file" : "\(fileCount) files"
     }
 
     var hasChanges: Bool {
@@ -166,16 +162,9 @@ struct FileChangeStatusCapsule: View {
 
     private var capsuleContent: some View {
         GlassStatusPill {
-            Image("changes")
-                .renderingMode(.template)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 16, height: 16)
-                .foregroundStyle(.secondary)
-
             Text(title)
                 .font(AppFont.subheadline(weight: .medium))
-                .foregroundStyle(.primary.opacity(0.78))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .minimumScaleFactor(0.82)
@@ -225,7 +214,7 @@ private struct FileChangeStatusDiffCountsLabel: View {
 #if DEBUG
 #Preview("File Change Status Capsule") {
     VStack(spacing: 14) {
-        FileChangeStatusCapsule(title: "30 files changed", additions: 2700, deletions: 72)
+        FileChangeStatusCapsule(title: "30 files", additions: 2700, deletions: 72)
     }
     .padding()
 }

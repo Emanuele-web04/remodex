@@ -2,7 +2,7 @@
 // Purpose: Renders the turn composer input, queued-draft actions, attachments, and send/stop controls.
 // Layer: View Component (orchestrator)
 // Exports: TurnComposerView, TurnComposerInputChangeHandler
-// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsPanel, TurnMentionChips, TurnComposerInputTextView, TurnComposerSecondaryBar
+// Depends on: SwiftUI, AdaptiveGlassModifier, ComposerAttachmentsPreview, FileAutocompletePanel, SkillAutocompletePanel, SlashCommandAutocompletePanel, ComposerBottomBar, QueuedDraftsSheet, TurnMentionChips, TurnComposerInputTextView, TurnComposerSecondaryBar
 
 import SwiftUI
 import UIKit
@@ -124,21 +124,22 @@ struct TurnComposerView: View {
 
     @State private var composerInputHeight: CGFloat = 32
     @State private var inputChangeTask: Task<Void, Never>?
+    @State private var isShowingQueuedDraftsSheet = false
 
     private var showsSendButton: Bool {
         !isThreadRunning || accessoryState.hasSendableContent(input: input)
     }
 
     // Collapse to a single glass capsule whenever the keyboard is closed. Only
-    // pending composer content (typed text, queued drafts, attachments/mentions)
-    // or an active voice recording keeps the expanded layout; a running turn
-    // stays collapsed and surfaces Stop inside the capsule instead.
+    // pending composer content (typed text, attachments/mentions) or an active
+    // voice recording keeps the expanded layout; a running turn stays collapsed
+    // and surfaces Stop inside the capsule instead. Queued drafts live in the
+    // carousel capsule above, so they never expand the composer.
     private var showsCollapsedComposer: Bool {
         allowsCollapsedComposer
             && !isInputFocused.wrappedValue
             && input.isEmpty
             && !accessoryState.hasTopAccessoryContent
-            && !accessoryState.hasQueuedDrafts
             && !accessoryState.showsVoiceRecordingCapsule
     }
 
@@ -158,6 +159,22 @@ struct TurnComposerView: View {
         // keyboard rises and dismisses in the same motion as the morph instead
         // of waiting for a view swap.
         .animation(.snappy(duration: 0.26), value: showsCollapsedComposer)
+        .sheet(isPresented: $isShowingQueuedDraftsSheet) {
+            QueuedDraftsSheet(
+                drafts: accessoryState.queuedDrafts,
+                canSteerDrafts: accessoryState.canSteerQueuedDrafts,
+                canRestoreDrafts: accessoryState.canRestoreQueuedDrafts,
+                steeringDraftID: accessoryState.steeringDraftID,
+                onRestore: onRestoreQueuedDraft,
+                onSteer: onSteerQueuedDraft,
+                onRemove: onRemoveQueuedDraft
+            )
+        }
+        .onChange(of: accessoryState.hasQueuedDrafts) { _, hasDrafts in
+            if !hasDrafts {
+                isShowingQueuedDraftsSheet = false
+            }
+        }
     }
 
     private var composerStack: some View {
@@ -171,14 +188,15 @@ struct TurnComposerView: View {
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
 
-            if showsSecondaryBar && hasWorkingDirectory && !accessoryState.showsVoiceRecordingCapsule {
+            if showsSecondaryBar && !accessoryState.showsVoiceRecordingCapsule {
                 TurnComposerSecondaryBar(
                     isInputFocused: isInputFocused.wrappedValue,
-                    isComposerCollapsed: showsCollapsedComposer,
                     isEmptyThread: isEmptyThread,
                     hasWorkingDirectory: hasWorkingDirectory,
                     isWorktreeProject: isWorktreeProject,
                     activeFileChangeStatus: activeFileChangeStatus,
+                    queuedDraftCount: accessoryState.queuedDrafts.count,
+                    onTapQueuedDrafts: { isShowingQueuedDraftsSheet = true },
                     showsGitBranchSelector: showsGitBranchSelector,
                     isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
                     availableGitBranchTargets: availableGitBranchTargets,
@@ -198,16 +216,6 @@ struct TurnComposerView: View {
                     onTapCreateWorktree: onTapCreateWorktree
                 )
             }
-
-            TurnComposerQueuedDraftsSection(
-                drafts: accessoryState.queuedDrafts,
-                canSteerDrafts: accessoryState.canSteerQueuedDrafts,
-                canRestoreDrafts: accessoryState.canRestoreQueuedDrafts,
-                steeringDraftID: accessoryState.steeringDraftID,
-                onRestoreQueuedDraft: onRestoreQueuedDraft,
-                onSteerQueuedDraft: onSteerQueuedDraft,
-                onRemoveQueuedDraft: onRemoveQueuedDraft
-            )
 
             VStack(spacing: 0) {
                 if !showsCollapsedComposer {
@@ -492,46 +500,6 @@ private struct TurnComposerAutocompletePanels: View {
         .fixedSize(horizontal: false, vertical: true)
         .layoutPriority(1)
         .zIndex(1)
-    }
-}
-
-private struct TurnComposerQueuedDraftsSection: View {
-    private static let cornerRadius: CGFloat = 22
-
-    let drafts: [QueuedTurnDraft]
-    let canSteerDrafts: Bool
-    let canRestoreDrafts: Bool
-    let steeringDraftID: String?
-    let onRestoreQueuedDraft: (String) -> Void
-    let onSteerQueuedDraft: (String) -> Void
-    let onRemoveQueuedDraft: (String) -> Void
-
-    var body: some View {
-        Group {
-            if !drafts.isEmpty {
-                QueuedDraftsPanel(
-                    drafts: drafts,
-                    canSteerDrafts: canSteerDrafts,
-                    canRestoreDrafts: canRestoreDrafts,
-                    steeringDraftID: steeringDraftID,
-                    onRestore: onRestoreQueuedDraft,
-                    onSteer: onSteerQueuedDraft,
-                    onRemove: onRemoveQueuedDraft
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .adaptiveGlass(
-                    .regular,
-                    in: RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-            }
-        }
-        // Keep queued follow-ups visually separate from the composer input.
-        .frame(
-            height: drafts.isEmpty
-                ? 0
-                : CGFloat(drafts.count) * 34 + CGFloat(max(drafts.count - 1, 0))
-        )
     }
 }
 

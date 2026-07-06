@@ -1,7 +1,7 @@
 // FILE: PlanAccessoryCard.swift
-// Purpose: Hosts the compact active-plan accessory as a standalone, previewable view.
+// Purpose: Hosts the compact active-plan capsule as a standalone, previewable view.
 // Layer: View Component
-// Exports: PlanAccessoryCard, PlanAccessorySnapshot, PlanAccessoryPreviewFixtures
+// Exports: PlanAccessoryCard, PlanAccessorySnapshot, PinnedPlanAccessoryContext, PlanAccessoryPreviewFixtures
 // Depends on: SwiftUI, CodexMessage, CodexCollaboration
 
 import SwiftUI
@@ -172,40 +172,48 @@ struct GlassAccessoryCard<LeadingMarker: View, Header: View, Summary: View, Trai
     }
 }
 
+/// Carries the pinned active-plan state from the conversation container down to
+/// the composer's carousel row without widening the composer parameter chain.
+struct PinnedPlanAccessoryContext {
+    let snapshot: PlanAccessorySnapshot
+    let onTap: () -> Void
+}
+
+private struct PinnedPlanAccessoryKey: EnvironmentKey {
+    static let defaultValue: PinnedPlanAccessoryContext? = nil
+}
+
+extension EnvironmentValues {
+    var pinnedPlanAccessory: PinnedPlanAccessoryContext? {
+        get { self[PinnedPlanAccessoryKey.self] }
+        set { self[PinnedPlanAccessoryKey.self] = newValue }
+    }
+}
+
 struct PlanAccessoryCard: View {
     let snapshot: PlanAccessorySnapshot
     let onTap: () -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onTap()
-            } label: {
-                GlassStatusPill {
-                    leadingMarker
+        Button {
+            HapticFeedback.shared.triggerImpactFeedback(style: .light)
+            onTap()
+        } label: {
+            GlassStatusPill {
+                leadingMarker
 
-                    Text(snapshot.title)
-                        .font(AppFont.caption(weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
+                Text(snapshot.title)
+                    .font(AppFont.caption(weight: .medium))
+                    .foregroundStyle(.secondary)
 
-                    Text(snapshot.summary)
-                        .font(AppFont.caption())
-                        .foregroundStyle(.primary.opacity(0.78))
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-
-                    trailingMetric
-                }
+                trailingMetric
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Open active plan")
-            .accessibilityValue("\(snapshot.status.label), \(snapshot.progressDescription)")
-            .accessibilityHint("Shows the current plan steps in a sheet")
-
-            Spacer(minLength: 0)
         }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .accessibilityLabel("Open active plan")
+        .accessibilityValue("\(snapshot.status.label), \(snapshot.progressDescription)")
+        .accessibilityHint("Shows the current plan steps in a sheet")
     }
 
     // Compact status dot mirroring the plan tint, sized to sit on a caption line.
@@ -224,6 +232,10 @@ struct PlanAccessoryCard: View {
     @ViewBuilder
     private var trailingMetric: some View {
         if let progressText = snapshot.progressText {
+            Text("·")
+                .font(AppFont.caption(weight: .medium))
+                .foregroundStyle(.tertiary)
+
             Text(progressText)
                 .font(AppFont.caption(weight: .medium))
                 .foregroundStyle(.secondary)
