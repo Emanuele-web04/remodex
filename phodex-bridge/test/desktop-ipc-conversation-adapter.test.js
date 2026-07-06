@@ -125,6 +125,44 @@ test("conversation adapter strips injected context carried inside turn.items", (
   assert.equal(serialized.includes("environment_context"), false);
 });
 
+test("conversation adapter extracts prompt from mixed context wrapper user items", () => {
+  const wrappedPrompt = [
+    "# AGENTS.md instructions for /Users/me/proj",
+    "",
+    "<INSTRUCTIONS>",
+    "rules",
+    "</INSTRUCTIONS>",
+    "",
+    "<environment_context>",
+    "  <cwd>/Users/me/proj</cwd>",
+    "</environment_context>",
+    "",
+    "## My request for Codex:",
+    "fix the desktop sync bug",
+  ].join("\n");
+  const state = buildConversationStateFromThread({
+    id: "thread-context-wrapper",
+    name: "Context wrapper",
+    cwd: "/Users/me/proj",
+    turns: [{
+      id: "turn-context-wrapper",
+      status: "completed",
+      items: [
+        { id: "wrapped-prompt", type: "userMessage", content: [{ type: "input_text", text: wrappedPrompt }] },
+        { id: "reply", type: "agentMessage", text: "Fixed" },
+      ],
+    }],
+  });
+
+  const turn = state.turns[0];
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "fix the desktop sync bug" }]);
+  assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
+  const serialized = JSON.stringify(turn);
+  assert.equal(serialized.includes("AGENTS.md instructions"), false);
+  assert.equal(serialized.includes("environment_context"), false);
+  assert.equal(serialized.includes("## My request for Codex:"), false);
+});
+
 test("conversation adapter drops injected context user items from live item events", () => {
   const conversations = new Map();
   const owned = new Set(["thread-context-live"]);
