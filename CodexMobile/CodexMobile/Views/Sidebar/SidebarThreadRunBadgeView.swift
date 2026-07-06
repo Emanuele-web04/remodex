@@ -35,8 +35,7 @@ struct SidebarThreadRunBadgeView: View {
 extension CodexThreadRunBadgeState {
     var isVisibleInSidebar: Bool {
         switch self {
-        case .running:
-        case .failed:
+        case .running, .failed:
             return true
         case .ready:
             return false
