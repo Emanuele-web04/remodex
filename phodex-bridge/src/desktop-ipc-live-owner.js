@@ -1328,7 +1328,9 @@ function applyAppServerMessageToConversationState({
       }), { now });
       if (turn && message.params?.item) {
         upsertItem(turn, cloneJSON(message.params.item));
-        if (message.params.item.type === "agentMessage" && method === "item/started") {
+        // Desktop derives its "Worked for Ns" divider from these two marks, not
+        // from durationMs, so keep them set on every lifecycle path.
+        if (message.params.item.type === "agentMessage") {
           turn.finalAssistantStartedAtMs = turn.finalAssistantStartedAtMs || now();
         }
         if (message.params.item.type && message.params.item.type !== "userMessage") {
@@ -1572,7 +1574,7 @@ function buildConversationTurn(turn, {
     collaborationMode: null,
     attachments: [],
   });
-  return {
+  const builtTurn = {
     id: turnId,
     turnId,
     params,
@@ -1589,10 +1591,16 @@ function buildConversationTurn(turn, {
       ? cloneJSON(turn.items)
       : cloneJSON(previousTurn?.items || []),
   };
+  // Hydrated turns from thread/read carry the prompt as an item with empty
+  // params.input; adopt it into params so Desktop renders a normal bubble.
+  normalizeTurnInitialPrompt(builtTurn);
+  return builtTurn;
 }
 
-// Reattaches the cached turn/start prompt to a just-started turn so Desktop
-// followers still see the user message when turn/started arrives with no items.
+// Attaches the cached turn/start prompt to a just-started turn as
+// turn.params.input. Desktop builds the user bubble from params.input and
+// treats any userMessage item that does not dedupe against it as a mid-turn
+// steer ("Steered conversation"), so the prompt must live ONLY in params.
 // Pending prompts are consumed FIFO so rapid consecutive starts stay matched.
 function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsByThreadId) {
   if (!turn || !(pendingTurnStartParamsByThreadId instanceof Map)) {
@@ -1620,16 +1628,7 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
     ...turn.params,
     ...cloneJSON(pendingParams),
   };
-  if (turnHasUserMessageItem(turn)) {
-    return;
-  }
-  const turnId = readString(turn.turnId) || readString(turn.id) || "turn";
-  turn.items.unshift({
-    id: `user-message-${turnId}`,
-    type: "userMessage",
-    remodexSyntheticUserMessage: true,
-    content: input.map(userMessageContentFromTurnInput).filter(Boolean),
-  });
+  normalizeTurnInitialPrompt(turn);
 }
 
 // Desktop's composer reads the followed thread's model/effort from the
@@ -1677,10 +1676,90 @@ function isUserMessageItem(item) {
     || (type === "message" && normalizeToken(item?.role) === "user");
 }
 
-// Matched via an explicit marker instead of the item id so the synthetic row is
-// still recognized after a fallback turn id gets promoted to the real turn id.
-function isSyntheticUserMessageItem(item) {
-  return isUserMessageItem(item) && item?.remodexSyntheticUserMessage === true;
+// Desktop's prompt dedupe allows only these item types to precede the initial
+// user message; anything else makes a userMessage item render as a steer.
+const PRE_PROMPT_META_ITEM_TYPES = new Set([
+  "automaticapprovalreview",
+  "forkedfromconversation",
+  "modelchanged",
+  "modelrerouted",
+  "personalitychanged",
+  "remotetaskcreated",
+  "worktreeinit",
+]);
+
+// Joins the human-readable text of user input/content entries so the initial
+// prompt can be matched by meaning instead of exact entry shape (the phone
+// sends input_text entries while the app-server echoes text entries).
+function extractUserText(entries) {
+  if (typeof entries === "string") {
+    return entries.trim();
+  }
+  if (!Array.isArray(entries)) {
+    return "";
+  }
+  return entries
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return entry;
+      }
+      if (!entry || typeof entry !== "object") {
+        return "";
+      }
+      return typeof entry.text === "string" ? entry.text : "";
+    })
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function isInitialPromptUserMessageItem(turn, item) {
+  if (!isUserMessageItem(item)) {
+    return false;
+  }
+  const promptText = extractUserText(turn?.params?.input);
+  if (!promptText) {
+    return false;
+  }
+  return extractUserText(item?.content) === promptText;
+}
+
+// Desktop renders the turn's user bubble from turn.params.input and labels any
+// userMessage item that fails its dedupe as "Steered conversation". Keep the
+// initial prompt ONLY in params: drop the first user item that duplicates it,
+// or adopt it into params.input for hydrated turns that arrived item-only.
+// Later userMessage items are genuine mid-turn steers and stay untouched.
+function normalizeTurnInitialPrompt(turn) {
+  if (!turn || !Array.isArray(turn.items)) {
+    return;
+  }
+  const promptText = extractUserText(turn?.params?.input);
+  for (let index = 0; index < turn.items.length; index += 1) {
+    const item = turn.items[index];
+    if (isUserMessageItem(item)) {
+      const itemText = extractUserText(item?.content);
+      if (!itemText) {
+        return;
+      }
+      if (!promptText) {
+        turn.params = {
+          ...turn.params,
+          input: (Array.isArray(item.content) ? item.content : [])
+            .map(userMessageContentFromTurnInput)
+            .filter(Boolean),
+        };
+        turn.items.splice(index, 1);
+        return;
+      }
+      if (itemText === promptText) {
+        turn.items.splice(index, 1);
+      }
+      return;
+    }
+    if (!PRE_PROMPT_META_ITEM_TYPES.has(normalizeToken(item?.type))) {
+      return;
+    }
+  }
 }
 
 function userMessageContentFromTurnInput(entry) {
@@ -1766,14 +1845,13 @@ function upsertItem(turn, item) {
     };
     return;
   }
-  if (isUserMessageItem(item)) {
-    // Replace the synthetic prompt row in place so the canonical user message
-    // keeps its position instead of jumping below already-streamed items.
-    const syntheticIndex = turn.items.findIndex((candidate) => isSyntheticUserMessageItem(candidate));
-    if (syntheticIndex >= 0) {
-      turn.items[syntheticIndex] = cloneJSON(item);
-      return;
-    }
+  // The app-server echoes the initial prompt as a userMessage item; Desktop
+  // already renders it from turn.params.input and would label the duplicate as
+  // "Steered conversation". Only later user messages are genuine steers.
+  if (isUserMessageItem(item)
+    && !turnHasUserMessageItem(turn)
+    && isInitialPromptUserMessageItem(turn, item)) {
+    return;
   }
   turn.items.push(cloneJSON(item));
 }
@@ -1817,6 +1895,10 @@ function applyDeltaNotification(conversation, method, params, {
   if (!delta) {
     return;
   }
+
+  // Deltas prove work is in progress even when item/started was missed (e.g.
+  // the bridge joined mid-turn); Desktop's worked-for divider needs the mark.
+  turn.firstTurnWorkItemStartedAtMs = turn.firstTurnWorkItemStartedAtMs || now();
 
   if (method === "item/agentMessage/delta") {
     const item = ensureItemOfType(turn, itemId, () => ({

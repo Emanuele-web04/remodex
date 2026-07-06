@@ -14,6 +14,7 @@ const { setTimeout: wait } = require("node:timers/promises");
 const {
   applyAppServerMessageToConversationState,
   buildConversationStatePatches,
+  buildConversationStateFromThread,
   createDesktopIpcLiveOwner,
 } = require("../src/desktop-ipc-live-owner");
 
@@ -658,13 +659,10 @@ test("live owner keeps phone turn input in snapshots when turn/started has no it
   );
   const turn = broadcast.params.change.conversationState.turns[0];
   assert.equal(turn.turnId, "turn-user-input");
+  // Desktop renders the user bubble from params.input; a duplicate userMessage
+  // item would be labelled "Steered conversation", so items must stay empty.
   assert.deepEqual(turn.params.input, [{ type: "input_text", text: "build the feature" }]);
-  assert.deepEqual(turn.items[0], {
-    id: "user-message-turn-user-input",
-    type: "userMessage",
-    remodexSyntheticUserMessage: true,
-    content: [{ type: "text", text: "build the feature" }],
-  });
+  assert.deepEqual(turn.items, []);
 });
 
 test("live owner router keeps same-id requests from different clients separate", async (t) => {
@@ -2822,7 +2820,7 @@ test("conversation adapter ignores thread started notifications for unowned thre
   assert.equal(conversations.has("thread-unowned-started"), false);
 });
 
-test("conversation adapter replaces synthetic user prompt with canonical userMessage items", () => {
+test("conversation adapter keeps the prompt in params and drops the echoed userMessage item", () => {
   const conversations = new Map();
   const pendingTurnStartParamsByThreadId = new Map([[
     "thread-canonical-user",
@@ -2857,12 +2855,14 @@ test("conversation adapter replaces synthetic user prompt with canonical userMes
     },
   });
   assert.deepEqual(update, { threadId: "thread-canonical-user", changed: true });
+  // Desktop renders the user bubble from params.input; no item is injected.
   assert.deepEqual(
-    conversations.get("thread-canonical-user").turns[0].items.map((item) => item.id),
-    ["user-message-turn-canonical-user"]
+    conversations.get("thread-canonical-user").turns[0].params.input,
+    [{ type: "input_text", text: "build the canonical path" }]
   );
+  assert.deepEqual(conversations.get("thread-canonical-user").turns[0].items, []);
 
-  // A reasoning item streams in before the canonical user message arrives.
+  // A reasoning item streams in before the echoed user message arrives.
   update = applyAppServerMessageToConversationState({
     conversations,
     now,
@@ -2901,22 +2901,39 @@ test("conversation adapter replaces synthetic user prompt with canonical userMes
     },
   });
   assert.deepEqual(update, { threadId: "thread-canonical-user", changed: true });
-  // The canonical user message replaces the synthetic row in place, keeping the
-  // prompt above the already-streamed reasoning item.
+  // The app-server echo of the initial prompt is dropped: Desktop would label
+  // a userMessage item that fails its params.input dedupe as a steer.
   assert.deepEqual(
     conversations.get("thread-canonical-user").turns[0].items.map((item) => item.id),
-    ["canonical-user-message", "reasoning-1"]
+    ["reasoning-1"]
   );
-  const userMessages = conversations.get("thread-canonical-user").turns[0].items
-    .filter((item) => item.type === "userMessage");
-  assert.deepEqual(userMessages, [{
-    id: "canonical-user-message",
-    type: "userMessage",
-    content: [{ type: "text", text: "build the canonical path" }],
-  }]);
+
+  // A genuinely new user message mid-turn is a steer and must be kept.
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/started",
+      params: {
+        threadId: "thread-canonical-user",
+        turnId: "turn-canonical-user",
+        item: {
+          id: "steer-user-message",
+          type: "userMessage",
+          content: [{ type: "text", text: "also update the docs" }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId: "thread-canonical-user", changed: true });
+  assert.deepEqual(
+    conversations.get("thread-canonical-user").turns[0].items.map((item) => item.id),
+    ["reasoning-1", "steer-user-message"]
+  );
 });
 
-test("conversation adapter dedupes synthetic user prompt after fallback turn id promotion", () => {
+test("conversation adapter dedupes the echoed prompt after fallback turn id promotion", () => {
   const conversations = new Map();
   const fallbackTurnIdsByThreadId = new Map();
   const pendingTurnStartParamsByThreadId = new Map([[
@@ -2931,8 +2948,8 @@ test("conversation adapter dedupes synthetic user prompt after fallback turn id 
   const owned = new Set(["thread-promoted-user"]);
   const now = () => 7;
 
-  // turn/started arrives without a usable turn id, so the turn and the synthetic
-  // user message are created under a fallback turn id.
+  // turn/started arrives without a usable turn id, so the turn is created
+  // under a fallback id with the prompt held in params.input only.
   applyAppServerMessageToConversationState({
     conversations,
     fallbackTurnIdsByThreadId,
@@ -2952,12 +2969,13 @@ test("conversation adapter dedupes synthetic user prompt after fallback turn id 
       },
     },
   });
-  const syntheticItems = conversations.get("thread-promoted-user").turns[0].items;
-  assert.equal(syntheticItems.length, 1);
-  assert.equal(syntheticItems[0].type, "userMessage");
+  const fallbackTurn = conversations.get("thread-promoted-user").turns[0];
+  assert.deepEqual(fallbackTurn.params.input, [{ type: "input_text", text: "prompt before promotion" }]);
+  assert.deepEqual(fallbackTurn.items, []);
 
-  // A later event promotes the fallback turn to its real id, then the canonical
-  // user message arrives; the synthetic row must still be replaced.
+  // A later event promotes the fallback turn to its real id, then the app-server
+  // echoes the prompt as a userMessage item; it must still dedupe against
+  // params.input instead of surviving as a "Steered conversation" row.
   applyAppServerMessageToConversationState({
     conversations,
     fallbackTurnIdsByThreadId,
@@ -2979,12 +2997,94 @@ test("conversation adapter dedupes synthetic user prompt after fallback turn id 
 
   const turn = conversations.get("thread-promoted-user").turns[0];
   assert.equal(turn.turnId, "turn-promoted-real");
-  const userMessages = turn.items.filter((item) => item.type === "userMessage");
-  assert.deepEqual(userMessages, [{
-    id: "canonical-promoted-user-message",
-    type: "userMessage",
-    content: [{ type: "text", text: "prompt before promotion" }],
-  }]);
+  assert.deepEqual(turn.items.filter((item) => item.type === "userMessage"), []);
+  assert.deepEqual(turn.params.input, [{ type: "input_text", text: "prompt before promotion" }]);
+});
+
+test("hydrated turns adopt the leading userMessage item into params.input", () => {
+  const state = buildConversationStateFromThread({
+    id: "thread-hydrated-prompt",
+    name: "Hydrated",
+    cwd: "/tmp/hydrated",
+    turns: [{
+      id: "turn-hydrated-1",
+      status: "completed",
+      startedAt: 5,
+      items: [
+        {
+          id: "disk-user-message",
+          type: "userMessage",
+          content: [{ type: "text", text: "prompt from disk" }],
+        },
+        { id: "disk-assistant", type: "agentMessage", text: "done" },
+      ],
+    }],
+  }, { now: () => 99 });
+
+  const turn = state.turns[0];
+  // The prompt moves into params.input (Desktop's bubble source) and the item
+  // is dropped so it cannot render as "Steered conversation".
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "prompt from disk" }]);
+  assert.deepEqual(turn.items.map((item) => item.id), ["disk-assistant"]);
+});
+
+test("conversation adapter marks worked-for boundaries from deltas and completions", () => {
+  const conversations = new Map();
+  const owned = new Set(["thread-worked-for"]);
+  let timestamp = 1000;
+  const now = () => {
+    timestamp += 10;
+    return timestamp;
+  };
+
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-worked-for",
+        turn: { id: "turn-worked-for", items: [], status: "inProgress", error: null, startedAt: 1 },
+      },
+    },
+  });
+  assert.equal(conversations.get("thread-worked-for").turns[0].firstTurnWorkItemStartedAtMs, null);
+
+  // A joined-mid-turn delta (no item/started seen) must still mark work start.
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/commandExecution/outputDelta",
+      params: {
+        threadId: "thread-worked-for",
+        turnId: "turn-worked-for",
+        itemId: "command-1",
+        delta: "output line\n",
+      },
+    },
+  });
+  const workedTurn = conversations.get("thread-worked-for").turns[0];
+  assert.ok(workedTurn.firstTurnWorkItemStartedAtMs > 0);
+
+  // An agentMessage that only surfaces at item/completed still marks the
+  // final-assistant boundary Desktop uses as workedCompletedAtMs.
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/completed",
+      params: {
+        threadId: "thread-worked-for",
+        turnId: "turn-worked-for",
+        item: { id: "assistant-final", type: "agentMessage", text: "all done" },
+      },
+    },
+  });
+  assert.ok(workedTurn.finalAssistantStartedAtMs > workedTurn.firstTurnWorkItemStartedAtMs);
 });
 
 test("conversation adapter propagates phone turn model and effort to composer fields", () => {
@@ -3066,7 +3166,7 @@ test("conversation adapter consumes pending turn starts FIFO for rapid consecuti
 
   const turns = conversations.get("thread-fifo").turns;
   assert.deepEqual(
-    turns.map((turn) => turn.items[0].content[0].text),
+    turns.map((turn) => turn.params.input[0].text),
     ["first prompt", "second prompt"]
   );
   assert.equal(pendingTurnStartParamsByThreadId.has("thread-fifo"), false);
