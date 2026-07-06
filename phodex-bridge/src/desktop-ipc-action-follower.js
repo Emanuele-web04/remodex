@@ -296,10 +296,12 @@ function createDesktopIpcActionFollower({
   }
 
   // The live owner is releasing/removing its stream, not claiming it; cancel any
-  // speculative phone request instead of routing it to either runtime.
+  // speculative phone request instead of routing it to either runtime. Phone
+  // interest (activeThreadIds) deliberately survives the release: if Desktop
+  // picks the thread up next, its broadcasts must be processed immediately
+  // instead of being dropped until the phone happens to issue another read.
   function removeDesktopThreadState(threadId) {
     liveOwnerThreadIds.delete(threadId);
-    activeThreadIds.delete(threadId);
     ownershipProbeDeadlinesByThreadId.delete(threadId);
     pendingOwnershipProbeTokensByThreadId.delete(threadId);
     desktopOwnedByProbeThreadIds.delete(threadId);
@@ -891,6 +893,17 @@ function createDesktopIpcActionFollower({
     // phone; used to keep fallback mirrors (rollout tail) silent.
     hasLiveThreadState(threadId) {
       return rawStatesByThreadId.has(readString(threadId));
+    },
+    // Fresh = Desktop broadcast within the stale window. A cache Desktop went
+    // silent on may hide a stalled stream; fallback mirrors must not stay muted
+    // behind it, or a reopened running thread freezes as "finished" until the
+    // next broadcast happens to arrive.
+    hasFreshLiveThreadState(threadId) {
+      const id = readString(threadId);
+      if (!rawStatesByThreadId.has(id)) {
+        return false;
+      }
+      return now() - (rawStateUpdatedAtByThreadId.get(id) || 0) <= STALE_ACTIVE_READ_MAX_AGE_MS;
     },
   };
 }

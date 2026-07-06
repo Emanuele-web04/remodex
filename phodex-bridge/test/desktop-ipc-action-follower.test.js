@@ -3328,6 +3328,7 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
   await waitFor(() => follower.hasLiveThreadState("thread-stale-active"));
 
   // While Desktop keeps the stream fresh, cached reads answer immediately.
+  assert.equal(follower.hasFreshLiveThreadState("thread-stale-active"), true);
   const freshServed = follower.observeInbound(JSON.stringify({
     id: "read-fresh",
     method: "thread/read",
@@ -3338,8 +3339,12 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
 
   // Desktop went silent while the cache still claims an active turn: the cache
   // is stale evidence, so the read must fall through to the local app-server
-  // instead of pinning a phantom running indicator on the phone.
+  // instead of pinning a phantom running indicator on the phone. The same
+  // staleness must unmute the rollout fallback mirror (hasFreshLiveThreadState
+  // false while hasLiveThreadState stays true) so the reopened thread recovers.
   fakeNow += 21_000;
+  assert.equal(follower.hasLiveThreadState("thread-stale-active"), true);
+  assert.equal(follower.hasFreshLiveThreadState("thread-stale-active"), false);
   const staleServed = follower.observeInbound(JSON.stringify({
     id: "read-stale",
     method: "thread/read",

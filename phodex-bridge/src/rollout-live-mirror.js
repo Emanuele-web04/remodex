@@ -83,6 +83,9 @@ function createRolloutLiveMirrorController({
           }
         }
         : sendApplicationResponse,
+      isSuppressed: typeof shouldSuppressThread === "function"
+        ? () => Boolean(shouldSuppressThread(threadId))
+        : () => false,
       logPrefix,
       fsModule,
       now,
@@ -121,6 +124,7 @@ function createRolloutLiveMirrorController({
 function createThreadRolloutLiveMirror({
   threadId,
   sendApplicationResponse,
+  isSuppressed = () => false,
   logPrefix,
   fsModule,
   now,
@@ -148,6 +152,7 @@ function createThreadRolloutLiveMirror({
   let lastGrowthAt = startedAt;
   let lastHeartbeatAt = 0;
   let didBootstrap = false;
+  let wasSuppressed = false;
 
   const intervalId = setIntervalFn(tick, pollIntervalMs);
   tick();
@@ -159,6 +164,20 @@ function createThreadRolloutLiveMirror({
 
     try {
       const currentTime = now();
+
+      // While another live source streams this thread the tail keeps consuming
+      // rollout lines with its emissions muted. When that source goes quiet and
+      // the mute lifts, everything consumed meanwhile was never mirrored: re-run
+      // the bootstrap catch-up so the phone backfills the gap instead of
+      // resuming from a cursor past content it never saw.
+      const suppressed = isSuppressed();
+      if (wasSuppressed && !suppressed && didBootstrap) {
+        lastSize = 0;
+        partialLine = "";
+        didBootstrap = false;
+        resetRunState(state);
+      }
+      wasSuppressed = suppressed;
 
       if (!rolloutPath) {
         if (currentTime - startedAt >= lookupTimeoutMs) {

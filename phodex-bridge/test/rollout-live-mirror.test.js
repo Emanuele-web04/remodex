@@ -272,6 +272,63 @@ test("rollout mirror suppression silences threads owned by another live source",
   assert.deepEqual(outbound, []);
 });
 
+test("suppression lift re-bootstraps the muted tail so a running thread recovers", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-unmute",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      userMessage("keep going"),
+      taskStarted("turn-unmute"),
+      agentMessage("still streaming", "final_answer"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  let suppressed = true;
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 200,
+    shouldSuppressThread: () => suppressed,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: {
+      threadId: "thread-unmute",
+    },
+  }));
+
+  // The muted tail consumes the whole rollout without mirroring anything.
+  await wait(30);
+  assert.deepEqual(outbound, []);
+
+  // The other live source went stale: the mirror must re-run its bootstrap
+  // catch-up so the phone backfills the gap and sees the run as active again,
+  // instead of staying frozen on a cursor past content it never mirrored.
+  suppressed = false;
+  await wait(30);
+
+  const methods = outbound.map((message) => message.method);
+  assert.equal(methods.includes("turn/started"), true);
+  assert.equal(methods.includes("codex/event/user_message"), true);
+  const bootstrapComplete = outbound.find(
+    (message) => message.params?.remodexRolloutBootstrapComplete === true
+  );
+  assert.ok(bootstrapComplete, "expected a bootstrap-complete activity marker after unmute");
+  assert.equal(bootstrapComplete.params.turnId, "turn-unmute");
+});
+
 test("desktop-origin bootstrap emits terminal catch-up for completed runs", async (t) => {
   const { homeDir } = createTemporaryRolloutHome({
     threadId: "thread-terminal-completed",

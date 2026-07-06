@@ -502,7 +502,14 @@ function createDesktopIpcLiveOwner({
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
     fallbackTurnIdsByThreadId.delete(normalizedThreadId);
     streamRevisionsByThreadId.delete(normalizedThreadId);
+    // An active-peer takeover can still drop a non-empty queue (hasActiveLocalTurn
+    // only shields idle yields); announce the emptied queue instead of letting
+    // clients keep rendering drafts the bridge will never run.
+    const droppedQueuedFollowUps = (queuedFollowUpsByThreadId.get(normalizedThreadId) || []).length > 0;
     queuedFollowUpsByThreadId.delete(normalizedThreadId);
+    if (droppedQueuedFollowUps) {
+      broadcastQueuedFollowUps(normalizedThreadId);
+    }
     runningQueuedFollowUpThreadIds.delete(normalizedThreadId);
     announcedReadStateThreadIds.delete(normalizedThreadId);
     cancelSidebarAnnouncement(normalizedThreadId);
@@ -1302,9 +1309,15 @@ function createDesktopIpcLiveOwner({
 
   // True while the bridge's app-server is executing a turn for this thread, or
   // has just been asked to start one (pending starts clear on error or on the
-  // matching turn/started snapshot). Such threads must not be handed to peers.
+  // matching turn/started snapshot). Queued follow-ups count as active work
+  // too: releasing ownership deletes the queue, so yielding an "idle" thread
+  // that still holds drafts would silently discard them. Such threads must not
+  // be handed to peers or released on unsubscribe.
   function hasActiveLocalTurn(threadId) {
     if (pendingTurnStartParamsByThreadId.has(threadId)) {
+      return true;
+    }
+    if ((queuedFollowUpsByThreadId.get(threadId) || []).length > 0) {
       return true;
     }
     const turns = conversations.get(threadId)?.turns || [];

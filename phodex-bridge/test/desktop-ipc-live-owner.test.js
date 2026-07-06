@@ -2296,6 +2296,14 @@ test("live owner pauses undecodable queued entries and halts the queue after int
   );
   assert.equal(pausedBroadcast.params.messages.length, 2);
   assert.equal(codexRequests.filter((request) => request.method === "turn/start").length, 0);
+
+  // The thread is idle but its queue still holds drafts: leaving the screen
+  // must not release ownership, or the queued work is silently discarded.
+  owner.observeInbound(JSON.stringify({
+    method: "thread/unsubscribe",
+    params: { threadId: "thread-queue-guards" },
+  }));
+  assert.equal(owner.isThreadOwned("thread-queue-guards"), true);
 });
 
 test("live owner dedupes read-state broadcasts for already-clean threads", async (t) => {

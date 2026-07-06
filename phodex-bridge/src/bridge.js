@@ -264,9 +264,12 @@ function startBridge({
       sendApplicationResponse,
       // One live source per thread: the IPC follower (Desktop-owned threads)
       // and the bridge's own app-server stream (phone-owned threads) are both
-      // authoritative over the rollout file tail.
+      // authoritative over the rollout file tail. The follower only counts
+      // while its Desktop stream is FRESH: a cache Desktop went silent on must
+      // not keep the rollout fallback muted, or a reopened running thread
+      // shows "finished" and never recovers until the next broadcast.
       shouldSuppressThread: (threadId) => (
-        Boolean(desktopIpcActionFollower?.hasLiveThreadState(threadId))
+        Boolean(desktopIpcActionFollower?.hasFreshLiveThreadState(threadId))
         || Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId))
       ),
     })
