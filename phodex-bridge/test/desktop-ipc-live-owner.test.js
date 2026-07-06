@@ -1912,6 +1912,77 @@ test("live owner refuses queued follow-ups instead of silently dropping them", a
   assert.match(response.error, /not supported/i);
 });
 
+test("live owner announces phone threads to the Desktop sidebar once", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-sidebar-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sidebarRefreshDelayMs: 5,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "sidebar-turn-1",
+    method: "turn/start",
+    params: {
+      threadId: "thread-sidebar",
+      input: [{ type: "text", text: "hello desktop" }],
+    },
+  }));
+
+  const announcement = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast" && frame.method === "thread-unarchived"
+  );
+  assert.equal(announcement.params.conversationId, "thread-sidebar");
+  assert.equal(announcement.params.hostId, "local");
+  assert.equal(announcement.version, 1);
+
+  // A later turn on the same thread must not re-announce it.
+  const announcementCount = () => frames.filter((frame) => (
+    frame.type === "broadcast" && frame.method === "thread-unarchived"
+  )).length;
+  const before = announcementCount();
+  owner.observeInbound(JSON.stringify({
+    id: "sidebar-turn-2",
+    method: "turn/start",
+    params: {
+      threadId: "thread-sidebar",
+      input: [{ type: "text", text: "again" }],
+    },
+  }));
+  await wait(30);
+  assert.equal(announcementCount(), before);
+});
+
 test("live owner keeps ownership when peer sends non-owner patch broadcasts", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-peer-patch-");
   const codexRequests = [];

@@ -27,6 +27,11 @@ const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 75;
 const DEFAULT_MAX_PATCH_COUNT = 2_000;
 const DEFAULT_MAX_PATCH_BYTES = 512 * 1024;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 1_000;
+// Desktop's webview refreshes its recent-conversations list when it receives a
+// thread-unarchived broadcast for its host. Give the rollout writer a moment to
+// persist session_meta + the first user event so the refreshed thread/list scan
+// can actually see the thread.
+const DEFAULT_SIDEBAR_REFRESH_DELAY_MS = 1_200;
 const THREAD_STREAM_STATE_CHANGED = "thread-stream-state-changed";
 // Cached thread/read responses are only a hydration convenience; owned threads
 // are never evicted, so a small cap keeps long browsing sessions bounded.
@@ -122,6 +127,7 @@ function createDesktopIpcLiveOwner({
   sendRawCodexMessage,
   normalizeTurnStartParams = (params) => params,
   socketPath = resolveDefaultIpcSocketPath(),
+  sidebarRefreshDelayMs = DEFAULT_SIDEBAR_REFRESH_DELAY_MS,
   snapshotDebounceMs = DEFAULT_SNAPSHOT_DEBOUNCE_MS,
   maxPatchCount = DEFAULT_MAX_PATCH_COUNT,
   maxPatchBytes = DEFAULT_MAX_PATCH_BYTES,
@@ -145,6 +151,8 @@ function createDesktopIpcLiveOwner({
   const cachedThreadsByThreadId = new Map();
   const lastBroadcastStatesByThreadId = new Map();
   const fallbackTurnIdsByThreadId = new Map();
+  const announcedSidebarThreadIds = new Set();
+  const sidebarRefreshTimersByThreadId = new Map();
   const pendingTurnStartParamsByThreadId = new Map();
   const pendingTurnStartEntriesByRequestId = new Map();
   const followerRuntimeOverridesByThreadId = new Map();
@@ -224,6 +232,7 @@ function createDesktopIpcLiveOwner({
     markOwnedThread(threadId);
     if (method === "turn/start") {
       rememberPendingTurnStart(threadId, message?.params, message?.id);
+      scheduleSidebarAnnouncement(threadId);
     }
     seedOwnedConversation(threadId, {
       cwd: readString(message?.params?.cwd),
@@ -296,6 +305,11 @@ function createDesktopIpcLiveOwner({
     cachedThreadsByThreadId.clear();
     lastBroadcastStatesByThreadId.clear();
     fallbackTurnIdsByThreadId.clear();
+    for (const timer of sidebarRefreshTimersByThreadId.values()) {
+      clearTimeout(timer);
+    }
+    sidebarRefreshTimersByThreadId.clear();
+    announcedSidebarThreadIds.clear();
     pendingTurnStartParamsByThreadId.clear();
     pendingTurnStartEntriesByRequestId.clear();
     followerRuntimeOverridesByThreadId.clear();
@@ -414,6 +428,8 @@ function createDesktopIpcLiveOwner({
     pendingThreadHydrationsByThreadId.delete(normalizedThreadId);
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
     fallbackTurnIdsByThreadId.delete(normalizedThreadId);
+    cancelSidebarAnnouncement(normalizedThreadId);
+    announcedSidebarThreadIds.delete(normalizedThreadId);
     pendingTurnStartParamsByThreadId.delete(normalizedThreadId);
     followerRuntimeOverridesByThreadId.delete(normalizedThreadId);
     for (const [requestId, pending] of Array.from(pendingTurnStartEntriesByRequestId.entries())) {
@@ -463,6 +479,37 @@ function createDesktopIpcLiveOwner({
 
   function broadcastThreadUnarchived(threadId) {
     queueThreadArchiveMetadataBroadcast(THREAD_UNARCHIVED, threadId);
+  }
+
+  // Desktop has no watcher on the shared session store, but its webview reacts
+  // to thread-unarchived broadcasts by re-running thread/list. Announcing each
+  // phone-driven thread once (after the rollout has had time to persist) makes
+  // it appear in Desktop's sidebar without the disruptive deep-link bounce.
+  function scheduleSidebarAnnouncement(threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId
+      || announcedSidebarThreadIds.has(normalizedThreadId)
+      || sidebarRefreshTimersByThreadId.has(normalizedThreadId)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      sidebarRefreshTimersByThreadId.delete(normalizedThreadId);
+      if (!ownedThreadIds.has(normalizedThreadId)) {
+        return;
+      }
+      announcedSidebarThreadIds.add(normalizedThreadId);
+      broadcastThreadUnarchived(normalizedThreadId);
+    }, Math.max(0, sidebarRefreshDelayMs));
+    timer.unref?.();
+    sidebarRefreshTimersByThreadId.set(normalizedThreadId, timer);
+  }
+
+  function cancelSidebarAnnouncement(threadId) {
+    const timer = sidebarRefreshTimersByThreadId.get(threadId);
+    if (timer) {
+      clearTimeout(timer);
+      sidebarRefreshTimersByThreadId.delete(threadId);
+    }
   }
 
   // Archive/unarchive are list metadata updates; keep only the final per-thread
