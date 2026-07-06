@@ -29,39 +29,56 @@ enum MarkdownTextFormatter {
             in: raw,
             style: .displayName
         )
-        let headingNormalized = replaceMatches(
-            in: normalizedSkills,
-            regex: TurnMessageRegexCache.heading,
-            template: "**$1**"
-        )
-        return linkifyFileReferenceLines(in: headingNormalized, profile: profile)
+        return transformLinesOutsideFences(in: normalizedSkills, profile: profile)
     }
 
-    private static func linkifyFileReferenceLines(in text: String, profile: MarkdownRenderProfile) -> String {
+    private static func transformLinesOutsideFences(in text: String, profile: MarkdownRenderProfile) -> String {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var isInsideFence = false
+        var openFenceCloser: String?
 
         let transformed = lines.map { line -> String in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("```") {
-                isInsideFence.toggle()
+            if let fenceCloser = openFenceCloser {
+                if trimmed.hasPrefix(fenceCloser) {
+                    openFenceCloser = nil
+                }
                 return line
             }
 
-            guard !isInsideFence else {
+            // Fenced code stays verbatim: no heading bolding, no linkification.
+            if let fenceCloser = markdownFenceCloser(for: trimmed) {
+                openFenceCloser = fenceCloser
                 return line
             }
 
-            return linkifyInlineFileReferences(in: line, profile: profile)
+            let headingNormalized = replaceMatches(
+                in: line,
+                regex: TurnMessageRegexCache.heading,
+                template: "**$1**"
+            )
+            return linkifyInlineFileReferences(in: headingNormalized, profile: profile)
         }
 
         return transformed.joined(separator: "\n")
+    }
+
+    private static func markdownFenceCloser(for trimmedLine: String) -> String? {
+        if trimmedLine.hasPrefix("```") {
+            return "```"
+        }
+        if trimmedLine.hasPrefix("~~~") {
+            return "~~~"
+        }
+        return nil
     }
 
     private static func linkifyInlineFileReferences(in line: String, profile: MarkdownRenderProfile) -> String {
         switch profile {
         case .assistantProse, .fileChangeSystem:
             break
+        case .userProse:
+            // User prose renders mentions as chips upstream; typed paths stay literal text.
+            return line
         }
 
         var transformedLine = line

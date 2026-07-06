@@ -65,6 +65,67 @@ final class UserBubbleInlineMarkdownRendererTests: XCTestCase {
 
         XCTAssertFalse(rendered.visibleText.isEmpty)
     }
+
+    // MARK: - Block markdown detection
+
+    func testPlainAndInlineOnlyTextIsNotBlockMarkdown() {
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("is this safe to merge?"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("Use **bold** and `code` here."))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("run ls *.swift"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("*.swift files only"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("the answer is 10. maybe 11"))
+        XCTAssertFalse(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("#hashtag without space"))
+    }
+
+    func testFencedCodeIsBlockMarkdown() {
+        XCTAssertTrue(
+            UserBubbleBlockMarkdownDetector.containsBlockMarkdown("fix this:\n```swift\nlet x = 1\n```")
+        )
+    }
+
+    func testHeadingListQuoteAndTableAreBlockMarkdown() {
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("# Plan\nreview the diff"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("check:\n- reconnect\n- pairing"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("steps:\n1. build\n2. run"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("> quoted reply"))
+        XCTAssertTrue(UserBubbleBlockMarkdownDetector.containsBlockMarkdown("| a | b |\n| - | - |"))
+    }
+
+    // MARK: - Collapsed markdown preview
+
+    func testCollapsedPreviewKeepsShortTextVerbatim() {
+        let text = "fix this:\n```swift\nlet x = 1\n```"
+
+        XCTAssertEqual(UserBubbleCollapsedMarkdownPreview.previewText(for: text), text)
+    }
+
+    func testCollapsedPreviewTruncatesLongTextAndClosesOpenFence() {
+        let codeLines = (1...40).map { "let value\($0) = \($0)" }.joined(separator: "\n")
+        let text = "fix this:\n```swift\n" + codeLines + "\n```"
+
+        let preview = UserBubbleCollapsedMarkdownPreview.previewText(for: text)
+
+        XCTAssertLessThan(preview.count, text.count)
+        XCTAssertTrue(preview.hasSuffix("\n```"))
+        XCTAssertFalse(preview.contains("value40"))
+    }
+
+    func testCollapsedPreviewCutsSingleOverlongLineAtCharacterBudget() {
+        let text = "```\n" + String(repeating: "x", count: 5_000)
+
+        let preview = UserBubbleCollapsedMarkdownPreview.previewText(for: text)
+
+        XCTAssertLessThan(preview.count, 1_300)
+        XCTAssertTrue(preview.hasSuffix("\n```"))
+    }
+
+    func testCollapsedPreviewClosesOpenInlineMarkup() {
+        let lines = ["- **important start", "plain line"] + (1...12).map { "line \($0)" }
+        let preview = UserBubbleCollapsedMarkdownPreview.previewText(for: lines.joined(separator: "\n"))
+
+        XCTAssertLessThan(preview.count, lines.joined(separator: "\n").count)
+        XCTAssertTrue(preview.hasSuffix("**"))
+    }
 }
 
 private extension UserBubbleInlineMarkdownRenderResult {

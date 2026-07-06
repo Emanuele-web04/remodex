@@ -1,8 +1,9 @@
 // FILE: UserBubbleInlineMarkdownText.swift
 // Purpose: Renders lightweight inline markdown inside user prompt bubbles.
 // Layer: View Support
-// Exports: UserBubbleInlineMarkdownText, UserBubbleInlineMarkdownRenderer
-// Depends on: Foundation, SwiftUI, TurnMessageCacheCore, TurnMessageRegexCache
+// Exports: UserBubbleInlineMarkdownText, UserBubbleInlineMarkdownRenderer, UserBubbleBlockMarkdownDetector,
+//   UserBubbleCollapsedMarkdownPreview
+// Depends on: Foundation, SwiftUI, TurnMessageCacheCore, TurnMessageRegexCache, StreamingInlineMarkupAutoCloser
 
 import Foundation
 import SwiftUI
@@ -32,6 +33,146 @@ struct UserBubbleInlineMarkdownText: View {
 enum UserBubbleInlineMarkdownRenderResult {
     case plain
     case rich(AttributedString)
+}
+
+// Detects block-level markdown the inline renderer cannot express; those user
+// messages take the shared MarkdownTextView pipeline used by assistant rows.
+enum UserBubbleBlockMarkdownDetector {
+    static func containsBlockMarkdown(_ rawText: String) -> Bool {
+        if rawText.contains("```") || rawText.contains("~~~") {
+            return true
+        }
+
+        return rawText
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .contains { isBlockSyntaxLine($0.drop(while: { $0 == " " || $0 == "\t" })) }
+    }
+
+    private static func isBlockSyntaxLine(_ line: Substring) -> Bool {
+        guard let first = line.first else {
+            return false
+        }
+
+        switch first {
+        case "#":
+            let hashes = line.prefix(while: { $0 == "#" })
+            return hashes.count <= 6 && line.dropFirst(hashes.count).first == " "
+        case "-", "*", "+":
+            return line.dropFirst().first == " " || isThematicBreak(line)
+        case ">":
+            return true
+        case "|":
+            return line.dropFirst().contains("|")
+        default:
+            return isOrderedListItem(line)
+        }
+    }
+
+    private static func isOrderedListItem(_ line: Substring) -> Bool {
+        let digits = line.prefix(while: { $0.isASCII && $0.isNumber })
+        guard !digits.isEmpty, digits.count <= 3 else {
+            return false
+        }
+
+        let rest = line.dropFirst(digits.count)
+        return rest.hasPrefix(". ") || rest.hasPrefix(") ")
+    }
+
+    private static func isThematicBreak(_ line: Substring) -> Bool {
+        guard let marker = line.first, line.count >= 3 else {
+            return false
+        }
+        return line.allSatisfy { $0 == marker }
+    }
+}
+
+// Collapsed block-markdown bubbles render only this bounded prefix, so a long
+// paste never pays full StructuredText layout just to be clipped to ~10 lines.
+enum UserBubbleCollapsedMarkdownPreview {
+    private static let cache = BoundedCache<String, String>(maxEntries: 256)
+    private static let maxLines = 10
+    private static let maxCharacters = 1_200
+
+    static func previewText(for rawText: String) -> String {
+        guard needsTruncation(rawText) else {
+            return rawText
+        }
+
+        let key = TurnTextCacheKey.stableKey(namespace: "user-bubble-collapsed-preview", text: rawText)
+        return cache.getOrSet(key) {
+            truncatedPreview(from: rawText)
+        }
+    }
+
+    static func reset() {
+        cache.removeAll()
+    }
+
+    // Bounded scan; text within both limits is already its own preview.
+    private static func needsTruncation(_ rawText: String) -> Bool {
+        var characterCount = 0
+        var newlineCount = 0
+        for character in rawText {
+            characterCount += 1
+            if characterCount > maxCharacters {
+                return true
+            }
+            if character == "\n" {
+                newlineCount += 1
+                if newlineCount >= maxLines {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func truncatedPreview(from rawText: String) -> String {
+        var openFenceCloser: String?
+        var includedLines = 0
+        var remainingCharacters = maxCharacters
+        var cutIndex = rawText.endIndex
+        var lineStart = rawText.startIndex
+
+        while lineStart < rawText.endIndex {
+            let lineEnd = rawText[lineStart...].firstIndex(of: "\n") ?? rawText.endIndex
+            let line = rawText[lineStart..<lineEnd]
+
+            if let budgetIndex = line.index(line.startIndex, offsetBy: remainingCharacters, limitedBy: line.endIndex),
+               budgetIndex < line.endIndex {
+                // Single overlong line (minified pastes): cut mid-line at the budget.
+                cutIndex = budgetIndex
+                break
+            }
+
+            // A tilde fence is only closed by tildes, so remember which closer is owed.
+            let content = line.drop(while: { $0 == " " || $0 == "\t" })
+            if let fenceCloser = openFenceCloser {
+                if content.hasPrefix(fenceCloser) {
+                    openFenceCloser = nil
+                }
+            } else if content.hasPrefix("```") {
+                openFenceCloser = "```"
+            } else if content.hasPrefix("~~~") {
+                openFenceCloser = "~~~"
+            }
+
+            includedLines += 1
+            remainingCharacters -= line.count + 1
+            if includedLines >= maxLines || remainingCharacters <= 0 {
+                cutIndex = lineEnd
+                break
+            }
+            lineStart = lineEnd < rawText.endIndex ? rawText.index(after: lineEnd) : rawText.endIndex
+        }
+
+        let preview = String(rawText[..<cutIndex])
+        if let openFenceCloser {
+            // An unterminated fence would swallow the rest of the preview's styling.
+            return preview + "\n" + openFenceCloser
+        }
+        return StreamingInlineMarkupAutoCloser.autoClosed(preview)
+    }
 }
 
 enum UserBubbleInlineMarkdownRenderer {

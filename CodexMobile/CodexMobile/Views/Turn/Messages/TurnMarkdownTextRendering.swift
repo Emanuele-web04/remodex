@@ -76,6 +76,9 @@ struct MarkdownTextView: View {
     var constrainsToAvailableWidth: Bool = false
     var usesCaches: Bool = true
     var usesScrollableCodeBlocks: Bool = false
+    // Overrides the accent-derived link color, e.g. inside tinted user bubbles
+    // where the accent palette can match the bubble background.
+    var linkColor: Color? = nil
 
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(UserBubbleColor.storageKey)
@@ -150,6 +153,9 @@ struct MarkdownTextView: View {
     }
 
     private var markdownLinkColor: Color {
+        if let linkColor {
+            return linkColor
+        }
         let palette = (UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default).ctaPalette
         return palette.bubbleBackground(for: colorScheme)
     }

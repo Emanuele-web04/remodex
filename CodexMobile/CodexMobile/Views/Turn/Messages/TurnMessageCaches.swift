@@ -21,6 +21,7 @@ enum TurnCacheManager {
         MarkdownParseCacheReset.reset()
         MarkdownRenderableTextCache.reset()
         UserBubbleRenderModelCache.reset()
+        UserBubbleCollapsedMarkdownPreview.reset()
         MessageRowRenderModelCache.reset()
         CommandExecutionStatusCache.reset()
         ToolActivityRenderCache.reset()
@@ -390,7 +391,7 @@ enum DiffBlockDetectionCache {
 
     static func isDiffBlock(code: String, profile: MarkdownRenderProfile) -> Bool {
         switch profile {
-        case .assistantProse, .fileChangeSystem:
+        case .assistantProse, .userProse, .fileChangeSystem:
             break
         }
 
