@@ -1437,6 +1437,16 @@ extension CodexService {
         return itemId.hasSuffix(":input")
     }
 
+    // Rollout mirrors tag reasoning rows with synthetic "rollout-*" item ids
+    // and live streams may use turn-scoped placeholders; both are provisional
+    // and must merge with the real reasoning identity of the same turn.
+    nonisolated static func isProvisionalThinkingIdentifier(_ itemId: String?) -> Bool {
+        guard let itemId = normalizedHistoryIdentifier(itemId) else {
+            return true
+        }
+        return itemId.hasPrefix("rollout-") || itemId.hasPrefix("turn:")
+    }
+
     // Turn identities are mergeable when either side lacks a real turn id;
     // two distinct real turn ids stay separate so intentionally repeated
     // sends keep one row per turn.

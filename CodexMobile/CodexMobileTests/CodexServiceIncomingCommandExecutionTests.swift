@@ -2021,6 +2021,51 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertFalse(thinkingRows[0].isStreaming)
     }
 
+    // The IPC follower streams reasoning under real per-item ids while the
+    // rollout mirror aggregates the same turn under one synthetic
+    // "rollout-thinking:" id. Alternating sources mid-turn must rebind to the
+    // existing row instead of stacking a second "Thinking..." row.
+    func testRolloutMirrorReasoningRebindsToIpcThinkingRowInsteadOfDuplicating() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let realItemID = "reasoning-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+        service.handleNotification(
+            method: "item/reasoning/textDelta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(realItemID),
+                "delta": .string("Weighing options"),
+            ])
+        )
+        service.handleNotification(
+            method: "item/reasoning/textDelta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string("rollout-thinking:\(threadID):\(turnID)"),
+                "delta": .string(" and deciding"),
+                "remodexDesktopMirror": .bool(true),
+                "remodexRolloutLiveMirror": .bool(true),
+            ])
+        )
+
+        let thinkingRows = service.messages(for: threadID).filter {
+            $0.role == .system && $0.kind == .thinking
+        }
+        XCTAssertEqual(thinkingRows.count, 1)
+        XCTAssertEqual(thinkingRows[0].itemId, realItemID)
+    }
+
     func testHistoryMergeReconcilesThinkingByTurnWhenTextDiffers() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

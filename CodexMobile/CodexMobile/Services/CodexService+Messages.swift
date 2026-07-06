@@ -2292,6 +2292,22 @@ extension CodexService {
                 streamingSystemMessageByItemID[syntheticKey] = existingMessageID
             }
             messageID = existingMessageID
+        } else if kind == .thinking,
+                  let resolvedTurnId, !resolvedTurnId.isEmpty,
+                  let existingMessageID = reusableProvisionalThinkingRowID(
+                      threadId: threadId,
+                      turnId: resolvedTurnId,
+                      incomingItemId: itemId
+                  ) {
+            // Rollout mirrors aggregate a turn's reasoning under one synthetic
+            // "rollout-thinking:" id while IPC mirrors stream real per-item ids.
+            // When the live sources alternate mid-turn, rebind instead of
+            // stacking a second "Thinking..." row for the same turn.
+            streamingSystemMessageByItemID[key] = existingMessageID
+            if let syntheticKey {
+                streamingSystemMessageByItemID[syntheticKey] = existingMessageID
+            }
+            messageID = existingMessageID
         } else {
             messageID = nil
         }
@@ -2341,6 +2357,12 @@ extension CodexService {
                messagesByThread[threadId]?[index].itemId == syntheticItemId {
                 messagesByThread[threadId]?[index].itemId = itemId
             } else if messagesByThread[threadId]?[index].itemId == nil {
+                messagesByThread[threadId]?[index].itemId = itemId
+            } else if kind == .thinking,
+                      Self.isProvisionalThinkingIdentifier(messagesByThread[threadId]?[index].itemId),
+                      !Self.isProvisionalThinkingIdentifier(itemId) {
+                // Adopt the real reasoning identity so a later real section opens
+                // its own row instead of overwriting this one through the fallback.
                 messagesByThread[threadId]?[index].itemId = itemId
             }
             if var threadMessages = messagesByThread[threadId],
@@ -2574,6 +2596,29 @@ extension CodexService {
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    // Desktop mirrors race two reasoning identities for one turn: the IPC
+    // follower streams real per-item ids while the rollout tail aggregates the
+    // turn under one synthetic "rollout-thinking:" id. Rebinding is only safe
+    // when a side is provisional; two distinct real ids stay separate sections.
+    private func reusableProvisionalThinkingRowID(
+        threadId: String,
+        turnId: String,
+        incomingItemId: String
+    ) -> String? {
+        guard let candidate = messagesByThread[threadId]?.last(where: { message in
+            message.role == .system
+                && message.kind == .thinking
+                && message.turnId == turnId
+        }) else {
+            return nil
+        }
+        guard Self.isProvisionalThinkingIdentifier(incomingItemId)
+                || Self.isProvisionalThinkingIdentifier(candidate.itemId) else {
+            return nil
+        }
+        return candidate.id
     }
 
     // Allows text-based reuse only for provisional rows; stable item ids must stay distinct.

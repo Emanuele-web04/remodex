@@ -477,9 +477,13 @@ enum TurnTimelineReducer {
         return previousTurnId == incomingTurnId
     }
 
-    // Treats synthetic turn-scoped thinking ids as unstable so a later real item can reuse the row.
+    // Treats synthetic turn-scoped and rollout-mirror thinking ids as unstable
+    // so a later real item can reuse the row instead of stacking a duplicate.
     private static func hasStableThinkingIdentity(_ message: CodexMessage) -> Bool {
         guard let itemId = normalizedIdentifier(message.itemId) else {
+            return false
+        }
+        if itemId.hasPrefix("rollout-") {
             return false
         }
         return !(itemId.hasPrefix("turn:") && itemId.contains("|kind:\(CodexMessageKind.thinking.rawValue)"))
