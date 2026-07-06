@@ -519,6 +519,11 @@ function buildConversationTurn(turn, {
       ? cloneJSON(turn.items)
       : cloneJSON(previousTurn?.items || []),
   };
+  // Injected context (AGENTS.md instructions, environment_context) rides inside
+  // turn.items on turn/started, turn/completed, and hydrated thread/read turns.
+  // Drop it here, position-independently, so no Desktop snapshot path leaks it
+  // as a user bubble regardless of where the app-server placed it in the turn.
+  builtTurn.items = builtTurn.items.filter((item) => !isContextualUserMessageItem(item));
   // Hydrated turns from thread/read carry the prompt as an item with empty
   // params.input; adopt it into params so Desktop renders a normal bubble.
   normalizeTurnInitialPrompt(builtTurn);

@@ -3239,9 +3239,15 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
 // Live item lifecycle events can carry the injected context user items too;
 // dropping the whole notification keeps the phone timeline clean without
 // rewriting the payload on the hot path.
+const LIVE_ITEM_LIFECYCLE_METHODS = new Set([
+  "item/started",
+  "item/updated",
+  "item/completed",
+]);
+
 function isContextualUserItemNotification(parsed) {
   const method = typeof parsed?.method === "string" ? parsed.method : "";
-  if (method !== "item/started" && method !== "item/completed") {
+  if (!LIVE_ITEM_LIFECYCLE_METHODS.has(method)) {
     return false;
   }
   const item = parsed?.params?.item;

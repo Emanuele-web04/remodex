@@ -1193,6 +1193,17 @@ test("live owner handles discovery and start-turn follower requests for owned th
     (frame) => frame.type === "response" && frame.requestId === "start-turn-1"
   );
   assert.equal(response.resultType, "success");
+  // Desktop's follower reads response.result.turn off the { result } wrapper its
+  // own owner handler produces; the raw turn/start result would make it read
+  // `.turn` on undefined ("Error creating task").
+  assert.deepEqual(response.result, {
+    result: {
+      turn: {
+        id: "turn-from-follower",
+        status: "inProgress",
+      },
+    },
+  });
   assert.deepEqual(codexRequests.filter((request) => request.method === "turn/start"), [{
     method: "turn/start",
     params: {
