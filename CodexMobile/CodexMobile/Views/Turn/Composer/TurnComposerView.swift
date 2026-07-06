@@ -311,16 +311,16 @@ struct TurnComposerView: View {
                         }
                     }
                 }
-                // Collapsed capsule: 10pt on every side so the 30pt inline controls
-                // sit at the same distance from the edges as the 10pt vertical rhythm.
-                .padding(.leading, showsCollapsedComposer ? 10 : 14)
-                .padding(.trailing, showsCollapsedComposer ? 10 : 16)
-                // Resting row: 10pt above and below the row content, with
+                // Collapsed capsule: 6pt on every side so the 32pt inline controls
+                // sit at the same distance from the edges as the 6pt vertical rhythm.
+                .padding(.leading, showsCollapsedComposer ? 6 : 14)
+                .padding(.trailing, showsCollapsedComposer ? 6 : 16)
+                // Resting row: 6pt above and below the row content, with
                 // `composerSurfaceCornerRadius` derived as half the resulting
-                // height so the surface reads as a true capsule (50pt/25 at the
-                // default type size). The expanded card keeps its own rhythm.
-                .padding(.top, showsCollapsedComposer ? 10 : accessoryState.topInputPadding + 6)
-                .padding(.bottom, showsCollapsedComposer ? 10 : 4)
+                // height so the surface reads as a true capsule. The expanded
+                // card keeps its own rhythm.
+                .padding(.top, showsCollapsedComposer ? 6 : accessoryState.topInputPadding + 6)
+                .padding(.bottom, showsCollapsedComposer ? 6 : 4)
                 .onChange(of: input) { _, newValue in
                     inputChangeTask?.cancel()
                     // Coalesce fast typing into one autocomplete refresh per main-actor turn.
@@ -406,19 +406,18 @@ struct TurnComposerView: View {
         isEmptyThread ? "Ask Remodex anything..." : "Ask for follow-up changes"
     }
 
-    // The resting bar is ~50pt tall, so 25 keeps it a true capsule; the radius
-    // animates to the expanded card's 26 inside the same morph.
-    // Resting row content height: the 30pt inline controls, or the scaled text
-    // line when Dynamic Type grows past them.
+    // The radius animates to the expanded card's 26 inside the same morph.
+    // Resting row content height: the inline control tap targets, or the scaled
+    // text line when Dynamic Type grows past them.
     private var collapsedRowContentHeight: CGFloat {
-        max(collapsedInputHeight, 30)
+        max(collapsedInputHeight, collapsedControlTapTarget)
     }
 
-    // Collapsed: half the resting height (10pt padding + content + 10pt padding)
-    // so the surface reads as a true capsule at every Dynamic Type size
-    // (25 for the default 50pt). Expanded: the standard 26pt card radius.
+    // Collapsed: half the resting height (6pt padding + content + 6pt padding)
+    // so the surface reads as a true capsule at every Dynamic Type size.
+    // Expanded: the standard 26pt card radius.
     private var composerSurfaceCornerRadius: CGFloat {
-        showsCollapsedComposer ? (collapsedRowContentHeight + 20) / 2 : 26
+        showsCollapsedComposer ? (collapsedRowContentHeight + 12) / 2 : 26
     }
 
 }

@@ -49,11 +49,11 @@ private struct SidebarThreadRunSpinner: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(Color.green.opacity(0.22), lineWidth: 1.5)
+                .stroke(Color.gray.opacity(0.22), lineWidth: 1.5)
             Circle()
                 .trim(from: 0.16, to: 0.72)
                 .stroke(
-                    Color.green,
+                    Color.gray,
                     style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
                 )
                 .rotationEffect(.degrees(isSpinning ? 360 : 0))
