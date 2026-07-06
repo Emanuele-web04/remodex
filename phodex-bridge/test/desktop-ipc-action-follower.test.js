@@ -1336,7 +1336,9 @@ test("desktop IPC follower routes phone turns to Desktop-owned threads", async (
           resultType: "success",
           method: frame.method,
           handledByClientId: "desktop",
-          result: { turn: { id: "turn-from-phone" } },
+          result: frame.method === "thread-follower-start-turn"
+            ? { result: { turn: { id: "turn-from-phone" } } }
+            : { turn: { id: "turn-from-phone" } },
         });
       }
     });

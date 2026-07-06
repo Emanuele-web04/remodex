@@ -13,6 +13,7 @@ const {
   normalizeToken,
   readString,
   requestIdKey,
+  visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 
 const LOCAL_HOST_ID = "local";
@@ -519,6 +520,13 @@ function buildConversationTurn(turn, {
       ? cloneJSON(turn.items)
       : cloneJSON(previousTurn?.items || []),
   };
+  // Injected context (AGENTS.md instructions, environment_context) rides inside
+  // turn.items on turn/started, turn/completed, and hydrated thread/read turns.
+  // Drop it here, position-independently, so no Desktop snapshot path leaks it
+  // as a user bubble regardless of where the app-server placed it in the turn.
+  builtTurn.items = builtTurn.items
+    .map(sanitizeUserMessageItem)
+    .filter(Boolean);
   // Hydrated turns from thread/read carry the prompt as an item with empty
   // params.input; adopt it into params so Desktop renders a normal bubble.
   normalizeTurnInitialPrompt(builtTurn);
@@ -623,6 +631,57 @@ function extractUserText(entries) {
     .trim();
 }
 
+function sanitizeUserInputEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  const sanitized = [];
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      const visible = visibleUserPromptText(entry);
+      if (visible) {
+        sanitized.push(visible);
+      }
+      continue;
+    }
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const text = typeof entry.text === "string" ? entry.text : "";
+    if (!text) {
+      sanitized.push(cloneJSON(entry));
+      continue;
+    }
+    const visible = visibleUserPromptText(text);
+    if (!visible) {
+      continue;
+    }
+    sanitized.push(visible === text ? cloneJSON(entry) : {
+      ...cloneJSON(entry),
+      text: visible,
+    });
+  }
+  return sanitized;
+}
+
+function sanitizeUserMessageItem(item) {
+  if (!isUserMessageItem(item)) {
+    return item;
+  }
+  const rawText = extractUserText(item?.content);
+  const sanitizedContent = sanitizeUserInputEntries(Array.isArray(item?.content) ? item.content : []);
+  if (rawText && sanitizedContent.length === 0) {
+    return null;
+  }
+  if (!Array.isArray(item?.content)) {
+    return cloneJSON(item);
+  }
+  return {
+    ...cloneJSON(item),
+    content: sanitizedContent,
+  };
+}
+
 function isInitialPromptUserMessageItem(turn, item) {
   if (!isUserMessageItem(item)) {
     return false;
@@ -635,16 +694,36 @@ function isInitialPromptUserMessageItem(turn, item) {
 }
 
 function isContextualUserMessageItem(item) {
-  return isUserMessageItem(item) && isContextualUserText(extractUserText(item?.content));
+  if (!isUserMessageItem(item)) {
+    return false;
+  }
+  const text = extractUserText(item?.content);
+  return Boolean(text) && isContextualUserText(text);
 }
 
 function normalizeTurnInitialPrompt(turn) {
   if (!turn || !Array.isArray(turn.items)) {
     return;
   }
+  if (Array.isArray(turn.params?.input)) {
+    turn.params = {
+      ...turn.params,
+      input: sanitizeUserInputEntries(turn.params.input),
+    };
+  }
   const promptText = extractUserText(turn?.params?.input);
   for (let index = 0; index < turn.items.length; index += 1) {
-    const item = turn.items[index];
+    let item = turn.items[index];
+    const sanitizedItem = sanitizeUserMessageItem(item);
+    if (!sanitizedItem) {
+      turn.items.splice(index, 1);
+      index -= 1;
+      continue;
+    }
+    if (sanitizedItem !== item) {
+      turn.items[index] = sanitizedItem;
+      item = sanitizedItem;
+    }
     // Injected context user items sit before the real prompt in persisted
     // history; strip them so they are never adopted as the prompt bubble.
     if (isContextualUserMessageItem(item)) {
@@ -658,13 +737,9 @@ function normalizeTurnInitialPrompt(turn) {
         return;
       }
       if (!promptText) {
-        turn.params = {
-          ...turn.params,
-          input: (Array.isArray(item.content) ? item.content : [])
-            .map(userMessageContentFromTurnInput)
-            .filter(Boolean),
-        };
-        turn.items.splice(index, 1);
+        if (adoptInitialPromptUserMessage(turn, item)) {
+          turn.items.splice(index, 1);
+        }
         return;
       }
       if (itemText === promptText) {
@@ -679,6 +754,10 @@ function normalizeTurnInitialPrompt(turn) {
 }
 
 function userMessageContentFromTurnInput(entry) {
+  if (typeof entry === "string") {
+    const text = readString(entry);
+    return text ? { type: "text", text } : null;
+  }
   if (!entry || typeof entry !== "object") {
     return null;
   }
@@ -687,6 +766,23 @@ function userMessageContentFromTurnInput(entry) {
     return { type: "text", text: readString(entry.text) };
   }
   return cloneJSON(entry);
+}
+
+function adoptInitialPromptUserMessage(turn, item) {
+  if (!isUserMessageItem(item) || !Array.isArray(item?.content)) {
+    return false;
+  }
+  const input = item.content
+    .map(userMessageContentFromTurnInput)
+    .filter(Boolean);
+  if (input.length === 0) {
+    return false;
+  }
+  turn.params = {
+    ...turn.params,
+    input,
+  };
+  return true;
 }
 
 function ensureConversationInMap(conversations, threadId, options = {}) {
@@ -757,8 +853,9 @@ function upsertItem(turn, item) {
   // user items too; no Codex UI renders it, so it must not reach the stream.
   // Also evict any copy that slipped into the state before this filter existed.
   const index = turn.items.findIndex((candidate) => readString(candidate?.id) === itemId);
-  if (isContextualUserMessageItem(item)
-    || (index >= 0 && isContextualUserMessageItem(turn.items[index]))) {
+  const sanitizedItem = sanitizeUserMessageItem(item);
+  const existingItem = index >= 0 ? sanitizeUserMessageItem(turn.items[index]) : null;
+  if (!sanitizedItem) {
     if (index >= 0) {
       turn.items.splice(index, 1);
     }
@@ -766,20 +863,23 @@ function upsertItem(turn, item) {
   }
   if (index >= 0) {
     turn.items[index] = {
-      ...turn.items[index],
-      ...cloneJSON(item),
+      ...(existingItem || {}),
+      ...cloneJSON(sanitizedItem),
     };
     return;
   }
   // The app-server echoes the initial prompt as a userMessage item; Desktop
   // already renders it from turn.params.input and would label the duplicate as
   // "Steered conversation". Only later user messages are genuine steers.
-  if (isUserMessageItem(item)
-    && !turnHasUserMessageItem(turn)
-    && isInitialPromptUserMessageItem(turn, item)) {
-    return;
+  if (isUserMessageItem(sanitizedItem) && !turnHasUserMessageItem(turn)) {
+    if (isInitialPromptUserMessageItem(turn, sanitizedItem)) {
+      return;
+    }
+    if (!extractUserText(turn?.params?.input) && adoptInitialPromptUserMessage(turn, sanitizedItem)) {
+      return;
+    }
   }
-  turn.items.push(cloneJSON(item));
+  turn.items.push(cloneJSON(sanitizedItem));
 }
 
 function upsertRequest(conversation, request) {

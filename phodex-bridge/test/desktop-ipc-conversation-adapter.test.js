@@ -84,6 +84,138 @@ test("conversation adapter evicts pre-existing contextual items on merge", () =>
   assert.deepEqual(conversations.get("thread-context-merge").turns[0].items, []);
 });
 
+test("conversation adapter strips injected context carried inside turn.items", () => {
+  const agentsText = "# AGENTS.md instructions for /Users/me/proj\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>";
+  const envText = "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>";
+  const conversations = new Map();
+  const owned = new Set(["thread-turn-items"]);
+  const now = () => 3;
+
+  // turn/completed carries the full turn.items on turn 1, injected context first.
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-turn-items",
+        turn: {
+          id: "turn-turn-items",
+          status: "completed",
+          startedAt: 1,
+          items: [
+            { id: "ctx-agents", type: "userMessage", content: [{ type: "input_text", text: agentsText }] },
+            { id: "ctx-env", type: "userMessage", content: [{ type: "input_text", text: envText }] },
+            { id: "real-prompt", type: "userMessage", content: [{ type: "input_text", text: "minchia compa" }] },
+            { id: "reply", type: "agentMessage", text: "Dimmi tutto" },
+          ],
+        },
+      },
+    },
+  });
+
+  const turn = conversations.get("thread-turn-items").turns[0];
+  // Context is dropped; the real prompt is adopted into params.input (Desktop
+  // renders the bubble from there), leaving only the assistant reply as an item.
+  assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "minchia compa" }]);
+  const serialized = JSON.stringify(turn);
+  assert.equal(serialized.includes("AGENTS.md instructions"), false);
+  assert.equal(serialized.includes("environment_context"), false);
+});
+
+test("conversation adapter extracts prompt from mixed context wrapper user items", () => {
+  const wrappedPrompt = [
+    "# AGENTS.md instructions for /Users/me/proj",
+    "",
+    "<INSTRUCTIONS>",
+    "rules",
+    "</INSTRUCTIONS>",
+    "",
+    "<environment_context>",
+    "  <cwd>/Users/me/proj</cwd>",
+    "</environment_context>",
+    "",
+    "## My request for Codex:",
+    "fix the desktop sync bug",
+  ].join("\n");
+  const state = buildConversationStateFromThread({
+    id: "thread-context-wrapper",
+    name: "Context wrapper",
+    cwd: "/Users/me/proj",
+    turns: [{
+      id: "turn-context-wrapper",
+      status: "completed",
+      items: [
+        { id: "wrapped-prompt", type: "userMessage", content: [{ type: "input_text", text: wrappedPrompt }] },
+        { id: "reply", type: "agentMessage", text: "Fixed" },
+      ],
+    }],
+  });
+
+  const turn = state.turns[0];
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "fix the desktop sync bug" }]);
+  assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
+  const serialized = JSON.stringify(turn);
+  assert.equal(serialized.includes("AGENTS.md instructions"), false);
+  assert.equal(serialized.includes("environment_context"), false);
+  assert.equal(serialized.includes("## My request for Codex:"), false);
+});
+
+test("conversation adapter adopts live mixed context prompt item into params input", () => {
+  const wrappedPrompt = [
+    "# AGENTS.md instructions for /Users/me/proj",
+    "",
+    "<INSTRUCTIONS>",
+    "rules",
+    "</INSTRUCTIONS>",
+    "",
+    "## My request for Codex:",
+    "continue from live event",
+  ].join("\n");
+  const conversations = new Map();
+  const owned = new Set(["thread-live-wrapper"]);
+  const now = () => 7;
+
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-live-wrapper",
+        turn: { id: "turn-live-wrapper", items: [], status: "inProgress", startedAt: 1 },
+      },
+    },
+  });
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/completed",
+      params: {
+        threadId: "thread-live-wrapper",
+        turnId: "turn-live-wrapper",
+        item: {
+          id: "wrapped-live-prompt",
+          type: "userMessage",
+          content: [{ type: "input_text", text: wrappedPrompt }],
+        },
+      },
+    },
+  });
+
+  const turn = conversations.get("thread-live-wrapper").turns[0];
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "continue from live event" }]);
+  assert.deepEqual(turn.items, []);
+  const serialized = JSON.stringify(turn);
+  assert.equal(serialized.includes("AGENTS.md instructions"), false);
+  assert.equal(serialized.includes("## My request for Codex:"), false);
+});
+
 test("conversation adapter drops injected context user items from live item events", () => {
   const conversations = new Map();
   const owned = new Set(["thread-context-live"]);

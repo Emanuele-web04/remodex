@@ -975,7 +975,12 @@ function createDesktopIpcLiveOwner({
       params.senderRequestId || params.sender_request_id
     );
     try {
-      return await sendCodexRequest("turn/start", nextCodexParams);
+      const turnStartResult = await sendCodexRequest("turn/start", nextCodexParams);
+      // Codex Desktop's own thread-follower-start-turn-for-host handler replies
+      // with { result: <turnStartResult> }; a follower reads response.result.turn
+      // off that wrapper. Returning the raw result made Desktop read `.turn` on
+      // undefined ("Error creating task"), even though the turn did start.
+      return { result: turnStartResult ?? null };
     } catch (error) {
       discardPendingTurnStartEntry(conversationId, pendingEntry);
       throw error;

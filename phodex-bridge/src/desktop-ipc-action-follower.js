@@ -701,7 +701,7 @@ function createDesktopIpcActionFollower({
       .then((result) => {
         sendApplicationResponse(JSON.stringify({
           id: originalMessage.id,
-          result: result ?? null,
+          result: appServerResultForFollowerRequest(route.method, result),
         }));
       })
       .catch((error) => {
@@ -725,6 +725,17 @@ function createDesktopIpcActionFollower({
           },
         }));
       });
+  }
+
+  function appServerResultForFollowerRequest(method, result) {
+    if (method === "thread-follower-start-turn"
+      && result
+      && typeof result === "object"
+      && !Array.isArray(result)
+      && Object.prototype.hasOwnProperty.call(result, "result")) {
+      return result.result ?? null;
+    }
+    return result ?? null;
   }
 
   // Desktop-followed turn starts must apply the same param normalization as
