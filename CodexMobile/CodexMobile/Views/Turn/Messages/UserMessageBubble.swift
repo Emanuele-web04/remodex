@@ -51,7 +51,7 @@ struct UserMessageBubble: View {
 
             if let statusText = deliveryStatusText {
                 Text(statusText)
-                    .font(AppFont.caption2())
+                    .font(AppFont.subheadline())
                     .foregroundStyle(message.deliveryState == .failed ? .red : .secondary)
             }
         }
