@@ -9,10 +9,10 @@ const { randomUUID } = require("crypto");
 const {
   cloneJSON,
   isContextualUserText,
+  isUserRoleItem: isUserMessageItem,
   normalizeToken,
   readString,
   requestIdKey,
-  visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 
 const LOCAL_HOST_ID = "local";
@@ -591,12 +591,6 @@ function turnHasUserMessageItem(turn) {
   return turn.items.some((item) => isUserMessageItem(item));
 }
 
-function isUserMessageItem(item) {
-  const type = normalizeToken(item?.type);
-  return type === "usermessage"
-    || (type === "message" && normalizeToken(item?.role) === "user");
-}
-
 const PRE_PROMPT_META_ITEM_TYPES = new Set([
   "automaticapprovalreview",
   "forkedfromconversation",
@@ -759,17 +753,22 @@ function upsertItem(turn, item) {
   if (!itemId) {
     return;
   }
+  // Injected context (AGENTS.md instructions, environment_context) arrives as
+  // user items too; no Codex UI renders it, so it must not reach the stream.
+  // Also evict any copy that slipped into the state before this filter existed.
   const index = turn.items.findIndex((candidate) => readString(candidate?.id) === itemId);
+  if (isContextualUserMessageItem(item)
+    || (index >= 0 && isContextualUserMessageItem(turn.items[index]))) {
+    if (index >= 0) {
+      turn.items.splice(index, 1);
+    }
+    return;
+  }
   if (index >= 0) {
     turn.items[index] = {
       ...turn.items[index],
       ...cloneJSON(item),
     };
-    return;
-  }
-  // Injected context (AGENTS.md instructions, environment_context) arrives as
-  // user items too; no Codex UI renders it, so it must not reach the stream.
-  if (isContextualUserMessageItem(item)) {
     return;
   }
   // The app-server echoes the initial prompt as a userMessage item; Desktop

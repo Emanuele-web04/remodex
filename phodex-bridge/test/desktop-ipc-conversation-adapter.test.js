@@ -39,6 +39,51 @@ test("conversation adapter strips injected context user items from hydrated turn
   assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
 });
 
+test("conversation adapter evicts pre-existing contextual items on merge", () => {
+  const conversations = new Map();
+  const owned = new Set(["thread-context-merge"]);
+  const now = () => 9;
+  const contextualItem = {
+    id: "ctx-stale",
+    type: "userMessage",
+    content: [{
+      type: "input_text",
+      text: "# AGENTS.md instructions for /Users/me/proj\n<INSTRUCTIONS>rules</INSTRUCTIONS>",
+    }],
+  };
+
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-context-merge",
+        turn: { id: "turn-context-merge", items: [], status: "inProgress", startedAt: 1 },
+      },
+    },
+  });
+  // Simulate a contextual item that slipped into state before the filter existed.
+  conversations.get("thread-context-merge").turns[0].items.push({ ...contextualItem });
+
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/completed",
+      params: {
+        threadId: "thread-context-merge",
+        turnId: "turn-context-merge",
+        item: contextualItem,
+      },
+    },
+  });
+
+  assert.deepEqual(conversations.get("thread-context-merge").turns[0].items, []);
+});
+
 test("conversation adapter drops injected context user items from live item events", () => {
   const conversations = new Map();
   const owned = new Set(["thread-context-live"]);

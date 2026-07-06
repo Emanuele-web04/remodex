@@ -52,7 +52,11 @@ const {
 } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
-const { isContextualUserText, visibleUserPromptText } = require("./desktop-ipc-shared");
+const {
+  isContextualUserText,
+  isUserRoleItem,
+  readUserItemText,
+} = require("./desktop-ipc-shared");
 const {
   createDesktopIpcActionFollower,
   seedConversationStateFromThreadRead,
@@ -3170,10 +3174,10 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
     // Injected context (AGENTS.md instructions, environment_context) is stored
     // as user-role items in app-server history; Codex UIs hide it at render
     // time, so mobile history must not receive it as user bubbles.
-    if (!isUserRoleHistoryItem(item)) {
+    if (!isUserRoleItem(item)) {
       return true;
     }
-    const kept = !isContextualUserText(historyItemUserText(item));
+    const kept = !isContextualUserText(readUserItemText(item));
     if (!kept) {
       turnDidChange = true;
     }
@@ -3241,41 +3245,10 @@ function isContextualUserItemNotification(parsed) {
     return false;
   }
   const item = parsed?.params?.item;
-  if (!isUserRoleHistoryItem(item)) {
+  if (!isUserRoleItem(item)) {
     return false;
   }
-  return isContextualUserText(historyItemUserText(item));
-}
-
-function isUserRoleHistoryItem(item) {
-  if (!item || typeof item !== "object") {
-    return false;
-  }
-  const type = normalizeHistoryItemToken(item.type);
-  if (type === "usermessage") {
-    return true;
-  }
-  return type === "message" && normalizeNonEmptyString(item.role).toLowerCase() === "user";
-}
-
-function historyItemUserText(item) {
-  const direct = normalizeNonEmptyString(item?.text) || normalizeNonEmptyString(item?.message);
-  if (direct) {
-    return direct;
-  }
-  const content = Array.isArray(item?.content) ? item.content : [];
-  return content
-    .map((entry) => {
-      if (typeof entry === "string") {
-        return entry;
-      }
-      if (!entry || typeof entry !== "object") {
-        return "";
-      }
-      return normalizeNonEmptyString(entry.text) || "";
-    })
-    .filter(Boolean)
-    .join("\n");
+  return isContextualUserText(readUserItemText(item));
 }
 
 function convertApplyPatchHistoryItem(item) {
@@ -3972,6 +3945,7 @@ module.exports = {
   disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
+  isContextualUserItemNotification,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,

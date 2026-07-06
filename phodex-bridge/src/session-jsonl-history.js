@@ -5,7 +5,11 @@
 const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const { terminalEventClosesTrackedTurn } = require("./rollout-turn-semantics");
-const { isContextualUserText, visibleUserPromptText } = require("./desktop-ipc-shared");
+const {
+  isContextualUserText,
+  isUserRoleItem,
+  visibleUserPromptText,
+} = require("./desktop-ipc-shared");
 
 function readThreadTurnsListPageFromSessionJsonl(filePath, {
   threadId = "",
@@ -221,6 +225,9 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       if (eventType === "user_message") {
         const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
         const item = createUserMessageHistoryItem(payload, index + 1, entry.timestamp);
+        if (!item.text) {
+          continue;
+        }
         applyHistoryTimeZone(item, sessionTimeZone);
         if (!explicitTurnId && !activeTurnId) {
           pushPendingUserMessage(pendingUserMessages, item);
@@ -317,7 +324,11 @@ function createUserMessageHistoryItem(payload, lineNumber, timestamp) {
     id: normalizeString(payload?.id) || `user-message-line-${lineNumber}`,
     type: "user_message",
     role: "user",
-    text: normalizeString(payload?.message) || normalizeString(payload?.text),
+    // Event-shaped user messages can carry injected context or IDE prompt
+    // wrappers too; keep only the visible request like every other path.
+    text: visibleUserPromptText(
+      normalizeString(payload?.message) || normalizeString(payload?.text)
+    ),
     createdAt: createdAt || undefined,
     timestamp: createdAt || undefined,
   };
@@ -430,7 +441,7 @@ function historyItemTimestamp(item, fallbackTimestamp = "") {
 }
 
 function isUserHistoryItem(item) {
-  return normalizeHistoryToken(item?.type) === "usermessage"
+  return isUserRoleItem(item)
     || normalizeString(item?.role).toLowerCase() === "user";
 }
 

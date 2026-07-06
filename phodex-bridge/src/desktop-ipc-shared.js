@@ -103,6 +103,37 @@ function isPlainJSONObject(value) {
   return value != null && typeof value === "object" && !Array.isArray(value);
 }
 
+// Single predicate for "this timeline item is a user message", shared by the
+// relay sanitizer, the JSONL history parser, and the Desktop-bound adapter so
+// context filters can never drift apart across paths again.
+function isUserRoleItem(item) {
+  const type = normalizeToken(item?.type);
+  if (type === "usermessage") {
+    return true;
+  }
+  return type === "message" && normalizeToken(item?.role) === "user";
+}
+
+function readUserItemText(item) {
+  const direct = readString(item?.text) || readString(item?.message);
+  if (direct) {
+    return direct;
+  }
+  const content = Array.isArray(item?.content) ? item.content : [];
+  return content
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return entry;
+      }
+      if (!entry || typeof entry !== "object") {
+        return "";
+      }
+      return typeof entry.text === "string" ? entry.text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 function safeParseJSON(value) {
   try {
     return JSON.parse(value);
@@ -145,9 +176,11 @@ module.exports = {
   cloneJSON,
   isContextualUserText,
   isPlainJSONObject,
+  isUserRoleItem,
   normalizeToken,
   readString,
   readText,
+  readUserItemText,
   requestIdKey,
   resolveDefaultIpcSocketPath,
   safeParseJSON,

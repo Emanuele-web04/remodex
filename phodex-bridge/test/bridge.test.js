@@ -20,6 +20,7 @@ const {
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
+  isContextualUserItemNotification,
   sanitizeThreadHistoryImagesForRelay,
 } = require("../src/bridge");
 
@@ -840,6 +841,43 @@ test("fetchAdaptiveThreadTurnsListForRelay does not copy malformed page fields i
       nextCursor: null,
     },
   });
+});
+
+test("isContextualUserItemNotification drops only contextual live user items", () => {
+  const contextualItem = {
+    id: "ctx-item",
+    type: "userMessage",
+    content: [{
+      type: "input_text",
+      text: "# AGENTS.md instructions for /Users/me/proj\n<INSTRUCTIONS>rules</INSTRUCTIONS>",
+    }],
+  };
+
+  assert.equal(isContextualUserItemNotification({
+    method: "item/started",
+    params: { threadId: "t", item: contextualItem },
+  }), true);
+  assert.equal(isContextualUserItemNotification({
+    method: "item/completed",
+    params: { threadId: "t", item: contextualItem },
+  }), true);
+
+  // Real prompts, assistant items, and other methods must pass through.
+  assert.equal(isContextualUserItemNotification({
+    method: "item/started",
+    params: {
+      threadId: "t",
+      item: { id: "real", type: "userMessage", content: [{ type: "input_text", text: "ciao" }] },
+    },
+  }), false);
+  assert.equal(isContextualUserItemNotification({
+    method: "item/started",
+    params: { threadId: "t", item: { id: "a", type: "agentMessage", text: "hi" } },
+  }), false);
+  assert.equal(isContextualUserItemNotification({
+    method: "turn/started",
+    params: { threadId: "t", item: contextualItem },
+  }), false);
 });
 
 test("sanitizeThreadHistoryImagesForRelay drops injected context user items from history", () => {
