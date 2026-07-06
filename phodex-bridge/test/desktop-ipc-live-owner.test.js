@@ -1853,63 +1853,6 @@ test("live owner applies Desktop runtime overrides to later follower turn starts
   }]);
 });
 
-test("live owner refuses queued follow-ups instead of silently dropping them", async (t) => {
-  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-queued-followups-");
-  let serverSocket = null;
-
-  const server = net.createServer((socket) => {
-    serverSocket = socket;
-    attachFrameReader(socket, (frame) => {
-      if (frame.method === "initialize") {
-        writeFrame(socket, {
-          type: "response",
-          requestId: frame.requestId,
-          resultType: "success",
-          method: "initialize",
-          handledByClientId: "router",
-          result: { clientId: "remodex-owner-test" },
-        });
-      }
-    });
-  });
-  await new Promise((resolve) => server.listen(socketPath, resolve));
-  t.after(() => {
-    owner.stopAll();
-    server.close();
-    serverSocket?.destroy();
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  const owner = createDesktopIpcLiveOwner({
-    socketPath,
-    sendCodexRequest: async () => ({ ok: true }),
-    sendRawCodexMessage() {},
-  });
-
-  owner.observeInbound(JSON.stringify({
-    method: "turn/start",
-    params: { threadId: "thread-queued", input: [] },
-  }));
-  await waitFor(() => serverSocket);
-
-  writeFrame(serverSocket, {
-    type: "request",
-    requestId: "queued-followups-1",
-    sourceClientId: "desktop",
-    method: "thread-follower-set-queued-follow-ups-state",
-    params: {
-      conversationId: "thread-queued",
-      queuedFollowUps: [{ input: [{ type: "text", text: "later" }] }],
-    },
-  });
-  const response = await waitForFrame(
-    serverSocket,
-    (frame) => frame.type === "response" && frame.requestId === "queued-followups-1"
-  );
-  assert.equal(response.resultType, "error");
-  assert.match(response.error, /not supported/i);
-});
-
 test("live owner serves follower load-complete-history with a fresh snapshot revision", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-load-history-");
   const frames = [];
@@ -2003,6 +1946,303 @@ test("live owner serves follower load-complete-history with a fresh snapshot rev
   assert.equal(snapshot.version, 8);
   const turnIds = snapshot.params.change.conversationState.turns.map((turn) => turn.turnId);
   assert.ok(turnIds.includes("turn-history-1"));
+});
+
+test("live owner applies Desktop thread settings and broadcasts phone read state", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-settings-read-");
+  const frames = [];
+  const codexRequests = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    async sendCodexRequest(method, params) {
+      codexRequests.push({ method, params });
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "settings-turn-1",
+    method: "turn/start",
+    params: { threadId: "thread-settings", input: [{ type: "text", text: "hi" }] },
+  }));
+  await waitFor(() => serverSocket);
+
+  // Desktop updates the thread settings for the followed conversation.
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "update-settings-1",
+    sourceClientId: "desktop",
+    version: 1,
+    method: "thread-follower-update-thread-settings",
+    params: {
+      conversationId: "thread-settings",
+      threadSettings: {
+        model: "gpt-desktop-settings",
+        effort: "high",
+      },
+    },
+  });
+  const settingsResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "update-settings-1"
+  );
+  assert.equal(settingsResponse.resultType, "success");
+
+  const settingsSnapshot = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-settings"
+      && JSON.stringify(frame.params?.change ?? {}).includes("gpt-desktop-settings")
+  );
+  assert.ok(settingsSnapshot);
+
+  // The next Desktop-origin turn inherits the settings.
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "settings-start-1",
+    sourceClientId: "desktop",
+    version: 1,
+    method: "thread-follower-start-turn",
+    params: {
+      conversationId: "thread-settings",
+      turnStartParams: { input: [{ type: "text", text: "run with settings" }] },
+    },
+  });
+  await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "settings-start-1"
+  );
+  const startedTurn = codexRequests.filter((request) => request.method === "turn/start").at(-1);
+  assert.equal(startedTurn.params.model, "gpt-desktop-settings");
+  assert.equal(startedTurn.params.effort, "high");
+
+  // Reading the thread from the phone broadcasts the read state to Desktop.
+  owner.observeInbound(JSON.stringify({
+    id: "read-1",
+    method: "thread/read",
+    params: { threadId: "thread-settings" },
+  }));
+  const readBroadcast = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast" && frame.method === "thread-read-state-changed"
+  );
+  assert.deepEqual(readBroadcast.params, {
+    conversationId: "thread-settings",
+    hasUnreadTurn: false,
+  });
+  assert.equal(readBroadcast.version, 1);
+});
+
+test("live owner runs Desktop queued follow-ups between turns", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-queue-");
+  const frames = [];
+  const codexRequests = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    async sendCodexRequest(method, params) {
+      codexRequests.push({ method, params });
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "queue-turn-1",
+    method: "turn/start",
+    params: { threadId: "thread-queue", input: [{ type: "text", text: "first" }] },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-queue",
+      turn: { id: "turn-queue-1", items: [], status: "inProgress", startedAt: 1 },
+    },
+  }));
+  await waitFor(() => serverSocket);
+
+  // Desktop queues a follow-up while the turn is running.
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "queue-set-1",
+    sourceClientId: "desktop",
+    version: 1,
+    method: "thread-follower-set-queued-follow-ups-state",
+    params: {
+      conversationId: "thread-queue",
+      state: {
+        "thread-queue": [{
+          id: "queued-1",
+          context: { text: "queued follow-up from desktop" },
+        }],
+      },
+    },
+  });
+  const queueResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "queue-set-1"
+  );
+  assert.equal(queueResponse.resultType, "success");
+
+  const queueBroadcast = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-queued-followups-changed"
+      && (frame.params?.messages?.length ?? 0) === 1
+  );
+  assert.equal(queueBroadcast.params.conversationId, "thread-queue");
+
+  // No queued turn starts while the current one is still running.
+  assert.equal(
+    codexRequests.filter((request) => request.method === "turn/start").length,
+    0
+  );
+
+  // The current turn completes: the owner must start the queued follow-up.
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-queue",
+      turn: { id: "turn-queue-1", items: [], status: "completed", startedAt: 1 },
+    },
+  }));
+
+  await waitFor(() => codexRequests.some((request) => request.method === "turn/start"));
+  const queuedStart = codexRequests.find((request) => request.method === "turn/start");
+  assert.deepEqual(queuedStart.params.input, [{ type: "text", text: "queued follow-up from desktop" }]);
+  assert.equal(queuedStart.params.threadId, "thread-queue");
+
+  // The drained queue is rebroadcast as empty.
+  await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-queued-followups-changed"
+      && (frame.params?.messages?.length ?? 0) === 0
+  );
+});
+
+test("live owner normalizes image_url input entries for Desktop snapshots", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-image-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "image-turn-1",
+    method: "turn/start",
+    params: {
+      threadId: "thread-image",
+      input: [
+        { type: "text", text: "look at this" },
+        { type: "image_url", image_url: { url: "https://example.com/shot.png" } },
+      ],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-image",
+      turn: { id: "turn-image-1", items: [], status: "inProgress", startedAt: 1 },
+    },
+  }));
+
+  const snapshot = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-image"
+      && frame.params?.change?.type === "snapshot"
+  );
+  const turn = snapshot.params.change.conversationState.turns[0];
+  assert.deepEqual(turn.params.input, [
+    { type: "text", text: "look at this" },
+    { type: "image", url: "https://example.com/shot.png" },
+  ]);
 });
 
 test("live owner announces phone threads to the Desktop sidebar once", async (t) => {
