@@ -1,14 +1,36 @@
 // FILE: TerminalSelectableTextSheet.swift
 // Purpose: Presents the visible terminal text as plain text with classic iOS selection.
 // Layer: View Component
-// Exports: TerminalSelectableTextState, TerminalSelectableTextSheet
-// Depends on: SwiftUI, RemodexTerminalTheme
+// Exports: TerminalSelectableTextState, TerminalSelectableTextSheet, TerminalSelectableTextNormalizer
+// Depends on: Foundation, SwiftUI, RemodexTerminalTheme
 
+import Foundation
 import SwiftUI
 
 struct TerminalSelectableTextState: Identifiable {
     let id = UUID()
     let text: String
+}
+
+enum TerminalSelectableTextNormalizer {
+    static func normalizedText(from rawText: String) -> String? {
+        normalizedText(fromLines: rawText.components(separatedBy: "\n"))
+    }
+
+    static func normalizedText(fromLines rawLines: [String]) -> String? {
+        let lines = rawLines.map(cleanedLine)
+        guard let firstContentIndex = lines.firstIndex(where: { !$0.isEmpty }),
+              let lastContentIndex = lines.lastIndex(where: { !$0.isEmpty }) else {
+            return nil
+        }
+        return Array(lines[firstContentIndex...lastContentIndex]).joined(separator: "\n")
+    }
+
+    private static func cleanedLine(_ line: String) -> String {
+        let cleaned = line.replacingOccurrences(of: "\r", with: "")
+        guard let lastVisible = cleaned.lastIndex(where: { $0 != " " }) else { return "" }
+        return String(cleaned[...lastVisible])
+    }
 }
 
 /// Native-selection escape hatch for the GPU-rendered terminal: the Ghostty

@@ -404,8 +404,15 @@ struct TerminalScreen: View {
     }
 
     private func presentSelectableTerminalText() {
-        guard let text = terminalTextReader.visibleText() else { return }
+        guard let text = terminalTextReader.visibleText() ?? fallbackSelectableTerminalText else { return }
         selectableTextState = TerminalSelectableTextState(text: text)
+    }
+
+    private var fallbackSelectableTerminalText: String? {
+        let rawText = String(decoding: activeSnapshot.bufferData, as: UTF8.self)
+        // Prevents a dead menu tap during transient native-view remounts; the
+        // live Ghostty reader remains preferred whenever it is available.
+        return TerminalSelectableTextNormalizer.normalizedText(from: rawText)
     }
 
     private func saveConnectionAndOpen() async {

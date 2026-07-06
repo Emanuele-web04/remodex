@@ -1268,16 +1268,11 @@ final class GhosttyTerminalView: UIView, UITextFieldDelegate, UIGestureRecognize
     /// Plain text of the currently visible grid, with per-line trailing blanks
     /// removed. Backs the "Select text" sheet that offers classic iOS selection.
     func visibleTextForSelection() -> String? {
-        guard let visibleText = readVisibleTerminalText() else { return nil }
-        let lines = visibleText
-            .components(separatedBy: "\n")
-            .map { line -> String in
-                let cleaned = line.replacingOccurrences(of: "\r", with: "")
-                guard let lastVisible = cleaned.lastIndex(where: { $0 != " " }) else { return "" }
-                return String(cleaned[...lastVisible])
-            }
-        let joined = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        return joined.isEmpty ? nil : joined
+        guard let metrics = currentSelectionMetrics(),
+              let visualRows = visibleTerminalRows(metrics: metrics) else { return nil }
+        return TerminalSelectableTextNormalizer.normalizedText(
+            fromLines: visualRows.map(\.text)
+        )
     }
 
     private func readText(for selectionRange: TerminalSelectionRange) -> String? {
