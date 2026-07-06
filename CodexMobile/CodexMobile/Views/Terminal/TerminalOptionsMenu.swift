@@ -17,6 +17,7 @@ struct TerminalOptionsMenu: View {
     let isRunning: Bool
     let hasConnectionConfiguration: Bool
     let canPaste: Bool
+    let canSelectText: Bool
     let canClear: Bool
     let canResetKnownHost: Bool
     let onSelectSession: (String) -> Void
@@ -24,6 +25,7 @@ struct TerminalOptionsMenu: View {
     let onToggleConnection: () -> Void
     let onOpenConnectionEditor: () -> Void
     let onPaste: () -> Void
+    let onSelectText: () -> Void
     let onClear: () -> Void
     let onResetKnownHost: () -> Void
     let onAdjustFontSize: (Double) -> Void
@@ -105,6 +107,11 @@ struct TerminalOptionsMenu: View {
                 RemodexIcon.menuLabel("Paste", systemName: "doc.on.clipboard")
             }
             .disabled(!canPaste)
+
+            Button(action: onSelectText) {
+                RemodexIcon.menuLabel("Select text", systemName: "text.cursor")
+            }
+            .disabled(!canSelectText)
         }
     }
 
