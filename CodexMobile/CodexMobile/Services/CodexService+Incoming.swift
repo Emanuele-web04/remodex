@@ -2154,6 +2154,7 @@ extension CodexService {
             || itemType.hasPrefix("collabagentinteraction")
             || itemType == "diff"
             || itemType == "plan"
+            || itemType == "todolist"
             || itemType == "enteredreviewmode"
             || itemType == "contextcompaction" else {
             return false
@@ -2216,7 +2217,7 @@ extension CodexService {
             }
             kind = .fileChange
             body = resolvedBody
-        case "plan":
+        case "plan", "todolist":
             kind = .plan
             body = decodePlanItemBody(itemObject)
         case "enteredreviewmode":

@@ -149,6 +149,16 @@ extension CodexService {
         }
 
         let itemType = normalizedItemType(itemObject["type"]?.stringValue ?? "")
+        // Non-active Desktop turns mirror user prompts through item/completed only
+        // (no item/started), so the prompt must upsert from here as well.
+        if handleMirroredUserMessageItem(
+            itemObject: itemObject,
+            paramsObject: paramsObject,
+            itemType: itemType
+        ) {
+            return
+        }
+
         if isCompletedGeneratedImageItemType(itemType) {
             appendCompletedGeneratedImageItem(
                 itemObject: itemObject,
@@ -290,7 +300,7 @@ extension CodexService {
         }
 
         let itemType = normalizedItemType(itemObject["type"]?.stringValue ?? "")
-        if handleMirroredUserMessageItemStarted(
+        if handleMirroredUserMessageItem(
             itemObject: itemObject,
             paramsObject: paramsObject,
             itemType: itemType
@@ -352,7 +362,9 @@ extension CodexService {
 }
 
 private extension CodexService {
-    func handleMirroredUserMessageItemStarted(
+    // Upserts Desktop-mirrored user prompts delivered as item lifecycle events
+    // (item/started for active turns, item/completed for non-active ones).
+    func handleMirroredUserMessageItem(
         itemObject: IncomingParamsObject,
         paramsObject: IncomingParamsObject,
         itemType: String
