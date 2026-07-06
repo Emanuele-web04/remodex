@@ -163,6 +163,59 @@ test("conversation adapter extracts prompt from mixed context wrapper user items
   assert.equal(serialized.includes("## My request for Codex:"), false);
 });
 
+test("conversation adapter adopts live mixed context prompt item into params input", () => {
+  const wrappedPrompt = [
+    "# AGENTS.md instructions for /Users/me/proj",
+    "",
+    "<INSTRUCTIONS>",
+    "rules",
+    "</INSTRUCTIONS>",
+    "",
+    "## My request for Codex:",
+    "continue from live event",
+  ].join("\n");
+  const conversations = new Map();
+  const owned = new Set(["thread-live-wrapper"]);
+  const now = () => 7;
+
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-live-wrapper",
+        turn: { id: "turn-live-wrapper", items: [], status: "inProgress", startedAt: 1 },
+      },
+    },
+  });
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/completed",
+      params: {
+        threadId: "thread-live-wrapper",
+        turnId: "turn-live-wrapper",
+        item: {
+          id: "wrapped-live-prompt",
+          type: "userMessage",
+          content: [{ type: "input_text", text: wrappedPrompt }],
+        },
+      },
+    },
+  });
+
+  const turn = conversations.get("thread-live-wrapper").turns[0];
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "continue from live event" }]);
+  assert.deepEqual(turn.items, []);
+  const serialized = JSON.stringify(turn);
+  assert.equal(serialized.includes("AGENTS.md instructions"), false);
+  assert.equal(serialized.includes("## My request for Codex:"), false);
+});
+
 test("conversation adapter drops injected context user items from live item events", () => {
   const conversations = new Map();
   const owned = new Set(["thread-context-live"]);

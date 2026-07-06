@@ -737,13 +737,9 @@ function normalizeTurnInitialPrompt(turn) {
         return;
       }
       if (!promptText) {
-        turn.params = {
-          ...turn.params,
-          input: (Array.isArray(item.content) ? item.content : [])
-            .map(userMessageContentFromTurnInput)
-            .filter(Boolean),
-        };
-        turn.items.splice(index, 1);
+        if (adoptInitialPromptUserMessage(turn, item)) {
+          turn.items.splice(index, 1);
+        }
         return;
       }
       if (itemText === promptText) {
@@ -770,6 +766,23 @@ function userMessageContentFromTurnInput(entry) {
     return { type: "text", text: readString(entry.text) };
   }
   return cloneJSON(entry);
+}
+
+function adoptInitialPromptUserMessage(turn, item) {
+  if (!isUserMessageItem(item) || !Array.isArray(item?.content)) {
+    return false;
+  }
+  const input = item.content
+    .map(userMessageContentFromTurnInput)
+    .filter(Boolean);
+  if (input.length === 0) {
+    return false;
+  }
+  turn.params = {
+    ...turn.params,
+    input,
+  };
+  return true;
 }
 
 function ensureConversationInMap(conversations, threadId, options = {}) {
@@ -858,10 +871,13 @@ function upsertItem(turn, item) {
   // The app-server echoes the initial prompt as a userMessage item; Desktop
   // already renders it from turn.params.input and would label the duplicate as
   // "Steered conversation". Only later user messages are genuine steers.
-  if (isUserMessageItem(sanitizedItem)
-    && !turnHasUserMessageItem(turn)
-    && isInitialPromptUserMessageItem(turn, sanitizedItem)) {
-    return;
+  if (isUserMessageItem(sanitizedItem) && !turnHasUserMessageItem(turn)) {
+    if (isInitialPromptUserMessageItem(turn, sanitizedItem)) {
+      return;
+    }
+    if (!extractUserText(turn?.params?.input) && adoptInitialPromptUserMessage(turn, sanitizedItem)) {
+      return;
+    }
   }
   turn.items.push(cloneJSON(sanitizedItem));
 }
