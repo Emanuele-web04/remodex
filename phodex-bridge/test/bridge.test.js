@@ -842,6 +842,59 @@ test("fetchAdaptiveThreadTurnsListForRelay does not copy malformed page fields i
   });
 });
 
+test("sanitizeThreadHistoryImagesForRelay drops injected context user items from history", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-thread-context",
+    result: {
+      thread: {
+        id: "thread-context",
+        turns: [
+          {
+            id: "turn-1",
+            items: [
+              {
+                id: "item-agents",
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: "# AGENTS.md instructions for /Users/me/proj\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>",
+                }],
+              },
+              {
+                id: "item-env",
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>",
+                }],
+              },
+              {
+                id: "item-real",
+                type: "user_message",
+                content: [{ type: "input_text", text: "minchia compa" }],
+              },
+              {
+                id: "item-reply",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Dimmi tutto" }],
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  const itemIds = sanitized.result.thread.turns[0].items.map((item) => item.id);
+  assert.deepEqual(itemIds, ["item-real", "item-reply"]);
+});
+
 test("sanitizeThreadHistoryImagesForRelay replaces inline history images with lightweight references", () => {
   const rawMessage = JSON.stringify({
     id: "req-thread-read",

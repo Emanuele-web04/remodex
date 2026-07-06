@@ -640,6 +640,10 @@ function isInitialPromptUserMessageItem(turn, item) {
   return extractUserText(item?.content) === promptText;
 }
 
+function isContextualUserMessageItem(item) {
+  return isUserMessageItem(item) && isContextualUserText(extractUserText(item?.content));
+}
+
 function normalizeTurnInitialPrompt(turn) {
   if (!turn || !Array.isArray(turn.items)) {
     return;
@@ -647,6 +651,13 @@ function normalizeTurnInitialPrompt(turn) {
   const promptText = extractUserText(turn?.params?.input);
   for (let index = 0; index < turn.items.length; index += 1) {
     const item = turn.items[index];
+    // Injected context user items sit before the real prompt in persisted
+    // history; strip them so they are never adopted as the prompt bubble.
+    if (isContextualUserMessageItem(item)) {
+      turn.items.splice(index, 1);
+      index -= 1;
+      continue;
+    }
     if (isUserMessageItem(item)) {
       const itemText = extractUserText(item?.content);
       if (!itemText) {
@@ -754,6 +765,11 @@ function upsertItem(turn, item) {
       ...turn.items[index],
       ...cloneJSON(item),
     };
+    return;
+  }
+  // Injected context (AGENTS.md instructions, environment_context) arrives as
+  // user items too; no Codex UI renders it, so it must not reach the stream.
+  if (isContextualUserMessageItem(item)) {
     return;
   }
   // The app-server echoes the initial prompt as a userMessage item; Desktop

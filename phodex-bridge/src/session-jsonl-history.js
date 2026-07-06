@@ -5,6 +5,7 @@
 const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const { terminalEventClosesTrackedTurn } = require("./rollout-turn-semantics");
+const { isContextualUserText, visibleUserPromptText } = require("./desktop-ipc-shared");
 
 function readThreadTurnsListPageFromSessionJsonl(filePath, {
   threadId = "",
@@ -1001,6 +1002,13 @@ function shouldSkipResponseItemForHistory(payload, skippedCallIds) {
   }
 
   if (role === "user" && isSubagentNotificationMessage(payload)) {
+    return true;
+  }
+
+  // Injected context (AGENTS.md instructions, environment_context wrappers) is
+  // persisted as user-role response items; Codex UIs hide it at render time and
+  // mobile history must do the same.
+  if (role === "user" && isContextualUserText(responseItemMessageText(payload))) {
     return true;
   }
 

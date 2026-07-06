@@ -52,6 +52,7 @@ const {
 } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
+const { isContextualUserText, visibleUserPromptText } = require("./desktop-ipc-shared");
 const {
   createDesktopIpcActionFollower,
   seedConversationStateFromThreadRead,
@@ -1044,6 +1045,9 @@ function startBridge({
     }
 
     const parsed = safeParseJSON(normalizedMessage);
+    if (isContextualUserItemNotification(parsed)) {
+      return null;
+    }
     const responseId = parsed?.id;
     if (responseId == null) {
       return sanitizeLiveGeneratedImageMessageForRelay(normalizedMessage);
@@ -3162,7 +3166,19 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
   const turnThreadId = normalizeNonEmptyString(threadId)
     || normalizeNonEmptyString(turn.threadId)
     || normalizeNonEmptyString(turn.thread_id);
-  const sanitizedItems = turn.items.map((item) => {
+  const sanitizedItems = turn.items.filter((item) => {
+    // Injected context (AGENTS.md instructions, environment_context) is stored
+    // as user-role items in app-server history; Codex UIs hide it at render
+    // time, so mobile history must not receive it as user bubbles.
+    if (!isUserRoleHistoryItem(item)) {
+      return true;
+    }
+    const kept = !isContextualUserText(historyItemUserText(item));
+    if (!kept) {
+      turnDidChange = true;
+    }
+    return kept;
+  }).map((item) => {
     if (!item || typeof item !== "object") {
       return item;
     }
@@ -3214,6 +3230,52 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
       items: sanitizedItems,
     }
     : turn;
+}
+
+// Live item lifecycle events can carry the injected context user items too;
+// dropping the whole notification keeps the phone timeline clean without
+// rewriting the payload on the hot path.
+function isContextualUserItemNotification(parsed) {
+  const method = typeof parsed?.method === "string" ? parsed.method : "";
+  if (method !== "item/started" && method !== "item/completed") {
+    return false;
+  }
+  const item = parsed?.params?.item;
+  if (!isUserRoleHistoryItem(item)) {
+    return false;
+  }
+  return isContextualUserText(historyItemUserText(item));
+}
+
+function isUserRoleHistoryItem(item) {
+  if (!item || typeof item !== "object") {
+    return false;
+  }
+  const type = normalizeHistoryItemToken(item.type);
+  if (type === "usermessage") {
+    return true;
+  }
+  return type === "message" && normalizeNonEmptyString(item.role).toLowerCase() === "user";
+}
+
+function historyItemUserText(item) {
+  const direct = normalizeNonEmptyString(item?.text) || normalizeNonEmptyString(item?.message);
+  if (direct) {
+    return direct;
+  }
+  const content = Array.isArray(item?.content) ? item.content : [];
+  return content
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return entry;
+      }
+      if (!entry || typeof entry !== "object") {
+        return "";
+      }
+      return normalizeNonEmptyString(entry.text) || "";
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 function convertApplyPatchHistoryItem(item) {

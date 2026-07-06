@@ -8,10 +8,77 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   applyAppServerMessageToConversationState,
+  buildConversationStateFromThread,
 } = require("../src/desktop-ipc-conversation-adapter");
 const {
   buildConversationStatePatches,
 } = require("../src/desktop-ipc-state-patches");
+
+test("conversation adapter strips injected context user items from hydrated turns", () => {
+  const agentsText = "# AGENTS.md instructions for /Users/me/proj\n\n<INSTRUCTIONS>\nrules\n</INSTRUCTIONS>";
+  const envText = "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>";
+  const state = buildConversationStateFromThread({
+    id: "thread-context-hydrate",
+    name: "Context hydrate",
+    cwd: "/Users/me/proj",
+    turns: [{
+      id: "turn-context-hydrate",
+      status: "completed",
+      items: [
+        { id: "ctx-agents", type: "userMessage", content: [{ type: "input_text", text: agentsText }] },
+        { id: "ctx-env", type: "userMessage", content: [{ type: "input_text", text: envText }] },
+        { id: "real-prompt", type: "userMessage", content: [{ type: "input_text", text: "minchia compa" }] },
+        { id: "reply", type: "agentMessage", text: "Dimmi tutto" },
+      ],
+    }],
+  });
+
+  const turn = state.turns[0];
+  // The real prompt is adopted into params.input; context never becomes a bubble.
+  assert.deepEqual(turn.params.input, [{ type: "text", text: "minchia compa" }]);
+  assert.deepEqual(turn.items.map((item) => item.id), ["reply"]);
+});
+
+test("conversation adapter drops injected context user items from live item events", () => {
+  const conversations = new Map();
+  const owned = new Set(["thread-context-live"]);
+  const now = () => 5;
+
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "turn/started",
+      params: {
+        threadId: "thread-context-live",
+        turn: { id: "turn-context-live", items: [], status: "inProgress", startedAt: 1 },
+      },
+    },
+  });
+  applyAppServerMessageToConversationState({
+    conversations,
+    now,
+    shouldOwnThread: (threadId) => owned.has(threadId),
+    message: {
+      method: "item/started",
+      params: {
+        threadId: "thread-context-live",
+        turnId: "turn-context-live",
+        item: {
+          id: "ctx-live",
+          type: "userMessage",
+          content: [{
+            type: "input_text",
+            text: "# AGENTS.md instructions for /Users/me/proj\n<INSTRUCTIONS>rules</INSTRUCTIONS>",
+          }],
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(conversations.get("thread-context-live").turns[0].items, []);
+});
 
 test("conversation state patch builder falls back when patches are too large", () => {
   assert.deepEqual(
