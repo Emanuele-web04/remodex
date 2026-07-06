@@ -34,17 +34,20 @@ enum MarkdownTextFormatter {
 
     private static func transformLinesOutsideFences(in text: String, profile: MarkdownRenderProfile) -> String {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        var isInsideFence = false
+        var openFenceCloser: String?
 
         let transformed = lines.map { line -> String in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("```") {
-                isInsideFence.toggle()
+            if let fenceCloser = openFenceCloser {
+                if trimmed.hasPrefix(fenceCloser) {
+                    openFenceCloser = nil
+                }
                 return line
             }
 
             // Fenced code stays verbatim: no heading bolding, no linkification.
-            guard !isInsideFence else {
+            if let fenceCloser = markdownFenceCloser(for: trimmed) {
+                openFenceCloser = fenceCloser
                 return line
             }
 
@@ -57,6 +60,16 @@ enum MarkdownTextFormatter {
         }
 
         return transformed.joined(separator: "\n")
+    }
+
+    private static func markdownFenceCloser(for trimmedLine: String) -> String? {
+        if trimmedLine.hasPrefix("```") {
+            return "```"
+        }
+        if trimmedLine.hasPrefix("~~~") {
+            return "~~~"
+        }
+        return nil
     }
 
     private static func linkifyInlineFileReferences(in line: String, profile: MarkdownRenderProfile) -> String {
