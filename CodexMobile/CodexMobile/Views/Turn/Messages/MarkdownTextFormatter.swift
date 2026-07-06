@@ -29,15 +29,10 @@ enum MarkdownTextFormatter {
             in: raw,
             style: .displayName
         )
-        let headingNormalized = replaceMatches(
-            in: normalizedSkills,
-            regex: TurnMessageRegexCache.heading,
-            template: "**$1**"
-        )
-        return linkifyFileReferenceLines(in: headingNormalized, profile: profile)
+        return transformLinesOutsideFences(in: normalizedSkills, profile: profile)
     }
 
-    private static func linkifyFileReferenceLines(in text: String, profile: MarkdownRenderProfile) -> String {
+    private static func transformLinesOutsideFences(in text: String, profile: MarkdownRenderProfile) -> String {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var isInsideFence = false
 
@@ -48,11 +43,17 @@ enum MarkdownTextFormatter {
                 return line
             }
 
+            // Fenced code stays verbatim: no heading bolding, no linkification.
             guard !isInsideFence else {
                 return line
             }
 
-            return linkifyInlineFileReferences(in: line, profile: profile)
+            let headingNormalized = replaceMatches(
+                in: line,
+                regex: TurnMessageRegexCache.heading,
+                template: "**$1**"
+            )
+            return linkifyInlineFileReferences(in: headingNormalized, profile: profile)
         }
 
         return transformed.joined(separator: "\n")
@@ -62,6 +63,9 @@ enum MarkdownTextFormatter {
         switch profile {
         case .assistantProse, .fileChangeSystem:
             break
+        case .userProse:
+            // User prose renders mentions as chips upstream; typed paths stay literal text.
+            return line
         }
 
         var transformedLine = line
