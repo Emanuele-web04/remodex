@@ -22,6 +22,38 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testDesktopMirroredUserMessageItemStartedAppendsImmediately() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "remodexDesktopMirror": .bool(true),
+                "item": .object([
+                    "id": .string("\(turnID):input"),
+                    "type": .string("userMessage"),
+                    "content": .array([
+                        .object([
+                            "type": .string("text"),
+                            "text": .string("ciao, come stai?"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        let messages = service.messages(for: threadID)
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.first?.role, .user)
+        XCTAssertEqual(messages.first?.text, "ciao, come stai?")
+        XCTAssertEqual(messages.first?.turnId, turnID)
+        XCTAssertEqual(messages.first?.deliveryState, .confirmed)
+    }
+
     func testAssistantDeltaCoalescingAppliesOrderedDeltasOnFlush() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

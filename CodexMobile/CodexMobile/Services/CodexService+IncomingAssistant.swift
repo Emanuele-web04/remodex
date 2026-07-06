@@ -290,6 +290,14 @@ extension CodexService {
         }
 
         let itemType = normalizedItemType(itemObject["type"]?.stringValue ?? "")
+        if handleMirroredUserMessageItemStarted(
+            itemObject: itemObject,
+            paramsObject: paramsObject,
+            itemType: itemType
+        ) {
+            return
+        }
+
         if handleStructuredItemLifecycle(
             itemObject: itemObject,
             paramsObject: paramsObject,
@@ -344,6 +352,45 @@ extension CodexService {
 }
 
 private extension CodexService {
+    func handleMirroredUserMessageItemStarted(
+        itemObject: IncomingParamsObject,
+        paramsObject: IncomingParamsObject,
+        itemType: String
+    ) -> Bool {
+        guard isDesktopMirroredBridgeEvent(paramsObject) else {
+            return false
+        }
+
+        let role = itemObject["role"]?.stringValue?.lowercased() ?? ""
+        let isUserMessage = itemType == "usermessage"
+            || (itemType == "message" && role.contains("user"))
+        guard isUserMessage else {
+            return false
+        }
+
+        let turnId = extractTurnID(from: paramsObject)
+        guard let threadId = resolveThreadID(from: paramsObject, turnIdHint: turnId) else {
+            return true
+        }
+        if let turnId {
+            threadIdByTurnID[turnId] = threadId
+        }
+
+        let text = extractIncomingMessageText(from: itemObject)
+        guard !text.isEmpty else {
+            return true
+        }
+
+        markMirroredRunningCatchupNeeded(for: threadId)
+        appendConfirmedMirroredUserMessage(
+            threadId: threadId,
+            turnId: turnId,
+            text: text,
+            createdAt: decodeHistoryTimestamp(from: paramsObject)
+        )
+        return true
+    }
+
     // Extracts assistant delta text across stable + legacy codex/event envelopes.
     func extractAssistantDeltaText(
         from paramsObject: IncomingParamsObject,
