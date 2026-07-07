@@ -460,6 +460,36 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertFalse(viewModel.hasBlockingAttachmentState)
     }
 
+    func testDetachedFailedAttachmentLoadUpdatesRetainedTile() {
+        let service = makeService()
+        let viewModel = TurnViewModel()
+        viewModel.input = "Use this image"
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-failed", state: .loading)
+        ]
+
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-failed-attachment")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-failed-attachment")
+        viewModel.saveLifecycleLocalDraft(codex: service, threadID: "thread-failed-attachment")
+        viewModel.cancelTransientTasks()
+
+        TurnViewModel.completeAttachmentLoad(
+            .failed,
+            id: "attachment-failed",
+            viewModel: viewModel,
+            expectedDraftMergeRevision: expectedRevision,
+            attachmentOrder: ["attachment-failed"],
+            codex: service,
+            threadID: "thread-failed-attachment"
+        )
+
+        XCTAssertEqual(viewModel.composerAttachments, [
+            TurnComposerImageAttachment(id: "attachment-failed", state: .failed)
+        ])
+        XCTAssertTrue(viewModel.hasBlockingAttachmentState)
+        XCTAssertEqual(service.composerDraft(for: "thread-failed-attachment")?.attachments, [])
+    }
+
     func testDetachedAttachmentLoadPreservesSelectedOrder() {
         let service = makeService()
         let firstAttachment = CodexImageAttachment(

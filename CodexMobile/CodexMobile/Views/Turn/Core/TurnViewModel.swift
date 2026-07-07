@@ -1494,6 +1494,17 @@ final class TurnViewModel {
     ) {
         if let viewModel {
             if viewModel.detachedAttachmentLoadIDs.remove(attachmentID) != nil {
+                if state == .failed,
+                   viewModel.composerAttachments.contains(where: { $0.id == attachmentID }) {
+                    viewModel.updateComposerAttachment(
+                        id: attachmentID,
+                        state: state,
+                        codex: codex,
+                        threadID: threadID,
+                        advancesAttachmentMergeRevision: false
+                    )
+                    return
+                }
                 mergeDecodedAttachmentIntoSavedDraft(
                     state,
                     id: attachmentID,
