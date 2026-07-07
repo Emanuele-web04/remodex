@@ -394,6 +394,8 @@ final class CodexService {
     @ObservationIgnored var composerDraftMergeRevisionByThreadID: [String: Int] = [:]
     // Bumps when Mac-scoped draft storage is swapped so stale decodes cannot write into the next namespace.
     @ObservationIgnored var composerDraftMergeEpoch: Int = 0
+    // Tracks loading attachment IDs that may still merge after their originating view disappears.
+    @ObservationIgnored var composerDraftPendingAttachmentIDsByThreadID: [String: Set<String>] = [:]
     var messagesByThread: [String: [CodexMessage]] = [:]
     // Monotonic per-thread revision so views can react to message mutations without hashing full transcripts.
     var messageRevisionByThread: [String: Int] = [:]

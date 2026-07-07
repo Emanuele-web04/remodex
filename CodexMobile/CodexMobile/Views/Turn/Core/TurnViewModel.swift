@@ -627,6 +627,12 @@ final class TurnViewModel {
         composerAttachments.contains { $0.state == .loading }
     }
 
+    private var loadingComposerAttachmentIDs: Set<String> {
+        Set(composerAttachments.compactMap { attachment -> String? in
+            attachment.state == .loading ? attachment.id : nil
+        })
+    }
+
     // Saves the current composer as a per-thread draft; empty composers remove stale draft state.
     func saveLocalDraft(
         codex: CodexService,
@@ -648,6 +654,7 @@ final class TurnViewModel {
             for: threadID,
             advancesAttachmentMergeRevision: shouldAdvanceMergeRevision
         )
+        codex.setComposerDraftPendingAttachmentIDs(loadingComposerAttachmentIDs, for: threadID)
         if persistToDisk {
             flushLocalDraftPersistence(codex: codex)
         } else {
@@ -682,7 +689,32 @@ final class TurnViewModel {
             return
         }
 
-        restoreComposerState(from: draft)
+        if hasComposerDraftContent {
+            restoreVisibleComposerState(from: draft)
+        } else {
+            restoreComposerState(from: draft)
+        }
+    }
+
+    // Merges saved ready attachments into visible loading slots without dropping still-loading siblings.
+    private func restoreVisibleComposerState(from draft: TurnComposerLocalDraft) {
+        input = draft.input
+        composerMentionedFiles = draft.mentionedFiles
+        composerMentionedSkills = draft.mentionedSkills
+        composerMentionedPlugins = draft.mentionedPlugins
+
+        let draftAttachmentsByID = Dictionary(uniqueKeysWithValues: draft.attachments.map { ($0.id, $0) })
+        let liveAttachmentIDs = Set(composerAttachments.map(\.id))
+        var restoredAttachments = composerAttachments.map { attachment in
+            draftAttachmentsByID[attachment.id] ?? attachment
+        }
+        restoredAttachments.append(contentsOf: draft.attachments.filter { !liveAttachmentIDs.contains($0.id) })
+        composerAttachments = restoredAttachments
+
+        composerReviewSelection = draft.reviewSelection
+        isSubagentsSelectionArmed = draft.isSubagentsSelectionArmed
+        isPlanModeArmed = draft.isPlanModeArmed
+        clearComposerAutocomplete()
     }
 
     private func reattachVisibleAttachmentLoads() {
@@ -697,7 +729,7 @@ final class TurnViewModel {
             return true
         }
 
-        // Allows onAppear to replace stale loading tiles whose detached decodes reached the saved draft.
+        // Allows onAppear to replace any stale loading tiles whose detached decodes reached the saved draft.
         guard input == draft.input,
               composerMentionedFiles == draft.mentionedFiles,
               composerMentionedSkills == draft.mentionedSkills,
@@ -734,8 +766,11 @@ final class TurnViewModel {
 
         guard hasOnlyRestorableAttachmentStates,
               !loadingAttachmentIDs.isEmpty,
-              liveAttachmentIDs.isSubset(of: draftAttachmentIDs),
-              readyAttachments.allSatisfy({ draftAttachmentsByID[$0.id] == $0 }) else {
+              draftAttachmentIDs.isSubset(of: liveAttachmentIDs),
+              !draftAttachmentIDs.isDisjoint(with: loadingAttachmentIDs),
+              readyAttachments.allSatisfy({ readyAttachment in
+                  draftAttachmentsByID[readyAttachment.id].map { $0 == readyAttachment } ?? true
+              }) else {
             return false
         }
 
@@ -1564,9 +1599,13 @@ final class TurnViewModel {
         guard case .ready = state else { return }
         guard codex.composerDraftMergeEpoch == expectedDraftMergeEpoch else { return }
         guard codex.composerDraftMergeRevision(for: threadID) == expectedDraftMergeRevision else { return }
+        guard codex.canMergePendingComposerAttachment(id: attachmentID, for: threadID) else { return }
         let existing = codex.composerDraft(for: threadID)
         var attachments = existing?.attachments ?? []
-        guard !attachments.contains(where: { $0.id == attachmentID }) else { return }
+        guard !attachments.contains(where: { $0.id == attachmentID }) else {
+            codex.markPendingComposerAttachmentMerged(id: attachmentID, for: threadID)
+            return
+        }
         attachments.append(TurnComposerImageAttachment(id: attachmentID, state: state))
         attachments = orderedDraftAttachments(attachments, attachmentOrder: attachmentOrder)
 
@@ -1587,6 +1626,7 @@ final class TurnViewModel {
             persistToDisk: true,
             advancesAttachmentMergeRevision: false
         )
+        codex.markPendingComposerAttachmentMerged(id: attachmentID, for: threadID)
     }
 
     private static func orderedDraftAttachments(
