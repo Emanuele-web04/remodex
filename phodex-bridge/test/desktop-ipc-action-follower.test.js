@@ -3385,7 +3385,7 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
   assert.equal(outbound.some((message) => message.id === "read-idle"), true);
 });
 
-test("desktop IPC follower drops phone interest in a thread after a full Desktop disconnect", async (t) => {
+test("desktop IPC follower keeps phone interest in a thread across a Desktop disconnect", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-active-thread-disconnect-");
   const serverFrames = [];
   const localForwards = [];
@@ -3445,11 +3445,11 @@ test("desktop IPC follower drops phone interest in a thread after a full Desktop
 
   serverSocket.destroy();
   await wait(25);
-  const framesBeforeSecondTurn = serverFrames.length;
 
-  // No fresh thread/read has happened since the disconnect, so a full Desktop
-  // disconnect must have dropped phone interest in this thread: the same
-  // ownership-probe window (still unexpired) must no longer hold the turn.
+  // Phone interest is phone-scoped, not connection-scoped: a transient Desktop
+  // disconnect must NOT drop it, or reconnect snapshots for a thread the phone
+  // is still viewing would be ignored until the phone issues a fresh read. The
+  // same ownership-probe window (still unexpired) must keep holding the turn.
   const handledAfterDisconnect = follower.observeInbound(JSON.stringify({
     id: "phone-turn-after-disconnect",
     method: "turn/start",
@@ -3458,11 +3458,7 @@ test("desktop IPC follower drops phone interest in a thread after a full Desktop
       input: [{ type: "input_text", text: "after disconnect" }],
     },
   }));
-  assert.equal(handledAfterDisconnect, false);
-  assert.equal(
-    serverFrames.slice(framesBeforeSecondTurn).some((frame) => frame.type === "client-discovery-request"),
-    false
-  );
+  assert.equal(handledAfterDisconnect, true);
 });
 
 test("desktop IPC follower caps activeThreadIds so a marathon connection cannot grow it forever", async (t) => {
@@ -3532,6 +3528,81 @@ test("desktop IPC follower caps activeThreadIds so a marathon connection cannot 
     },
   }));
   assert.equal(heldNewest, true, "the most recently observed thread id should still be treated as active");
+});
+
+test("desktop IPC follower refreshes active-thread recency so re-read threads survive eviction", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-active-thread-lru-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    forwardToLocalCodex() {},
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 10_000,
+  });
+  t.after(() => follower.stopAll());
+
+  // Fill the set exactly to MAX_ACTIVE_THREAD_IDS (512) with no eviction yet.
+  for (let i = 0; i < 512; i += 1) {
+    follower.observeInbound(JSON.stringify({
+      method: "thread/resume",
+      params: { threadId: `thread-lru-${i}` },
+    }));
+  }
+  // Re-reading the oldest thread must refresh its recency (delete-before-add),
+  // so the next overflow evicts thread-lru-1 instead of thread-lru-0.
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-lru-0" },
+  }));
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-lru-512" },
+  }));
+  await waitFor(() => serverSocket);
+
+  const heldRefreshed = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-lru-refreshed",
+    method: "turn/start",
+    params: {
+      threadId: "thread-lru-0",
+      input: [{ type: "input_text", text: "refreshed thread" }],
+    },
+  }));
+  assert.equal(heldRefreshed, true, "a re-read thread must have its recency refreshed and survive eviction");
+
+  const heldEvicted = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-lru-evicted",
+    method: "turn/start",
+    params: {
+      threadId: "thread-lru-1",
+      input: [{ type: "input_text", text: "evicted thread" }],
+    },
+  }));
+  assert.equal(heldEvicted, false, "the least-recently-read thread must be the one evicted");
 });
 
 function attachFrameReader(socket, onFrame) {

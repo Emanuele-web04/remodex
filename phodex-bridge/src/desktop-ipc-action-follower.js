@@ -102,8 +102,12 @@ function createDesktopIpcActionFollower({
   const pendingRoutesByRequestId = new Map();
   const activeThreadIds = new Set();
   // JS Set preserves insertion order, so the oldest entry is always
-  // `activeThreadIds.values().next().value`, giving cheap FIFO eviction.
+  // `activeThreadIds.values().next().value`. Delete-before-add refreshes the
+  // thread's recency, so eviction is LRU: a thread the phone keeps reading is
+  // never the one evicted. Evicting interest also drops the thread's cached
+  // per-thread state, so the cap actually bounds follower memory.
   function rememberActiveThread(threadId) {
+    activeThreadIds.delete(threadId);
     activeThreadIds.add(threadId);
     while (activeThreadIds.size > MAX_ACTIVE_THREAD_IDS) {
       const oldest = activeThreadIds.values().next().value;
@@ -111,7 +115,24 @@ function createDesktopIpcActionFollower({
         break;
       }
       activeThreadIds.delete(oldest);
+      forgetEvictedThreadState(oldest);
     }
+  }
+
+  // Cleanup for cap-evicted threads only: clears follower caches without touching
+  // liveOwnerThreadIds (still-owned local streams must not become hijackable) and
+  // without rejecting held requests (removeDesktopThreadState handles real removal).
+  function forgetEvictedThreadState(threadId) {
+    syncProjectedActions(threadId, []);
+    rawStatesByThreadId.delete(threadId);
+    rawStateUpdatedAtByThreadId.delete(threadId);
+    conversationProjector.remove(threadId);
+    queuedChangesByThreadId.delete(threadId);
+    baselineRecoveryStateByThreadId.delete(threadId);
+    recoveringThreadIds.delete(threadId);
+    ownershipProbeDeadlinesByThreadId.delete(threadId);
+    pendingOwnershipProbeTokensByThreadId.delete(threadId);
+    desktopOwnedByProbeThreadIds.delete(threadId);
   }
   const recoveringThreadIds = new Set();
   const queuedChangesByThreadId = new Map();
@@ -286,12 +307,10 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
-    // Unlike a per-thread release, a full Desktop disconnect is a natural
-    // boundary for phone interest too: reconnect snapshots re-populate
-    // activeThreadIds via fresh reads, so there is nothing to lose by clearing
-    // it here, and doing so keeps a marathon connection from accumulating
-    // every thread id ever observed.
-    activeThreadIds.clear();
+    // Keep activeThreadIds: phone interest is phone-scoped, not connection-scoped.
+    // Clearing it here would make reconnect snapshots for a thread the phone is
+    // still viewing fail the activeThreadIds.has() guard until the phone happens
+    // to issue a fresh read. Growth is bounded by the LRU cap instead.
     // Keep pending approval routes too: a transient disconnect proves nothing
     // about the prompt's outcome, and falsely resolving it would dismiss a
     // still-blocking approval on the phone. Reconnect snapshots reconcile them.
