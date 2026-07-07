@@ -122,6 +122,11 @@ struct SystemMessageContentView: View {
         }
     }
 
+    // Long Desktop turns accumulate dozens of per-file rows; cap the live list
+    // to the most recent files so the timeline stays readable. The full recap
+    // still renders as one compact card when the turn completes.
+    private static let maxVisibleStreamingFileChangeEntries = 4
+
     private func fileChangeStreamingSystemView(
         entries: [TurnFileChangeSummaryEntry],
         fallbackText: String
@@ -133,7 +138,13 @@ struct SystemMessageContentView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                ForEach(entries) { entry in
+                let hiddenCount = entries.count - Self.maxVisibleStreamingFileChangeEntries
+                if hiddenCount > 0 {
+                    Text("+\(hiddenCount) more files")
+                        .font(AppFont.caption())
+                        .foregroundStyle(.secondary.opacity(0.6))
+                }
+                ForEach(Array(entries.suffix(Self.maxVisibleStreamingFileChangeEntries))) { entry in
                     FileChangeInlineActionRow(entry: entry)
                 }
             }

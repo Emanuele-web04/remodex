@@ -203,7 +203,7 @@ struct PlanAccessoryCard: View {
                 leadingMarker
 
                 Text(snapshot.title)
-                    .font(AppFont.caption(weight: .medium))
+                    .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
                 trailingMetric
@@ -233,11 +233,11 @@ struct PlanAccessoryCard: View {
     private var trailingMetric: some View {
         if let progressText = snapshot.progressText {
             Text("·")
-                .font(AppFont.caption(weight: .medium))
+                .font(AppFont.caption())
                 .foregroundStyle(.tertiary)
 
             Text(progressText)
-                .font(AppFont.caption(weight: .medium))
+                .font(AppFont.caption())
                 .foregroundStyle(.secondary)
                 .fixedSize()
         } else if snapshot.isStreaming {

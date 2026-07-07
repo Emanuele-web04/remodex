@@ -2647,6 +2647,58 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(merged[0].isStreaming)
     }
 
+    // The bridge's history-compaction banner turn ships without a status on
+    // older bridges; treating it as interruptible flagged idle heavy threads
+    // as running ("Remodex is thinking") right after a trimmed thread/read.
+    func testTurnStateSnapshotIgnoresHistoryCompactionMarkerTurn() {
+        let service = makeService()
+        let turnObjects: [RPCObject] = [
+            [
+                "id": .string("remodex-history-compacted-turn-1"),
+                "remodexSynthetic": .bool(true),
+                "remodexHistoryCompacted": .bool(true),
+            ],
+            [
+                "id": .string("turn-30"),
+                "status": .string("completed"),
+            ],
+            [
+                "id": .string("turn-31"),
+                "status": .string("completed"),
+            ],
+        ]
+
+        let snapshot = service.turnStateSnapshot(from: turnObjects, newestFirst: false)
+
+        XCTAssertNil(snapshot.interruptibleTurnID)
+        XCTAssertFalse(snapshot.hasInterruptibleTurnWithoutID)
+        XCTAssertEqual(snapshot.latestTurnID, "turn-31")
+    }
+
+    // A genuinely running turn after the marker must still be detected.
+    func testTurnStateSnapshotStillDetectsRunningTurnPastCompactionMarker() {
+        let service = makeService()
+        let turnObjects: [RPCObject] = [
+            [
+                "id": .string("remodex-history-compacted-turn-1"),
+                "remodexSynthetic": .bool(true),
+            ],
+            [
+                "id": .string("turn-30"),
+                "status": .string("completed"),
+            ],
+            [
+                "id": .string("turn-31"),
+                "status": .string("inProgress"),
+            ],
+        ]
+
+        let snapshot = service.turnStateSnapshot(from: turnObjects, newestFirst: false)
+
+        XCTAssertEqual(snapshot.interruptibleTurnID, "turn-31")
+        XCTAssertEqual(snapshot.latestTurnID, "turn-31")
+    }
+
     private func sendTurnStarted(service: CodexService, threadID: String, turnID: String) {
         service.handleNotification(
             method: "turn/started",

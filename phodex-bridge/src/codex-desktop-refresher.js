@@ -327,6 +327,10 @@ class CodexDesktopRefresher {
       this.bundleId,
       this.appPath,
       targetUrl || "",
+      // Navigation-only mode must never launch Codex from closed: content
+      // already syncs over IPC live sync, so a deep link while the app is
+      // down would only cold-start it to show a thread nobody asked to see.
+      this.navigationOnly ? "0" : "1",
     ]);
   }
 

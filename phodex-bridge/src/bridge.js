@@ -82,7 +82,11 @@ const RELAY_WATCHDOG_PING_INTERVAL_MS = 10_000;
 const RELAY_HISTORY_IMAGE_REFERENCE_URL = "remodex://history-image-elided";
 const RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES = 4 * 1024 * 1024;
 const RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS = 24_000;
-const RELAY_HISTORY_RECENT_TURN_TARGET = 40;
+// Recent-turn window used only when a thread/read payload already exceeds the
+// relay soft budget: heavy threads first paint with this many newest turns and
+// older history arrives via thread/turns/list pagination. Normal threads are
+// never trimmed.
+const RELAY_HISTORY_RECENT_TURN_TARGET = 16;
 const RELAY_TURNS_LIST_TARGET_BUDGET_MS = 5_500;
 const RELAY_TURNS_LIST_BUDGET_RESERVE_MS = 1_000;
 const RELAY_TURNS_LIST_MAX_INITIAL_LIMIT = 5;
@@ -670,6 +674,11 @@ function startBridge({
     }
     desktopRefresher.handleInbound(rawMessage, parsedMessage);
     rolloutLiveMirror?.observeInbound(rawMessage, parsedMessage);
+    // Track the request method BEFORE follower interception: responses the
+    // follower serves from projected Desktop state must hit the same relay
+    // sanitize/trim budget as app-server responses, or heavy threads ship as
+    // one oversized frame and kill the phone's websocket (EMSGSIZE).
+    rememberForwardedRequestMethod(rawMessage);
     if (desktopIpcActionFollower?.observeInbound(rawMessage, parsedMessage)) {
       return;
     }
@@ -3800,6 +3809,9 @@ function buildRelayHistoryCompactionTurn(omittedTurnCount, keptTurnCount, idSour
 
   return {
     id: `remodex-history-compacted-${baseId}`,
+    // A status-less turn reads as interruptible/running to the phone's
+    // turn-state snapshot, flagging idle heavy threads as "thinking".
+    status: "completed",
     remodexSynthetic: true,
     remodexHistoryCompacted: true,
     remodexOmittedTurnCount: omittedTurnCount,

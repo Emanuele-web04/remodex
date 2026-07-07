@@ -627,7 +627,9 @@ test("desktop IPC follower announces thread replacement when synthetic turn ids 
   assert.equal(replaced.params.threadId, "thread-full-replace");
   assert.equal(replaced.params.remodexDesktopMirror, true);
   assert.equal(replaced.params.remodexDesktopIpcMirror, true);
-  assert.equal(replaced.params.thread.turns[0].turnId, "turn-real-id");
+  // No embedded thread: the phone rebuilds from canonical history, and heavy
+  // threads must not ship as one oversized relay frame.
+  assert.equal(replaced.params.thread, undefined);
 
   // The replacement bootstrap follows the announcement with the real turn id.
   const replacedIndex = outbound.indexOf(replaced);

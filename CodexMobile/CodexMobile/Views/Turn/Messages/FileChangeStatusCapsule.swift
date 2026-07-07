@@ -163,11 +163,9 @@ struct FileChangeStatusCapsule: View {
     private var capsuleContent: some View {
         GlassStatusPill {
             Text(title)
-                .font(AppFont.subheadline(weight: .medium))
+                .font(AppFont.caption())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .minimumScaleFactor(0.82)
 
             if let additions, let deletions, additions > 0 || deletions > 0 {
                 FileChangeStatusDiffCountsLabel(additions: additions, deletions: deletions)
@@ -190,7 +188,7 @@ private struct FileChangeStatusDiffCountsLabel: View {
             Text("-\(Self.compactCount(deletions))")
                 .foregroundStyle(Color.red)
         }
-        .font(AppFont.subheadline(weight: .semibold))
+        .font(AppFont.caption())
         .lineLimit(1)
     }
 

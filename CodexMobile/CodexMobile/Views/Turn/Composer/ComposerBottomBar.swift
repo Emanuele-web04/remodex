@@ -83,7 +83,9 @@ struct ComposerBottomBar: View {
     // MARK: - Body
 
     var body: some View {
-        HStack(spacing: 6) {
+        // 8pt base spacing + each control's own edge padding lands every
+        // visual gap (ring/pill, pill/mic, mic/stop-send) at ~11-12pt.
+        HStack(spacing: 8) {
             ComposerAttachmentMenu(
                 isPlanModeArmed: isPlanModeArmed,
                 runtimeState: runtimeState,
@@ -98,8 +100,13 @@ struct ComposerBottomBar: View {
             inlineAccessMenuLabel
             Spacer(minLength: 0)
 
-            inlineStatusControl
-            runtimeMenuControl
+            // Ring + runtime pill travel together on the trailing side; the
+            // tight inner spacing keeps the ring visually attached to the
+            // model/effort block instead of floating in the Spacer gap.
+            HStack(spacing: 2) {
+                inlineStatusControl
+                runtimeMenuControl
+            }
 
             if isQueuePaused && queuedCount > 0 {
                 Button {
@@ -129,6 +136,9 @@ struct ComposerBottomBar: View {
                     diameter: composerCircleDiameter,
                     iconSize: composerActionIconSize
                 )
+                // Match the send button's extra leading air so the mic never
+                // sits flush against the filled stop circle.
+                .padding(.leading, 3)
             }
 
             if showsSendButton {
@@ -235,6 +245,9 @@ struct ComposerBottomBar: View {
             shouldAutoRefreshStatus: shouldAutoRefreshUsageStatus,
             showsGlassBackground: false,
             progressColorOverride: .primary,
+            // Slimmer tap target than the standalone default so the ring's
+            // internal air matches the ~12pt visual rhythm of the bar.
+            tapTargetSize: 28,
             onRefreshStatus: onRefreshUsageStatus
         )
     }
@@ -275,9 +288,8 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.callout() }
-    private var leadingIconFont: Font { AppFont.subheadline() }
-    private let maxInlineRuntimeControlWidth: CGFloat = 128
-    private let maxInlineRuntimeTextWidth: CGFloat = 104
+    private var effortTextFont: Font { AppFont.subheadline() }
+    private var leadingIconFont: Font { AppFont.callout() }
 
     static func == (lhs: ComposerRuntimeMenuControl, rhs: ComposerRuntimeMenuControl) -> Bool {
         lhs.orderedModelOptions == rhs.orderedModelOptions
@@ -319,7 +331,9 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
                 )
             )
         }
-        .frame(minWidth: 0, maxWidth: maxInlineRuntimeControlWidth, alignment: .trailing)
+        // Let the pill hug its content; the Spacer in the bottom bar absorbs
+        // leftover width, and layoutPriority(-1) makes the effort label the
+        // first thing to truncate when the bar runs out of room.
         .layoutPriority(-1)
         .tint(metaLabelColor)
         .accessibilityLabel(runtimeAccessibilityLabel)
@@ -380,10 +394,7 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
     ) -> some View {
         HStack(spacing: 6) {
             if let leadingImageName {
-                // Native SF Symbol on purpose: the Central lightning artwork
-                // reads as a different glyph from the system bolt that the
-                // user expects in the speed badge.
-                Image(systemName: leadingImageName)
+                RemodexIcon.image(systemName: leadingImageName)
                     .font(leadingIconFont)
                     .foregroundStyle(Color.primary)
             }
@@ -399,21 +410,17 @@ private struct ComposerRuntimeMenuControl: View, Equatable {
 
                 if let effortPart, !effortPart.isEmpty {
                     Text(effortPart)
-                        .font(metaTextFont)
+                        .font(effortTextFont)
                         .fontWeight(.regular)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .layoutPriority(0)
-                        .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 }
             }
-            // Grow left from the mic; truncate effort first when space is tight.
-            .frame(maxWidth: maxInlineRuntimeTextWidth, alignment: .trailing)
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 4)
-        .frame(minWidth: 0, maxWidth: maxInlineRuntimeControlWidth, alignment: .trailing)
         .contentShape(Rectangle())
     }
 }
@@ -484,8 +491,7 @@ private struct AllModelsSheet: View {
                         .font(AppFont.body(weight: .medium))
                         .foregroundStyle(Color(.label))
                     if modelSupportsFastMode(model) {
-                        Image(systemName: CodexServiceTier.fast.iconName)
-                            .font(.system(size: fastModeIconSide, weight: .regular))
+                        RemodexIcon.image(systemName: CodexServiceTier.fast.iconName, size: fastModeIconSide)
                             .frame(width: fastModeIconSide, height: fastModeIconSide)
                             .foregroundStyle(Color(.secondaryLabel))
                     }

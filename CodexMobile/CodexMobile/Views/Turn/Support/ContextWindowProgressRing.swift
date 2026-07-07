@@ -14,13 +14,15 @@ struct ContextWindowProgressRing: View {
     let shouldAutoRefreshStatus: Bool
     var showsGlassBackground: Bool = true
     var progressColorOverride: Color?
+    // Callers sitting in tight rows (composer bottom bar) can shrink the tap
+    // target so the ring's built-in air doesn't inflate visual gaps.
+    var tapTargetSize: CGFloat = 34
     let onRefreshStatus: (() async -> Void)?
     @State private var isShowingPopover = false
     @State private var isRefreshing = false
 
     private let ringSize: CGFloat = 16
     private let lineWidth: CGFloat = 2.75
-    private let tapTargetSize: CGFloat = 34
 
     var body: some View {
         let displayUsage = usage ?? .zero

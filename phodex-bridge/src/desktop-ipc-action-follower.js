@@ -570,8 +570,10 @@ function createDesktopIpcActionFollower({
           hasMore: false,
         }
       : {
+          // The projected thread is the entire payload the phone decodes;
+          // echoing the raw Desktop conversationState alongside it doubled
+          // heavy threads past the relay frame limit for nothing.
           thread,
-          conversationState: cloneJSON(rawState),
         };
     sendApplicationResponse(JSON.stringify({
       id: message.id,
@@ -597,11 +599,13 @@ function createDesktopIpcActionFollower({
       // baseline: the projector cache was evicted, so updates that arrived while
       // unobserved were never mirrored. Both cases need the phone to rebuild the
       // thread from canonical history instead of trusting incremental rows.
+      // The phone reacts to thread/replaced by re-reading canonical history;
+      // it never decodes an embedded thread, and heavy threads would blow the
+      // relay frame limit if we shipped one.
       sendApplicationResponse(JSON.stringify({
         method: "thread/replaced",
         params: {
           threadId,
-          thread: cloneJSON(output.thread || null),
           remodexDesktopMirror: true,
           remodexDesktopIpcMirror: true,
           remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,

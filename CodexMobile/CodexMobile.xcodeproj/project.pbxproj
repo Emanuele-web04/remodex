@@ -53,7 +53,6 @@
 		A4B0C1D2E3F4051627384A0E /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0D /* libz.tbd */; };
 		A4B0C1D2E3F4051627384A10 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A4B0C1D2E3F4051627384A0F /* UIKit.framework */; };
 		A7D1C9E4B6F84321ABCD1201 /* TerminalPasteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D1C9E4B6F84321ABCD1202 /* TerminalPasteTests.swift */; };
-		BFA160000000000000000001 /* TerminalSelectableTextNormalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFA160000000000000000002 /* TerminalSelectableTextNormalizerTests.swift */; };
 		A9F1B2C3D4E5F60718293A40 /* TurnSkillAutocompleteTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */; };
 		A9F1B2C3D4E5F60718293A42 /* CodexSkillsListDecodeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */; };
 		A9F1B2C3D4E5F60718293A44 /* CodexTurnInputPayloadSkillTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F1B2C3D4E5F60718293A45 /* CodexTurnInputPayloadSkillTests.swift */; };
@@ -64,6 +63,7 @@
 		B1C2D3E4F5061728394A5B6C /* CodexServiceIncomingCommandExecutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */; };
 		B3C4D5E6F708192A3B4C5D6E /* CodexPlanModeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */; };
 		B7A1C2D3E4F5061728394051 /* SidebarThreadGroupingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */; };
+		BFA160000000000000000001 /* TerminalSelectableTextNormalizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFA160000000000000000002 /* TerminalSelectableTextNormalizerTests.swift */; };
 		C04E214B2F71D34100AA3193 /* RevenueCat in Frameworks */ = {isa = PBXBuildFile; productRef = C04E214A2F71D34100AA3193 /* RevenueCat */; };
 		C04E214D2F71D4DB00AA3193 /* StoreKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C04E214C2F71D4DB00AA3193 /* StoreKit.framework */; };
 		C078C1A22F79000100BEEF01 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = C078C1A12F79000100BEEF01 /* Citadel */; };
@@ -180,7 +180,6 @@
 		A4B0C1D2E3F4051627384A0D /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
 		A4B0C1D2E3F4051627384A0F /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		A7D1C9E4B6F84321ABCD1202 /* TerminalPasteTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TerminalPasteTests.swift; sourceTree = "<group>"; };
-		BFA160000000000000000002 /* TerminalSelectableTextNormalizerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TerminalSelectableTextNormalizerTests.swift; sourceTree = "<group>"; };
 		A932BE773A84EFEA525DF684 /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = CodexMobile/Assets.xcassets; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A41 /* TurnSkillAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnSkillAutocompleteTokenTests.swift; sourceTree = "<group>"; };
 		A9F1B2C3D4E5F60718293A43 /* CodexSkillsListDecodeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexSkillsListDecodeTests.swift; sourceTree = "<group>"; };
@@ -193,6 +192,7 @@
 		B3C4D5E6F708192A3B4C5D6F /* CodexPlanModeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CodexPlanModeTests.swift; sourceTree = "<group>"; };
 		B7A1C2D3E4F5061728394052 /* SidebarThreadGroupingTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SidebarThreadGroupingTests.swift; sourceTree = "<group>"; };
 		BA83C07BD6661A63FFD1400F /* RemodexLaunchIntent.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexLaunchIntent.swift; sourceTree = "<group>"; };
+		BFA160000000000000000002 /* TerminalSelectableTextNormalizerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TerminalSelectableTextNormalizerTests.swift; sourceTree = "<group>"; };
 		C04E214C2F71D4DB00AA3193 /* StoreKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StoreKit.framework; path = System/Library/Frameworks/StoreKit.framework; sourceTree = SDKROOT; };
 		C09A76AE2F4B8D7B003B3F3A /* CodexMobile.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CodexMobile.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C0B9CCCCC45E47616AB452FA /* RemodexMenuBarApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemodexMenuBarApp.swift; sourceTree = "<group>"; };

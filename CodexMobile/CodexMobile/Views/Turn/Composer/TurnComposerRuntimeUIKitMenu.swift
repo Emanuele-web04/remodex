@@ -117,7 +117,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
     private static func modelAction(model: CodexModelOption, input: Input) -> UIAction {
         let title = TurnComposerMetaMapper.modelTitle(for: model)
         let image: UIImage? = model.supportsServiceTier(.fast)
-            ? UIImage(systemName: CodexServiceTier.fast.iconName)
+            ? RemodexIcon.menuUIImage(systemName: CodexServiceTier.fast.iconName)
             : nil
 
         return UIAction(
@@ -197,11 +197,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
         let tierActions: [UIMenuElement] = CodexServiceTier.allCases.map { tier in
             UIAction(
                 title: tier.displayName,
-                // Keep the Fast tier on the native SF bolt to match the speed
-                // badge in the composer; other tiers can use Central artwork.
-                image: tier == .fast
-                    ? UIImage(systemName: tier.iconName)
-                    : RemodexIcon.menuUIImage(systemName: tier.iconName),
+                image: RemodexIcon.menuUIImage(systemName: tier.iconName),
                 state: input.runtimeState.isSelectedServiceTier(tier) ? .on : .off
             ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
@@ -219,7 +215,7 @@ enum TurnComposerRuntimeUIKitMenuBuilder {
         return UIMenu(
             title: "Speed",
             subtitle: subtitle,
-            image: UIImage(systemName: "bolt.fill"),
+            image: RemodexIcon.menuUIImage(systemName: "bolt.fill"),
             options: [.singleSelection],
             children: [normalAction] + tierActions
         )

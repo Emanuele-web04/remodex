@@ -479,14 +479,16 @@ enum TurnTimelineReducer {
 
     // Treats synthetic turn-scoped and rollout-mirror thinking ids as unstable
     // so a later real item can reuse the row instead of stacking a duplicate.
+    // Deliberately narrower than isMirrorMintedItemID: only this kind's own
+    // "turn:" placeholder is unstable, other kinds' placeholders stay distinct.
     private static func hasStableThinkingIdentity(_ message: CodexMessage) -> Bool {
         guard let itemId = normalizedIdentifier(message.itemId) else {
             return false
         }
-        if itemId.hasPrefix("rollout-") {
+        if CodexSyntheticIdentifiers.isRolloutMintedItemID(itemId) {
             return false
         }
-        return !(itemId.hasPrefix("turn:") && itemId.contains("|kind:\(CodexMessageKind.thinking.rawValue)"))
+        return !CodexSyntheticIdentifiers.isPlaceholderItemID(itemId, kind: .thinking)
     }
 
     // Identifies placeholder-only rows that should be reused instead of stacked.
@@ -1054,7 +1056,7 @@ enum TurnTimelineReducer {
         guard let itemId else {
             return true
         }
-        return itemId.hasPrefix("turn:") || itemId.hasPrefix("rollout-")
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
     }
 
     // Keeps only the newest matching file-change card when multiple event channels emit the same diff.
@@ -1072,16 +1074,26 @@ enum TurnTimelineReducer {
         var supersededIndices: Set<Int> = []
         for olderSlot in fileChangeIndices.indices {
             let olderIndex = fileChangeIndices[olderSlot]
-            guard let olderSignature = signatures[olderIndex] else { continue }
+            guard let olderSignature = signatures[olderIndex],
+                  !supersededIndices.contains(olderIndex) else { continue }
 
             for newerSlot in (olderSlot + 1)..<fileChangeIndices.count {
                 let newerIndex = fileChangeIndices[newerSlot]
                 guard let newerSignature = signatures[newerIndex],
-                      fileChangeMessage(newerSignature, supersedes: olderSignature) else {
+                      !supersededIndices.contains(newerIndex) else {
                     continue
                 }
-                supersededIndices.insert(olderIndex)
-                break
+                if fileChangeMessage(newerSignature, supersedes: olderSignature)
+                    || fileChangeAggregateAbsorbs(newerSignature, card: olderSignature) {
+                    supersededIndices.insert(olderIndex)
+                    break
+                }
+                // A cumulative aggregate absorbs later completed per-patch
+                // cards whose files it already covers; rendering both stacks the
+                // compact card on top of the aggregate for the same turn.
+                if fileChangeAggregateAbsorbs(olderSignature, card: newerSignature) {
+                    supersededIndices.insert(newerIndex)
+                }
             }
         }
 
@@ -1205,6 +1217,10 @@ enum TurnTimelineReducer {
 
         let turnId = normalizedIdentifier(message.turnId)
         let key = duplicateFileChangeKey(for: message)
+        // Accepted residual: oversized aggregates (>64KB) opt out of dedupe
+        // entirely. A bounded/partial parse would yield partial path sets, and
+        // partial paths can falsely win subset comparisons and delete rows
+        // that should survive — opting out is the safe failure mode.
         let entries = message.text.utf8.count <= largeTextDedupeByteLimit
             ? (TurnFileChangeSummaryParser.parse(from: message.text)?.entries ?? [])
             : []
@@ -1232,13 +1248,42 @@ enum TurnTimelineReducer {
             key: key,
             paths: paths,
             singleEntryDescriptor: singleEntryDescriptor,
-            isStreaming: message.isStreaming
+            isStreaming: message.isStreaming,
+            isKnownAggregate: normalizedIdentifier(message.itemId)
+                .map(CodexSyntheticIdentifiers.isCumulativeFileChangeAggregateItemID) ?? false
         )
     }
 
     // Treats newer file-change snapshots as authoritative only when they describe the
     // same turn (or a turnless→turnful upgrade) and either the same dedupe key or a
     // provisional-to-final snapshot upgrade with matching paths.
+    // A cumulative aggregate and completed per-patch cards can coexist for the
+    // same turn (long Desktop runs emit both). While streaming — or when the
+    // row's item id proves it IS the aggregate — it is the authoritative view
+    // and absorbs any covered card, equal path sets included. Otherwise (the
+    // aggregate often adopts a real item id mid-turn or via history merge, so
+    // identity is unknown) it only absorbs STRICTLY covered cards; equal path
+    // sets stay with the key/streaming arbitration so the wrong row of an
+    // identical pair is never killed.
+    private static func fileChangeAggregateAbsorbs(
+        _ aggregate: FileChangeDedupSignature,
+        card: FileChangeDedupSignature
+    ) -> Bool {
+        guard !card.isStreaming,
+              !card.isKnownAggregate,
+              let aggregateTurn = aggregate.turnId,
+              let cardTurn = card.turnId,
+              aggregateTurn == cardTurn,
+              !card.paths.isEmpty,
+              !aggregate.paths.isEmpty else {
+            return false
+        }
+        if aggregate.isStreaming || aggregate.isKnownAggregate {
+            return card.paths.isSubset(of: aggregate.paths)
+        }
+        return card.paths.isStrictSubset(of: aggregate.paths)
+    }
+
     private static func fileChangeMessage(
         _ newer: FileChangeDedupSignature,
         supersedes older: FileChangeDedupSignature
@@ -1324,6 +1369,9 @@ private struct FileChangeDedupSignature: Equatable {
     let paths: Set<String>
     let singleEntryDescriptor: FileChangeSingleEntryDescriptor?
     let isStreaming: Bool
+    // Positive-only: true when the item id can only belong to the cumulative
+    // aggregate row; false means "identity unknown", not "per-patch card".
+    let isKnownAggregate: Bool
 }
 
 private struct FileChangeSingleEntryDescriptor: Equatable {

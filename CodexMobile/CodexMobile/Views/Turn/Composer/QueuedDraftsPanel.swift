@@ -18,11 +18,11 @@ struct QueuedStatusCapsule: View {
         } label: {
             GlassStatusPill {
                 Text("Queued")
-                    .font(AppFont.caption(weight: .medium))
+                    .font(AppFont.caption())
                     .foregroundStyle(.secondary)
 
                 Text("\(count)")
-                    .font(AppFont.caption(weight: .medium))
+                    .font(AppFont.caption())
                     .foregroundStyle(.primary.opacity(0.78))
                     .fixedSize()
             }

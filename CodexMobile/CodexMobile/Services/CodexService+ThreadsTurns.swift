@@ -3036,12 +3036,11 @@ extension CodexService {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    // Bridge-synthesized placeholder turn ids ("turn-line-<n>" from JSONL history
-    // fallback, "rollout-…" from the rollout live mirror) group history rows and
-    // keep running state visible, but they are not real app-server turn ids:
+    // Bridge-synthesized placeholder turn ids group history rows and keep
+    // running state visible, but they are not real app-server turn ids:
     // acting with one gets rejected ("expected active turn id … but found …").
     nonisolated static func isSyntheticPlaceholderTurnID(_ turnId: String) -> Bool {
-        turnId.hasPrefix("turn-line-") || turnId.hasPrefix("rollout-")
+        CodexSyntheticIdentifiers.isBridgeMintedTurnID(turnId)
     }
 
     // Resolves the currently interruptible turn id from the latest turn page when local state is stale.
@@ -3221,17 +3220,30 @@ extension CodexService {
         }
 
         let newestTurnObjects = newestFirst ? turnObjects : Array(turnObjects.reversed())
-        let latestTurnID = newestTurnObjects.compactMap { turnObject in
-            normalizedInterruptIdentifier(
+        let latestTurnID = newestTurnObjects.compactMap { turnObject -> String? in
+            guard let turnID = normalizedInterruptIdentifier(
                 turnObject["id"]?.stringValue
                     ?? turnObject["turnId"]?.stringValue
                     ?? turnObject["turn_id"]?.stringValue
-            )
+            ), !CodexSyntheticIdentifiers.isHistoryCompactionMarkerTurnID(turnID) else {
+                return nil
+            }
+            return turnID
         }.first
 
         // Newest-first scanning avoids interrupting an older completed turn when recovery is stale.
         var hasInterruptibleTurnWithoutID = false
         for turnObject in newestTurnObjects {
+            // The bridge's compaction banner ships without a real turn status
+            // (older bridges omit it entirely); reading it as interruptible
+            // flagged idle heavy threads as running.
+            if let turnID = normalizedInterruptIdentifier(
+                turnObject["id"]?.stringValue
+                    ?? turnObject["turnId"]?.stringValue
+                    ?? turnObject["turn_id"]?.stringValue
+            ), CodexSyntheticIdentifiers.isHistoryCompactionMarkerTurnID(turnID) {
+                continue
+            }
             let turnStatus = normalizedInterruptTurnStatus(from: turnObject)
             guard isInterruptibleTurnStatus(turnStatus) else {
                 continue

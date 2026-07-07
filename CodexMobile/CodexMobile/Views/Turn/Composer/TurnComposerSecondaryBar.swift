@@ -8,7 +8,6 @@
 import SwiftUI
 
 struct TurnComposerSecondaryBar: View {
-    let isInputFocused: Bool
     let isEmptyThread: Bool
     let hasWorkingDirectory: Bool
     let isWorktreeProject: Bool
@@ -16,96 +15,63 @@ struct TurnComposerSecondaryBar: View {
     var queuedDraftCount: Int = 0
     var onTapQueuedDrafts: () -> Void = {}
 
-    let showsGitBranchSelector: Bool
-    let isGitBranchSelectorEnabled: Bool
-    let availableGitBranchTargets: [String]
-    let gitBranchesCheckedOutElsewhere: Set<String>
-    let gitWorktreePathsByBranch: [String: String]
-    let selectedGitBaseBranch: String
-    let currentGitBranch: String
-    let gitDefaultBranch: String
-    let isLoadingGitBranchTargets: Bool
-    let isSwitchingGitBranch: Bool
-    let isCreatingGitWorktree: Bool
-
-    let onSelectGitBranch: (String) -> Void
-    let onCreateGitBranch: (String) -> Void
-    let onSelectGitBaseBranch: (String) -> Void
-    let onRefreshGitBranches: () -> Void
-    let canHandOffToWorktree: Bool
-    let onTapCreateWorktree: () -> Void
+    let gitState: TurnComposerGitState
+    let gitActions: TurnComposerGitActions
 
     @Environment(\.pinnedPlanAccessory) private var pinnedPlanAccessory
+    @State private var isContextClusterExpanded = false
 
-    private var hasCarouselContent: Bool {
-        hasWorkingDirectory || pinnedPlanAccessory != nil || queuedDraftCount > 0
-    }
-
+    // Presence is decided by the call site (TurnComposerView) so the parent
+    // VStack never hosts an empty child that could leave stray spacing.
     var body: some View {
-        // The row stays visible while the composer rests as a collapsed capsule
-        // and hides only when the keyboard takes the space.
-        if !isInputFocused, hasCarouselContent || activeFileChangeStatus != nil {
-            VStack(spacing: 8) {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if hasWorkingDirectory {
+                    TurnComposerCollapsibleContextCluster(isExpanded: $isContextClusterExpanded)
+                }
+
+                // File changes lead the pills, right after the chevron.
                 if let activeFileChangeStatus {
                     FileChangeStatusCapsule(snapshot: activeFileChangeStatus)
                         .transition(.opacity.combined(with: .scale(scale: 0.94)))
                 }
 
-                if hasCarouselContent {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            if hasWorkingDirectory {
-                                contextCluster
-                            }
+                if let pinnedPlanAccessory {
+                    PlanAccessoryCard(
+                        snapshot: pinnedPlanAccessory.snapshot,
+                        onTap: pinnedPlanAccessory.onTap
+                    )
+                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
+                }
 
-                            if let pinnedPlanAccessory {
-                                PlanAccessoryCard(
-                                    snapshot: pinnedPlanAccessory.snapshot,
-                                    onTap: pinnedPlanAccessory.onTap
-                                )
-                                .transition(.opacity.combined(with: .scale(scale: 0.94)))
-                            }
-
-                            if queuedDraftCount > 0 {
-                                QueuedStatusCapsule(count: queuedDraftCount, onTap: onTapQueuedDrafts)
-                                    .transition(.opacity.combined(with: .scale(scale: 0.94)))
-                            }
-                        }
-                    }
-                    .scrollBounceBehavior(.basedOnSize)
-                    // Let the capsules' glass shadows breathe past the scroll bounds.
-                    .scrollClipDisabled()
+                if queuedDraftCount > 0 {
+                    QueuedStatusCapsule(count: queuedDraftCount, onTap: onTapQueuedDrafts)
+                        .transition(.opacity.combined(with: .scale(scale: 0.94)))
                 }
             }
-            .frame(maxWidth: .infinity)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-            .animation(.spring(response: 0.28, dampingFraction: 0.88), value: activeFileChangeStatus)
-            .animation(.spring(response: 0.28, dampingFraction: 0.88), value: queuedDraftCount > 0)
         }
-    }
-
-    private var contextCluster: some View {
-        TurnComposerCollapsibleContextCluster(
-            isEmptyThread: isEmptyThread,
-            hasWorkingDirectory: hasWorkingDirectory,
-            isWorktreeProject: isWorktreeProject,
-            showsGitBranchSelector: showsGitBranchSelector,
-            isGitBranchSelectorEnabled: isGitBranchSelectorEnabled,
-            availableGitBranchTargets: availableGitBranchTargets,
-            gitBranchesCheckedOutElsewhere: gitBranchesCheckedOutElsewhere,
-            gitWorktreePathsByBranch: gitWorktreePathsByBranch,
-            selectedGitBaseBranch: selectedGitBaseBranch,
-            currentGitBranch: currentGitBranch,
-            gitDefaultBranch: gitDefaultBranch,
-            isLoadingGitBranchTargets: isLoadingGitBranchTargets,
-            isSwitchingGitBranch: isSwitchingGitBranch,
-            isCreatingGitWorktree: isCreatingGitWorktree,
-            onSelectGitBranch: onSelectGitBranch,
-            onCreateGitBranch: onCreateGitBranch,
-            onSelectGitBaseBranch: onSelectGitBaseBranch,
-            onRefreshGitBranches: onRefreshGitBranches,
-            canHandOffToWorktree: canHandOffToWorktree,
-            onTapCreateWorktree: onTapCreateWorktree
-        )
+        .scrollBounceBehavior(.basedOnSize)
+        // Let the capsules' glass shadows breathe past the scroll bounds.
+        .scrollClipDisabled()
+        // The expanded pills must overlay the ScrollView from OUTSIDE: content
+        // floating above a UIScrollView's bounds renders with clipping off but
+        // never receives touches, so hosting the column inside the carousel
+        // left "main"/"Local" visible yet dead to taps.
+        .overlay(alignment: .bottomLeading) {
+            if isContextClusterExpanded {
+                TurnComposerContextClusterFloatingColumn(
+                    isEmptyThread: isEmptyThread,
+                    hasWorkingDirectory: hasWorkingDirectory,
+                    isWorktreeProject: isWorktreeProject,
+                    gitState: gitState,
+                    gitActions: gitActions
+                )
+                .transition(.contextClusterReveal)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .animation(.spring(response: 0.28, dampingFraction: 0.88), value: activeFileChangeStatus)
+        .animation(.spring(response: 0.28, dampingFraction: 0.88), value: queuedDraftCount > 0)
     }
 }
