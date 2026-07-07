@@ -597,6 +597,11 @@ final class TurnViewModel {
         resetSkillAutocompleteState()
         resetPluginAutocompleteState()
         resetSlashCommandState(clearPendingSelection: true, clearConfirmedSelection: true)
+        for task in attachmentLoadTasks.values {
+            task.cancel()
+        }
+        attachmentLoadTasks.removeAll()
+        detachedAttachmentLoadIDs.removeAll()
         isSubagentsSelectionArmed = false
         input = ""
         composerAttachments.removeAll()
@@ -618,6 +623,10 @@ final class TurnViewModel {
         )
     }
 
+    private var hasLoadingComposerAttachments: Bool {
+        composerAttachments.contains { $0.state == .loading }
+    }
+
     // Saves the current composer as a per-thread draft; empty composers remove stale draft state.
     func saveLocalDraft(
         codex: CodexService,
@@ -633,10 +642,11 @@ final class TurnViewModel {
             return
         }
 
+        let shouldAdvanceMergeRevision = advancesAttachmentMergeRevision && !hasLoadingComposerAttachments
         codex.setComposerDraft(
             draft.isEmpty ? nil : draft,
             for: threadID,
-            advancesAttachmentMergeRevision: advancesAttachmentMergeRevision
+            advancesAttachmentMergeRevision: shouldAdvanceMergeRevision
         )
         if persistToDisk {
             flushLocalDraftPersistence(codex: codex)
@@ -665,6 +675,7 @@ final class TurnViewModel {
     }
 
     func restoreSavedLocalDraftIfNeeded(codex: CodexService, threadID: String) {
+        reattachVisibleAttachmentLoads()
         guard let draft = codex.composerDraft(for: threadID),
               canRestoreSavedLocalDraft(draft),
               !draft.isEmpty else {
@@ -672,6 +683,13 @@ final class TurnViewModel {
         }
 
         restoreComposerState(from: draft)
+    }
+
+    private func reattachVisibleAttachmentLoads() {
+        let visibleLoadingAttachmentIDs = Set(composerAttachments.compactMap { attachment -> String? in
+            attachment.state == .loading ? attachment.id : nil
+        })
+        detachedAttachmentLoadIDs.subtract(visibleLoadingAttachmentIDs)
     }
 
     private func canRestoreSavedLocalDraft(_ draft: TurnComposerLocalDraft) -> Bool {
@@ -814,6 +832,9 @@ final class TurnViewModel {
     }
 
     func removeComposerAttachment(id: String) {
+        attachmentLoadTasks[id]?.cancel()
+        attachmentLoadTasks[id] = nil
+        detachedAttachmentLoadIDs.remove(id)
         composerAttachments.removeAll(where: { $0.id == id })
     }
 
@@ -1372,6 +1393,7 @@ final class TurnViewModel {
         }
         saveLocalDraft(codex: codex, threadID: threadID)
         let expectedDraftMergeRevision = codex.composerDraftMergeRevision(for: threadID)
+        let attachmentOrder = composerAttachments.map(\.id)
 
         for job in attachmentJobs {
             attachmentLoadTasks[job.id] = Task { @MainActor [weak self] in
@@ -1382,6 +1404,7 @@ final class TurnViewModel {
                     id: job.id,
                     viewModel: self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
+                    attachmentOrder: attachmentOrder,
                     codex: codex,
                     threadID: threadID
                 )
@@ -1420,6 +1443,7 @@ final class TurnViewModel {
         }
         saveLocalDraft(codex: codex, threadID: threadID)
         let expectedDraftMergeRevision = codex.composerDraftMergeRevision(for: threadID)
+        let attachmentOrder = composerAttachments.map(\.id)
 
         for job in attachmentJobs {
             attachmentLoadTasks[job.id] = Task { @MainActor [weak self] in
@@ -1430,6 +1454,7 @@ final class TurnViewModel {
                     id: job.id,
                     viewModel: self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
+                    attachmentOrder: attachmentOrder,
                     codex: codex,
                     threadID: threadID
                 )
@@ -1463,6 +1488,7 @@ final class TurnViewModel {
         id attachmentID: String,
         viewModel: TurnViewModel?,
         expectedDraftMergeRevision: Int,
+        attachmentOrder: [String] = [],
         codex: CodexService,
         threadID: String
     ) {
@@ -1472,6 +1498,7 @@ final class TurnViewModel {
                     state,
                     id: attachmentID,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
+                    attachmentOrder: attachmentOrder,
                     codex: codex,
                     threadID: threadID
                 )
@@ -1494,17 +1521,19 @@ final class TurnViewModel {
             state,
             id: attachmentID,
             expectedDraftMergeRevision: expectedDraftMergeRevision,
+            attachmentOrder: attachmentOrder,
             codex: codex,
             threadID: threadID
         )
     }
 
-    // The draft snapshot saved on disappear only keeps .ready attachments, so an image
-    // that finished decoding after navigation must merge only if the draft is unchanged.
+    // The draft snapshot saved on disappear only keeps .ready attachments, so a late
+    // decode merges only while the pending loading attachment has not been removed.
     private static func mergeDecodedAttachmentIntoSavedDraft(
         _ state: TurnComposerImageAttachmentState,
         id attachmentID: String,
         expectedDraftMergeRevision: Int,
+        attachmentOrder: [String],
         codex: CodexService,
         threadID: String
     ) {
@@ -1514,6 +1543,7 @@ final class TurnViewModel {
         var attachments = existing?.attachments ?? []
         guard !attachments.contains(where: { $0.id == attachmentID }) else { return }
         attachments.append(TurnComposerImageAttachment(id: attachmentID, state: state))
+        attachments = orderedDraftAttachments(attachments, attachmentOrder: attachmentOrder)
 
         let merged = TurnComposerLocalDraft(
             input: existing?.input ?? "",
@@ -1532,6 +1562,31 @@ final class TurnViewModel {
             persistToDisk: true,
             advancesAttachmentMergeRevision: false
         )
+    }
+
+    private static func orderedDraftAttachments(
+        _ attachments: [TurnComposerImageAttachment],
+        attachmentOrder: [String]
+    ) -> [TurnComposerImageAttachment] {
+        guard !attachmentOrder.isEmpty else {
+            return attachments
+        }
+
+        var orderByID: [String: Int] = [:]
+        for (index, id) in attachmentOrder.enumerated() where orderByID[id] == nil {
+            orderByID[id] = index
+        }
+
+        return attachments.enumerated()
+            .sorted { lhs, rhs in
+                let lhsOrder = orderByID[lhs.element.id] ?? Int.max
+                let rhsOrder = orderByID[rhs.element.id] ?? Int.max
+                if lhsOrder != rhsOrder {
+                    return lhsOrder < rhsOrder
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
     }
 
     // Sends a composer payload, queueing follow-ups while the current run is still active.

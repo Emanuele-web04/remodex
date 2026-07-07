@@ -423,6 +423,151 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertFalse(viewModel.hasBlockingAttachmentState)
     }
 
+    func testReappearedDetachedAttachmentLoadUpdatesLiveTile() {
+        let service = makeService()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+        let viewModel = TurnViewModel()
+        viewModel.input = "Use this image"
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-reappeared", state: .loading)
+        ]
+
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-reappeared-attachment")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-reappeared-attachment")
+        viewModel.saveLifecycleLocalDraft(codex: service, threadID: "thread-reappeared-attachment")
+        viewModel.cancelTransientTasks()
+        viewModel.restoreSavedLocalDraftIfNeeded(codex: service, threadID: "thread-reappeared-attachment")
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-reappeared",
+            viewModel: viewModel,
+            expectedDraftMergeRevision: expectedRevision,
+            attachmentOrder: ["attachment-reappeared"],
+            codex: service,
+            threadID: "thread-reappeared-attachment"
+        )
+
+        XCTAssertEqual(viewModel.composerAttachments, [
+            TurnComposerImageAttachment(id: "attachment-reappeared", state: .ready(attachment))
+        ])
+        XCTAssertEqual(service.composerDraft(for: "thread-reappeared-attachment")?.attachments, [
+            TurnComposerImageAttachment(id: "attachment-reappeared", state: .ready(attachment))
+        ])
+        XCTAssertFalse(viewModel.hasBlockingAttachmentState)
+    }
+
+    func testDetachedAttachmentLoadPreservesSelectedOrder() {
+        let service = makeService()
+        let firstAttachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "first-thumb",
+            payloadDataURL: "data:image/jpeg;base64,FIRST"
+        )
+        let secondAttachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "second-thumb",
+            payloadDataURL: "data:image/jpeg;base64,SECOND"
+        )
+        let viewModel = TurnViewModel()
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-first", state: .loading),
+            TurnComposerImageAttachment(id: "attachment-second", state: .loading),
+        ]
+
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-ordered-attachments")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-ordered-attachments")
+        let attachmentOrder = ["attachment-first", "attachment-second"]
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(secondAttachment),
+            id: "attachment-second",
+            viewModel: nil,
+            expectedDraftMergeRevision: expectedRevision,
+            attachmentOrder: attachmentOrder,
+            codex: service,
+            threadID: "thread-ordered-attachments"
+        )
+        TurnViewModel.completeAttachmentLoad(
+            .ready(firstAttachment),
+            id: "attachment-first",
+            viewModel: nil,
+            expectedDraftMergeRevision: expectedRevision,
+            attachmentOrder: attachmentOrder,
+            codex: service,
+            threadID: "thread-ordered-attachments"
+        )
+
+        XCTAssertEqual(service.composerDraft(for: "thread-ordered-attachments")?.attachments, [
+            TurnComposerImageAttachment(id: "attachment-first", state: .ready(firstAttachment)),
+            TurnComposerImageAttachment(id: "attachment-second", state: .ready(secondAttachment)),
+        ])
+    }
+
+    func testDraftEditsDoNotBlockPendingAttachmentMerge() {
+        let service = makeService()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+        let viewModel = TurnViewModel()
+        viewModel.input = "Describe this"
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-edited", state: .loading)
+        ]
+
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-edited-attachment")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-edited-attachment")
+        viewModel.input = "Describe this in detail"
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-edited-attachment")
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-edited",
+            viewModel: nil,
+            expectedDraftMergeRevision: expectedRevision,
+            attachmentOrder: ["attachment-edited"],
+            codex: service,
+            threadID: "thread-edited-attachment"
+        )
+
+        XCTAssertEqual(service.composerDraftMergeRevision(for: "thread-edited-attachment"), expectedRevision)
+        XCTAssertEqual(service.composerDraft(for: "thread-edited-attachment")?.input, "Describe this in detail")
+        XCTAssertEqual(service.composerDraft(for: "thread-edited-attachment")?.attachments, [
+            TurnComposerImageAttachment(id: "attachment-edited", state: .ready(attachment))
+        ])
+    }
+
+    func testRemovedPendingAttachmentDoesNotMergeAfterLateCompletion() {
+        let service = makeService()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+        let viewModel = TurnViewModel()
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-removed", state: .loading)
+        ]
+
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-removed-attachment")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-removed-attachment")
+        viewModel.removeComposerAttachment(id: "attachment-removed")
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-removed-attachment")
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-removed",
+            viewModel: nil,
+            expectedDraftMergeRevision: expectedRevision,
+            attachmentOrder: ["attachment-removed"],
+            codex: service,
+            threadID: "thread-removed-attachment"
+        )
+
+        XCTAssertNil(service.composerDraft(for: "thread-removed-attachment"))
+    }
+
     func testDetachedPastedAttachmentLoadFinishesIntoSavedDraft() async {
         let service = makeService()
         let viewModel = TurnViewModel()
