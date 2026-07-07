@@ -377,6 +377,7 @@ final class TurnViewModel {
     @ObservationIgnored private var localDraftPersistenceDebounceTask: Task<Void, Never>?
     @ObservationIgnored var gitStatusRefreshTask: Task<Void, Never>?
     @ObservationIgnored private var attachmentLoadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var detachedAttachmentLoadIDs: Set<String> = []
     @ObservationIgnored var pendingGitBranchOperation: GitBranchUserOperation?
     @ObservationIgnored var pendingGitWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?
     @ObservationIgnored var pendingManagedGitWorktreeOpenHandler: ((GitCreateManagedWorktreeResult) -> Void)?
@@ -430,9 +431,14 @@ final class TurnViewModel {
         localDraftPersistenceDebounceTask = nil
         gitStatusRefreshTask?.cancel()
         gitStatusRefreshTask = nil
-        // View-scoped attachment decode Tasks: cancel and drop so a torn-down view model
-        // never mutates composerAttachments after the view disappears.
-        for task in attachmentLoadTasks.values { task.cancel() }
+        // Detached attachment loads may still finish into the saved draft, but must not
+        // mutate this view model after the view disappears.
+        let loadingAttachmentIDs = composerAttachments.compactMap { attachment -> String? in
+            guard attachment.state == .loading else { return nil }
+            return attachment.id
+        }
+        detachedAttachmentLoadIDs.formUnion(attachmentLoadTasks.keys)
+        detachedAttachmentLoadIDs.formUnion(loadingAttachmentIDs)
         attachmentLoadTasks.removeAll()
     }
 
@@ -1323,7 +1329,7 @@ final class TurnViewModel {
                 Self.completeAttachmentLoad(
                     state,
                     id: job.id,
-                    viewModel: self,
+                    viewModel: Task.isCancelled ? nil : self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
                     codex: codex,
                     threadID: threadID
@@ -1370,7 +1376,7 @@ final class TurnViewModel {
                 Self.completeAttachmentLoad(
                     state,
                     id: job.id,
-                    viewModel: self,
+                    viewModel: Task.isCancelled ? nil : self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
                     codex: codex,
                     threadID: threadID
@@ -1409,6 +1415,16 @@ final class TurnViewModel {
         threadID: String
     ) {
         if let viewModel {
+            if viewModel.detachedAttachmentLoadIDs.remove(attachmentID) != nil {
+                mergeDecodedAttachmentIntoSavedDraft(
+                    state,
+                    id: attachmentID,
+                    expectedDraftMergeRevision: expectedDraftMergeRevision,
+                    codex: codex,
+                    threadID: threadID
+                )
+                return
+            }
             defer { viewModel.attachmentLoadTasks[attachmentID] = nil }
             guard viewModel.composerAttachments.contains(where: { $0.id == attachmentID }) else {
                 return

@@ -380,6 +380,39 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         ])
     }
 
+    func testDetachedAttachmentLoadMergesWithoutMutatingDisappearedView() {
+        let service = makeService()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+        let viewModel = TurnViewModel()
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-detached", state: .loading)
+        ]
+
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-detached-attachment")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-detached-attachment")
+        viewModel.saveLifecycleLocalDraft(codex: service, threadID: "thread-detached-attachment")
+        viewModel.cancelTransientTasks()
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-detached",
+            viewModel: viewModel,
+            expectedDraftMergeRevision: expectedRevision,
+            codex: service,
+            threadID: "thread-detached-attachment"
+        )
+
+        XCTAssertEqual(viewModel.composerAttachments, [
+            TurnComposerImageAttachment(id: "attachment-detached", state: .loading)
+        ])
+        XCTAssertEqual(service.composerDraft(for: "thread-detached-attachment")?.attachments, [
+            TurnComposerImageAttachment(id: "attachment-detached", state: .ready(attachment))
+        ])
+    }
+
     func testLocalDraftSurvivesFailedSend() async {
         let service = makeService()
         service.isConnected = true
