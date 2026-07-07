@@ -1331,7 +1331,7 @@ final class TurnViewModel {
             composerAttachments.append(TurnComposerImageAttachment(id: attachmentID, state: .loading))
 
             attachmentLoadTasks[attachmentID] = Task { @MainActor [weak self] in
-                let state = Self.loadComposerAttachmentState(fromData: imageData)
+                let state = await Self.loadComposerAttachmentState(fromData: imageData)
                 guard let self, !Task.isCancelled else { return }
                 self.updateComposerAttachment(id: attachmentID, state: state, codex: codex, threadID: threadID)
                 self.attachmentLoadTasks[attachmentID] = nil
@@ -1915,19 +1915,21 @@ final class TurnViewModel {
         }
     }
 
-    private static func loadComposerAttachmentState(from item: PhotosPickerItem) async -> TurnComposerImageAttachmentState {
+    // Nonisolated so decode/resize/encode run on the global executor, not the main actor:
+    // callers await from @MainActor tasks and only the UI update hops back to main.
+    private nonisolated static func loadComposerAttachmentState(from item: PhotosPickerItem) async -> TurnComposerImageAttachmentState {
         do {
             guard let data = try await item.loadTransferable(type: Data.self),
                   !data.isEmpty else {
                 return .failed
             }
-            return loadComposerAttachmentState(fromData: data)
+            return await loadComposerAttachmentState(fromData: data)
         } catch {
             return .failed
         }
     }
 
-    private static func loadComposerAttachmentState(fromData data: Data) -> TurnComposerImageAttachmentState {
+    private nonisolated static func loadComposerAttachmentState(fromData data: Data) async -> TurnComposerImageAttachmentState {
         guard let attachment = TurnAttachmentPipeline.makeAttachment(from: data) else {
             return .failed
         }
