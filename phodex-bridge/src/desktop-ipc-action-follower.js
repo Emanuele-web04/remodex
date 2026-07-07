@@ -32,6 +32,9 @@ const MAX_BASELINE_RECOVERY_ATTEMPTS = 5;
 const BASELINE_RECOVERY_BASE_DELAY_MS = 1_000;
 const BASELINE_RECOVERY_MAX_DELAY_MS = 15_000;
 const MAX_QUEUED_CHANGES_PER_THREAD = 300;
+// Phone interest survives per-thread release by design, so cap the set to keep a
+// marathon single Desktop connection from accumulating every thread id forever.
+const MAX_ACTIVE_THREAD_IDS = 512;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const DESKTOP_STATE_READ_METHODS = new Set(["thread/read", "thread/resume", "thread/turns/list"]);
@@ -98,6 +101,18 @@ function createDesktopIpcActionFollower({
   const conversationProjector = createDesktopConversationProjector({ now });
   const pendingRoutesByRequestId = new Map();
   const activeThreadIds = new Set();
+  // JS Set preserves insertion order, so the oldest entry is always
+  // `activeThreadIds.values().next().value`, giving cheap FIFO eviction.
+  function rememberActiveThread(threadId) {
+    activeThreadIds.add(threadId);
+    while (activeThreadIds.size > MAX_ACTIVE_THREAD_IDS) {
+      const oldest = activeThreadIds.values().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      activeThreadIds.delete(oldest);
+    }
+  }
   const recoveringThreadIds = new Set();
   const queuedChangesByThreadId = new Map();
   const baselineRecoveryStateByThreadId = new Map();
@@ -143,7 +158,7 @@ function createDesktopIpcActionFollower({
       return false;
     }
 
-    activeThreadIds.add(threadId);
+    rememberActiveThread(threadId);
     if (!rawStatesByThreadId.has(threadId)
       && !liveOwnerThreadIds.has(threadId)
       && !isLocallyOwnedThread(threadId)) {
@@ -271,6 +286,12 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
+    // Unlike a per-thread release, a full Desktop disconnect is a natural
+    // boundary for phone interest too: reconnect snapshots re-populate
+    // activeThreadIds via fresh reads, so there is nothing to lose by clearing
+    // it here, and doing so keeps a marathon connection from accumulating
+    // every thread id ever observed.
+    activeThreadIds.clear();
     // Keep pending approval routes too: a transient disconnect proves nothing
     // about the prompt's outcome, and falsely resolving it would dismiss a
     // still-blocking approval on the phone. Reconnect snapshots reconcile them.
@@ -554,7 +575,7 @@ function createDesktopIpcActionFollower({
       return false;
     }
 
-    activeThreadIds.add(threadId);
+    rememberActiveThread(threadId);
     const thread = projectDesktopConversationStateToThread(threadId, rawState, { now });
     // A run that Desktop stopped streaming updates for is not a live run: serving
     // it from cache would answer thread-list refreshes with a phantom "running"

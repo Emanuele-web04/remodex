@@ -3385,6 +3385,155 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
   assert.equal(outbound.some((message) => message.id === "read-idle"), true);
 });
 
+test("desktop IPC follower drops phone interest in a thread after a full Desktop disconnect", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-active-thread-disconnect-");
+  const serverFrames = [];
+  const localForwards = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    forwardToLocalCodex(rawMessage) {
+      localForwards.push(JSON.parse(rawMessage));
+    },
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-interest-disconnect" },
+  }));
+  await waitFor(() => serverSocket);
+
+  // Before any disconnect, phone interest plus a live ownership probe window
+  // means a quick turn/start is held rather than treated as unroutable.
+  const heldBeforeDisconnect = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-before-disconnect",
+    method: "turn/start",
+    params: {
+      threadId: "thread-interest-disconnect",
+      input: [{ type: "input_text", text: "before disconnect" }],
+    },
+  }));
+  assert.equal(heldBeforeDisconnect, true);
+
+  serverSocket.destroy();
+  await wait(25);
+  const framesBeforeSecondTurn = serverFrames.length;
+
+  // No fresh thread/read has happened since the disconnect, so a full Desktop
+  // disconnect must have dropped phone interest in this thread: the same
+  // ownership-probe window (still unexpired) must no longer hold the turn.
+  const handledAfterDisconnect = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-after-disconnect",
+    method: "turn/start",
+    params: {
+      threadId: "thread-interest-disconnect",
+      input: [{ type: "input_text", text: "after disconnect" }],
+    },
+  }));
+  assert.equal(handledAfterDisconnect, false);
+  assert.equal(
+    serverFrames.slice(framesBeforeSecondTurn).some((frame) => frame.type === "client-discovery-request"),
+    false
+  );
+});
+
+test("desktop IPC follower caps activeThreadIds so a marathon connection cannot grow it forever", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-active-thread-cap-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse() {},
+    forwardToLocalCodex() {},
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 10_000,
+  });
+  t.after(() => follower.stopAll());
+
+  const oldestThreadId = "thread-cap-0";
+  // MAX_ACTIVE_THREAD_IDS is 512: one more distinct thread than the cap must
+  // evict the oldest entry (FIFO, since Set preserves insertion order).
+  const totalThreads = 513;
+  for (let i = 0; i < totalThreads; i += 1) {
+    follower.observeInbound(JSON.stringify({
+      method: "thread/resume",
+      params: { threadId: `thread-cap-${i}` },
+    }));
+  }
+  await waitFor(() => serverSocket);
+
+  const heldOldest = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-cap-oldest",
+    method: "turn/start",
+    params: {
+      threadId: oldestThreadId,
+      input: [{ type: "input_text", text: "oldest thread" }],
+    },
+  }));
+  assert.equal(heldOldest, false, "the oldest thread id should have been evicted once the cap was exceeded");
+
+  const newestThreadId = `thread-cap-${totalThreads - 1}`;
+  const heldNewest = follower.observeInbound(JSON.stringify({
+    id: "phone-turn-cap-newest",
+    method: "turn/start",
+    params: {
+      threadId: newestThreadId,
+      input: [{ type: "input_text", text: "newest thread" }],
+    },
+  }));
+  assert.equal(heldNewest, true, "the most recently observed thread id should still be treated as active");
+});
+
 function attachFrameReader(socket, onFrame) {
   let buffer = Buffer.alloc(0);
   socket.on("data", (chunk) => {
