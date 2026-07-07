@@ -346,6 +346,40 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertNil(service.composerDraft(for: "thread-stale-attachment"))
     }
 
+    func testLifecycleDraftSaveDoesNotBlockLateAttachmentMerge() {
+        let service = makeService()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+        let viewModel = TurnViewModel()
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-navigation", state: .loading)
+        ]
+
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-navigation-attachment")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-navigation-attachment")
+        viewModel.saveLifecycleLocalDraft(codex: service, threadID: "thread-navigation-attachment")
+
+        XCTAssertEqual(
+            service.composerDraftMergeRevision(for: "thread-navigation-attachment"),
+            expectedRevision
+        )
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-navigation",
+            viewModel: nil,
+            expectedDraftMergeRevision: expectedRevision,
+            codex: service,
+            threadID: "thread-navigation-attachment"
+        )
+
+        XCTAssertEqual(service.composerDraft(for: "thread-navigation-attachment")?.attachments, [
+            TurnComposerImageAttachment(id: "attachment-navigation", state: .ready(attachment))
+        ])
+    }
+
     func testLocalDraftSurvivesFailedSend() async {
         let service = makeService()
         service.isConnected = true

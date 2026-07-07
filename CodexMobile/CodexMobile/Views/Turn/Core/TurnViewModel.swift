@@ -639,6 +639,16 @@ final class TurnViewModel {
         }
     }
 
+    // Lifecycle saves are persistence checkpoints, not user edits that should invalidate pending decodes.
+    func saveLifecycleLocalDraft(codex: CodexService, threadID: String) {
+        saveLocalDraft(
+            codex: codex,
+            threadID: threadID,
+            persistToDisk: true,
+            advancesAttachmentMergeRevision: false
+        )
+    }
+
     func clearLocalDraft(codex: CodexService, threadID: String, persistToDisk: Bool = false) {
         codex.setComposerDraft(nil, for: threadID)
         if persistToDisk {
