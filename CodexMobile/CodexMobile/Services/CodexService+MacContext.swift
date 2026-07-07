@@ -62,6 +62,7 @@ extension CodexService {
                 macDeviceId: normalizedMacDeviceId,
                 includeLegacyFallback: includeLegacyFallback
             )
+            composerDraftMergeEpoch += 1
             composerDraftMergeRevisionByThreadID = [:]
             messageRevisionByThread = Dictionary(uniqueKeysWithValues: loadedMessages.keys.map { ($0, 0) })
             messageIndexCacheByThread.removeAll()
@@ -245,6 +246,7 @@ extension CodexService {
             activeTurnIdByThread.removeAll()
             messagesByThread.removeAll()
             composerDraftsByThreadID.removeAll()
+            composerDraftMergeEpoch += 1
             composerDraftMergeRevisionByThreadID.removeAll()
             messageRevisionByThread.removeAll()
             threadIdByTurnID.removeAll()

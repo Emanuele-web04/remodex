@@ -1393,6 +1393,7 @@ final class TurnViewModel {
         }
         saveLocalDraft(codex: codex, threadID: threadID)
         let expectedDraftMergeRevision = codex.composerDraftMergeRevision(for: threadID)
+        let expectedDraftMergeEpoch = codex.composerDraftMergeEpoch
         let attachmentOrder = composerAttachments.map(\.id)
 
         for job in attachmentJobs {
@@ -1404,6 +1405,7 @@ final class TurnViewModel {
                     id: job.id,
                     viewModel: self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
+                    expectedDraftMergeEpoch: expectedDraftMergeEpoch,
                     attachmentOrder: attachmentOrder,
                     codex: codex,
                     threadID: threadID
@@ -1443,6 +1445,7 @@ final class TurnViewModel {
         }
         saveLocalDraft(codex: codex, threadID: threadID)
         let expectedDraftMergeRevision = codex.composerDraftMergeRevision(for: threadID)
+        let expectedDraftMergeEpoch = codex.composerDraftMergeEpoch
         let attachmentOrder = composerAttachments.map(\.id)
 
         for job in attachmentJobs {
@@ -1454,6 +1457,7 @@ final class TurnViewModel {
                     id: job.id,
                     viewModel: self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
+                    expectedDraftMergeEpoch: expectedDraftMergeEpoch,
                     attachmentOrder: attachmentOrder,
                     codex: codex,
                     threadID: threadID
@@ -1482,16 +1486,22 @@ final class TurnViewModel {
         )
     }
 
-    // Routes a finished decode into a surviving tile, or into the saved draft if the draft did not change.
+    // Routes a finished decode into a surviving tile, or into the saved draft if it is still merge-safe.
     static func completeAttachmentLoad(
         _ state: TurnComposerImageAttachmentState,
         id attachmentID: String,
         viewModel: TurnViewModel?,
         expectedDraftMergeRevision: Int,
+        expectedDraftMergeEpoch: Int = 0,
         attachmentOrder: [String] = [],
         codex: CodexService,
         threadID: String
     ) {
+        guard codex.composerDraftMergeEpoch == expectedDraftMergeEpoch else {
+            viewModel?.attachmentLoadTasks[attachmentID] = nil
+            return
+        }
+
         if let viewModel {
             if viewModel.detachedAttachmentLoadIDs.remove(attachmentID) != nil {
                 if state == .failed,
@@ -1509,6 +1519,7 @@ final class TurnViewModel {
                     state,
                     id: attachmentID,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
+                    expectedDraftMergeEpoch: expectedDraftMergeEpoch,
                     attachmentOrder: attachmentOrder,
                     codex: codex,
                     threadID: threadID
@@ -1532,23 +1543,26 @@ final class TurnViewModel {
             state,
             id: attachmentID,
             expectedDraftMergeRevision: expectedDraftMergeRevision,
+            expectedDraftMergeEpoch: expectedDraftMergeEpoch,
             attachmentOrder: attachmentOrder,
             codex: codex,
             threadID: threadID
         )
     }
 
-    // The draft snapshot saved on disappear only keeps .ready attachments, so a late
-    // decode merges only while the pending loading attachment has not been removed.
+    // The draft snapshot saved on disappear only keeps .ready attachments, so a late decode
+    // merges only while the pending loading attachment and Mac-scoped draft storage still match.
     private static func mergeDecodedAttachmentIntoSavedDraft(
         _ state: TurnComposerImageAttachmentState,
         id attachmentID: String,
         expectedDraftMergeRevision: Int,
+        expectedDraftMergeEpoch: Int,
         attachmentOrder: [String],
         codex: CodexService,
         threadID: String
     ) {
         guard case .ready = state else { return }
+        guard codex.composerDraftMergeEpoch == expectedDraftMergeEpoch else { return }
         guard codex.composerDraftMergeRevision(for: threadID) == expectedDraftMergeRevision else { return }
         let existing = codex.composerDraft(for: threadID)
         var attachments = existing?.attachments ?? []

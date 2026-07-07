@@ -346,6 +346,40 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertNil(service.composerDraft(for: "thread-stale-attachment"))
     }
 
+    func testLateAttachmentLoadDoesNotMergeAfterMacScopedDraftsReset() {
+        let service = makeService()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+        let viewModel = TurnViewModel()
+        let threadID = "thread-mac-scope-attachment"
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-mac-scope", state: .loading)
+        ]
+        viewModel.saveLocalDraft(codex: service, threadID: threadID)
+
+        let expectedRevision = service.composerDraftMergeRevision(for: threadID)
+        let expectedEpoch = service.composerDraftMergeEpoch
+        service.clearInMemoryMacScopedState()
+
+        XCTAssertEqual(service.composerDraftMergeRevision(for: threadID), expectedRevision)
+        XCTAssertNotEqual(service.composerDraftMergeEpoch, expectedEpoch)
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-mac-scope",
+            viewModel: nil,
+            expectedDraftMergeRevision: expectedRevision,
+            expectedDraftMergeEpoch: expectedEpoch,
+            attachmentOrder: ["attachment-mac-scope"],
+            codex: service,
+            threadID: threadID
+        )
+
+        XCTAssertNil(service.composerDraft(for: threadID))
+    }
+
     func testLifecycleDraftSaveDoesNotBlockLateAttachmentMerge() {
         let service = makeService()
         let attachment = CodexImageAttachment(
