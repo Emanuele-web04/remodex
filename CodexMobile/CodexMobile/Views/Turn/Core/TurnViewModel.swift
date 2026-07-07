@@ -376,6 +376,7 @@ final class TurnViewModel {
     @ObservationIgnored var pluginAutocompleteDebounceTask: Task<Void, Never>?
     @ObservationIgnored private var localDraftPersistenceDebounceTask: Task<Void, Never>?
     @ObservationIgnored var gitStatusRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private var attachmentLoadTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var pendingGitBranchOperation: GitBranchUserOperation?
     @ObservationIgnored var pendingGitWorktreeOpenHandler: ((GitCreateWorktreeResult) -> Void)?
     @ObservationIgnored var pendingManagedGitWorktreeOpenHandler: ((GitCreateManagedWorktreeResult) -> Void)?
@@ -429,6 +430,10 @@ final class TurnViewModel {
         localDraftPersistenceDebounceTask = nil
         gitStatusRefreshTask?.cancel()
         gitStatusRefreshTask = nil
+        // View-scoped attachment decode Tasks: cancel and drop so a torn-down view model
+        // never mutates composerAttachments after the view disappears.
+        for task in attachmentLoadTasks.values { task.cancel() }
+        attachmentLoadTasks.removeAll()
     }
 
     func activateThread(threadID: String, codex: CodexService, onComplete: @escaping () -> Void) {
@@ -1288,11 +1293,11 @@ final class TurnViewModel {
             let attachmentID = UUID().uuidString
             composerAttachments.append(TurnComposerImageAttachment(id: attachmentID, state: .loading))
 
-            Task {
+            attachmentLoadTasks[attachmentID] = Task { @MainActor [weak self] in
                 let state = await Self.loadComposerAttachmentState(from: item)
-                await MainActor.run {
-                    self.updateComposerAttachment(id: attachmentID, state: state, codex: codex, threadID: threadID)
-                }
+                guard let self, !Task.isCancelled else { return }
+                self.updateComposerAttachment(id: attachmentID, state: state, codex: codex, threadID: threadID)
+                self.attachmentLoadTasks[attachmentID] = nil
             }
         }
         saveLocalDraft(codex: codex, threadID: threadID)
@@ -1325,11 +1330,11 @@ final class TurnViewModel {
             let attachmentID = UUID().uuidString
             composerAttachments.append(TurnComposerImageAttachment(id: attachmentID, state: .loading))
 
-            Task {
+            attachmentLoadTasks[attachmentID] = Task { @MainActor [weak self] in
                 let state = Self.loadComposerAttachmentState(fromData: imageData)
-                await MainActor.run {
-                    self.updateComposerAttachment(id: attachmentID, state: state, codex: codex, threadID: threadID)
-                }
+                guard let self, !Task.isCancelled else { return }
+                self.updateComposerAttachment(id: attachmentID, state: state, codex: codex, threadID: threadID)
+                self.attachmentLoadTasks[attachmentID] = nil
             }
         }
         saveLocalDraft(codex: codex, threadID: threadID)
