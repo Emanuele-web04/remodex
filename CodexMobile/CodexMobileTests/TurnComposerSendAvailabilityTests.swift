@@ -387,6 +387,7 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
             payloadDataURL: "data:image/jpeg;base64,AAAA"
         )
         let viewModel = TurnViewModel()
+        viewModel.input = "Use this image"
         viewModel.composerAttachments = [
             TurnComposerImageAttachment(id: "attachment-detached", state: .loading)
         ]
@@ -408,9 +409,18 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertEqual(viewModel.composerAttachments, [
             TurnComposerImageAttachment(id: "attachment-detached", state: .loading)
         ])
+        XCTAssertEqual(viewModel.input, "Use this image")
         XCTAssertEqual(service.composerDraft(for: "thread-detached-attachment")?.attachments, [
             TurnComposerImageAttachment(id: "attachment-detached", state: .ready(attachment))
         ])
+
+        viewModel.restoreSavedLocalDraftIfNeeded(codex: service, threadID: "thread-detached-attachment")
+
+        XCTAssertEqual(viewModel.input, "Use this image")
+        XCTAssertEqual(viewModel.composerAttachments, [
+            TurnComposerImageAttachment(id: "attachment-detached", state: .ready(attachment))
+        ])
+        XCTAssertFalse(viewModel.hasBlockingAttachmentState)
     }
 
     func testDetachedPastedAttachmentLoadFinishesIntoSavedDraft() async {

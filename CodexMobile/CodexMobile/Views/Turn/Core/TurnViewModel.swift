@@ -665,13 +665,63 @@ final class TurnViewModel {
     }
 
     func restoreSavedLocalDraftIfNeeded(codex: CodexService, threadID: String) {
-        guard !hasComposerDraftContent,
-              let draft = codex.composerDraft(for: threadID),
+        guard let draft = codex.composerDraft(for: threadID),
+              canRestoreSavedLocalDraft(draft),
               !draft.isEmpty else {
             return
         }
 
         restoreComposerState(from: draft)
+    }
+
+    private func canRestoreSavedLocalDraft(_ draft: TurnComposerLocalDraft) -> Bool {
+        if !hasComposerDraftContent {
+            return true
+        }
+
+        // Allows onAppear to replace stale loading tiles whose detached decodes reached the saved draft.
+        guard input == draft.input,
+              composerMentionedFiles == draft.mentionedFiles,
+              composerMentionedSkills == draft.mentionedSkills,
+              composerMentionedPlugins == draft.mentionedPlugins,
+              composerReviewSelection == draft.reviewSelection,
+              isPlanModeArmed == draft.isPlanModeArmed,
+              isSubagentsSelectionArmed == draft.isSubagentsSelectionArmed else {
+            return false
+        }
+
+        let readyAttachments = composerAttachments.compactMap { attachment -> TurnComposerImageAttachment? in
+            if case .ready = attachment.state {
+                return attachment
+            }
+            return nil
+        }
+        let loadingAttachmentIDs = Set(composerAttachments.compactMap { attachment -> String? in
+            attachment.state == .loading ? attachment.id : nil
+        })
+        let hasOnlyRestorableAttachmentStates = composerAttachments.allSatisfy { attachment in
+            switch attachment.state {
+            case .loading, .ready:
+                return true
+            case .failed:
+                return false
+            }
+        }
+        var draftAttachmentsByID: [String: TurnComposerImageAttachment] = [:]
+        for attachment in draft.attachments {
+            draftAttachmentsByID[attachment.id] = attachment
+        }
+        let liveAttachmentIDs = Set(composerAttachments.map(\.id))
+        let draftAttachmentIDs = Set(draftAttachmentsByID.keys)
+
+        guard hasOnlyRestorableAttachmentStates,
+              !loadingAttachmentIDs.isEmpty,
+              liveAttachmentIDs.isSubset(of: draftAttachmentIDs),
+              readyAttachments.allSatisfy({ draftAttachmentsByID[$0.id] == $0 }) else {
+            return false
+        }
+
+        return true
     }
 
     // Debounces disk writes so removals and edits update persistence without writing per keystroke.
