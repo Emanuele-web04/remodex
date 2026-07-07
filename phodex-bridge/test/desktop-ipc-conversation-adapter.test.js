@@ -324,6 +324,135 @@ test("conversation adapter streams fileChange output deltas into fileChange item
   assert.equal(item.aggregatedOutput, "diff --git a/a.txt b/a.txt");
 });
 
+test("conversation adapter keeps turnless fileChange events on latest real turn", () => {
+  const threadId = "thread-real-file-change";
+  const conversations = new Map();
+  const owned = new Set([threadId]);
+  const conversation = buildConversationStateFromThread({
+    id: threadId,
+    turns: [{
+      id: "turn-real-file-change",
+      status: "inProgress",
+      items: [{ id: "assistant-real", type: "agentMessage", text: "Working." }],
+    }],
+  });
+  conversations.set(threadId, conversation);
+
+  let update = applyAppServerMessageToConversationState({
+    conversations,
+    shouldOwnThread: (candidateThreadId) => owned.has(candidateThreadId),
+    message: {
+      method: "item/fileChange/outputDelta",
+      params: {
+        threadId,
+        itemId: "streaming-file-change",
+        delta: "diff --git a/Sources/Real.swift",
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId, changed: true });
+
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    shouldOwnThread: (candidateThreadId) => owned.has(candidateThreadId),
+    message: {
+      method: "item/completed",
+      params: {
+        threadId,
+        item: {
+          id: "completed-file-change",
+          type: "fileChange",
+          status: "completed",
+          changes: [{ path: "Sources/Real.swift", kind: "update", additions: 3, deletions: 1 }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId, changed: true });
+
+  const turns = conversations.get(threadId).turns;
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].turnId, "turn-real-file-change");
+  const streamingItem = turns[0].items.find((item) => item.id === "streaming-file-change");
+  assert.equal(streamingItem.type, "fileChange");
+  assert.equal(streamingItem.aggregatedOutput, "diff --git a/Sources/Real.swift");
+  const completedItem = turns[0].items.find((item) => item.id === "completed-file-change");
+  assert.equal(completedItem.type, "fileChange");
+  assert.deepEqual(completedItem.changes, [
+    { path: "Sources/Real.swift", kind: "update", additions: 3, deletions: 1 },
+  ]);
+});
+
+test("conversation adapter keeps turnless fileChange events off optimistic pending turns", () => {
+  const threadId = "thread-pending-file-change";
+  const optimisticTurnId = `remodex-pending-turn:${threadId}:request-2`;
+  const conversations = new Map();
+  const fallbackTurnIdsByThreadId = new Map([[threadId, optimisticTurnId]]);
+  const owned = new Set([threadId]);
+  const conversation = buildConversationStateFromThread({
+    id: threadId,
+    turns: [{
+      id: "turn-previous",
+      status: "completed",
+      items: [{ id: "assistant-previous", type: "agentMessage", text: "Done." }],
+    }],
+  });
+  conversation.turns.push({
+    id: optimisticTurnId,
+    turnId: optimisticTurnId,
+    params: {
+      threadId,
+      input: [{ type: "input_text", text: "follow up" }],
+    },
+    status: "inProgress",
+    items: [],
+    remodexOptimisticPendingTurn: true,
+  });
+  conversations.set(threadId, conversation);
+
+  let update = applyAppServerMessageToConversationState({
+    conversations,
+    fallbackTurnIdsByThreadId,
+    shouldOwnThread: (candidateThreadId) => owned.has(candidateThreadId),
+    message: {
+      method: "item/fileChange/outputDelta",
+      params: {
+        threadId,
+        itemId: "late-file-change-delta",
+        delta: "diff --git a/Sources/Previous.swift",
+      },
+    },
+  });
+  assert.deepEqual(update, { threadId, changed: true });
+
+  update = applyAppServerMessageToConversationState({
+    conversations,
+    fallbackTurnIdsByThreadId,
+    shouldOwnThread: (candidateThreadId) => owned.has(candidateThreadId),
+    message: {
+      method: "item/completed",
+      params: {
+        threadId,
+        item: {
+          id: "late-file-change",
+          type: "fileChange",
+          status: "completed",
+          changes: [{ path: "Sources/Previous.swift", kind: "update", additions: 2, deletions: 1 }],
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(update, { threadId, changed: true });
+  const turns = conversations.get(threadId).turns;
+  assert.equal(turns[0].turnId, "turn-previous");
+  assert.equal(turns[0].items.at(-1).id, "late-file-change");
+  const deltaItem = turns[0].items.find((item) => item.id === "late-file-change-delta");
+  assert.equal(deltaItem.type, "fileChange");
+  assert.equal(deltaItem.aggregatedOutput, "diff --git a/Sources/Previous.swift");
+  assert.deepEqual(turns[1].items, []);
+});
+
 test("conversation adapter tracks requests and resolved notifications", () => {
   const conversations = new Map();
   const owned = new Set(["thread-adapter"]);

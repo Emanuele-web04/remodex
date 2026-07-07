@@ -641,6 +641,337 @@ test("live owner keeps phone turn input in snapshots when turn/started has no it
   assert.deepEqual(turn.items, []);
 });
 
+test("live owner broadcasts phone image turns before turn/started arrives", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-image-pending-");
+  const frames = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+  const imageDataURL = `data:image/jpeg;base64,${Buffer.from("fake-image").toString("base64")}`;
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-image-pending",
+    method: "turn/start",
+    params: {
+      threadId: "thread-image-pending",
+      cwd: "/tmp/image-pending",
+      input: [
+        { type: "text", text: "look at this" },
+        { type: "image", url: imageDataURL },
+      ],
+    },
+  }));
+
+  const pendingSnapshot = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-image-pending"
+      && frame.params?.change?.type === "snapshot"
+      && frame.params.change.conversationState.turns.length === 1
+  );
+  const pendingTurn = pendingSnapshot.params.change.conversationState.turns[0];
+  assert.match(pendingTurn.turnId, /^remodex-pending-turn:/);
+  assert.equal(pendingTurn.remodexOptimisticPendingTurn, true);
+  assert.deepEqual(pendingTurn.params.input, [
+    { type: "text", text: "look at this" },
+    { type: "image", url: imageDataURL },
+  ]);
+  assert.deepEqual(pendingTurn.items, []);
+
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-image-pending",
+      turn: {
+        id: "turn-image-pending",
+        items: [],
+        status: "inProgress",
+        startedAt: 2,
+      },
+    },
+  }));
+
+  await waitFor(() => owner._debugSnapshot("thread-image-pending")?.turns?.[0]?.turnId === "turn-image-pending");
+  const promotedState = owner._debugSnapshot("thread-image-pending");
+  assert.equal(promotedState.turns.length, 1);
+  assert.equal(promotedState.turns[0].remodexOptimisticPendingTurn, undefined);
+  assert.deepEqual(promotedState.turns[0].params.input, pendingTurn.params.input);
+});
+
+test("live owner rebroadcasts optimistic image turns on IPC connect during hydration", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("rlo-image-connect-");
+  const frames = [];
+  let serverSocket = null;
+  let initializeFrame = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        initializeFrame = frame;
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async (method) => {
+      if (method === "thread/read") {
+        return new Promise(() => {});
+      }
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+  const imageDataURL = `data:image/png;base64,${Buffer.from("connect-image").toString("base64")}`;
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-image-connect",
+    method: "turn/start",
+    params: {
+      threadId: "thread-image-connect",
+      cwd: "/tmp/image-connect",
+      input: [
+        { type: "text", text: "show immediately on reconnect" },
+        { type: "image", url: imageDataURL },
+      ],
+    },
+  }));
+
+  await waitFor(() => initializeFrame && serverSocket);
+  writeFrame(serverSocket, {
+    type: "response",
+    requestId: initializeFrame.requestId,
+    resultType: "success",
+    method: "initialize",
+    handledByClientId: "router",
+    result: { clientId: "remodex-owner-test" },
+  });
+
+  const snapshot = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-image-connect"
+      && frame.params?.change?.type === "snapshot"
+  );
+  const [turn] = snapshot.params.change.conversationState.turns;
+  assert.equal(turn.remodexOptimisticPendingTurn, true);
+  assert.deepEqual(turn.params.input, [
+    { type: "text", text: "show immediately on reconnect" },
+    { type: "image", url: imageDataURL },
+  ]);
+});
+
+test("live owner promotes rapid pending turns in FIFO order", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-pending-fifo-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-fifo-1",
+    method: "turn/start",
+    params: {
+      threadId: "thread-pending-fifo",
+      input: [{ type: "text", text: "first" }],
+    },
+  }));
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-fifo-2",
+    method: "turn/start",
+    params: {
+      threadId: "thread-pending-fifo",
+      input: [{ type: "text", text: "second" }],
+    },
+  }));
+
+  await waitFor(() => owner._debugSnapshot("thread-pending-fifo")?.turns?.length === 2);
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-pending-fifo",
+      turn: { id: "turn-fifo-1", items: [], status: "inProgress", startedAt: 1 },
+    },
+  }));
+
+  await waitFor(() => owner._debugSnapshot("thread-pending-fifo")?.turns?.[0]?.turnId === "turn-fifo-1");
+  let turns = owner._debugSnapshot("thread-pending-fifo").turns;
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0].params.input[0].text, "first");
+  assert.match(turns[1].turnId, /^remodex-pending-turn:/);
+  assert.equal(turns[1].params.input[0].text, "second");
+
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-pending-fifo",
+      turn: { id: "turn-fifo-2", items: [], status: "inProgress", startedAt: 2 },
+    },
+  }));
+
+  await waitFor(() => owner._debugSnapshot("thread-pending-fifo")?.turns?.[1]?.turnId === "turn-fifo-2");
+  turns = owner._debugSnapshot("thread-pending-fifo").turns;
+  assert.deepEqual(turns.map((turn) => turn.turnId), ["turn-fifo-1", "turn-fifo-2"]);
+  assert.deepEqual(turns.map((turn) => turn.params.input[0].text), ["first", "second"]);
+});
+
+test("live owner promotes rapid turn-less pending starts in FIFO order", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("rlo-turnless-fifo-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest: async () => ({ ok: true }),
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "turnless-start-fifo-1",
+    method: "turn/start",
+    params: {
+      threadId: "thread-turnless-pending-fifo",
+      input: [{ type: "text", text: "first turnless" }],
+    },
+  }));
+  owner.observeInbound(JSON.stringify({
+    id: "turnless-start-fifo-2",
+    method: "turn/start",
+    params: {
+      threadId: "thread-turnless-pending-fifo",
+      input: [{ type: "text", text: "second turnless" }],
+    },
+  }));
+
+  await waitFor(() => owner._debugSnapshot("thread-turnless-pending-fifo")?.turns?.length === 2);
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-turnless-pending-fifo",
+      turn: { items: [], status: "inProgress", startedAt: 1 },
+    },
+  }));
+
+  await waitFor(() => {
+    const turns = owner._debugSnapshot("thread-turnless-pending-fifo")?.turns || [];
+    return turns[0]?.params?.input?.[0]?.text === "first turnless"
+      && turns[1]?.params?.input?.[0]?.text === "second turnless";
+  });
+
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-turnless-pending-fifo",
+      turn: { items: [], status: "inProgress", startedAt: 2 },
+    },
+  }));
+
+  await waitFor(() => {
+    const turns = owner._debugSnapshot("thread-turnless-pending-fifo")?.turns || [];
+    return turns.length === 2
+      && turns.every((turn) => !turn.remodexOptimisticPendingTurn)
+      && turns[0].params.input[0].text === "first turnless"
+      && turns[1].params.input[0].text === "second turnless";
+  });
+  const turns = owner._debugSnapshot("thread-turnless-pending-fifo").turns;
+  assert.notEqual(turns[0].turnId, turns[1].turnId);
+  assert.deepEqual(turns.map((turn) => turn.params.input[0].text), [
+    "first turnless",
+    "second turnless",
+  ]);
+});
+
 test("live owner router keeps same-id requests from different clients separate", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-routed-ids-");
   let handlerSocket = null;
@@ -1318,6 +1649,26 @@ test("live owner dedupes held phone turn starts routed back through follower IPC
       },
     },
   }));
+  writeFrame(serverSocket, {
+    type: "request",
+    requestId: "start-held-dedupe-late",
+    sourceClientId: "desktop",
+    method: "thread-follower-start-turn",
+    params: {
+      conversationId: "thread-held-dedupe",
+      senderRequestId: "phone-held-start",
+      turnStartParams: {
+        cwd: "/tmp/held-dedupe",
+        input,
+      },
+    },
+  });
+  const lateResponse = await waitForFrame(
+    serverSocket,
+    (frame) => frame.type === "response" && frame.requestId === "start-held-dedupe-late"
+  );
+  assert.equal(lateResponse.resultType, "success");
+  assert.equal(owner._debugSnapshot("thread-held-dedupe").turns.length, 1);
   owner.observeOutbound(JSON.stringify({
     method: "turn/started",
     params: {

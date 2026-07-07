@@ -106,6 +106,8 @@ struct TurnComposerView: View {
     // Square hit target for the resting capsule's "+" and mic controls, matched
     // to the send button so they're just as easy to tap despite smaller glyphs.
     private let collapsedControlTapTarget: CGFloat = 32
+    private let expandedPlainTextMaxVisibleLines: CGFloat = 6
+    private let expandedAccessoryTextMaxVisibleLines: CGFloat = 4
 
     @State private var composerInputHeight: CGFloat = 32
     @State private var inputChangeTask: Task<Void, Never>?
@@ -267,6 +269,7 @@ struct TurnComposerView: View {
                             runtimeState: runtimeState,
                             runtimeActions: runtimeActions,
                             isCollapsed: showsCollapsedComposer,
+                            maxVisibleLines: expandedInputMaxVisibleLines,
                             onPasteImageData: { imageDataItems in
                                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                                 onPasteImageData(imageDataItems)
@@ -407,6 +410,15 @@ struct TurnComposerView: View {
     // text line when Dynamic Type grows past them.
     private var collapsedRowContentHeight: CGFloat {
         max(collapsedInputHeight, collapsedControlTapTarget)
+    }
+
+    // Attachments and mention chips already consume vertical keyboard space, so
+    // switch the text field to internal scrolling sooner to keep the whole
+    // composer card above the keyboard in compact draft screens.
+    private var expandedInputMaxVisibleLines: CGFloat {
+        accessoryState.hasTopAccessoryContent
+            ? expandedAccessoryTextMaxVisibleLines
+            : expandedPlainTextMaxVisibleLines
     }
 
     // Collapsed: half the resting height (6pt padding + content + 6pt padding)

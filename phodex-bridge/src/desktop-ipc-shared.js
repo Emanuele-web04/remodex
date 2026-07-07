@@ -49,6 +49,8 @@ const CONTEXT_FRAGMENT_MARKERS = [
   { start: "# AGENTS.md instructions for ", end: "</INSTRUCTIONS>" },
   { start: "<user_instructions>", end: "</user_instructions>" },
   { start: "<environment_context>", end: "</environment_context>" },
+  // Runtime skill bodies are hidden context, not user-authored prompt text.
+  { start: "<skill>", end: "</skill>" },
 ];
 const PROMPT_REQUEST_BEGIN = "## My request for Codex:";
 

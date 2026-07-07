@@ -19,10 +19,10 @@ struct TurnComposerInputTextView: UIViewRepresentable {
     let runtimeState: TurnComposerRuntimeState?
     let runtimeActions: TurnComposerRuntimeActions
     let isCollapsed: Bool
+    let maxVisibleLines: CGFloat
     let onPasteImageData: ([Data]) -> Void
 
     private let minVisibleLines: CGFloat = 1
-    private let maxVisibleLines: CGFloat = 8
     func makeUIView(context: Context) -> TurnComposerPasteInterceptingTextView {
         let textView = TurnComposerPasteInterceptingTextView(frame: .zero, textContainer: nil)
         textView.delegate = context.coordinator
@@ -67,6 +67,7 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             isFocused: $isFocused,
             dynamicHeight: $dynamicHeight
         )
+        let maxVisibleLinesChanged = context.coordinator.updateMaxVisibleLines(maxVisibleLines)
         let expandedAfterCollapse = context.coordinator.noteCollapsedState(isCollapsed)
         let shouldApplyBindingText = context.coordinator.shouldApplyBindingText(text, to: uiView)
         let textChanged = shouldApplyBindingText && uiView.text != text
@@ -103,8 +104,11 @@ struct TurnComposerInputTextView: UIViewRepresentable {
                 uiView?.isEditable = false
             }
         }
-        context.coordinator.updateHeightIfNeeded(for: uiView, force: textChanged || fontChanged || expandedAfterCollapse)
-        if expandedAfterCollapse {
+        context.coordinator.updateHeightIfNeeded(
+            for: uiView,
+            force: textChanged || fontChanged || expandedAfterCollapse || maxVisibleLinesChanged
+        )
+        if expandedAfterCollapse || maxVisibleLinesChanged {
             context.coordinator.scheduleDeferredHeightUpdate(for: uiView)
         }
     }
@@ -133,13 +137,13 @@ struct TurnComposerInputTextView: UIViewRepresentable {
         private var isFocused: Binding<Bool>
         private var dynamicHeight: Binding<CGFloat>
         private let minVisibleLines: CGFloat
-        private let maxVisibleLines: CGFloat
         private var lastFocusBindingValue: Bool
         private var pendingHeightValue: CGFloat?
         private var isHeightCommitScheduled = false
         private var lastHeightMeasurementSignature: HeightMeasurementSignature?
         private var lastIsEditable: Bool
         private var lastIsCollapsed: Bool
+        private var maxVisibleLines: CGFloat
         private var pendingUIKitText: String?
         private var staleBindingTextDuringPendingEdit: String?
 
@@ -179,6 +183,15 @@ struct TurnComposerInputTextView: UIViewRepresentable {
             let expandedAfterCollapse = lastIsCollapsed && !isCollapsed
             lastIsCollapsed = isCollapsed
             return expandedAfterCollapse
+        }
+
+        fileprivate func updateMaxVisibleLines(_ value: CGFloat) -> Bool {
+            guard abs(maxVisibleLines - value) > 0.1 else {
+                return false
+            }
+            maxVisibleLines = value
+            lastHeightMeasurementSignature = nil
+            return true
         }
 
         func textViewDidChange(_ textView: UITextView) {

@@ -868,6 +868,22 @@ test("isContextualUserItemNotification drops only contextual live user items", (
       text: "# AGENTS.md instructions for /Users/me/proj\n<INSTRUCTIONS>rules</INSTRUCTIONS>",
     }],
   };
+  const skillContextItem = {
+    id: "skill-context-item",
+    type: "userMessage",
+    content: [{
+      type: "input_text",
+      text: [
+        "<skill>",
+        "<name>check-code</name>",
+        "<path>$check-code</path>",
+        "---",
+        "name: check-code",
+        "description: Review recent code changes across a repository.",
+        "</skill>",
+      ].join("\n"),
+    }],
+  };
 
   assert.equal(isContextualUserItemNotification({
     method: "item/started",
@@ -876,6 +892,10 @@ test("isContextualUserItemNotification drops only contextual live user items", (
   assert.equal(isContextualUserItemNotification({
     method: "item/completed",
     params: { threadId: "t", item: contextualItem },
+  }), true);
+  assert.equal(isContextualUserItemNotification({
+    method: "item/completed",
+    params: { threadId: "t", item: skillContextItem },
   }), true);
 
   // Real prompts, assistant items, and other methods must pass through.
@@ -922,6 +942,23 @@ test("sanitizeThreadHistoryImagesForRelay drops injected context user items from
                 content: [{
                   type: "input_text",
                   text: "<environment_context>\n  <cwd>/Users/me/proj</cwd>\n</environment_context>",
+                }],
+              },
+              {
+                id: "item-skill",
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: [
+                    "<skill>",
+                    "<name>check-code</name>",
+                    "<path>$check-code</path>",
+                    "---",
+                    "name: check-code",
+                    "description: Review recent code changes across a repository.",
+                    "</skill>",
+                  ].join("\n"),
                 }],
               },
               {

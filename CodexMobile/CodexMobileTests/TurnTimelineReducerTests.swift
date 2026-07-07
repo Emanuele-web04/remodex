@@ -1097,7 +1097,7 @@ final class TurnTimelineReducerTests: XCTestCase {
                 Totals: +0 -6
                 """,
                 createdAt: now.addingTimeInterval(1),
-                turnID: "turn-2",
+                turnID: "turn-1",
                 orderIndex: 2
             ),
         ]
@@ -1113,6 +1113,48 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(summary?.entries.first?.path, "CodexMobile/CodexMobile/Views/Turn/TurnTimelineView.swift")
         XCTAssertEqual(summary?.entries.first?.additions, 6)
         XCTAssertEqual(summary?.entries.first?.deletions, 6)
+    }
+
+    func testTimelineProjectionKeepsAdjacentFileChangeRowsSeparateAcrossTurns() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "file-change-previous-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/Previous.swift
+                Kind: update
+                Totals: +2 -1
+                """,
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "file-change-new-turn",
+                threadID: "thread",
+                role: .system,
+                kind: .fileChange,
+                text: """
+                Status: completed
+
+                Path: Sources/New.swift
+                Kind: update
+                Totals: +3 -0
+                """,
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-2",
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["file-change-previous-turn", "file-change-new-turn"])
     }
 
     func testTimelineProjectionMergesAdjacentFinalFileChangeRowsIntoOneTable() {
@@ -1147,7 +1189,7 @@ final class TurnTimelineReducerTests: XCTestCase {
                 Totals: +3 -0
                 """,
                 createdAt: now.addingTimeInterval(1),
-                turnID: "turn-2",
+                turnID: "turn-1",
                 orderIndex: 2
             ),
         ]

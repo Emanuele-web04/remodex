@@ -83,9 +83,9 @@ struct ComposerBottomBar: View {
     // MARK: - Body
 
     var body: some View {
-        // 8pt base spacing + each control's own edge padding lands every
-        // visual gap (ring/pill, pill/mic, mic/stop-send) at ~11-12pt.
-        HStack(spacing: 8) {
+        // 10pt base spacing + each control's own edge padding lands every
+        // visual gap (ring/pill, pill/mic, mic/stop-send) at ~14pt.
+        HStack(spacing: 10) {
             ComposerAttachmentMenu(
                 isPlanModeArmed: isPlanModeArmed,
                 runtimeState: runtimeState,
@@ -103,7 +103,7 @@ struct ComposerBottomBar: View {
             // Ring + runtime pill travel together on the trailing side; the
             // tight inner spacing keeps the ring visually attached to the
             // model/effort block instead of floating in the Spacer gap.
-            HStack(spacing: 2) {
+            HStack(spacing: 4) {
                 inlineStatusControl
                 runtimeMenuControl
             }
@@ -138,7 +138,7 @@ struct ComposerBottomBar: View {
                 )
                 // Match the send button's extra leading air so the mic never
                 // sits flush against the filled stop circle.
-                .padding(.leading, 3)
+                .padding(.leading, 4)
             }
 
             if showsSendButton {
@@ -154,7 +154,7 @@ struct ComposerBottomBar: View {
                             .offset(x: 8, y: -8)
                     }
                 }
-                .padding(.leading, 3)
+                .padding(.leading, 4)
                 .disabled(isSendDisabled)
             }
         }

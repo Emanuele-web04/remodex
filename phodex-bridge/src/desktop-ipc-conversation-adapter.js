@@ -55,6 +55,7 @@ function resolveTurnIdForParams({
   conversation,
   params,
   fallbackTurnIdsByThreadId,
+  allowOptimisticFallback = true,
 } = {}) {
   const explicitTurnId = readTurnIdFromParams(params);
   if (explicitTurnId) {
@@ -63,7 +64,15 @@ function resolveTurnIdForParams({
   }
   const fallbackTurnId = readFallbackTurnId(conversation?.id, fallbackTurnIdsByThreadId);
   if (fallbackTurnId) {
+    if (!allowOptimisticFallback && isOptimisticPendingTurnId(conversation, fallbackTurnId)) {
+      return latestNonOptimisticTurnId(conversation) || "";
+    }
     return fallbackTurnId;
+  }
+  if (!allowOptimisticFallback) {
+    // Turnless file-change events belong on the latest real turn, not a pending
+    // phone-send placeholder that may temporarily be the last row.
+    return latestNonOptimisticTurnId(conversation) || "";
   }
   return "";
 }
@@ -92,6 +101,36 @@ function readFallbackTurnId(threadId, fallbackTurnIdsByThreadId) {
   return normalizedThreadId && fallbackTurnIdsByThreadId instanceof Map
     ? readString(fallbackTurnIdsByThreadId.get(normalizedThreadId))
     : "";
+}
+
+function isOptimisticPendingTurn(turn) {
+  return turn?.remodexOptimisticPendingTurn === true;
+}
+
+function isOptimisticPendingTurnId(conversation, turnId) {
+  const normalizedTurnId = readString(turnId);
+  if (!conversation || !normalizedTurnId || !Array.isArray(conversation.turns)) {
+    return false;
+  }
+  return conversation.turns.some((turn) => (
+    isOptimisticPendingTurn(turn)
+      && (readString(turn?.turnId) || readString(turn?.id)) === normalizedTurnId
+  ));
+}
+
+function latestNonOptimisticTurnId(conversation) {
+  const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (isOptimisticPendingTurn(turn)) {
+      continue;
+    }
+    const turnId = readString(turn?.turnId) || readString(turn?.id);
+    if (turnId) {
+      return turnId;
+    }
+  }
+  return "";
 }
 
 function createSyntheticTurnId(threadId, now = () => Date.now()) {
@@ -196,7 +235,12 @@ function applyAppServerMessageToConversationState({
         now,
       }), { now });
       if (method === "turn/started") {
-        applyPendingTurnStartParams(conversation, upsertedTurn, pendingTurnStartParamsByThreadId);
+        applyPendingTurnStartParams(
+          conversation,
+          upsertedTurn,
+          pendingTurnStartParamsByThreadId,
+          fallbackTurnIdsByThreadId
+        );
       }
       conversation.updatedAt = now();
       return { threadId, changed: true };
@@ -249,12 +293,14 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const allowOptimisticFallback = !isFileChangeLikeItemType(message.params?.item?.type);
       const turn = ensureTurn(conversation, resolveTurnIdForParams({
         conversation,
         params: message.params,
         fallbackTurnIdsByThreadId,
+        allowOptimisticFallback,
         now,
-      }), { now });
+      }), { now, allowLastTurnFallback: allowOptimisticFallback });
       if (turn && message.params?.item) {
         upsertItem(turn, cloneJSON(message.params.item));
         // Desktop derives its "Worked for Ns" divider from these two marks, not
@@ -281,8 +327,10 @@ function applyAppServerMessageToConversationState({
         return null;
       }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
+      const allowOptimisticFallback = method !== "item/fileChange/outputDelta";
       applyDeltaNotification(conversation, method, message.params || {}, {
         fallbackTurnIdsByThreadId,
+        allowOptimisticFallback,
         now,
       });
       conversation.updatedAt = now();
@@ -533,7 +581,12 @@ function buildConversationTurn(turn, {
   return builtTurn;
 }
 
-function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsByThreadId) {
+function applyPendingTurnStartParams(
+  conversation,
+  turn,
+  pendingTurnStartParamsByThreadId,
+  fallbackTurnIdsByThreadId = null
+) {
   if (!turn || !(pendingTurnStartParamsByThreadId instanceof Map)) {
     return;
   }
@@ -543,6 +596,10 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
   if (Array.isArray(queue) && queue.length === 0) {
     pendingTurnStartParamsByThreadId.delete(threadId);
   }
+  if (pendingEntry) {
+    pendingEntry.consumed = true;
+  }
+  releaseConsumedOptimisticFallback(threadId, pendingEntry, fallbackTurnIdsByThreadId);
   const pendingParams = pendingEntry?.params;
   if (!pendingParams) {
     return;
@@ -550,7 +607,7 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
 
   applyTurnRuntimeMetadata(conversation, pendingParams);
 
-  const input = Array.isArray(pendingParams.input) ? cloneJSON(pendingParams.input) : [];
+  const input = Array.isArray(pendingParams.input) ? pendingParams.input : [];
   if (input.length === 0) {
     return;
   }
@@ -560,6 +617,16 @@ function applyPendingTurnStartParams(conversation, turn, pendingTurnStartParamsB
     ...cloneJSON(pendingParams),
   };
   normalizeTurnInitialPrompt(turn);
+}
+
+function releaseConsumedOptimisticFallback(threadId, pendingEntry, fallbackTurnIdsByThreadId) {
+  const consumedOptimisticTurnId = readString(pendingEntry?.optimisticTurnId);
+  if (!threadId || !consumedOptimisticTurnId || !(fallbackTurnIdsByThreadId instanceof Map)) {
+    return;
+  }
+  if (readString(fallbackTurnIdsByThreadId.get(threadId)) === consumedOptimisticTurnId) {
+    fallbackTurnIdsByThreadId.delete(threadId);
+  }
 }
 
 function applyTurnRuntimeMetadata(conversation, turnParams) {
@@ -817,9 +884,15 @@ function upsertTurn(conversation, turn, { now = () => Date.now() } = {}) {
   return nextTurn;
 }
 
-function ensureTurn(conversation, turnId, { now = () => Date.now() } = {}) {
+function ensureTurn(conversation, turnId, {
+  now = () => Date.now(),
+  allowLastTurnFallback = true,
+} = {}) {
   const normalizedTurnId = readString(turnId);
   if (!normalizedTurnId) {
+    if (!allowLastTurnFallback) {
+      return null;
+    }
     return conversation.turns[conversation.turns.length - 1] || null;
   }
   let turn = conversation.turns.find((candidate) => (
@@ -902,14 +975,16 @@ function upsertRequest(conversation, request) {
 
 function applyDeltaNotification(conversation, method, params, {
   fallbackTurnIdsByThreadId = null,
+  allowOptimisticFallback = true,
   now = () => Date.now(),
 } = {}) {
   const turn = ensureTurn(conversation, resolveTurnIdForParams({
     conversation,
     params,
     fallbackTurnIdsByThreadId,
+    allowOptimisticFallback,
     now,
-  }), { now });
+  }), { now, allowLastTurnFallback: allowOptimisticFallback });
   if (!turn) {
     return;
   }
@@ -1011,6 +1086,11 @@ function growArray(value, index, fillValue) {
     next.push(fillValue);
   }
   return next;
+}
+
+function isFileChangeLikeItemType(value) {
+  const itemType = normalizeToken(value);
+  return itemType === "filechange" || itemType === "diff";
 }
 
 function readThreadIdFromParams(params) {

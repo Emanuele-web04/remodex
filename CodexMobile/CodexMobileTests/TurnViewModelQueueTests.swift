@@ -906,6 +906,48 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertNil(service.activeTurnIdByThread["thread-queue"])
     }
 
+    func testRefreshInFlightTurnStateClearsDesktopMirroredRunWhenSnapshotClosesActiveTurn() async {
+        let service = makeService()
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string("thread-queue"),
+                "turnId": .string("turn-live"),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = false
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/read")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "turns": .array([
+                            .object([
+                                "id": .string("turn-live"),
+                                "status": .string("completed"),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let didRefresh = await service.refreshInFlightTurnState(threadId: "thread-queue")
+
+        XCTAssertTrue(didRefresh)
+        XCTAssertFalse(service.threadHasActiveOrRunningTurn("thread-queue"))
+        XCTAssertFalse(service.desktopMirroredRunningThreadIDs.contains("thread-queue"))
+        XCTAssertNil(service.activeTurnIdByThread["thread-queue"])
+        XCTAssertNil(service.activeTurnId)
+    }
+
     func testVisibleTailPreservesRecentFileChangeArtifactsFromOmittedPreviousTurn() {
         let service = makeService()
         let fileChange = makeMessage(
