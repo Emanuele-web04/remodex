@@ -1578,6 +1578,9 @@ function startBridge({
         stdio: "ignore",
         env: process.env,
       });
+      child.on?.("error", (error) => {
+        console.warn(`[remodex] Failed to schedule the post-update bridge restart: ${error?.message || error}`);
+      });
       child.unref?.();
     }, BRIDGE_RESTART_AFTER_UPDATE_DELAY_MS);
     restartTimer.unref?.();

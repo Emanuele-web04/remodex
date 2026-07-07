@@ -227,16 +227,48 @@ extension CodexService {
         composerDraftsByThreadID[threadId]
     }
 
+    // Returns the draft mutation revision used to reject stale async attachment merges.
+    func composerDraftMergeRevision(for threadId: String) -> Int {
+        composerDraftMergeRevisionByThreadID[threadId] ?? 0
+    }
+
+    // Stores loading attachment IDs that are still allowed to complete into a saved draft.
+    func setComposerDraftPendingAttachmentIDs(_ ids: Set<String>, for threadId: String) {
+        composerDraftPendingAttachmentIDsByThreadID[threadId] = ids
+    }
+
+    func canMergePendingComposerAttachment(id attachmentID: String, for threadId: String) -> Bool {
+        guard let pendingAttachmentIDs = composerDraftPendingAttachmentIDsByThreadID[threadId] else {
+            return true
+        }
+
+        return pendingAttachmentIDs.contains(attachmentID)
+    }
+
+    func markPendingComposerAttachmentMerged(id attachmentID: String, for threadId: String) {
+        guard var pendingAttachmentIDs = composerDraftPendingAttachmentIDsByThreadID[threadId] else {
+            return
+        }
+
+        pendingAttachmentIDs.remove(attachmentID)
+        setComposerDraftPendingAttachmentIDs(pendingAttachmentIDs, for: threadId)
+    }
+
     // Stores or clears an unsent composer draft, optionally flushing it to local disk.
     func setComposerDraft(
         _ draft: TurnComposerLocalDraft?,
         for threadId: String,
-        persistToDisk: Bool = false
+        persistToDisk: Bool = false,
+        advancesAttachmentMergeRevision: Bool = true
     ) {
         if let draft, !draft.isEmpty {
             composerDraftsByThreadID[threadId] = draft
         } else {
             composerDraftsByThreadID.removeValue(forKey: threadId)
+            composerDraftPendingAttachmentIDsByThreadID.removeValue(forKey: threadId)
+        }
+        if advancesAttachmentMergeRevision {
+            composerDraftMergeRevisionByThreadID[threadId, default: 0] += 1
         }
 
         if persistToDisk {

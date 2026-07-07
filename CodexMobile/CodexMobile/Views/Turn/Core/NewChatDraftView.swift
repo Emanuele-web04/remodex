@@ -152,7 +152,7 @@ struct NewChatDraftView: View {
         .onChange(of: scenePhase) { _, phase in
             guard phase != .active else { return }
             handleVoiceScenePhaseChange(phase)
-            viewModel.saveLocalDraft(codex: codex, threadID: route.id, persistToDisk: true)
+            viewModel.saveLifecycleLocalDraft(codex: codex, threadID: route.id)
         }
         .onChange(of: selectedProjectPath) { _, _ in
             // Defer the observable-model mutation out of the .onChange action

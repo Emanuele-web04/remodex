@@ -32,6 +32,9 @@ const MAX_BASELINE_RECOVERY_ATTEMPTS = 5;
 const BASELINE_RECOVERY_BASE_DELAY_MS = 1_000;
 const BASELINE_RECOVERY_MAX_DELAY_MS = 15_000;
 const MAX_QUEUED_CHANGES_PER_THREAD = 300;
+// Phone interest survives per-thread release by design, so cap the set to keep a
+// marathon single Desktop connection from accumulating every thread id forever.
+const MAX_ACTIVE_THREAD_IDS = 512;
 const DESKTOP_IPC_ACTION_SOURCE = "desktop-ipc-action-follower";
 const REMODEX_LIVE_OWNER_SOURCE = "desktop-ipc-live-owner";
 const DESKTOP_STATE_READ_METHODS = new Set(["thread/read", "thread/resume", "thread/turns/list"]);
@@ -98,6 +101,53 @@ function createDesktopIpcActionFollower({
   const conversationProjector = createDesktopConversationProjector({ now });
   const pendingRoutesByRequestId = new Map();
   const activeThreadIds = new Set();
+  // JS Set preserves insertion order; delete-before-add refreshes recency, and
+  // cap eviction skips threads with pending prompts so approvals are not lost.
+  function rememberActiveThread(threadId) {
+    activeThreadIds.delete(threadId);
+    activeThreadIds.add(threadId);
+    while (activeThreadIds.size > MAX_ACTIVE_THREAD_IDS) {
+      const oldest = oldestEvictableActiveThreadId();
+      if (oldest === undefined) {
+        break;
+      }
+      activeThreadIds.delete(oldest);
+      forgetEvictedThreadState(oldest);
+    }
+  }
+
+  function oldestEvictableActiveThreadId() {
+    for (const threadId of activeThreadIds) {
+      if (!hasPendingProjectedActions(threadId)) {
+        return threadId;
+      }
+    }
+    return undefined;
+  }
+
+  function hasPendingProjectedActions(threadId) {
+    for (const route of pendingRoutesByRequestId.values()) {
+      if (route.threadId === threadId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Cleanup for cap-evicted threads only: clears follower caches without touching
+  // liveOwnerThreadIds (still-owned local streams must not become hijackable) and
+  // without rejecting held requests (removeDesktopThreadState handles real removal).
+  function forgetEvictedThreadState(threadId) {
+    rawStatesByThreadId.delete(threadId);
+    rawStateUpdatedAtByThreadId.delete(threadId);
+    conversationProjector.remove(threadId);
+    queuedChangesByThreadId.delete(threadId);
+    baselineRecoveryStateByThreadId.delete(threadId);
+    recoveringThreadIds.delete(threadId);
+    ownershipProbeDeadlinesByThreadId.delete(threadId);
+    pendingOwnershipProbeTokensByThreadId.delete(threadId);
+    desktopOwnedByProbeThreadIds.delete(threadId);
+  }
   const recoveringThreadIds = new Set();
   const queuedChangesByThreadId = new Map();
   const baselineRecoveryStateByThreadId = new Map();
@@ -143,7 +193,7 @@ function createDesktopIpcActionFollower({
       return false;
     }
 
-    activeThreadIds.add(threadId);
+    rememberActiveThread(threadId);
     if (!rawStatesByThreadId.has(threadId)
       && !liveOwnerThreadIds.has(threadId)
       && !isLocallyOwnedThread(threadId)) {
@@ -271,6 +321,10 @@ function createDesktopIpcActionFollower({
     queuedChangesByThreadId.clear();
     pendingOwnershipProbeTokensByThreadId.clear();
     desktopOwnedByProbeThreadIds.clear();
+    // Keep activeThreadIds: phone interest is phone-scoped, not connection-scoped.
+    // Clearing it here would make reconnect snapshots for a thread the phone is
+    // still viewing fail the activeThreadIds.has() guard until the phone happens
+    // to issue a fresh read. Growth is bounded by the LRU cap instead.
     // Keep pending approval routes too: a transient disconnect proves nothing
     // about the prompt's outcome, and falsely resolving it would dismiss a
     // still-blocking approval on the phone. Reconnect snapshots reconcile them.
@@ -554,7 +608,7 @@ function createDesktopIpcActionFollower({
       return false;
     }
 
-    activeThreadIds.add(threadId);
+    rememberActiveThread(threadId);
     const thread = projectDesktopConversationStateToThread(threadId, rawState, { now });
     // A run that Desktop stopped streaming updates for is not a live run: serving
     // it from cache would answer thread-list refreshes with a phantom "running"

@@ -33,11 +33,14 @@ security_best_practices_report.md
 output/
 
 # Minified JS bundles (not part of this project)
+/main-*.js
 /main.js
+/deeplinks-*.js
 /links-*.js
 /scheme-*.js
 /initial-route-atom-*.js
 /use-navigate-to-local-conversation-*.js
+/preload.js
 
 # Temp files
 $TMP_PLACEHOLDER
