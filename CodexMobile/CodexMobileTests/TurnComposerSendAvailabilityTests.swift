@@ -413,6 +413,34 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         ])
     }
 
+    func testDetachedPastedAttachmentLoadFinishesIntoSavedDraft() async {
+        let service = makeService()
+        let viewModel = TurnViewModel()
+        let threadID = "thread-detached-paste"
+
+        viewModel.enqueuePastedImageData([Self.onePixelPNGData], codex: service, threadID: threadID)
+        guard let attachmentID = viewModel.composerAttachments.first?.id else {
+            XCTFail("Expected pasted image to create a loading attachment")
+            return
+        }
+        let expectedRevision = service.composerDraftMergeRevision(for: threadID)
+
+        viewModel.saveLifecycleLocalDraft(codex: service, threadID: threadID)
+        viewModel.cancelTransientTasks()
+
+        let savedAttachment = await waitForDraftAttachment(
+            in: service,
+            threadID: threadID,
+            attachmentID: attachmentID
+        )
+
+        XCTAssertNotNil(savedAttachment)
+        XCTAssertEqual(viewModel.composerAttachments, [
+            TurnComposerImageAttachment(id: attachmentID, state: .loading)
+        ])
+        XCTAssertEqual(service.composerDraftMergeRevision(for: threadID), expectedRevision)
+    }
+
     func testLocalDraftSurvivesFailedSend() async {
         let service = makeService()
         service.isConnected = true
@@ -640,6 +668,25 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         for _ in 0..<maxPollCount where viewModel.isSending {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+
+    private static let onePixelPNGData = Data(base64Encoded:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )!
+
+    private func waitForDraftAttachment(
+        in service: CodexService,
+        threadID: String,
+        attachmentID: String,
+        maxPollCount: Int = 120
+    ) async -> TurnComposerImageAttachment? {
+        for _ in 0..<maxPollCount {
+            if let attachment = service.composerDraft(for: threadID)?.attachments.first(where: { $0.id == attachmentID }) {
+                return attachment
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return service.composerDraft(for: threadID)?.attachments.first(where: { $0.id == attachmentID })
     }
 
     private func textInput(from params: JSONValue?) -> String? {

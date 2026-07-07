@@ -1326,10 +1326,11 @@ final class TurnViewModel {
         for job in attachmentJobs {
             attachmentLoadTasks[job.id] = Task { @MainActor [weak self] in
                 let state = await Self.loadComposerAttachmentState(from: job.item)
+                guard !Task.isCancelled else { return }
                 Self.completeAttachmentLoad(
                     state,
                     id: job.id,
-                    viewModel: Task.isCancelled ? nil : self,
+                    viewModel: self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
                     codex: codex,
                     threadID: threadID
@@ -1373,10 +1374,11 @@ final class TurnViewModel {
         for job in attachmentJobs {
             attachmentLoadTasks[job.id] = Task { @MainActor [weak self] in
                 let state = await Self.loadComposerAttachmentState(fromData: job.imageData)
+                guard !Task.isCancelled else { return }
                 Self.completeAttachmentLoad(
                     state,
                     id: job.id,
-                    viewModel: Task.isCancelled ? nil : self,
+                    viewModel: self,
                     expectedDraftMergeRevision: expectedDraftMergeRevision,
                     codex: codex,
                     threadID: threadID
