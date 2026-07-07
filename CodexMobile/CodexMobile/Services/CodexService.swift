@@ -390,6 +390,8 @@ final class CodexService {
     var queuePauseStateByThread: [String: QueuePauseState] = [:]
     // Per-thread unsent composer drafts that survive chat switches and app restarts.
     var composerDraftsByThreadID: [String: TurnComposerLocalDraft] = [:]
+    // Guards late async attachment completions so cleared drafts are not resurrected.
+    @ObservationIgnored var composerDraftMergeRevisionByThreadID: [String: Int] = [:]
     var messagesByThread: [String: [CodexMessage]] = [:]
     // Monotonic per-thread revision so views can react to message mutations without hashing full transcripts.
     var messageRevisionByThread: [String: Int] = [:]

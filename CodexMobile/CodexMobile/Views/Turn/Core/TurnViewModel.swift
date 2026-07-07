@@ -613,7 +613,12 @@ final class TurnViewModel {
     }
 
     // Saves the current composer as a per-thread draft; empty composers remove stale draft state.
-    func saveLocalDraft(codex: CodexService, threadID: String, persistToDisk: Bool = false) {
+    func saveLocalDraft(
+        codex: CodexService,
+        threadID: String,
+        persistToDisk: Bool = false,
+        advancesAttachmentMergeRevision: Bool = true
+    ) {
         let draft = localDraftSnapshot()
         if isSending, draft.isEmpty {
             if persistToDisk {
@@ -622,7 +627,11 @@ final class TurnViewModel {
             return
         }
 
-        codex.setComposerDraft(draft.isEmpty ? nil : draft, for: threadID)
+        codex.setComposerDraft(
+            draft.isEmpty ? nil : draft,
+            for: threadID,
+            advancesAttachmentMergeRevision: advancesAttachmentMergeRevision
+        )
         if persistToDisk {
             flushLocalDraftPersistence(codex: codex)
         } else {
@@ -1289,23 +1298,28 @@ final class TurnViewModel {
 
         clearComposerReviewSelectionIfNeededForNonReviewContent()
 
-        for item in acceptedItems {
-            let attachmentID = UUID().uuidString
-            composerAttachments.append(TurnComposerImageAttachment(id: attachmentID, state: .loading))
+        let attachmentJobs = acceptedItems.map { item in
+            (id: UUID().uuidString, item: item)
+        }
+        for job in attachmentJobs {
+            composerAttachments.append(TurnComposerImageAttachment(id: job.id, state: .loading))
+        }
+        saveLocalDraft(codex: codex, threadID: threadID)
+        let expectedDraftMergeRevision = codex.composerDraftMergeRevision(for: threadID)
 
-            attachmentLoadTasks[attachmentID] = Task { @MainActor [weak self] in
-                let state = await Self.loadComposerAttachmentState(from: item)
+        for job in attachmentJobs {
+            attachmentLoadTasks[job.id] = Task { @MainActor [weak self] in
+                let state = await Self.loadComposerAttachmentState(from: job.item)
                 Self.completeAttachmentLoad(
                     state,
-                    id: attachmentID,
+                    id: job.id,
                     viewModel: self,
-                    isCancelled: Task.isCancelled,
+                    expectedDraftMergeRevision: expectedDraftMergeRevision,
                     codex: codex,
                     threadID: threadID
                 )
             }
         }
-        saveLocalDraft(codex: codex, threadID: threadID)
     }
 
     // Reuses the picker intake pipeline so pasted images obey the same limits and processing.
@@ -1331,71 +1345,93 @@ final class TurnViewModel {
 
         clearComposerReviewSelectionIfNeededForNonReviewContent()
 
-        for imageData in acceptedItems {
-            let attachmentID = UUID().uuidString
-            composerAttachments.append(TurnComposerImageAttachment(id: attachmentID, state: .loading))
+        let attachmentJobs = acceptedItems.map { imageData in
+            (id: UUID().uuidString, imageData: imageData)
+        }
+        for job in attachmentJobs {
+            composerAttachments.append(TurnComposerImageAttachment(id: job.id, state: .loading))
+        }
+        saveLocalDraft(codex: codex, threadID: threadID)
+        let expectedDraftMergeRevision = codex.composerDraftMergeRevision(for: threadID)
 
-            attachmentLoadTasks[attachmentID] = Task { @MainActor [weak self] in
-                let state = await Self.loadComposerAttachmentState(fromData: imageData)
+        for job in attachmentJobs {
+            attachmentLoadTasks[job.id] = Task { @MainActor [weak self] in
+                let state = await Self.loadComposerAttachmentState(fromData: job.imageData)
                 Self.completeAttachmentLoad(
                     state,
-                    id: attachmentID,
+                    id: job.id,
                     viewModel: self,
-                    isCancelled: Task.isCancelled,
+                    expectedDraftMergeRevision: expectedDraftMergeRevision,
                     codex: codex,
                     threadID: threadID
                 )
             }
         }
-        saveLocalDraft(codex: codex, threadID: threadID)
     }
 
     private func updateComposerAttachment(
         id: String,
         state: TurnComposerImageAttachmentState,
         codex: CodexService,
-        threadID: String
+        threadID: String,
+        advancesAttachmentMergeRevision: Bool = true
     ) {
         guard let index = composerAttachments.firstIndex(where: { $0.id == id }) else {
             return
         }
 
         composerAttachments[index].state = state
-        saveLocalDraft(codex: codex, threadID: threadID, persistToDisk: true)
+        saveLocalDraft(
+            codex: codex,
+            threadID: threadID,
+            persistToDisk: true,
+            advancesAttachmentMergeRevision: advancesAttachmentMergeRevision
+        )
     }
 
-    // Routes a finished decode either into the live composer or, when the view was torn
-    // down mid-decode, into the thread's saved draft so the image is not silently lost.
-    private static func completeAttachmentLoad(
+    // Routes a finished decode into a surviving tile, or into the saved draft if the draft did not change.
+    static func completeAttachmentLoad(
         _ state: TurnComposerImageAttachmentState,
         id attachmentID: String,
         viewModel: TurnViewModel?,
-        isCancelled: Bool,
+        expectedDraftMergeRevision: Int,
         codex: CodexService,
         threadID: String
     ) {
-        if let viewModel, !isCancelled {
-            viewModel.updateComposerAttachment(id: attachmentID, state: state, codex: codex, threadID: threadID)
-            viewModel.attachmentLoadTasks[attachmentID] = nil
+        if let viewModel {
+            defer { viewModel.attachmentLoadTasks[attachmentID] = nil }
+            guard viewModel.composerAttachments.contains(where: { $0.id == attachmentID }) else {
+                return
+            }
+            viewModel.updateComposerAttachment(
+                id: attachmentID,
+                state: state,
+                codex: codex,
+                threadID: threadID,
+                advancesAttachmentMergeRevision: false
+            )
             return
         }
-        // A still-alive view model without the tile means the user removed the
-        // attachment on purpose; only then is dropping the decoded image correct.
-        if let viewModel, !viewModel.composerAttachments.contains(where: { $0.id == attachmentID }) {
-            return
-        }
-        mergeDecodedAttachmentIntoSavedDraft(state, id: attachmentID, codex: codex, threadID: threadID)
+        mergeDecodedAttachmentIntoSavedDraft(
+            state,
+            id: attachmentID,
+            expectedDraftMergeRevision: expectedDraftMergeRevision,
+            codex: codex,
+            threadID: threadID
+        )
     }
 
     // The draft snapshot saved on disappear only keeps .ready attachments, so an image
-    // that finished decoding after navigation must be merged into the store directly.
+    // that finished decoding after navigation must merge only if the draft is unchanged.
     private static func mergeDecodedAttachmentIntoSavedDraft(
         _ state: TurnComposerImageAttachmentState,
         id attachmentID: String,
+        expectedDraftMergeRevision: Int,
         codex: CodexService,
         threadID: String
     ) {
         guard case .ready = state else { return }
+        guard codex.composerDraftMergeRevision(for: threadID) == expectedDraftMergeRevision else { return }
         let existing = codex.composerDraft(for: threadID)
         var attachments = existing?.attachments ?? []
         guard !attachments.contains(where: { $0.id == attachmentID }) else { return }
@@ -1412,7 +1448,12 @@ final class TurnViewModel {
             isSubagentsSelectionArmed: existing?.isSubagentsSelectionArmed ?? false,
             updatedAt: Date()
         )
-        codex.setComposerDraft(merged, for: threadID, persistToDisk: true)
+        codex.setComposerDraft(
+            merged,
+            for: threadID,
+            persistToDisk: true,
+            advancesAttachmentMergeRevision: false
+        )
     }
 
     // Sends a composer payload, queueing follow-ups while the current run is still active.

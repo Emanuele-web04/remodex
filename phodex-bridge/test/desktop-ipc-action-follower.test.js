@@ -3498,7 +3498,7 @@ test("desktop IPC follower caps activeThreadIds so a marathon connection cannot 
 
   const oldestThreadId = "thread-cap-0";
   // MAX_ACTIVE_THREAD_IDS is 512: one more distinct thread than the cap must
-  // evict the oldest entry (FIFO, since Set preserves insertion order).
+  // evict the oldest LRU entry.
   const totalThreads = 513;
   for (let i = 0; i < totalThreads; i += 1) {
     follower.observeInbound(JSON.stringify({
@@ -3528,6 +3528,114 @@ test("desktop IPC follower caps activeThreadIds so a marathon connection cannot 
     },
   }));
   assert.equal(heldNewest, true, "the most recently observed thread id should still be treated as active");
+});
+
+test("desktop IPC follower protects pending prompts from active-thread LRU eviction", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-active-thread-pending-cap-");
+  const serverFrames = [];
+  const outbound = [];
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      serverFrames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      } else if (frame.method === "thread-follower-submit-user-input") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: frame.method,
+          handledByClientId: "desktop",
+          result: { ok: true },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    forwardToLocalCodex() {},
+    requestTimeoutMs: 500,
+    ownershipProbeTimeoutMs: 10_000,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-pending-cap" },
+  }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 5,
+    params: {
+      conversationId: "thread-pending-cap",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          requests: [{
+            id: "req-pending-cap",
+            method: "item/tool/requestUserInput",
+            params: {
+              threadId: "thread-pending-cap",
+              turnId: "turn-pending-cap",
+              itemId: "item-pending-cap",
+              questions: [{ id: "q1", question: "Continue?" }],
+            },
+          }],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.find((message) => message.id === "req-pending-cap"));
+
+  for (let i = 0; i < 512; i += 1) {
+    follower.observeInbound(JSON.stringify({
+      method: "thread/resume",
+      params: { threadId: `thread-pending-cap-fill-${i}` },
+    }));
+  }
+
+  await wait(25);
+  assert.equal(
+    outbound.some((message) => message.method === "serverRequest/resolved"
+      && message.params?.requestId === "req-pending-cap"),
+    false,
+    "LRU eviction must not dismiss a still-pending Desktop prompt"
+  );
+
+  follower.observeInbound(JSON.stringify({
+    id: "req-pending-cap",
+    result: {
+      answers: {
+        q1: { answers: ["Yes"] },
+      },
+    },
+  }));
+  await waitFor(() => serverFrames.find((frame) => frame.method === "thread-follower-submit-user-input"));
+  const replyFrame = serverFrames.find((frame) => frame.method === "thread-follower-submit-user-input");
+  assert.equal(replyFrame.params.requestId, "req-pending-cap");
 });
 
 test("desktop IPC follower refreshes active-thread recency so re-read threads survive eviction", async (t) => {

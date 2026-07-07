@@ -272,6 +272,80 @@ final class TurnComposerSendAvailabilityTests: XCTestCase {
         XCTAssertNil(service.composerDraft(for: "thread-draft-clear"))
     }
 
+    func testAttachmentLoadCompletionUpdatesLiveLoadingTile() {
+        let service = makeService()
+        let viewModel = TurnViewModel()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+
+        viewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-live", state: .loading)
+        ]
+        viewModel.saveLocalDraft(codex: service, threadID: "thread-live-attachment")
+        let expectedRevision = service.composerDraftMergeRevision(for: "thread-live-attachment")
+        service.setComposerDraft(nil, for: "thread-live-attachment")
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-live",
+            viewModel: viewModel,
+            expectedDraftMergeRevision: expectedRevision,
+            codex: service,
+            threadID: "thread-live-attachment"
+        )
+
+        XCTAssertEqual(viewModel.readyComposerAttachments, [attachment])
+        XCTAssertFalse(viewModel.hasBlockingAttachmentState)
+    }
+
+    func testLateAttachmentLoadMergesOnlyWhenDraftRevisionIsUnchanged() {
+        let service = makeService()
+        let attachment = CodexImageAttachment(
+            thumbnailBase64JPEG: "thumb",
+            payloadDataURL: "data:image/jpeg;base64,AAAA"
+        )
+        let preservingViewModel = TurnViewModel()
+        preservingViewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-preserve", state: .loading)
+        ]
+        preservingViewModel.saveLocalDraft(codex: service, threadID: "thread-preserve-attachment")
+        let preservingRevision = service.composerDraftMergeRevision(for: "thread-preserve-attachment")
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-preserve",
+            viewModel: nil,
+            expectedDraftMergeRevision: preservingRevision,
+            codex: service,
+            threadID: "thread-preserve-attachment"
+        )
+
+        XCTAssertEqual(service.composerDraft(for: "thread-preserve-attachment")?.attachments, [
+            TurnComposerImageAttachment(id: "attachment-preserve", state: .ready(attachment))
+        ])
+
+        let staleViewModel = TurnViewModel()
+        staleViewModel.composerAttachments = [
+            TurnComposerImageAttachment(id: "attachment-stale", state: .loading)
+        ]
+        staleViewModel.saveLocalDraft(codex: service, threadID: "thread-stale-attachment")
+        let staleRevision = service.composerDraftMergeRevision(for: "thread-stale-attachment")
+        service.setComposerDraft(nil, for: "thread-stale-attachment")
+
+        TurnViewModel.completeAttachmentLoad(
+            .ready(attachment),
+            id: "attachment-stale",
+            viewModel: nil,
+            expectedDraftMergeRevision: staleRevision,
+            codex: service,
+            threadID: "thread-stale-attachment"
+        )
+
+        XCTAssertNil(service.composerDraft(for: "thread-stale-attachment"))
+    }
+
     func testLocalDraftSurvivesFailedSend() async {
         let service = makeService()
         service.isConnected = true

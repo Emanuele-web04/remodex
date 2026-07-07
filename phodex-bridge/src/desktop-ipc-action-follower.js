@@ -101,16 +101,13 @@ function createDesktopIpcActionFollower({
   const conversationProjector = createDesktopConversationProjector({ now });
   const pendingRoutesByRequestId = new Map();
   const activeThreadIds = new Set();
-  // JS Set preserves insertion order, so the oldest entry is always
-  // `activeThreadIds.values().next().value`. Delete-before-add refreshes the
-  // thread's recency, so eviction is LRU: a thread the phone keeps reading is
-  // never the one evicted. Evicting interest also drops the thread's cached
-  // per-thread state, so the cap actually bounds follower memory.
+  // JS Set preserves insertion order; delete-before-add refreshes recency, and
+  // cap eviction skips threads with pending prompts so approvals are not lost.
   function rememberActiveThread(threadId) {
     activeThreadIds.delete(threadId);
     activeThreadIds.add(threadId);
     while (activeThreadIds.size > MAX_ACTIVE_THREAD_IDS) {
-      const oldest = activeThreadIds.values().next().value;
+      const oldest = oldestEvictableActiveThreadId();
       if (oldest === undefined) {
         break;
       }
@@ -119,11 +116,28 @@ function createDesktopIpcActionFollower({
     }
   }
 
+  function oldestEvictableActiveThreadId() {
+    for (const threadId of activeThreadIds) {
+      if (!hasPendingProjectedActions(threadId)) {
+        return threadId;
+      }
+    }
+    return undefined;
+  }
+
+  function hasPendingProjectedActions(threadId) {
+    for (const route of pendingRoutesByRequestId.values()) {
+      if (route.threadId === threadId) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Cleanup for cap-evicted threads only: clears follower caches without touching
   // liveOwnerThreadIds (still-owned local streams must not become hijackable) and
   // without rejecting held requests (removeDesktopThreadState handles real removal).
   function forgetEvictedThreadState(threadId) {
-    syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     rawStateUpdatedAtByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
