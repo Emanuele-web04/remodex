@@ -10,9 +10,11 @@
 import SwiftUI
 import UIKit
 
-// Keep RemodexTextKit selection out of the scrolling timeline. This is shared by both
-// plain markdown rows and Mermaid-interleaved markdown segments.
-let enablesInlineMarkdownSelectionInTimeline = false
+// RemodexTextKit selection runs inline in the scrolling timeline (native handles, loupe,
+// copy/share menu). This is shared by both plain markdown rows and Mermaid-interleaved
+// markdown segments. Streaming rows opt out until the message settles; the timeline root
+// applies `.remodex.textSelectionScope()` so at most one selection is active across rows.
+let enablesInlineMarkdownSelectionInTimeline = true
 
 private let timelineStreamingPlaceholderTexts: Set<String> = [
     "...",
@@ -461,8 +463,9 @@ struct MessageRow: View, Equatable {
                 onDismiss: { previewImage = nil }
             )
         }
+        // No .clipped() here: it cut the selection handle grabbers at the row edges.
+        // The timeline container already clips the rows section at viewport width.
         .frame(maxWidth: .infinity, alignment: .leading)
-        .clipped()
         .onAppear {
             synchronizeAssistantDisplayText(immediate: true)
         }
@@ -655,7 +658,8 @@ struct MessageRow: View, Equatable {
                 } else if message.isStreaming {
                     streamingAssistantContent(
                         hasVisibleAssistantText: hasVisibleAssistantText,
-                        visibleAssistantTextWithoutImageSyntax: visibleAssistantTextWithoutImageSyntax
+                        visibleAssistantTextWithoutImageSyntax: visibleAssistantTextWithoutImageSyntax,
+                        actionText: actionText
                     )
                 } else {
                     if hasVisibleAssistantText {
@@ -704,10 +708,9 @@ struct MessageRow: View, Equatable {
                 )
             }
         }
+        // Settled rows omit an outer context menu so long-press reaches native selection.
+        // The streaming renderer installs its own fallback menu until selection is safe.
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contextMenu {
-            selectableTextActions(text: actionText, usesMarkdownSelection: true)
-        }
     }
 
     private var hasTurnEndActions: Bool {
@@ -731,15 +734,44 @@ struct MessageRow: View, Equatable {
     @ViewBuilder
     private func streamingAssistantContent(
         hasVisibleAssistantText: Bool,
-        visibleAssistantTextWithoutImageSyntax: String
+        visibleAssistantTextWithoutImageSyntax: String,
+        actionText: String
     ) -> some View {
         if hasVisibleAssistantText {
+            // Selection stays off while streaming: the settled/active split renders two
+            // StructuredText instances whose layout churns per delta, so selection would
+            // fight the reveal. The row switches to the selectable path once it settles.
             StreamingAssistantMarkdownTextView(
                 text: visibleAssistantTextWithoutImageSyntax,
-                enablesSelection: enablesInlineMarkdownSelectionInTimeline,
+                enablesSelection: false,
                 constrainsToAvailableWidth: true,
                 animatesReveal: showsStreamingAnimations
             )
+            .contextMenu {
+                streamingAssistantTextActions(text: actionText)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func streamingAssistantTextActions(text: String) -> some View {
+        if let selectableText = timelineSelectableActionText(text) {
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                selectableTextSheet = SelectableMessageTextSheetState(
+                    contentKind: .streamingAssistantMarkdown,
+                    text: selectableText
+                )
+            } label: {
+                Label("Select Text", systemImage: "text.cursor")
+            }
+
+            Button {
+                HapticFeedback.shared.triggerImpactFeedback(style: .light)
+                UIPasteboard.general.string = selectableText
+            } label: {
+                RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
+            }
         }
     }
 
@@ -756,29 +788,6 @@ struct MessageRow: View, Equatable {
             inlineCommitAndPushPhase: inlineCommitAndPushPhase,
             assistantRevertAction: assistantRevertAction
         )
-    }
-
-    @ViewBuilder
-    private func selectableTextActions(text: String, usesMarkdownSelection: Bool) -> some View {
-        if let selectableText = timelineSelectableActionText(text) {
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                selectableTextSheet = SelectableMessageTextSheetState(
-                    role: message.role,
-                    text: selectableText,
-                    usesMarkdownSelection: usesMarkdownSelection
-                )
-            } label: {
-                Label("Select Text", systemImage: "text.cursor")
-            }
-
-            Button {
-                HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                UIPasteboard.general.string = selectableText
-            } label: {
-                RemodexIcon.menuLabel("Copy", systemName: "doc.on.doc")
-            }
-        }
     }
 
     // Throttles only the assistant row's visible text during streaming so markdown/layout

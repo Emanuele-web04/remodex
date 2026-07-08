@@ -537,6 +537,51 @@ test("parseSessionJsonlTurns drops expanded skill context user items", () => {
   assert.equal(turns[0].items.some((item) => item.role === "assistant"), true);
 });
 
+test("parseSessionJsonlTurns drops attribute-bearing internal goal context", () => {
+  const internalContext = [
+    "<codex_internal_context source=\"goal\">",
+    "Continue pursuing hidden runtime state.",
+    "</codex_internal_context>",
+  ].join("\n");
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-07-05T10:00:00.000Z",
+      type: "session_meta",
+      payload: { id: "thread-jsonl-internal-context" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-05T10:00:01.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-jsonl-internal-context" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-05T10:00:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: internalContext }],
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-05T10:00:03.000Z",
+      type: "response_item",
+      payload: {
+        id: "assistant-final",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "done" }],
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-jsonl-internal-context" });
+  const userItems = turns.flatMap((turn) => turn.items.filter((item) => item.role === "user"));
+
+  assert.equal(userItems.length, 0);
+  assert.equal(turns[0].items.some((item) => item.role === "assistant"), true);
+});
+
 test("parseSessionJsonlTurns preserves explicit timestamp aliases over entry timestamp", () => {
   const content = [
     JSON.stringify({

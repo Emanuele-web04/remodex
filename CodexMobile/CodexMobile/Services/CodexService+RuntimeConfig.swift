@@ -17,6 +17,14 @@ private enum RuntimeConfigLoadingPolicy {
     static let modelListTimeoutNanoseconds: UInt64 = 8_000_000_000
 }
 
+private enum RuntimeDebugLogPolicy {
+    static let maximumStoredEntries = 400
+    static let storedEntryTrimBatch = 80
+    static let itemCompletionBatchSize = 100
+    static let itemCompletionFlushNanoseconds: UInt64 = 2_000_000_000
+    static let maximumReportedItemTypes = 6
+}
+
 private enum RuntimeSelectionDefaults {
     static let modelId = "gpt-5.5"
     static let reasoningEffort = "medium"
@@ -436,15 +444,73 @@ extension CodexService {
     func debugRuntimeLog(_ message: String) {
         let entry = "[\(runtimeDebugTimestampFormatter.string(from: Date()))] \(message)"
         runtimeDebugLogEntries.append(entry)
-        if runtimeDebugLogEntries.count > 400 {
-            runtimeDebugLogEntries.removeFirst(runtimeDebugLogEntries.count - 400)
+        if runtimeDebugLogEntries.count > RuntimeDebugLogPolicy.maximumStoredEntries {
+            // Trim in batches so sustained event bursts do not shift the array for every new entry.
+            runtimeDebugLogEntries.removeFirst(RuntimeDebugLogPolicy.storedEntryTrimBatch)
         }
 #if DEBUG
         print("[CodexRuntime] \(entry)")
 #endif
     }
 
+    // Coalesces history replay and desktop-mirror bursts into one diagnostic line per batch.
+    func recordCompactRuntimeItemCompletion(itemType: String) {
+        compactRuntimeItemCompletedCount += 1
+        compactRuntimeItemCompletedTypes[itemType, default: 0] += 1
+
+        if compactRuntimeItemCompletedCount >= RuntimeDebugLogPolicy.itemCompletionBatchSize {
+            flushCompactRuntimeItemCompletions()
+            return
+        }
+
+        guard compactRuntimeItemCompletedFlushTask == nil else {
+            return
+        }
+
+        compactRuntimeItemCompletedFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(
+                nanoseconds: RuntimeDebugLogPolicy.itemCompletionFlushNanoseconds
+            )
+            guard !Task.isCancelled else { return }
+            self?.flushCompactRuntimeItemCompletions()
+        }
+    }
+
+    func flushCompactRuntimeItemCompletions() {
+        compactRuntimeItemCompletedFlushTask?.cancel()
+        compactRuntimeItemCompletedFlushTask = nil
+
+        let total = compactRuntimeItemCompletedCount
+        let typeCounts = compactRuntimeItemCompletedTypes
+        compactRuntimeItemCompletedCount = 0
+        compactRuntimeItemCompletedTypes.removeAll(keepingCapacity: true)
+
+        guard total > 0 else {
+            return
+        }
+
+        let sortedTypes = typeCounts.sorted { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+        }
+        let reportedTypes = sortedTypes.prefix(RuntimeDebugLogPolicy.maximumReportedItemTypes)
+        var typeSummary = reportedTypes.map { "\($0.key):\($0.value)" }
+        let reportedCount = reportedTypes.reduce(into: 0) { partialResult, entry in
+            partialResult += entry.value
+        }
+        if reportedCount < total {
+            typeSummary.append("other:\(total - reportedCount)")
+        }
+
+        debugRuntimeLog(
+            "rpc item/completed ×\(total) types=\(typeSummary.joined(separator: ","))"
+        )
+    }
+
     func clearRuntimeDebugLog() {
+        compactRuntimeItemCompletedFlushTask?.cancel()
+        compactRuntimeItemCompletedFlushTask = nil
+        compactRuntimeItemCompletedCount = 0
+        compactRuntimeItemCompletedTypes.removeAll(keepingCapacity: true)
         runtimeDebugLogEntries.removeAll()
     }
 

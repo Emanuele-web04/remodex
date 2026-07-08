@@ -1297,7 +1297,7 @@
 			repositoryURL = "https://github.com/Emanuele-web04/RemodexTextKit.git";
 			requirement = {
 				kind = exactVersion;
-				version = 0.3.8;
+				version = 0.4.1;
 			};
 		};
 		D1A000000000000000000001 /* XCRemoteSwiftPackageReference "Runestone" */ = {

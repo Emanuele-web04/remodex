@@ -13,7 +13,7 @@ const {
   normalizeToken,
   readString,
   requestIdKey,
-  visibleUserPromptText,
+  sanitizeUserInputEntries: sanitizeSharedUserInputEntries,
 } = require("./desktop-ipc-shared");
 
 const LOCAL_HOST_ID = "local";
@@ -699,36 +699,7 @@ function extractUserText(entries) {
 }
 
 function sanitizeUserInputEntries(entries) {
-  if (!Array.isArray(entries)) {
-    return [];
-  }
-  const sanitized = [];
-  for (const entry of entries) {
-    if (typeof entry === "string") {
-      const visible = visibleUserPromptText(entry);
-      if (visible) {
-        sanitized.push(visible);
-      }
-      continue;
-    }
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const text = typeof entry.text === "string" ? entry.text : "";
-    if (!text) {
-      sanitized.push(cloneJSON(entry));
-      continue;
-    }
-    const visible = visibleUserPromptText(text);
-    if (!visible) {
-      continue;
-    }
-    sanitized.push(visible === text ? cloneJSON(entry) : {
-      ...cloneJSON(entry),
-      text: visible,
-    });
-  }
-  return sanitized;
+  return sanitizeSharedUserInputEntries(entries).map(cloneJSON);
 }
 
 function sanitizeUserMessageItem(item) {

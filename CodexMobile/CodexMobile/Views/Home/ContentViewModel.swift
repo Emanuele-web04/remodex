@@ -1053,6 +1053,8 @@ extension ContentViewModel {
 
     // Emits redacted switch traces so manual Mac switching can be debugged from device logs.
     private func logMacSwitchState(_ event: String, targetMacDeviceId: String?, codex: CodexService) {
+        #if DEBUG
+        guard event.contains("error") || AppEnvironment.verboseDiagnosticsEnabled else { return }
         let target = redactedMacSwitchIdentifier(targetMacDeviceId)
         let current = redactedMacSwitchIdentifier(codex.normalizedCurrentTrustedMacDeviceId)
         let previous = redactedMacSwitchIdentifier(codex.normalizedPreviousTrustedMacDeviceId)
@@ -1063,6 +1065,7 @@ extension ContentViewModel {
             + "relayMac=\(relayMac) relaySession=\(relaySession) connected=\(codex.isConnected) "
             + "state=\(codex.secureConnectionState.statusLabel)"
         )
+        #endif
     }
 
     private func redactedMacSwitchIdentifier(_ value: String?) -> String {

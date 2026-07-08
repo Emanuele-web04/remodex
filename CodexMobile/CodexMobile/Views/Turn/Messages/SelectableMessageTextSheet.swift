@@ -1,27 +1,31 @@
 // FILE: SelectableMessageTextSheet.swift
-// Purpose: Presents selectable text for timeline messages outside the scrolling row tree.
+// Purpose: Presents stable selectable snapshots for timeline text that cannot select inline.
 // Layer: View Component
 // Exports: SelectableMessageTextSheetState, SelectableMessageTextSheet
 // Depends on: SwiftUI, TurnMarkdownTextRendering
 
 import SwiftUI
 
-struct SelectableMessageTextSheetState: Identifiable {
-    let id = UUID()
-    let role: CodexMessageRole
-    let text: String
-    let usesMarkdownSelection: Bool
+enum SelectableMessageTextSheetContentKind {
+    case systemPlainText
+    case streamingAssistantMarkdown
 
     var title: String {
-        switch role {
-        case .assistant:
-            return "Assistant Message"
-        case .system:
+        switch self {
+        case .systemPlainText:
             return "System Message"
-        case .user:
-            return "Message"
+        case .streamingAssistantMarkdown:
+            return "Assistant Message"
         }
     }
+}
+
+// Settled assistant rows select inline; streaming rows use a stable sheet so
+// selection does not compete with the live markdown reveal.
+struct SelectableMessageTextSheetState: Identifiable {
+    let id = UUID()
+    let contentKind: SelectableMessageTextSheetContentKind
+    let text: String
 }
 
 struct SelectableMessageTextSheet: View {
@@ -31,24 +35,10 @@ struct SelectableMessageTextSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if state.usesMarkdownSelection {
-                        MarkdownTextView(
-                            text: state.text,
-                            profile: .assistantProse,
-                            enablesSelection: true
-                        )
-                    } else {
-                        Text(state.text)
-                            .font(AppFont.body())
-                            .foregroundStyle(.primary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }
-                .padding(16)
+                selectableContent
+                    .padding(16)
             }
-            .navigationTitle(state.title)
+            .navigationTitle(state.contentKind.title)
             .navigationBarTitleDisplayMode(.inline)
             .adaptiveNavigationBar()
             .toolbar {
@@ -58,5 +48,23 @@ struct SelectableMessageTextSheet: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    @ViewBuilder
+    private var selectableContent: some View {
+        switch state.contentKind {
+        case .systemPlainText:
+            Text(state.text)
+                .font(AppFont.body())
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        case .streamingAssistantMarkdown:
+            MarkdownTextView(
+                text: state.text,
+                profile: .assistantProse,
+                enablesSelection: true
+            )
+        }
     }
 }

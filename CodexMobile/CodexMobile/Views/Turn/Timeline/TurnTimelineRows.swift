@@ -2,8 +2,9 @@
 // Purpose: Renders timeline row groups and message-row accessories.
 // Layer: View Component
 // Exports: AssistantBlockAccessoryState, TurnTimelineRowsSection
-// Depends on: SwiftUI, TurnTimelineRenderProjection, MessageRow, CodexMessage
+// Depends on: SwiftUI, RemodexTextKit, TurnTimelineRenderProjection, MessageRow, CodexMessage
 
+import RemodexTextKit
 import SwiftUI
 
 struct AssistantBlockAccessoryState: Equatable {
@@ -185,26 +186,6 @@ private struct TurnTimelineToolBurstView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            ForEach(group.pinnedMessages) { message in
-                TurnTimelineMessageRow(
-                    message: message,
-                    isRetryAvailable: isRetryAvailable,
-                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
-                    planSessionSource: planSessionSource,
-                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
-                    completedTurnIDs: completedTurnIDs,
-                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
-                    currentWorkingDirectory: currentWorkingDirectory,
-                    planMatchingFingerprint: planMatchingFingerprint,
-                    newestStreamingMessageID: newestStreamingMessageID,
-                    autoScrollMode: autoScrollMode,
-                    showsGlobalRunningIndicator: showsGlobalRunningIndicator,
-                    onRetryUserMessage: onRetryUserMessage,
-                    onTapAssistantRevert: onTapAssistantRevert,
-                    onTapSubagent: onTapSubagent
-                )
-            }
-
             if group.hiddenCount > 0 {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
@@ -212,19 +193,12 @@ private struct TurnTimelineToolBurstView: View {
                     }
                 } label: {
                     HStack(spacing: 6) {
-                        RemodexIcon.image(systemName: "chevron.right")
-                            .font(AppFont.system(size: 10, weight: .semibold))
+                        RemodexIcon.image(systemName: "chevron.right", size: 17, relativeTo: .body)
                             .foregroundStyle(.secondary)
                             .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        (
-                            Text(summaryCountLabel)
-                                .font(AppFont.subheadline(weight: .medium))
-                                .foregroundStyle(.secondary)
-                            +
-                            Text(" " + summaryNounLabel)
-                                .font(AppFont.subheadline())
-                                .foregroundStyle(.tertiary)
-                        )
+                        Text("\(summaryCountLabel) \(summaryNounLabel)")
+                            .font(AppFont.body(weight: .regular))
+                            .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -252,6 +226,28 @@ private struct TurnTimelineToolBurstView: View {
                         onTapSubagent: onTapSubagent
                     )
                 }
+            }
+
+            // This is the only call row while collapsed. It stays last when the
+            // history opens too, so it updates in place as the model advances.
+            if let latestMessage = group.latestMessage {
+                TurnTimelineMessageRow(
+                    message: latestMessage,
+                    isRetryAvailable: isRetryAvailable,
+                    cachedBlockInfoByMessageID: cachedBlockInfoByMessageID,
+                    planSessionSource: planSessionSource,
+                    allowsAssistantPlanFallbackRecovery: allowsAssistantPlanFallbackRecovery,
+                    completedTurnIDs: completedTurnIDs,
+                    threadMessagesForPlanMatching: threadMessagesForPlanMatching,
+                    currentWorkingDirectory: currentWorkingDirectory,
+                    planMatchingFingerprint: planMatchingFingerprint,
+                    newestStreamingMessageID: newestStreamingMessageID,
+                    autoScrollMode: autoScrollMode,
+                    showsGlobalRunningIndicator: showsGlobalRunningIndicator,
+                    onRetryUserMessage: onRetryUserMessage,
+                    onTapAssistantRevert: onTapAssistantRevert,
+                    onTapSubagent: onTapSubagent
+                )
             }
         }
     }
@@ -456,6 +452,9 @@ struct TurnTimelineRowsSection: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // One selection scope for the whole timeline: starting a selection in any
+        // markdown row clears the active selection in every other row.
+        .remodex.textSelectionScope()
     }
 
     private var shouldUseGlobalRunningIndicator: Bool {

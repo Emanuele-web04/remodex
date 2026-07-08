@@ -238,7 +238,17 @@ extension CodexService {
         noteDesktopMirroredActivityIfNeeded(method: method, paramsObject: paramsObject)
 
         switch method {
-        case "turn/plan/updated", "item/plan/delta", "item/completed", "serverRequest/resolved":
+        case "item/completed":
+            if AppEnvironment.verboseDiagnosticsEnabled {
+                debugRuntimeLog(
+                    debugNotificationSummary(method: method, paramsObject: paramsObject)
+                )
+            } else {
+                recordCompactRuntimeItemCompletion(
+                    itemType: debugNotificationItemType(paramsObject: paramsObject)
+                )
+            }
+        case "turn/plan/updated", "item/plan/delta", "serverRequest/resolved":
             debugRuntimeLog(
                 debugNotificationSummary(method: method, paramsObject: paramsObject)
             )
@@ -2416,6 +2426,13 @@ extension CodexService {
         .compactMap { $0 }
         .first ?? 0
         return "rpc notification \(method) thread=\(paramsObject?["threadId"]?.stringValue ?? "") turn=\(paramsObject?["turnId"]?.stringValue ?? "") item=\(itemId) nestedItem=\(nestedItemId) type=\(itemType) event=\(eventType) path=\(pathName) resultLen=\(resultLength)"
+    }
+
+    private func debugNotificationItemType(paramsObject: IncomingParamsObject?) -> String {
+        let eventObject = paramsObject.flatMap { envelopeEventObject(from: $0) }
+        let itemObject = paramsObject.flatMap { extractIncomingItemObject(from: $0, eventObject: eventObject) }
+        let itemType = normalizedItemType(itemObject?["type"]?.stringValue ?? "")
+        return itemType.isEmpty ? "unknown" : itemType
     }
 
     private func extractItemID(

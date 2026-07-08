@@ -39,6 +39,8 @@ const {
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_MS = 1_500;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 75;
+const DEFAULT_INITIAL_HISTORY_RETRY_MS = 1_000;
+const DEFAULT_INITIAL_HISTORY_MAX_ATTEMPTS = 5;
 // Desktop's webview refreshes its recent-conversations list when it receives a
 // thread-unarchived broadcast for its host. Give the rollout writer a moment to
 // persist session_meta + the first user event so the refreshed thread/list scan
@@ -114,6 +116,8 @@ function createDesktopIpcLiveOwner({
   maxPatchBytes = DEFAULT_MAX_PATCH_BYTES,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   reconnectMs = DEFAULT_RECONNECT_MS,
+  initialHistoryRetryMs = DEFAULT_INITIAL_HISTORY_RETRY_MS,
+  initialHistoryMaxAttempts = DEFAULT_INITIAL_HISTORY_MAX_ATTEMPTS,
   netModule = net,
   now = () => Date.now(),
   logPrefix = "[remodex]",
@@ -132,6 +136,12 @@ function createDesktopIpcLiveOwner({
   const pendingThreadStartRequestIds = new Map();
   const pendingThreadReadRequestIds = new Set();
   const pendingThreadHydrationsByThreadId = new Map();
+  // Unknown existing threads need a real history baseline before the first
+  // Desktop snapshot; any seeded partial state can replace all desktop rows.
+  const threadsAwaitingInitialHistoryByThreadId = new Set();
+  const initialHistoryRetryAfterByThreadId = new Map();
+  const initialHistoryRetryTimersByThreadId = new Map();
+  const initialHistoryAttemptCountByThreadId = new Map();
   const cachedThreadsByThreadId = new Map();
   const lastBroadcastStatesByThreadId = new Map();
   const fallbackTurnIdsByThreadId = new Map();
@@ -230,6 +240,9 @@ function createDesktopIpcLiveOwner({
     const hadConversation = conversations.has(threadId);
     const hadCachedThread = cachedThreadsByThreadId.has(threadId);
     markOwnedThread(threadId);
+    if (!hadConversation && !hadCachedThread) {
+      threadsAwaitingInitialHistoryByThreadId.add(threadId);
+    }
     let pendingTurnStartEntry = null;
     if (method === "turn/start") {
       pendingTurnStartEntry = rememberPendingTurnStart(threadId, message?.params, message?.id);
@@ -245,7 +258,7 @@ function createDesktopIpcLiveOwner({
       insertOptimisticPendingTurn(threadId, pendingTurnStartEntry);
     }
     if (!hadConversation && !hadCachedThread) {
-      hydrateOwnedThreadFromRead(threadId);
+      requestInitialHistoryBaselineIfDue(threadId);
     }
     scheduleSnapshot(threadId);
   }
@@ -296,6 +309,11 @@ function createDesktopIpcLiveOwner({
     });
 
     if (update?.threadId && update.changed) {
+      // thread/started already carries the authoritative thread baseline, including
+      // new-thread cases where turn/start reached the bridge first.
+      if (readString(message.method) === "thread/started") {
+        stopAwaitingInitialHistory(update.threadId);
+      }
       refreshOptimisticFallbackForThread(update.threadId);
       scheduleSnapshot(update.threadId);
     }
@@ -325,6 +343,13 @@ function createDesktopIpcLiveOwner({
     pendingThreadStartRequestIds.clear();
     pendingThreadReadRequestIds.clear();
     pendingThreadHydrationsByThreadId.clear();
+    threadsAwaitingInitialHistoryByThreadId.clear();
+    initialHistoryRetryAfterByThreadId.clear();
+    initialHistoryAttemptCountByThreadId.clear();
+    for (const timer of initialHistoryRetryTimersByThreadId.values()) {
+      clearTimeout(timer);
+    }
+    initialHistoryRetryTimersByThreadId.clear();
     cachedThreadsByThreadId.clear();
     lastBroadcastStatesByThreadId.clear();
     fallbackTurnIdsByThreadId.clear();
@@ -463,6 +488,13 @@ function createDesktopIpcLiveOwner({
     pendingTurnStartEntriesByRequestId.delete(responseId);
     if (message.error) {
       discardPendingTurnStartEntry(pending.threadId, pending.entry);
+      const remainingStarts = pendingTurnStartParamsByThreadId.get(pending.threadId) || [];
+      if (remainingStarts.length === 0
+        && threadsAwaitingInitialHistoryByThreadId.has(pending.threadId)) {
+        // A rejected first turn cannot produce a usable baseline. Relinquish
+        // ownership instead of polling a thread that may never have existed.
+        removeOwnedThread(pending.threadId);
+      }
     }
   }
 
@@ -612,6 +644,7 @@ function createDesktopIpcLiveOwner({
     conversations.delete(normalizedThreadId);
     cachedThreadsByThreadId.delete(normalizedThreadId);
     pendingThreadHydrationsByThreadId.delete(normalizedThreadId);
+    stopAwaitingInitialHistory(normalizedThreadId);
     lastBroadcastStatesByThreadId.delete(normalizedThreadId);
     fallbackTurnIdsByThreadId.delete(normalizedThreadId);
     streamRevisionsByThreadId.delete(normalizedThreadId);
@@ -777,6 +810,7 @@ function createDesktopIpcLiveOwner({
       now,
     });
     conversations.set(threadId, next);
+    stopAwaitingInitialHistory(threadId);
     return next;
   }
 
@@ -831,8 +865,7 @@ function createDesktopIpcLiveOwner({
     const pendingThreadIds = Array.from(dirtyThreadIds);
     dirtyThreadIds.clear();
     for (const threadId of pendingThreadIds) {
-      if (pendingThreadHydrationsByThreadId.has(threadId)
-        && !hasOptimisticPendingTurn(threadId)) {
+      if (shouldDelayInitialSnapshotForHistory(threadId)) {
         dirtyThreadIds.add(threadId);
         continue;
       }
@@ -843,10 +876,81 @@ function createDesktopIpcLiveOwner({
     }
   }
 
-  function hasOptimisticPendingTurn(threadId) {
-    return Boolean(conversations.get(threadId)?.turns?.some((turn) => (
-      turn?.remodexOptimisticPendingTurn
-    )));
+  // Blocks only the first Desktop snapshot for a newly-owned, unhydrated thread.
+  // Once a baseline was broadcast, later patches may stream normally.
+  function shouldDelayInitialSnapshotForHistory(threadId) {
+    const normalizedThreadId = readString(threadId);
+    if (!normalizedThreadId || !threadsAwaitingInitialHistoryByThreadId.has(normalizedThreadId)) {
+      return false;
+    }
+    if (lastBroadcastStatesByThreadId.has(normalizedThreadId)) {
+      stopAwaitingInitialHistory(normalizedThreadId);
+      return false;
+    }
+    requestInitialHistoryBaselineIfDue(normalizedThreadId);
+    return ownedThreadIds.has(normalizedThreadId)
+      && threadsAwaitingInitialHistoryByThreadId.has(normalizedThreadId);
+  }
+
+  // Re-requests the thread/read baseline with bounded backoff while the first
+  // snapshot stays blocked. Permanent failures release ownership to other mirrors.
+  function requestInitialHistoryBaselineIfDue(threadId) {
+    if (pendingThreadHydrationsByThreadId.has(threadId)) {
+      return;
+    }
+    const maxAttempts = Number.isFinite(initialHistoryMaxAttempts)
+      ? Math.max(1, Math.floor(initialHistoryMaxAttempts))
+      : DEFAULT_INITIAL_HISTORY_MAX_ATTEMPTS;
+    const attemptCount = initialHistoryAttemptCountByThreadId.get(threadId) || 0;
+    if (attemptCount >= maxAttempts) {
+      removeOwnedThread(threadId);
+      return;
+    }
+    const currentTime = now();
+    const retryAfter = initialHistoryRetryAfterByThreadId.get(threadId) || 0;
+    if (currentTime < retryAfter) {
+      scheduleInitialHistoryRetryWakeup(threadId, retryAfter - currentTime);
+      return;
+    }
+    clearInitialHistoryRetryWakeup(threadId);
+    const retryBaseMs = Number.isFinite(initialHistoryRetryMs)
+      ? Math.max(0, initialHistoryRetryMs)
+      : DEFAULT_INITIAL_HISTORY_RETRY_MS;
+    const retryDelayMs = retryBaseMs * (2 ** Math.min(attemptCount, 5));
+    initialHistoryAttemptCountByThreadId.set(threadId, attemptCount + 1);
+    initialHistoryRetryAfterByThreadId.set(threadId, currentTime + retryDelayMs);
+    hydrateOwnedThreadFromRead(threadId);
+  }
+
+  function stopAwaitingInitialHistory(threadId) {
+    threadsAwaitingInitialHistoryByThreadId.delete(threadId);
+    initialHistoryRetryAfterByThreadId.delete(threadId);
+    initialHistoryAttemptCountByThreadId.delete(threadId);
+    clearInitialHistoryRetryWakeup(threadId);
+  }
+
+  // Wakes blocked first-snapshot flushes once the thread/read retry window opens.
+  function scheduleInitialHistoryRetryWakeup(threadId, delayMs) {
+    if (initialHistoryRetryTimersByThreadId.has(threadId)) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      initialHistoryRetryTimersByThreadId.delete(threadId);
+      if (ownedThreadIds.has(threadId) && threadsAwaitingInitialHistoryByThreadId.has(threadId)) {
+        scheduleSnapshot(threadId);
+      }
+    }, Math.max(0, delayMs));
+    timer.unref?.();
+    initialHistoryRetryTimersByThreadId.set(threadId, timer);
+  }
+
+  function clearInitialHistoryRetryWakeup(threadId) {
+    const timer = initialHistoryRetryTimersByThreadId.get(threadId);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    initialHistoryRetryTimersByThreadId.delete(threadId);
   }
 
   // Refreshing insertion order makes the Map behave as an LRU; owned threads
@@ -898,8 +1002,7 @@ function createDesktopIpcLiveOwner({
 
   function broadcastAllOwnedSnapshots() {
     for (const threadId of ownedThreadIds) {
-      if (pendingThreadHydrationsByThreadId.has(threadId)
-        && !hasOptimisticPendingTurn(threadId)) {
+      if (shouldDelayInitialSnapshotForHistory(threadId)) {
         dirtyThreadIds.add(threadId);
         continue;
       }
@@ -916,6 +1019,9 @@ function createDesktopIpcLiveOwner({
     const conversationState = conversations.get(threadId);
     if (!conversationState || !ownedThreadIds.has(threadId)) {
       return true;
+    }
+    if (shouldDelayInitialSnapshotForHistory(threadId)) {
+      return false;
     }
     const currentRevision = streamRevisionsByThreadId.get(threadId) ?? 0;
     const previousState = lastBroadcastStatesByThreadId.get(threadId) || null;

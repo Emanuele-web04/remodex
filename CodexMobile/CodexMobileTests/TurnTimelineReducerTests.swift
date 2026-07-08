@@ -331,14 +331,14 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         XCTAssertEqual(group.messages.map(\.id), toolMessages.map(\.id))
-        XCTAssertEqual(group.hiddenCount, 2)
-        XCTAssertEqual(group.pinnedMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5"])
-        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-6", "tool-7"])
+        XCTAssertEqual(group.hiddenCount, 6)
+        XCTAssertEqual(group.overflowMessages.map(\.id), ["tool-1", "tool-2", "tool-3", "tool-4", "tool-5", "tool-6"])
+        XCTAssertEqual(group.latestMessage?.id, "tool-7")
     }
 
-    func testTimelineRenderProjectionKeepsShortToolRunsExpanded() {
+    func testTimelineRenderProjectionKeepsUpToFourToolRunsExpanded() {
         let now = Date()
-        let toolMessages = (1...5).map { index in
+        let toolMessages = (1...4).map { index in
             makeMessage(
                 id: "tool-\(index)",
                 threadID: "thread",
@@ -352,7 +352,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         let items = TurnTimelineRenderProjection.project(messages: toolMessages)
-        XCTAssertEqual(items.count, 5)
+        XCTAssertEqual(items.count, 4)
 
         let messageIDs = items.compactMap { item -> String? in
             if case .message(let message) = item {

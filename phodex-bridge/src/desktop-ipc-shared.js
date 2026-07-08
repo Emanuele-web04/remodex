@@ -41,29 +41,128 @@ const DESKTOP_IPC_METHOD_VERSIONS = new Map([
   ["thread-follower-set-queued-follow-ups-state", 1],
 ]);
 
-// Codex injects project/context instructions as plain text fragments inside the
-// turn input. Desktop hides them via these exact markers (see codex-rs
-// memories/write phase1 and tui ide_context/prompt.rs); mirrored user bubbles
-// must apply the same rules or the phone renders instruction walls as prompts.
-const CONTEXT_FRAGMENT_MARKERS = [
-  { start: "# AGENTS.md instructions for ", end: "</INSTRUCTIONS>" },
-  { start: "<user_instructions>", end: "</user_instructions>" },
-  { start: "<environment_context>", end: "</environment_context>" },
-  // Runtime skill bodies are hidden context, not user-authored prompt text.
-  { start: "<skill>", end: "</skill>" },
+// Mirrors Codex's ContextualUserFragment registry. Keep this exact: arbitrary
+// XML is valid user input, while these runtime-owned markers are hidden history.
+const CONTEXT_MARKER_PAIRS = [
+  ["<environment_context>", "</environment_context>"],
+  ["<skill>", "</skill>"],
+  ["<user_shell_command>", "</user_shell_command>"],
+  ["<turn_aborted>", "</turn_aborted>"],
+  ["<subagent_notification>", "</subagent_notification>"],
+  ["<recommended_plugins>", "</recommended_plugins>"],
+  ["<goal_context>", "</goal_context>"],
+  // Review mode records this raw handoff in history, then emits the visible
+  // review result separately. Showing it as a user bubble leaks runtime state.
+  ["<user_action>", "</user_action>"],
 ];
+const LEGACY_CONTEXT_WARNING_PREFIXES = [
+  "Warning: The maximum number of unified exec processes you can keep open is",
+  "Warning: Your account was flagged for potentially high-risk cyber activity",
+];
+const LEGACY_APPLY_PATCH_WARNING_PREFIX = "Warning: apply_patch was requested via ";
+const LEGACY_APPLY_PATCH_WARNING_SUFFIX = "Use the apply_patch tool instead of exec_command.";
+const AGENTS_INSTRUCTIONS_PREFIX = "# AGENTS.md instructions";
+const INTERNAL_CONTEXT_PATTERN = /^<codex_internal_context\s+source=(?:"[a-z][a-z0-9_]*"|'[a-z][a-z0-9_]*')>[\s\S]*<\/codex_internal_context>$/;
+const EXTERNAL_CONTEXT_PATTERN = /^<external_([a-z0-9_-]+)>[\s\S]*<\/external_\1>$/;
 const PROMPT_REQUEST_BEGIN = "## My request for Codex:";
+const REVIEW_PROMPT_PREFIX = "## Code review guidelines:";
+
+// Attachments ride as input_image entries framed by "<image>"/"</image>" text
+// entries, so an image-only item's joined text is exactly an empty tag pair.
+// That incidentally matches the context shape, but it is NOT injected context:
+// classifying it as such would drop image-only user messages (the image entries
+// live in the same item the callers discard). Strip the placeholders before
+// classifying, and never surface them as visible bubble text.
+const IMAGE_PLACEHOLDER_PAIR = /<image>\s*<\/image>/gi;
+const IMAGE_PLACEHOLDER_TOKEN = /^<\/?image>$/i;
+const RUNTIME_IMAGE_OPENING_TAG = /<image\s+name=\[Image #\d+\]\s+path=(?:"[^"\r\n]+"|'[^'\r\n]+'|[^\s<>]+)\s*>/gi;
+
+function stripImagePlaceholders(text) {
+  let sawRuntimeImageOpeningTag = false;
+  const withoutRuntimeOpeners = text.replace(RUNTIME_IMAGE_OPENING_TAG, () => {
+    sawRuntimeImageOpeningTag = true;
+    return "";
+  });
+  const withoutPairs = withoutRuntimeOpeners.replace(IMAGE_PLACEHOLDER_PAIR, "");
+  if (sawRuntimeImageOpeningTag) {
+    return withoutPairs.replace(/<\/image>/gi, "");
+  }
+  return IMAGE_PLACEHOLDER_TOKEN.test(withoutPairs.trim()) ? "" : withoutPairs;
+}
 
 function isContextualUserText(text) {
-  const trimmed = typeof text === "string" ? text.trim() : "";
+  const raw = typeof text === "string" ? text : "";
+  const trimmed = stripImagePlaceholders(raw).trim();
   if (!trimmed) {
     return false;
   }
-  // Newer runtimes concatenate several fragments into one user item (for
-  // example AGENTS.md instructions followed by environment_context), so the
-  // opening and closing markers may come from different fragment kinds.
-  return CONTEXT_FRAGMENT_MARKERS.some(({ start }) => trimmed.startsWith(start))
-    && CONTEXT_FRAGMENT_MARKERS.some(({ end }) => trimmed.endsWith(end));
+  // Review envelopes contain a real request after the delimiter and are never
+  // wholly contextual, even when that request itself contains reserved markup.
+  if (trimmed.startsWith(REVIEW_PROMPT_PREFIX) && trimmed.includes(PROMPT_REQUEST_BEGIN)) {
+    return false;
+  }
+  const normalized = trimmed.toLowerCase();
+  if (normalized.startsWith(AGENTS_INSTRUCTIONS_PREFIX.toLowerCase())) {
+    // Runtime context can concatenate AGENTS.md with any registered hidden
+    // fragment. Only classify the whole item as hidden when its final fragment
+    // is also runtime-owned; a following real user request must stay visible.
+    return normalized.endsWith("</instructions>")
+      || CONTEXT_MARKER_PAIRS.some(([, end]) => normalized.endsWith(end));
+  }
+  if (CONTEXT_MARKER_PAIRS.some(([start, end]) => (
+    normalized.startsWith(start) && normalized.endsWith(end)
+  ))) {
+    return true;
+  }
+  if (INTERNAL_CONTEXT_PATTERN.test(trimmed) || EXTERNAL_CONTEXT_PATTERN.test(trimmed)) {
+    return true;
+  }
+  if (LEGACY_CONTEXT_WARNING_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) {
+    return true;
+  }
+  return trimmed.startsWith(LEGACY_APPLY_PATCH_WARNING_PREFIX)
+    && trimmed.endsWith(LEGACY_APPLY_PATCH_WARNING_SUFFIX);
+}
+
+function decodeXmlText(text) {
+  return text.replace(/&(lt|gt|quot|apos|amp);/g, (match, entity) => ({
+    lt: "<",
+    gt: ">",
+    quot: "\"",
+    apos: "'",
+    amp: "&",
+  })[entity] || match);
+}
+
+function extractNestedRuntimeText(text, outerTag, innerTag) {
+  const outerPattern = new RegExp(`^<${outerTag}>[\\s\\S]*<\\/${outerTag}>$`, "i");
+  if (!outerPattern.test(text.trim())) {
+    return null;
+  }
+  const innerPattern = new RegExp(`<${innerTag}>([\\s\\S]*?)<\\/${innerTag}>`, "i");
+  const match = innerPattern.exec(text);
+  return match ? decodeXmlText(match[1]).trim() : null;
+}
+
+// Some runtime wrappers are visible triggers, not hidden context. Codex.app
+// presents only their human-facing payload and keeps transport metadata private.
+function extractVisibleRuntimeEnvelope(text) {
+  const trimmed = text.trim();
+  const envelopePairs = [
+    ["heartbeat", "instructions"],
+    ["codex_delegation", "input"],
+    ["realtime_delegation", "input"],
+    ["sidechat_boundary", "latest_user_message"],
+  ];
+  for (const [outerTag, innerTag] of envelopePairs) {
+    const extracted = extractNestedRuntimeText(trimmed, outerTag, innerTag);
+    if (extracted != null) {
+      return extracted;
+    }
+  }
+
+  const hookPrompt = /^<hook_prompt\s+hook_run_id=(?:"[^"]+"|'[^']+')>([\s\S]*?)<\/hook_prompt>$/i.exec(trimmed);
+  return hookPrompt ? decodeXmlText(hookPrompt[1]).trim() : null;
 }
 
 // Mirrors Desktop's extract_prompt_request: IDE-context prompts embed the real
@@ -72,14 +171,94 @@ function visibleUserPromptText(text) {
   if (typeof text !== "string" || !text) {
     return "";
   }
-  if (isContextualUserText(text)) {
+  const cleaned = stripImagePlaceholders(text);
+  // Context bodies can contain the request delimiter as ordinary text. Classify
+  // the complete fragment first so the delimiter cannot reveal hidden content.
+  if (isContextualUserText(cleaned)) {
     return "";
   }
-  const requestIndex = text.lastIndexOf(PROMPT_REQUEST_BEGIN);
-  if (requestIndex < 0) {
-    return text;
+  const requestIndex = cleaned.lastIndexOf(PROMPT_REQUEST_BEGIN);
+  if (requestIndex >= 0) {
+    return cleaned.slice(requestIndex + PROMPT_REQUEST_BEGIN.length).trim();
   }
-  return text.slice(requestIndex + PROMPT_REQUEST_BEGIN.length).trim();
+  const envelopeText = extractVisibleRuntimeEnvelope(cleaned);
+  if (envelopeText != null) {
+    return envelopeText;
+  }
+  return cleaned;
+}
+
+// Sanitizes text fragments independently so a hidden fragment cannot cause a
+// sibling prompt or image attachment in the same user item to be discarded.
+function sanitizeUserInputEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  const sanitized = [];
+  for (const entry of entries) {
+    if (typeof entry === "string") {
+      const visible = visibleUserPromptText(entry);
+      if (visible) {
+        sanitized.push(visible);
+      }
+      continue;
+    }
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const textKey = ["text", "message", "content"].find((key) => typeof entry[key] === "string");
+    if (!textKey) {
+      sanitized.push(entry);
+      continue;
+    }
+    const visible = visibleUserPromptText(entry[textKey]);
+    if (!visible) {
+      continue;
+    }
+    sanitized.push(visible === entry[textKey] ? entry : { ...entry, [textKey]: visible });
+  }
+  return sanitized;
+}
+
+function sanitizeUserRoleItem(item) {
+  if (!isUserRoleItem(item)) {
+    return item;
+  }
+  let sanitized = item;
+  let changed = false;
+
+  if (Array.isArray(item.content)) {
+    const content = sanitizeUserInputEntries(item.content);
+    changed = content.length !== item.content.length
+      || content.some((entry, index) => entry !== item.content[index]);
+    if (changed) {
+      sanitized = { ...sanitized, content };
+    }
+  }
+
+  for (const key of ["text", "message"]) {
+    if (typeof sanitized[key] !== "string") {
+      continue;
+    }
+    const visible = visibleUserPromptText(sanitized[key]);
+    if (!visible && !Array.isArray(sanitized.content)) {
+      return null;
+    }
+    if (visible !== sanitized[key]) {
+      sanitized = { ...sanitized, [key]: visible };
+      changed = true;
+    }
+  }
+
+  const hasContent = Array.isArray(sanitized.content) && sanitized.content.length > 0;
+  const hasDirectText = ["text", "message"].some((key) => (
+    typeof sanitized[key] === "string" && sanitized[key].trim()
+  ));
+  if (Array.isArray(sanitized.content) && !hasContent && !hasDirectText) {
+    return null;
+  }
+
+  return changed ? sanitized : item;
 }
 
 // Extracts the visible human prompt from turn-start input entries while dropping
@@ -238,6 +417,8 @@ module.exports = {
   requestIdKey,
   resolveDefaultIpcSocketPath,
   safeParseJSON,
+  sanitizeUserInputEntries,
+  sanitizeUserRoleItem,
   visibleUserPromptText,
   visibleUserPromptFromInputEntries,
   writeFrame,

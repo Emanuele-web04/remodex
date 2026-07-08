@@ -383,6 +383,9 @@ final class CodexService {
     var lastErrorMessage: String?
     var keepMacAwakeWhileBridgeRuns = false
     var runtimeDebugLogEntries: [String] = []
+    @ObservationIgnored var compactRuntimeItemCompletedCount = 0
+    @ObservationIgnored var compactRuntimeItemCompletedTypes: [String: Int] = [:]
+    @ObservationIgnored var compactRuntimeItemCompletedFlushTask: Task<Void, Never>?
     var connectionRecoveryState: CodexConnectionRecoveryState = .idle
     // Per-thread queued drafts for client-side turn queueing while a run is active.
     var queuedTurnDraftsByThread: [String: [QueuedTurnDraft]] = [:]
@@ -1100,6 +1103,7 @@ final class CodexService {
             networkPathMonitor?.cancel()
             trustedSessionResolveTask?.cancel()
             messagePersistenceDebounceTask?.cancel()
+            compactRuntimeItemCompletedFlushTask?.cancel()
             coalescedRevertRefreshTask?.cancel()
             threadListSyncTask?.cancel()
             activeThreadSyncTask?.cancel()

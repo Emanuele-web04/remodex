@@ -20,6 +20,7 @@ const {
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
+  sanitizeLiveUserNotification,
   isContextualUserItemNotification,
   sanitizeThreadHistoryImagesForRelay,
 } = require("../src/bridge");
@@ -916,6 +917,45 @@ test("isContextualUserItemNotification drops only contextual live user items", (
   }), false);
 });
 
+test("sanitizeLiveUserNotification filters fallback context and rewrites visible envelopes", () => {
+  assert.equal(sanitizeLiveUserNotification({
+    method: "codex/event/user_message",
+    params: {
+      threadId: "t",
+      message: "<codex_internal_context source=\"goal\">secret</codex_internal_context>",
+    },
+  }), null);
+
+  const heartbeat = sanitizeLiveUserNotification({
+    method: "codex/event/user_message",
+    params: {
+      threadId: "t",
+      message: "<heartbeat><automation_id>private</automation_id><instructions>Check CI.</instructions></heartbeat>",
+    },
+  });
+  assert.equal(heartbeat.params.message, "Check CI.");
+
+  const mixedItem = sanitizeLiveUserNotification({
+    method: "item/completed",
+    params: {
+      threadId: "t",
+      item: {
+        id: "mixed",
+        type: "userMessage",
+        content: [
+          { type: "input_text", text: "<environment_context>secret</environment_context>" },
+          { type: "input_text", text: "keep me" },
+          { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(mixedItem.params.item.content, [
+    { type: "input_text", text: "keep me" },
+    { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+  ]);
+});
+
 test("sanitizeThreadHistoryImagesForRelay drops injected context user items from history", () => {
   const rawMessage = JSON.stringify({
     id: "req-thread-context",
@@ -962,6 +1002,15 @@ test("sanitizeThreadHistoryImagesForRelay drops injected context user items from
                 }],
               },
               {
+                id: "item-internal-goal",
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: "<codex_internal_context source=\"goal\">\nhidden goal state\n</codex_internal_context>",
+                }],
+              },
+              {
                 id: "item-real",
                 type: "user_message",
                 content: [{ type: "input_text", text: "minchia compa" }],
@@ -984,6 +1033,42 @@ test("sanitizeThreadHistoryImagesForRelay drops injected context user items from
   );
   const itemIds = sanitized.result.thread.turns[0].items.map((item) => item.id);
   assert.deepEqual(itemIds, ["item-real", "item-reply"]);
+});
+
+test("sanitizeThreadHistoryImagesForRelay sanitizes mixed user content entry-by-entry", () => {
+  const rawMessage = JSON.stringify({
+    id: "req-thread-mixed-context",
+    result: {
+      thread: {
+        id: "thread-mixed-context",
+        turns: [{
+          id: "turn-1",
+          items: [{
+            id: "item-mixed",
+            type: "user_message",
+            content: [
+              { type: "input_text", text: "<environment_context>secret</environment_context>" },
+              {
+                type: "input_text",
+                text: "## Code review guidelines:\ninternal review text\n## My request for Codex:\nReview this file",
+              },
+              { type: "input_text", text: "<image name=[Image #1] path=\"/tmp/private.png\">" },
+              { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+              { type: "input_text", text: "</image>" },
+            ],
+          }],
+        }],
+      },
+    },
+  });
+
+  const sanitized = JSON.parse(
+    sanitizeThreadHistoryImagesForRelay(rawMessage, "thread/read")
+  );
+  assert.deepEqual(sanitized.result.thread.turns[0].items[0].content, [
+    { type: "input_text", text: "Review this file" },
+    { type: "input_image", url: "remodex://history-image-elided" },
+  ]);
 });
 
 test("sanitizeThreadHistoryImagesForRelay replaces inline history images with lightweight references", () => {

@@ -84,7 +84,7 @@ struct SystemMessageContentView: View {
             transaction.animation = nil
         }
         .contextMenu {
-            selectableTextActions(text: actionText, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText)
         }
     }
 
@@ -117,7 +117,7 @@ struct SystemMessageContentView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu {
-                selectableTextActions(text: actionText, usesMarkdownSelection: false)
+                selectableTextActions(text: actionText)
             }
         }
     }
@@ -152,7 +152,7 @@ struct SystemMessageContentView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
-            selectableTextActions(text: actionText, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText)
         }
     }
 
@@ -210,7 +210,7 @@ struct SystemMessageContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 2)
             .contextMenu {
-                selectableTextActions(text: actionText, usesMarkdownSelection: false)
+                selectableTextActions(text: actionText)
             }
     }
 
@@ -236,7 +236,7 @@ struct SystemMessageContentView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
         .contextMenu {
-            selectableTextActions(text: actionText, usesMarkdownSelection: false)
+            selectableTextActions(text: actionText)
         }
     }
 
@@ -253,17 +253,14 @@ struct SystemMessageContentView: View {
     }
 
     @ViewBuilder
-    private func selectableTextActions(text: String, usesMarkdownSelection: Bool) -> some View {
+    private func selectableTextActions(text: String) -> some View {
         if let selectableText = timelineSelectableActionText(text) {
             Button {
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
-                onSelectText(
-                    SelectableMessageTextSheetState(
-                        role: message.role,
-                        text: selectableText,
-                        usesMarkdownSelection: usesMarkdownSelection
-                    )
-                )
+                onSelectText(SelectableMessageTextSheetState(
+                    contentKind: .systemPlainText,
+                    text: selectableText
+                ))
             } label: {
                 Label("Select Text", systemImage: "text.cursor")
             }

@@ -597,7 +597,18 @@ test("live owner keeps phone turn input in snapshots when turn/started has no it
   const owner = createDesktopIpcLiveOwner({
     socketPath,
     snapshotDebounceMs: 1,
-    sendCodexRequest: async () => ({ ok: true }),
+    sendCodexRequest: async (method) => {
+      if (method === "thread/read") {
+        return {
+          thread: {
+            id: "thread-user-input",
+            cwd: "/tmp/user-input",
+            turns: [],
+          },
+        };
+      }
+      return { ok: true };
+    },
     sendRawCodexMessage() {},
   });
 
@@ -632,6 +643,7 @@ test("live owner keeps phone turn input in snapshots when turn/started has no it
       && frame.method === "thread-stream-state-changed"
       && frame.params?.conversationId === "thread-user-input"
       && frame.params?.change?.type === "snapshot"
+      && frame.params.change.conversationState.turns?.[0]?.turnId === "turn-user-input"
   );
   const turn = broadcast.params.change.conversationState.turns[0];
   assert.equal(turn.turnId, "turn-user-input");
@@ -673,7 +685,18 @@ test("live owner broadcasts phone image turns before turn/started arrives", asyn
   const owner = createDesktopIpcLiveOwner({
     socketPath,
     snapshotDebounceMs: 1,
-    sendCodexRequest: async () => ({ ok: true }),
+    sendCodexRequest: async (method) => {
+      if (method === "thread/read") {
+        return {
+          thread: {
+            id: "thread-image-pending",
+            cwd: "/tmp/image-pending",
+            turns: [],
+          },
+        };
+      }
+      return { ok: true };
+    },
     sendRawCodexMessage() {},
   });
   const imageDataURL = `data:image/jpeg;base64,${Buffer.from("fake-image").toString("base64")}`;
@@ -728,7 +751,7 @@ test("live owner broadcasts phone image turns before turn/started arrives", asyn
   assert.deepEqual(promotedState.turns[0].params.input, pendingTurn.params.input);
 });
 
-test("live owner rebroadcasts optimistic image turns on IPC connect during hydration", async (t) => {
+test("live owner withholds optimistic image turns on IPC connect during initial hydration", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("rlo-image-connect-");
   const frames = [];
   let serverSocket = null;
@@ -787,19 +810,13 @@ test("live owner rebroadcasts optimistic image turns on IPC connect during hydra
     result: { clientId: "remodex-owner-test" },
   });
 
-  const snapshot = await waitForMessage(
-    frames,
-    (frame) => frame.type === "broadcast"
+  await wait(25);
+  assert.equal(
+    frames.some((frame) => frame.type === "broadcast"
       && frame.method === "thread-stream-state-changed"
-      && frame.params?.conversationId === "thread-image-connect"
-      && frame.params?.change?.type === "snapshot"
+      && frame.params?.conversationId === "thread-image-connect"),
+    false
   );
-  const [turn] = snapshot.params.change.conversationState.turns;
-  assert.equal(turn.remodexOptimisticPendingTurn, true);
-  assert.deepEqual(turn.params.input, [
-    { type: "text", text: "show immediately on reconnect" },
-    { type: "image", url: imageDataURL },
-  ]);
 });
 
 test("live owner promotes rapid pending turns in FIFO order", async (t) => {
@@ -1345,7 +1362,93 @@ test("live owner hydrates existing threads before first mobile-owned snapshot", 
   assert.equal(state.turns[1].turnId, "turn-new");
 });
 
-test("live owner resumes snapshots when existing thread hydration fails", async (t) => {
+test("live owner hydrates unknown threads before prompt-less owner actions publish", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-hydrate-compact-");
+  const frames = [];
+  let serverSocket = null;
+  let resolveThreadRead = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    sendCodexRequest() {
+      return new Promise((resolve) => {
+        resolveThreadRead = resolve;
+      });
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "compact-hydrate",
+    method: "thread/compact/start",
+    params: { threadId: "thread-hydrate-compact" },
+  }));
+
+  await waitFor(() => resolveThreadRead != null);
+  await wait(25);
+  assert.equal(
+    frames.some((frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-hydrate-compact"),
+    false
+  );
+
+  resolveThreadRead({
+    thread: {
+      id: "thread-hydrate-compact",
+      turns: [{
+        id: "turn-existing",
+        items: [{
+          id: "assistant-existing",
+          type: "agentMessage",
+          text: "Existing content survives compaction startup",
+        }],
+        status: "completed",
+        startedAt: 1,
+        completedAt: 2,
+      }],
+    },
+  });
+
+  const broadcast = await waitForMessage(
+    frames,
+    (frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-hydrate-compact"
+      && frame.params?.change?.type === "snapshot"
+  );
+  assert.equal(
+    broadcast.params.change.conversationState.turns[0].items[0].text,
+    "Existing content survives compaction startup"
+  );
+});
+
+test("live owner does not publish partial existing-thread snapshots when hydration fails", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-hydrate-fail-");
   const frames = [];
   let serverSocket = null;
@@ -1408,16 +1511,257 @@ test("live owner resumes snapshots when existing thread hydration fails", async 
     },
   }));
 
+  await wait(25);
+  assert.equal(
+    frames.some((frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-hydrate-fail"),
+    false
+  );
+});
+
+test("live owner retries failed initial hydration without another owner event", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-hydrate-retry-");
+  const frames = [];
+  let serverSocket = null;
+  let readAttempts = 0;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    initialHistoryRetryMs: 5,
+    async sendCodexRequest(method) {
+      if (method !== "thread/read") {
+        return { ok: true };
+      }
+      readAttempts += 1;
+      if (readAttempts === 1) {
+        throw new Error("first read failed");
+      }
+      return {
+        thread: {
+          id: "thread-hydrate-retry",
+          sessionId: "session-hydrate-retry",
+          preview: "Hydrate retry",
+          ephemeral: false,
+          modelProvider: "openai",
+          createdAt: 1,
+          updatedAt: 2,
+          status: { type: "idle" },
+          path: null,
+          cwd: "/tmp/hydrate-retry",
+          cliVersion: "test",
+          source: "app-server",
+          threadSource: null,
+          gitInfo: null,
+          name: "Hydrated retry thread",
+          turns: [{
+            id: "turn-old",
+            items: [{
+              id: "assistant-old",
+              type: "agentMessage",
+              text: "Existing Desktop content",
+            }],
+            status: "completed",
+            error: null,
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1000,
+          }],
+        },
+      };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-hydrate-retry",
+    method: "turn/start",
+    params: {
+      threadId: "thread-hydrate-retry",
+      cwd: "/tmp/hydrate-retry",
+      input: [{ type: "input_text", text: "continue" }],
+    },
+  }));
+  owner.observeOutbound(JSON.stringify({
+    method: "turn/started",
+    params: {
+      threadId: "thread-hydrate-retry",
+      turn: {
+        id: "turn-new",
+        items: [],
+        status: "inProgress",
+        error: null,
+        startedAt: 3,
+        completedAt: null,
+        durationMs: null,
+      },
+    },
+  }));
+
   const broadcast = await waitForMessage(
     frames,
     (frame) => frame.type === "broadcast"
       && frame.method === "thread-stream-state-changed"
-      && frame.params?.conversationId === "thread-hydrate-fail"
-      && frame.params?.change?.type === "snapshot"
+      && frame.params?.conversationId === "thread-hydrate-retry"
+      && frame.params?.change?.type === "snapshot",
+    500
   );
   const state = broadcast.params.change.conversationState;
-  assert.equal(state.turns.length, 1);
-  assert.equal(state.turns[0].turnId, "turn-new");
+  assert.equal(readAttempts, 2);
+  assert.equal(state.turns.length, 2);
+  assert.equal(state.turns[0].turnId, "turn-old");
+  assert.equal(state.turns[1].turnId, "turn-new");
+});
+
+test("live owner releases ownership after bounded initial hydration failures", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-hydrate-bounded-");
+  const frames = [];
+  let serverSocket = null;
+  let readAttempts = 0;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      frames.push(frame);
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    initialHistoryRetryMs: 5,
+    initialHistoryMaxAttempts: 2,
+    async sendCodexRequest(method) {
+      if (method === "thread/read") {
+        readAttempts += 1;
+        throw new Error("thread is permanently unavailable");
+      }
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "compact-hydrate-bounded",
+    method: "thread/compact/start",
+    params: { threadId: "thread-hydrate-bounded" },
+  }));
+
+  await waitFor(() => readAttempts === 2);
+  await waitFor(() => !owner.isThreadOwned("thread-hydrate-bounded"), 500);
+  const attemptsAfterRelease = readAttempts;
+  await wait(25);
+
+  assert.equal(readAttempts, attemptsAfterRelease);
+  assert.equal(
+    frames.some((frame) => frame.type === "broadcast"
+      && frame.method === "thread-stream-state-changed"
+      && frame.params?.conversationId === "thread-hydrate-bounded"),
+    false
+  );
+});
+
+test("live owner cancels initial hydration when the originating turn is rejected", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-hydrate-rejected-");
+  let serverSocket = null;
+  let readAttempts = 0;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "router",
+          result: { clientId: "remodex-owner-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    owner.stopAll();
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const owner = createDesktopIpcLiveOwner({
+    socketPath,
+    snapshotDebounceMs: 1,
+    initialHistoryRetryMs: 5,
+    async sendCodexRequest(method) {
+      if (method === "thread/read") {
+        readAttempts += 1;
+        throw new Error("thread not found");
+      }
+      return { ok: true };
+    },
+    sendRawCodexMessage() {},
+  });
+
+  owner.observeInbound(JSON.stringify({
+    id: "turn-start-hydrate-rejected",
+    method: "turn/start",
+    params: {
+      threadId: "thread-hydrate-rejected",
+      input: [{ type: "input_text", text: "will fail" }],
+    },
+  }));
+  await waitFor(() => readAttempts === 1);
+  owner.observeOutbound(JSON.stringify({
+    id: "turn-start-hydrate-rejected",
+    error: { code: -32000, message: "thread not found" },
+  }));
+
+  await waitFor(() => !owner.isThreadOwned("thread-hydrate-rejected"));
+  await wait(25);
+  assert.equal(readAttempts, 1);
 });
 
 test("live owner handles discovery and start-turn follower requests for owned threads", async (t) => {
@@ -1722,7 +2066,12 @@ test("live owner broadcasts a removed snapshot before archive cleanup", async (t
   const owner = createDesktopIpcLiveOwner({
     socketPath,
     snapshotDebounceMs: 1,
-    sendCodexRequest: async () => ({ ok: true }),
+    sendCodexRequest: async (method) => {
+      if (method === "thread/read") {
+        return { thread: { id: "thread-archive-remove", cwd: "/tmp/archive-remove", turns: [] } };
+      }
+      return { ok: true };
+    },
     sendRawCodexMessage() {},
   });
 
@@ -2000,7 +2349,12 @@ test("live owner yields ownership when a peer archives an owned thread", async (
   const owner = createDesktopIpcLiveOwner({
     socketPath,
     snapshotDebounceMs: 1,
-    sendCodexRequest: async () => ({ ok: true }),
+    sendCodexRequest: async (method) => {
+      if (method === "thread/read") {
+        return { thread: { id: "thread-peer-archive", turns: [] } };
+      }
+      return { ok: true };
+    },
     sendRawCodexMessage() {},
   });
 
@@ -2342,6 +2696,9 @@ test("live owner applies Desktop thread settings and broadcasts phone read state
     snapshotDebounceMs: 1,
     async sendCodexRequest(method, params) {
       codexRequests.push({ method, params });
+      if (method === "thread/read") {
+        return { thread: { id: "thread-settings", turns: [] } };
+      }
       return { ok: true };
     },
     sendRawCodexMessage() {},
@@ -2753,7 +3110,12 @@ test("live owner normalizes image_url input entries for Desktop snapshots", asyn
   const owner = createDesktopIpcLiveOwner({
     socketPath,
     snapshotDebounceMs: 1,
-    sendCodexRequest: async () => ({ ok: true }),
+    sendCodexRequest: async (method) => {
+      if (method === "thread/read") {
+        return { thread: { id: "thread-image", turns: [] } };
+      }
+      return { ok: true };
+    },
     sendRawCodexMessage() {},
   });
 
@@ -3196,7 +3558,12 @@ test("live owner drops cached conversation state when yielding to a peer owner",
   const owner = createDesktopIpcLiveOwner({
     socketPath,
     snapshotDebounceMs: 1,
-    sendCodexRequest: async () => ({ ok: true }),
+    sendCodexRequest: async (method) => {
+      if (method === "thread/read") {
+        return { thread: { id: "thread-yield-state", turns: [] } };
+      }
+      return { ok: true };
+    },
     sendRawCodexMessage() {},
   });
 

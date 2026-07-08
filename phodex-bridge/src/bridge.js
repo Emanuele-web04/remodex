@@ -56,6 +56,8 @@ const {
   isContextualUserText,
   isUserRoleItem,
   readUserItemText,
+  sanitizeUserRoleItem,
+  visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 const {
   createDesktopIpcActionFollower,
@@ -1060,7 +1062,7 @@ function startBridge({
   // Replaces huge inline desktop-history images with lightweight references before relay encryption.
   function sanitizeRelayBoundCodexMessage(rawMessage, parsedMessage = null) {
     pruneExpiredForwardedRequestMethods();
-    const normalizedMessage = normalizeRelayBoundJsonRpcMessage(rawMessage, {
+    let normalizedMessage = normalizeRelayBoundJsonRpcMessage(rawMessage, {
       pendingRequestMethodsById: relaySanitizedResponseMethodsById,
       parsedMessage,
     });
@@ -1071,11 +1073,16 @@ function startBridge({
     // Streaming deltas hit this path dozens of times per second; when the
     // envelope passed through normalization untouched, reuse the parse the
     // caller already paid for instead of re-parsing the same bytes.
-    const parsed = normalizedMessage === rawMessage && parsedMessage
+    let parsed = normalizedMessage === rawMessage && parsedMessage
       ? parsedMessage
       : safeParseJSON(normalizedMessage);
-    if (isContextualUserItemNotification(parsed)) {
+    const sanitizedLiveMessage = sanitizeLiveUserNotification(parsed);
+    if (!sanitizedLiveMessage) {
       return null;
+    }
+    if (sanitizedLiveMessage !== parsed) {
+      parsed = sanitizedLiveMessage;
+      normalizedMessage = JSON.stringify(parsed);
     }
     const responseId = parsed?.id;
     if (responseId == null) {
@@ -3200,25 +3207,22 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
   const turnThreadId = normalizeNonEmptyString(threadId)
     || normalizeNonEmptyString(turn.threadId)
     || normalizeNonEmptyString(turn.thread_id);
-  const sanitizedItems = turn.items.filter((item) => {
-    // Injected context (AGENTS.md instructions, environment_context) is stored
-    // as user-role items in app-server history; Codex UIs hide it at render
-    // time, so mobile history must not receive it as user bubbles.
-    if (!isUserRoleItem(item)) {
-      return true;
-    }
-    const kept = !isContextualUserText(readUserItemText(item));
-    if (!kept) {
-      turnDidChange = true;
-    }
-    return kept;
-  }).map((item) => {
+  const sanitizedItems = turn.items.map((item) => {
     if (!item || typeof item !== "object") {
       return item;
     }
 
     let itemDidChange = false;
-    let sanitizedItem = convertApplyPatchHistoryItem(item) || item;
+    let sanitizedItem = sanitizeUserRoleItem(item);
+    if (!sanitizedItem) {
+      turnDidChange = true;
+      return null;
+    }
+    if (sanitizedItem !== item) {
+      itemDidChange = true;
+    }
+
+    sanitizedItem = convertApplyPatchHistoryItem(sanitizedItem) || sanitizedItem;
     if (sanitizedItem !== item) {
       itemDidChange = true;
     }
@@ -3256,7 +3260,7 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
     }
 
     return itemDidChange ? sanitizedItem : item;
-  });
+  }).filter(Boolean);
 
   return turnDidChange
     ? {
@@ -3266,9 +3270,8 @@ function sanitizeRelayHistoryTurn(turn, threadId = "") {
     : turn;
 }
 
-// Live item lifecycle events can carry the injected context user items too;
-// dropping the whole notification keeps the phone timeline clean without
-// rewriting the payload on the hot path.
+// Compatibility predicate for callers that only need a drop/no-drop decision.
+// The full sanitizer below also rewrites mixed items without losing attachments.
 const LIVE_ITEM_LIFECYCLE_METHODS = new Set([
   "item/started",
   "item/updated",
@@ -3285,6 +3288,47 @@ function isContextualUserItemNotification(parsed) {
     return false;
   }
   return isContextualUserText(readUserItemText(item));
+}
+
+// Sanitizes both raw app-server item events and fallback user_message events
+// before they can become mobile bubbles. Structured attachments stay intact.
+function sanitizeLiveUserNotification(parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    return parsed;
+  }
+  const method = typeof parsed.method === "string" ? parsed.method : "";
+  if (LIVE_ITEM_LIFECYCLE_METHODS.has(method)) {
+    const item = parsed?.params?.item;
+    if (!isUserRoleItem(item)) {
+      return parsed;
+    }
+    const sanitizedItem = sanitizeUserRoleItem(item);
+    if (!sanitizedItem) {
+      return null;
+    }
+    return sanitizedItem === item ? parsed : {
+      ...parsed,
+      params: { ...parsed.params, item: sanitizedItem },
+    };
+  }
+
+  if (method !== "codex/event/user_message") {
+    return parsed;
+  }
+  const key = typeof parsed?.params?.message === "string"
+    ? "message"
+    : (typeof parsed?.params?.text === "string" ? "text" : "");
+  if (!key) {
+    return parsed;
+  }
+  const visible = visibleUserPromptText(parsed.params[key]);
+  if (!visible) {
+    return null;
+  }
+  return visible === parsed.params[key] ? parsed : {
+    ...parsed,
+    params: { ...parsed.params, [key]: visible },
+  };
 }
 
 function convertApplyPatchHistoryItem(item) {
@@ -3989,6 +4033,7 @@ module.exports = {
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
   sanitizeLiveGeneratedImageMessageForRelay,
+  sanitizeLiveUserNotification,
   sanitizeThreadHistoryImagesForRelay,
   startBridge,
 };

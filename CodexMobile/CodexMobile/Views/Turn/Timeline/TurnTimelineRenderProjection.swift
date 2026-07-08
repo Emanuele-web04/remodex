@@ -9,7 +9,9 @@ import Foundation
 // ─── Render Item Models ───────────────────────────────────────
 
 struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
-    static let collapsedVisibleCount = 5
+    // Once a burst exceeds this threshold, collapse every prior call and reserve
+    // the only visible call row for the newest tool activity.
+    static let collapsedVisibleCount = 4
 
     let id: String
     let messages: [CodexMessage]
@@ -19,12 +21,12 @@ struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
         self.id = "tool-burst:\(messages.first?.id ?? "unknown")"
     }
 
-    var pinnedMessages: [CodexMessage] {
-        Array(messages.prefix(Self.collapsedVisibleCount))
+    var overflowMessages: [CodexMessage] {
+        Array(messages.dropLast())
     }
 
-    var overflowMessages: [CodexMessage] {
-        Array(messages.dropFirst(Self.collapsedVisibleCount))
+    var latestMessage: CodexMessage? {
+        return messages.last
     }
 
     var hiddenCount: Int {

@@ -270,7 +270,9 @@ extension TurnTimelineView {
             case .message(let message):
                 ids.insert(message.id)
             case .toolBurst(let group):
-                ids.formUnion(group.pinnedMessages.map(\.id))
+                if let latestMessage = group.latestMessage {
+                    ids.insert(latestMessage.id)
+                }
             case .previousMessages:
                 break
             }
