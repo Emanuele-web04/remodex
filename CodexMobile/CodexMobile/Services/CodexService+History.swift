@@ -289,13 +289,20 @@ extension CodexService {
                     )
 
                 case "plan", "todolist":
-                    let decodedPlanState = decodeHistoryPlanState(from: itemObject)
+                    let decodedPlanState = decodePlanState(from: itemObject)
+                    let decodedPlanText = decodePlanItemText(from: itemObject)
+                    guard CodexPlanUpdateVisibilityPolicy.shouldApply(
+                        text: decodedPlanText,
+                        planState: decodedPlanState
+                    ) else {
+                        continue
+                    }
                     let isJsonlProgressPlan = itemObject["remodexJsonlProgressPlan"]?.boolValue == true
                     appendHistoryMessage(
                         to: &result,
                         role: .system,
                         kind: .plan,
-                        text: decodePlanItemText(from: itemObject),
+                        text: decodedPlanText,
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
@@ -2263,16 +2270,18 @@ extension CodexService {
             return summary
         }
 
-        return "Planning..."
+        // Keep transport emptiness distinct from presentation placeholders so
+        // history reconciliation can discard plan items with no visible payload.
+        return ""
     }
 
-    func decodeHistoryPlanState(from itemObject: [String: JSONValue]) -> CodexPlanState? {
-        let explanation = decodeHistoryNormalizedPlanText(itemObject["explanation"])
-            ?? decodeHistoryNormalizedPlanText(itemObject["summary"])
+    func decodePlanState(from itemObject: [String: JSONValue]) -> CodexPlanState? {
+        let explanation = decodeNormalizedPlanText(itemObject["explanation"])
+            ?? decodeNormalizedPlanText(itemObject["summary"])
         let steps = (itemObject["plan"]?.arrayValue ?? []).compactMap { stepValue -> CodexPlanStep? in
             guard let stepObject = stepValue.objectValue,
-                  let step = decodeHistoryNormalizedPlanText(stepObject["step"]),
-                  let rawStatus = decodeHistoryNormalizedPlanText(stepObject["status"]),
+                  let step = decodeNormalizedPlanText(stepObject["step"]),
+                  let rawStatus = decodeNormalizedPlanText(stepObject["status"]),
                   let status = CodexPlanStepStatus(wireValue: rawStatus) else {
                 return nil
             }
@@ -2483,7 +2492,7 @@ extension CodexService {
         return nil
     }
 
-    private func decodeHistoryNormalizedPlanText(_ value: JSONValue?) -> String? {
+    private func decodeNormalizedPlanText(_ value: JSONValue?) -> String? {
         let flattened = Self.normalizedMessageText(decodeHistoryStringParts(value).joined(separator: "\n"))
         guard Self.hasMeaningfulHistoryText(flattened) else {
             return nil

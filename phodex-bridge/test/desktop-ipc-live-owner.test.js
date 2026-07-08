@@ -15,6 +15,50 @@ const {
   buildConversationStateFromThread,
   createDesktopIpcLiveOwner,
 } = require("../src/desktop-ipc-live-owner");
+const {
+  applyAppServerMessageToConversationState,
+} = require("../src/desktop-ipc-conversation-adapter");
+
+test("conversation adapter ignores empty plan updates but keeps explanation-only updates", () => {
+  const threadId = "thread-plan-visibility";
+  const turnId = "turn-plan-visibility";
+  const conversations = new Map();
+  const apply = (message) => applyAppServerMessageToConversationState({
+    conversations,
+    message,
+    shouldOwnThread: (candidate) => candidate === threadId,
+    now: () => 1_000,
+  });
+
+  apply({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: threadId,
+        cwd: "/tmp/project",
+        turns: [{ id: turnId, status: "inProgress", items: [] }],
+      },
+    },
+  });
+
+  const emptyUpdate = apply({
+    method: "turn/plan/updated",
+    params: { threadId, turnId, plan: [] },
+  });
+  assert.deepEqual(emptyUpdate, { threadId, changed: false });
+  assert.deepEqual(conversations.get(threadId).turns[0].items, []);
+
+  const explanationUpdate = apply({
+    method: "turn/plan/updated",
+    params: { threadId, turnId, explanation: "Keep the last meaningful plan visible.", plan: [] },
+  });
+  assert.deepEqual(explanationUpdate, { threadId, changed: true });
+  assert.equal(conversations.get(threadId).turns[0].items.length, 1);
+  assert.equal(
+    conversations.get(threadId).turns[0].items[0].explanation,
+    "Keep the last meaningful plan visible."
+  );
+});
 
 test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-live-owner-");

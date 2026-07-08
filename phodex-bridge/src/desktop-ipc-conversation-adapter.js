@@ -8,6 +8,7 @@ const { randomUUID } = require("crypto");
 
 const {
   cloneJSON,
+  hasVisiblePlanUpdate,
   isContextualUserText,
   isUserRoleItem: isUserMessageItem,
   normalizeToken,
@@ -268,6 +269,11 @@ function applyAppServerMessageToConversationState({
       if (!threadId || !shouldOwnThread(threadId)) {
         return null;
       }
+      const explanation = readString(message.params?.explanation);
+      const plan = Array.isArray(message.params?.plan) ? cloneJSON(message.params.plan) : [];
+      if (!hasVisiblePlanUpdate(explanation, plan)) {
+        return { threadId, changed: false };
+      }
       const conversation = ensureConversationInMap(conversations, threadId, { hostId, now });
       const turn = ensureTurn(conversation, resolveTurnIdForParams({
         conversation,
@@ -279,8 +285,8 @@ function applyAppServerMessageToConversationState({
         upsertItem(turn, {
           id: `todo-list-${message.params?.turnId || now()}`,
           type: "todo-list",
-          explanation: message.params?.explanation ?? null,
-          plan: Array.isArray(message.params?.plan) ? cloneJSON(message.params.plan) : [],
+          explanation: explanation || null,
+          plan,
         });
       }
       conversation.updatedAt = now();

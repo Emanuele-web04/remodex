@@ -304,6 +304,10 @@ function readText(value) {
   return typeof value === "string" ? value : "";
 }
 
+function hasVisiblePlanUpdate(explanation, plan) {
+  return Boolean(readString(explanation)) || (Array.isArray(plan) && plan.length > 0);
+}
+
 function normalizeToken(value) {
   return typeof value === "string"
     ? value.toLowerCase().replace(/[_-\s]+/g, "")
@@ -407,6 +411,7 @@ module.exports = {
   MAX_FRAME_BYTES,
   cloneJSON,
   conversationSnapshotShowsActiveTurn,
+  hasVisiblePlanUpdate,
   isContextualUserText,
   isPlainJSONObject,
   isUserRoleItem,

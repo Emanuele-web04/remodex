@@ -17,7 +17,10 @@ const {
   TERMINAL_TASK_EVENT_TYPES,
   terminalEventClosesTrackedTurn,
 } = require("./rollout-turn-semantics");
-const { visibleUserPromptFromInputEntries } = require("./desktop-ipc-shared");
+const {
+  hasVisiblePlanUpdate,
+  visibleUserPromptFromInputEntries,
+} = require("./desktop-ipc-shared");
 
 // The phone batches each poll tick's notifications and settles its timeline
 // ~80ms after the batch ends (CodexService liveMirrorBatchFlushNanoseconds).
@@ -1309,7 +1312,8 @@ function parseToolArguments(rawArguments) {
 
 function planUpdateNotifications(state, argumentsObject) {
   const plan = normalizeProgressPlanSteps(argumentsObject.plan);
-  if (plan.length === 0) {
+  const explanation = readString(argumentsObject.explanation);
+  if (!hasVisiblePlanUpdate(explanation, plan)) {
     return [];
   }
 
@@ -1318,7 +1322,6 @@ function planUpdateNotifications(state, argumentsObject) {
     turnId: state.activeTurnId,
     plan,
   };
-  const explanation = readString(argumentsObject.explanation);
   if (explanation) {
     params.explanation = explanation;
   }

@@ -1185,6 +1185,49 @@ test("desktop-origin update_plan calls mirror as structured activity plan update
   );
 });
 
+test("desktop-origin plan mirror ignores empty updates but keeps explanation-only updates", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-plan-visibility",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-plan-visibility"),
+      functionCall("call-empty-plan", "update_plan", { plan: [] }),
+      functionCall("call-explanation-plan", "update_plan", {
+        explanation: "Keep the last meaningful plan visible.",
+        plan: [],
+      }),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 50,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-plan-visibility" },
+  }));
+  await wait(30);
+
+  const planUpdates = outbound.filter((message) => message.method === "turn/plan/updated");
+  assert.equal(planUpdates.length, 1);
+  assert.equal(planUpdates[0].params.explanation, "Keep the last meaningful plan visible.");
+  assert.deepEqual(planUpdates[0].params.plan, []);
+});
+
 test("desktop-origin completed plan items mirror as final plan rows", async (t) => {
   const { homeDir, rolloutPath } = createTemporaryRolloutHome({
     threadId: "thread-plan-result",

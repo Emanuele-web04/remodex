@@ -318,7 +318,7 @@ struct TurnComposerView: View {
                 // `composerSurfaceCornerRadius` derived as half the resulting
                 // height so the surface reads as a true capsule. The expanded
                 // card keeps its own rhythm.
-                .padding(.top, showsCollapsedComposer ? 6 : accessoryState.topInputPadding + 6)
+                .padding(.top, showsCollapsedComposer ? 6 : accessoryState.topInputPadding + 4)
                 .padding(.bottom, showsCollapsedComposer ? 6 : 4)
                 .onChange(of: input) { _, newValue in
                     inputChangeTask?.cancel()

@@ -679,6 +679,202 @@ final class CodexPlanModeTests: XCTestCase {
         XCTAssertEqual(planMessages[0].planState?.steps[1].status, .inProgress)
     }
 
+    func testEmptyTurnPlanUpdateDoesNotCreateTimelineCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([]),
+            ])
+        )
+
+        XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .plan }.isEmpty)
+    }
+
+    func testEmptyTurnPlanUpdatePreservesExistingProgressCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([
+                    .object([
+                        "step": .string("Inspect the current flow"),
+                        "status": .string("inProgress"),
+                    ]),
+                ]),
+            ])
+        )
+        XCTAssertEqual(service.messages(for: threadID).filter { $0.kind == .plan }.count, 1)
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.step, "Inspect the current flow")
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.status, .inProgress)
+    }
+
+    func testEmptyTurnPlanUpdatePreservesCompletedPlanResult() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.upsertPlanMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: "plan-result",
+            text: "1. Inspect the flow\n2. Implement the fix",
+            isStreaming: false,
+            planPresentation: .resultReady
+        )
+
+        service.handleNotification(
+            method: "turn/plan/updated",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "plan": .array([]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .resultReady)
+    }
+
+    func testEmptyPlanItemLifecycleDoesNotCreateTimelineCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string("empty-plan"),
+                    "type": .string("todoList"),
+                    "content": .array([]),
+                    "plan": .array([]),
+                ]),
+            ])
+        )
+
+        XCTAssertTrue(service.messages(for: threadID).filter { $0.kind == .plan }.isEmpty)
+    }
+
+    func testEmptyCompletedPlanItemFinalizesExistingStreamedPlan() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "plan-\(UUID().uuidString)"
+        let streamedText = "1. Inspect the mirror\n2. Preserve the timeline"
+
+        service.handleNotification(
+            method: "item/plan/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "delta": .string(streamedText),
+            ])
+        )
+
+        service.handleNotification(
+            method: "item/completed",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string(itemID),
+                    "type": .string("plan"),
+                    "content": .array([]),
+                ]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].text, streamedText)
+        XCTAssertFalse(planMessages[0].isStreaming)
+        XCTAssertEqual(planMessages[0].resolvedPlanPresentation, .resultCompletedItem)
+    }
+
+    func testStructuredPlanItemWithoutTextStillCreatesVisiblePlanCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "item": .object([
+                    "id": .string("structured-plan"),
+                    "type": .string("todoList"),
+                    "explanation": .string("Keep the mirror stable."),
+                    "plan": .array([
+                        .object([
+                            "step": .string("Reconcile live state"),
+                            "status": .string("inProgress"),
+                        ]),
+                    ]),
+                ]),
+            ])
+        )
+
+        let planMessages = service.messages(for: threadID).filter { $0.kind == .plan }
+        XCTAssertEqual(planMessages.count, 1)
+        XCTAssertEqual(planMessages[0].planState?.explanation, "Keep the mirror stable.")
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.step, "Reconcile live state")
+        XCTAssertEqual(planMessages[0].planState?.steps.first?.status, .inProgress)
+    }
+
+    func testEmptyHistoryPlanItemDoesNotRestoreTimelineCard() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        let messages = service.decodeMessagesFromThreadRead(
+            threadId: threadID,
+            threadObject: [
+                "turns": .array([
+                    .object([
+                        "id": .string("turn-empty-plan"),
+                        "items": .array([
+                            .object([
+                                "id": .string("empty-plan"),
+                                "type": .string("plan"),
+                                "content": .array([]),
+                                "plan": .array([]),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ]
+        )
+
+        XCTAssertTrue(messages.filter { $0.kind == .plan }.isEmpty)
+    }
+
     func testTurnPlanUpdatedWithoutThreadIDUsesTurnMapping() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

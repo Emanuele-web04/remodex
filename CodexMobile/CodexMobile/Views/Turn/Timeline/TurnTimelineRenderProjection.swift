@@ -9,9 +9,7 @@ import Foundation
 // ─── Render Item Models ───────────────────────────────────────
 
 struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
-    // Once a burst exceeds this threshold, collapse every prior call and reserve
-    // the only visible call row for the newest tool activity.
-    static let collapsedVisibleCount = 4
+    static let collapseThreshold = 4
 
     let id: String
     let messages: [CodexMessage]
@@ -26,7 +24,11 @@ struct TurnTimelineToolBurstGroup: Identifiable, Equatable {
     }
 
     var latestMessage: CodexMessage? {
-        return messages.last
+        messages.last
+    }
+
+    var visibleMessages: [CodexMessage] {
+        latestMessage.map { [$0] } ?? []
     }
 
     var hiddenCount: Int {
@@ -101,7 +103,7 @@ enum TurnTimelineRenderProjection {
 
         func flushBufferedToolMessages() {
             guard !bufferedToolMessages.isEmpty else { return }
-            if bufferedToolMessages.count > TurnTimelineToolBurstGroup.collapsedVisibleCount {
+            if bufferedToolMessages.count > TurnTimelineToolBurstGroup.collapseThreshold {
                 items.append(.toolBurst(TurnTimelineToolBurstGroup(messages: bufferedToolMessages)))
             } else {
                 items.append(contentsOf: bufferedToolMessages.map(TurnTimelineRenderItem.message))
@@ -139,7 +141,6 @@ enum TurnTimelineRenderProjection {
                !canShareToolBurst(previous: previous, incoming: renderedMessage) {
                 flushBufferedToolMessages()
             }
-
             bufferedToolMessages.append(renderedMessage)
         }
 
@@ -199,6 +200,8 @@ enum TurnTimelineRenderProjection {
                 continue
             }
 
+            // Stable turn identities are authoritative. Only turnless snapshots
+            // fall back to the surrounding user-delimited block.
             let key = normalizedIdentifier(message.turnId)
                 .map { "turn:\($0)" }
                 ?? "block:\(blockStart)"
@@ -708,6 +711,18 @@ enum TurnTimelineRenderProjection {
         }
     }
 
+    // Late turn ids can arrive mid-stream, so split only when both rows already
+    // carry distinct stable identities. Commentary rows flush the buffer earlier.
+    private static func canShareToolBurst(previous: CodexMessage, incoming: CodexMessage) -> Bool {
+        let previousTurnID = normalizedIdentifier(previous.turnId)
+        let incomingTurnID = normalizedIdentifier(incoming.turnId)
+
+        guard let previousTurnID, let incomingTurnID else {
+            return true
+        }
+        return previousTurnID == incomingTurnID
+    }
+
     // Drops placeholder-only rows before SwiftUI can reserve timeline spacing for them.
     private static func shouldSkipVisualRow(
         _ message: CodexMessage,
@@ -751,19 +766,6 @@ enum TurnTimelineRenderProjection {
         return ThinkingDisclosureParser
             .normalizedThinkingContent(from: text)
             .isEmpty
-    }
-
-    // Late turn ids can arrive mid-stream, so only split when both rows already
-    // have distinct stable turn ids.
-    private static func canShareToolBurst(previous: CodexMessage, incoming: CodexMessage) -> Bool {
-        let previousTurnID = normalizedIdentifier(previous.turnId)
-        let incomingTurnID = normalizedIdentifier(incoming.turnId)
-
-        guard let previousTurnID, let incomingTurnID else {
-            return true
-        }
-
-        return previousTurnID == incomingTurnID
     }
 
     private static func normalizedIdentifier(_ value: String?) -> String? {

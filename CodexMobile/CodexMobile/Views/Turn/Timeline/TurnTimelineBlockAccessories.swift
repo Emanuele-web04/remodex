@@ -30,10 +30,7 @@ extension TurnTimelineView {
             guard messages[i].role != .user else { i -= 1; continue }
             // Walk backward to collect the current assistant/system block.
             let blockEnd = i
-            var blockStart = i
-            while blockStart > 0 && messages[blockStart - 1].role != .user {
-                blockStart -= 1
-            }
+            let blockStart = assistantBlockStartIndex(endingAt: blockEnd, messages: messages)
 
             var blockTurnID: String?
             var fileChangeMessages: [CodexMessage] = []
@@ -61,7 +58,7 @@ extension TurnTimelineView {
 
             let isLatestBlock = latestBlockEnd == blockEnd
             let hasTrailingUserMessage = blockEnd < messages.index(before: messages.endIndex)
-            let copyAllowed = shouldShowCopyButton(
+            let blockCopyAllowed = shouldShowCopyButton(
                 blockTurnID: blockTurnID,
                 activeTurnID: activeTurnID,
                 isCopySuppressedByRunState: isCopySuppressedByRunState ?? isThreadRunning,
@@ -70,6 +67,12 @@ extension TurnTimelineView {
                 latestTurnTerminalState: latestTurnTerminalState,
                 stoppedTurnIDs: stoppedTurnIDs
             )
+            let hasAssistantText = (blockStart...blockEnd).contains {
+                messages[$0].role == .assistant && hasMeaningfulBlockText(messages[$0].text)
+            }
+            // Keep the action at the visual end of the block. Hosting it on the
+            // last assistant row leaves Copy stranded between prose and later tools.
+            let copyAllowed = blockCopyAllowed && hasAssistantText
             let copyText = copyAllowed
                 ? blockCopyText(in: blockStart...blockEnd, messages: messages)
                 : nil
@@ -119,6 +122,7 @@ extension TurnTimelineView {
         var parts: [String] = []
         var totalBytes = 0
         for index in range {
+            guard messages[index].role == .assistant else { continue }
             let rawText = messages[index].text
             guard hasMeaningfulBlockText(rawText) else { continue }
             totalBytes += rawText.utf8.count
@@ -270,9 +274,7 @@ extension TurnTimelineView {
             case .message(let message):
                 ids.insert(message.id)
             case .toolBurst(let group):
-                if let latestMessage = group.latestMessage {
-                    ids.insert(latestMessage.id)
-                }
+                ids.formUnion(group.visibleMessages.map(\.id))
             case .previousMessages:
                 break
             }
@@ -304,6 +306,32 @@ extension TurnTimelineView {
     private static func normalizedTurnID(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
+    // User messages and distinct stable turn ids both delimit accessory ownership.
+    // Missing ids remain compatible because live rows can receive their turn id late.
+    private static func assistantBlockStartIndex(
+        endingAt blockEnd: Int,
+        messages: [CodexMessage]
+    ) -> Int {
+        var blockStart = blockEnd
+        var blockTurnID = normalizedTurnID(messages[blockEnd].turnId)
+
+        while blockStart > messages.startIndex {
+            let previous = messages[blockStart - 1]
+            guard previous.role != .user else {
+                break
+            }
+
+            if let previousTurnID = normalizedTurnID(previous.turnId) {
+                if let blockTurnID, previousTurnID != blockTurnID {
+                    break
+                }
+                blockTurnID = blockTurnID ?? previousTurnID
+            }
+            blockStart -= 1
+        }
+        return blockStart
     }
 
     // Mirrors the composer Stop visibility so Copy never appears while the run is still active.

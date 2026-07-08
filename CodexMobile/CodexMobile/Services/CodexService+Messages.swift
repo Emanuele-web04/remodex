@@ -1731,6 +1731,43 @@ extension CodexService {
         updateCurrentOutput(for: threadId)
     }
 
+    // Completes a streamed plan without creating a placeholder or replacing its
+    // meaningful delta text when the terminal lifecycle payload is empty.
+    @discardableResult
+    func finalizeExistingPlanMessage(
+        threadId: String,
+        turnId: String?,
+        itemId: String?
+    ) -> Bool {
+        guard let messageIndex = findLatestPlanMessageIndex(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: itemId,
+            planPresentation: .resultStreaming
+        ),
+        let message = messagesByThread[threadId]?[messageIndex],
+        message.role == .system,
+        message.kind == .plan else {
+            return false
+        }
+
+        messagesByThread[threadId]?[messageIndex].isStreaming = false
+        messagesByThread[threadId]?[messageIndex].planPresentation = resolvedPlanPresentation(
+            requested: .resultCompletedItem,
+            turnId: turnId
+        )
+        refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
+
+        // One row can be reachable through both a synthetic turn key and a real
+        // item key, so clear every alias once its lifecycle is complete.
+        streamingSystemMessageByItemID = streamingSystemMessageByItemID.filter { _, messageID in
+            messageID != message.id
+        }
+        persistMessages()
+        updateCurrentOutput(for: threadId)
+        return true
+    }
+
     // Keeps multi-agent orchestration events on a single structured timeline row.
     func upsertSubagentActionMessage(
         threadId: String,
