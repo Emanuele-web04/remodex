@@ -549,7 +549,11 @@ final class TurnTimelineReducerTests: XCTestCase {
         ]
 
         let items = TurnTimelineRenderProjection.project(messages: messages)
-        XCTAssertEqual(items.map(\.id), ["tool-1", "tool-2"])
+        XCTAssertEqual(items.map(\.id), ["command-group:tool-1"])
+        guard case .commandGroup(let group) = items.first else {
+            return XCTFail("Expected completed commands behind one disclosure")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["tool-1", "tool-2"])
     }
 
     func testTimelineRenderProjectionSplitsToolRunsAcrossStableTurnIDs() {
@@ -588,6 +592,125 @@ final class TurnTimelineReducerTests: XCTestCase {
         }
 
         XCTAssertEqual(messageIDs, ["tool-1", "tool-2"])
+    }
+
+    func testTimelineRenderProjectionGroupsFinishedCommandsIntoDisclosureItem() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "command-1",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n \"needle\" Sources",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "command-1"
+            ),
+            makeMessage(
+                id: "command-2",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed sed -n '1,40p' Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-2"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["command-group:command-1"])
+    }
+
+    func testTimelineRenderProjectionKeepsRunningCommandsVisibleUntilFinished() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "running",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Running rg -n \"needle\" Sources",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "running",
+                isStreaming: true
+            ),
+            makeMessage(
+                id: "finished",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed sed -n '1,40p' Sources/App.swift",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "finished"
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(messages: messages)
+
+        XCTAssertEqual(items.map(\.id), ["running", "command-group:finished"])
+    }
+
+    func testTimelineRenderProjectionKeepsFinishedCommandGroupOutsideCompletedTurnPreviousMessages() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the timeline",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "status",
+                threadID: "thread",
+                role: .assistant,
+                text: "I’ll inspect the projection.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "status",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "command",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed rg -n \"TurnTimelineRenderProjection\" CodexMobile",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "command",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The projection is ready.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "final",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), [
+            "user",
+            "previous-messages:final",
+            "command-group:command",
+            "final",
+        ])
     }
 
     func testTimelineRenderProjectionCollapsesCompletedTurnBeforeFinalAnswer() {

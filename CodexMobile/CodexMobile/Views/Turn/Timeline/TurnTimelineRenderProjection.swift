@@ -52,9 +52,24 @@ struct TurnTimelinePreviousMessagesGroup: Identifiable, Equatable {
     }
 }
 
+struct TurnTimelineCommandGroup: Identifiable, Equatable {
+    let id: String
+    let messages: [CodexMessage]
+
+    init(messages: [CodexMessage]) {
+        self.messages = messages
+        self.id = "command-group:\(messages.first?.id ?? "unknown")"
+    }
+
+    var commandCount: Int {
+        messages.count
+    }
+}
+
 enum TurnTimelineRenderItem: Identifiable, Equatable {
     case message(CodexMessage)
     case toolBurst(TurnTimelineToolBurstGroup)
+    case commandGroup(TurnTimelineCommandGroup)
     case previousMessages(TurnTimelinePreviousMessagesGroup)
 
     var id: String {
@@ -62,6 +77,8 @@ enum TurnTimelineRenderItem: Identifiable, Equatable {
         case .message(let message):
             return message.id
         case .toolBurst(let group):
+            return group.id
+        case .commandGroup(let group):
             return group.id
         case .previousMessages(let group):
             return group.id
@@ -85,6 +102,7 @@ enum TurnTimelineRenderProjection {
     ) -> [TurnTimelineRenderItem] {
         var items: [TurnTimelineRenderItem] = []
         var bufferedToolMessages: [CodexMessage] = []
+        var bufferedCommandMessages: [CodexMessage] = []
         let fileChangePlan = fileChangeCollapsePlan(in: messages)
         let finalCollapsePlan = previousMessagesCollapsePlan(
             in: messages,
@@ -111,9 +129,16 @@ enum TurnTimelineRenderProjection {
             bufferedToolMessages.removeAll(keepingCapacity: true)
         }
 
+        func flushBufferedCommandMessages() {
+            guard !bufferedCommandMessages.isEmpty else { return }
+            items.append(.commandGroup(TurnTimelineCommandGroup(messages: bufferedCommandMessages)))
+            bufferedCommandMessages.removeAll(keepingCapacity: true)
+        }
+
         for (index, message) in messages.enumerated() {
             if let group = groupByInsertionIndex[index] {
                 flushBufferedToolMessages()
+                flushBufferedCommandMessages()
                 if group.group.hiddenCount > 0 {
                     items.append(.previousMessages(group.group))
                 }
@@ -133,10 +158,22 @@ enum TurnTimelineRenderProjection {
             }
             guard isToolBurstCandidate(message) else {
                 flushBufferedToolMessages()
+                flushBufferedCommandMessages()
                 items.append(.message(renderedMessage))
                 continue
             }
 
+            guard !isFinishedCommandGroupCandidate(renderedMessage) else {
+                flushBufferedToolMessages()
+                if let previous = bufferedCommandMessages.last,
+                   !canShareToolBurst(previous: previous, incoming: renderedMessage) {
+                    flushBufferedCommandMessages()
+                }
+                bufferedCommandMessages.append(renderedMessage)
+                continue
+            }
+
+            flushBufferedCommandMessages()
             if let previous = bufferedToolMessages.last,
                !canShareToolBurst(previous: previous, incoming: renderedMessage) {
                 flushBufferedToolMessages()
@@ -145,6 +182,7 @@ enum TurnTimelineRenderProjection {
         }
 
         flushBufferedToolMessages()
+        flushBufferedCommandMessages()
         return mergeAdjacentFileChangeItems(items)
     }
 
@@ -468,7 +506,9 @@ enum TurnTimelineRenderProjection {
                 return true
             case .plan:
                 return message.shouldDisplayInlinePlanResult
-            case .thinking, .toolActivity, .commandExecution, .chat:
+            case .commandExecution:
+                return isFinishedCommandGroupCandidate(message)
+            case .thinking, .toolActivity, .chat:
                 return false
             }
         }
@@ -709,6 +749,26 @@ enum TurnTimelineRenderProjection {
         case .thinking, .chat, .plan, .userInputPrompt, .fileChange, .subagentAction:
             return false
         }
+    }
+
+    private static func isFinishedCommandGroupCandidate(_ message: CodexMessage) -> Bool {
+        guard message.role == .system,
+              message.kind == .commandExecution,
+              !message.isStreaming else {
+            return false
+        }
+
+        guard let firstWord = message.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .first?
+            .lowercased() else {
+            return false
+        }
+
+        return firstWord == "completed"
+            || firstWord == "failed"
+            || firstWord == "stopped"
     }
 
     // Late turn ids can arrive mid-stream, so split only when both rows already
