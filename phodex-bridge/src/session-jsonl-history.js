@@ -207,7 +207,11 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         const turn = ensureTurn(
           turns,
           turnsById,
-          normalizeString(payload?.turn_id) || normalizeString(payload?.turnId) || activeTurnId || `turn-line-${index + 1}`,
+          normalizeString(payload?.turn_id)
+            || normalizeString(payload?.turnId)
+            || responseItemTurnId(completedItem)
+            || activeTurnId
+            || `turn-line-${index + 1}`,
           sessionThreadId,
           entry.timestamp
         );
@@ -264,7 +268,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       const turn = ensureTurn(
         turns,
         turnsById,
-        normalizeString(payload.turn_id) || normalizeString(payload.turnId) || activeTurnId || `turn-line-${index + 1}`,
+        responseItemTurnId(payload) || activeTurnId || `turn-line-${index + 1}`,
         sessionThreadId,
         entry.timestamp
       );
@@ -756,6 +760,7 @@ function normalizeProgressPlanItemForHistory(payload) {
     text: explanation || "Planning...",
     explanation: explanation || undefined,
     plan,
+    remodexProgressPlan: true,
     remodexJsonlProgressPlan: true,
   };
 }
@@ -1042,6 +1047,17 @@ function isInternalProgressPlanCall(payload) {
 function isSubagentNotificationMessage(payload) {
   const text = responseItemMessageText(payload).trimStart();
   return text.startsWith("<subagent_notification>");
+}
+
+// Modern Codex rollouts keep response-item ownership in metadata passthrough.
+// A rollout can interleave parallel turns, so the process-wide active turn is
+// only a last resort; using it first moves tools, plans, and prose across turns.
+function responseItemTurnId(payload) {
+  const metadata = objectValue(payload?.internal_chat_message_metadata_passthrough);
+  return normalizeString(payload?.turn_id)
+    || normalizeString(payload?.turnId)
+    || normalizeString(metadata?.turn_id)
+    || normalizeString(metadata?.turnId);
 }
 
 function responseItemMessageText(payload) {

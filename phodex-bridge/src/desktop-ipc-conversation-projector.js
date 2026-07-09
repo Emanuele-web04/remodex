@@ -824,6 +824,12 @@ function projectItemForMobile(item, itemType = normalizeToken(item?.type)) {
   }
 
   const projected = cloneJSON(item);
+  // Desktop/Litter stores internal update_plan snapshots as todo-list items.
+  // They are progress state, not user-actionable proposed-plan results. Preserve
+  // that semantic across both thread/read projection and lifecycle notifications.
+  if (itemType === "todolist") {
+    projected.remodexProgressPlan = true;
+  }
   if (!isGenericToolCallItemType(itemType)) {
     return projected;
   }

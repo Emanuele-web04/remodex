@@ -21,6 +21,7 @@ enum AssistantReplayDeduper {
                    in: result,
                    threadId: message.threadId,
                    turnId: message.turnId,
+                   itemId: message.itemId,
                    text: message.text
                ) {
                 continue
@@ -36,6 +37,7 @@ enum AssistantReplayDeduper {
         in messages: [CodexMessage],
         threadId: String,
         turnId: String?,
+        itemId: String? = nil,
         text: String,
         excludingMessageID: String? = nil
     ) -> Bool {
@@ -43,6 +45,7 @@ enum AssistantReplayDeduper {
             in: messages,
             threadId: threadId,
             turnId: turnId,
+            itemId: itemId,
             text: text,
             excludingMessageID: excludingMessageID
         ) != nil {
@@ -63,6 +66,7 @@ enum AssistantReplayDeduper {
         in messages: [CodexMessage],
         threadId: String,
         turnId: String?,
+        itemId: String? = nil,
         text: String,
         excludingMessageID: String? = nil,
         minimumCharacterCount: Int = 80
@@ -77,7 +81,8 @@ enum AssistantReplayDeduper {
             excludingMessageID: excludingMessageID
         )
         return candidateIndices.reversed().first { index in
-            exactReplayTextsMatch(messages[index].text, text)
+            assistantIdentityAllowsExactReplay(messages[index].itemId, itemId)
+                && exactReplayTextsMatch(messages[index].text, text)
         }
     }
 
@@ -138,6 +143,19 @@ enum AssistantReplayDeduper {
             return previous == incoming
         }
         return normalizedReplayText(previous) == normalizedReplayText(incoming)
+    }
+
+    private nonisolated static func assistantIdentityAllowsExactReplay(
+        _ existingItemId: String?,
+        _ incomingItemId: String?
+    ) -> Bool {
+        guard let existingItemId = normalizedIdentifier(existingItemId),
+              let incomingItemId = normalizedIdentifier(incomingItemId),
+              existingItemId != incomingItemId else {
+            return true
+        }
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(existingItemId)
+            || CodexSyntheticIdentifiers.isMirrorMintedItemID(incomingItemId)
     }
 
     private nonisolated static func isReplayTextLongEnough(

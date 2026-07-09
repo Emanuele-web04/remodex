@@ -86,9 +86,15 @@ enum TurnTimelineRenderProjection {
         var items: [TurnTimelineRenderItem] = []
         var bufferedToolMessages: [CodexMessage] = []
         let fileChangePlan = fileChangeCollapsePlan(in: messages)
+        let resolvedCompletedTurnIDs = completedTurnIDsIncludingFinalAnswerEvidence(
+            in: messages,
+            completedTurnIDs: completedTurnIDs,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning
+        )
         let finalCollapsePlan = previousMessagesCollapsePlan(
             in: messages,
-            completedTurnIDs: completedTurnIDs
+            completedTurnIDs: resolvedCompletedTurnIDs
         )
         let hiddenIndices = Set(finalCollapsePlan.values.flatMap(\.indices))
             .union(fileChangePlan.hiddenIndices)
@@ -150,21 +156,37 @@ enum TurnTimelineRenderProjection {
 
     static func collapsedFinalMessageIDs(
         in messages: [CodexMessage],
-        completedTurnIDs: Set<String>
+        completedTurnIDs: Set<String>,
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
     ) -> Set<String> {
-        Set(previousMessagesCollapsePlan(
+        let resolvedCompletedTurnIDs = completedTurnIDsIncludingFinalAnswerEvidence(
             in: messages,
-            completedTurnIDs: completedTurnIDs
+            completedTurnIDs: completedTurnIDs,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning
+        )
+        return Set(previousMessagesCollapsePlan(
+            in: messages,
+            completedTurnIDs: resolvedCompletedTurnIDs
         ).keys.map { messages[$0].id })
     }
 
     static func collapsedPreviousMessageIDs(
         in messages: [CodexMessage],
-        completedTurnIDs: Set<String>
+        completedTurnIDs: Set<String>,
+        activeTurnID: String? = nil,
+        isThreadRunning: Bool = false
     ) -> Set<String> {
-        Set(previousMessagesCollapsePlan(
+        let resolvedCompletedTurnIDs = completedTurnIDsIncludingFinalAnswerEvidence(
             in: messages,
-            completedTurnIDs: completedTurnIDs
+            completedTurnIDs: completedTurnIDs,
+            activeTurnID: activeTurnID,
+            isThreadRunning: isThreadRunning
+        )
+        return Set(previousMessagesCollapsePlan(
+            in: messages,
+            completedTurnIDs: resolvedCompletedTurnIDs
         ).values.flatMap { collapse in
             collapse.indices.map { messages[$0].id }
         })
@@ -347,6 +369,36 @@ enum TurnTimelineRenderProjection {
         }
 
         return plan
+    }
+
+    // Cold reopen can materialize old rows before turn terminal-state caches.
+    // A persisted non-streaming final_answer is safe completion evidence for an
+    // older turn, but never for the currently active (or unidentified running) turn.
+    private static func completedTurnIDsIncludingFinalAnswerEvidence(
+        in messages: [CodexMessage],
+        completedTurnIDs: Set<String>,
+        activeTurnID: String?,
+        isThreadRunning: Bool
+    ) -> Set<String> {
+        // turn/started can omit its id. In that case, protect the newest known
+        // turn while the thread is running and still infer older completed turns.
+        let protectedRunningTurnID = normalizedIdentifier(activeTurnID)
+            ?? (isThreadRunning
+                ? messages.reversed().compactMap { normalizedIdentifier($0.turnId) }.first
+                : nil)
+
+        var resolved = completedTurnIDs
+        for message in messages {
+            guard message.role == .assistant,
+                  !message.isStreaming,
+                  isFinalAnswerAssistantPhase(message.assistantPhase),
+                  let turnID = normalizedIdentifier(message.turnId),
+                  turnID != protectedRunningTurnID else {
+                continue
+            }
+            resolved.insert(turnID)
+        }
+        return resolved
     }
 
     private static func finalAssistantIndexByTurn(

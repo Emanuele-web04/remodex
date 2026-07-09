@@ -29,6 +29,18 @@ enum CodexPlanUpdateVisibilityPolicy {
     }
 }
 
+enum CodexPlanItemPresentationPolicy {
+    static func isProgressItem(_ itemObject: [String: JSONValue]) -> Bool {
+        let normalizedType = itemObject["type"]?.stringValue?
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: "_", with: "")
+        return normalizedType == "todolist"
+            || itemObject["remodexProgressPlan"]?.boolValue == true
+            || itemObject["remodexJsonlProgressPlan"]?.boolValue == true
+    }
+}
+
 extension CodexService {
     // Applies the latest structured plan snapshot for a turn while plan text keeps streaming separately.
     func handleTurnPlanUpdated(_ paramsObject: IncomingParamsObject?) {

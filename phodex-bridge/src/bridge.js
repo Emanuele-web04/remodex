@@ -268,15 +268,13 @@ function startBridge({
   const rolloutLiveMirror = !config.codexEndpoint
     ? createRolloutLiveMirrorController({
       sendApplicationResponse,
-      // One live source per thread: the IPC follower (Desktop-owned threads)
-      // and the bridge's own app-server stream (phone-owned threads) are both
-      // authoritative over the rollout file tail. The follower only counts
-      // while its Desktop stream is FRESH: a cache Desktop went silent on must
-      // not keep the rollout fallback muted, or a reopened running thread
-      // shows "finished" and never recovers until the next broadcast.
-      shouldSuppressThread: (threadId) => (
-        Boolean(desktopIpcActionFollower?.hasFreshLiveThreadState(threadId))
-        || Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId))
+      // One live source per thread. The follower keeps fresh/idle Desktop state
+      // authoritative, but yields an active cache that stopped broadcasting;
+      // a later Desktop snapshot is announced as a new source epoch so the
+      // phone performs canonical repair instead of mixing both mirrors.
+      shouldSuppressThread: (threadId) => shouldSuppressRolloutMirrorForThread(
+        threadId,
+        { desktopIpcActionFollower, desktopIpcLiveOwner }
       ),
     })
     : null;
@@ -2751,28 +2749,17 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
     }
 
     const items = Array.isArray(turn.items) ? turn.items : [];
-    let nextItems = items;
-    if (includeHistoryItems && artifacts.historyItems?.length > 0) {
-      const merged = mergeRelayHistoryItemsWithJsonlItems(items, artifacts.historyItems, normalizedThreadId);
-      if (merged.items !== items) {
-        nextItems = merged.items;
+    const merged = mergeRelayHistoryItemsWithJsonlItems(
+      items,
+      artifacts.timelineItems,
+      normalizedThreadId,
+      {
+        includeJsonlItem: includeHistoryItems
+          ? () => true
+          : isJsonlHistoryArtifactItem,
       }
-    }
-    if (artifacts.fileChangeItem && !hasEquivalentFileChangeItem(nextItems, artifacts.fileChangeItem)) {
-      nextItems = nextItems === items ? [...items] : nextItems;
-      nextItems.push(artifacts.fileChangeItem);
-    }
-    for (const imageViewItem of artifacts.imageViewItems || []) {
-      if (hasEquivalentImageViewItem(nextItems, imageViewItem)) {
-        continue;
-      }
-      nextItems = nextItems === items ? [...items] : nextItems;
-      nextItems.push(imageViewItem);
-    }
-    if (artifacts.progressPlanItem && !hasEquivalentProgressPlanItem(nextItems, artifacts.progressPlanItem)) {
-      nextItems = nextItems === items ? [...items] : nextItems;
-      nextItems.push(artifacts.progressPlanItem);
-    }
+    );
+    const nextItems = merged.items;
 
     if (nextItems === items) {
       return turn;
@@ -2869,53 +2856,9 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
         continue;
       }
 
-      const fileChanges = turnItems.filter((item) => normalizeHistoryItemToken(item?.type) === "filechange");
-      const progressPlan = turnItems.find((item) => (
-        normalizeHistoryItemToken(item?.type) === "plan"
-          && item?.remodexJsonlProgressPlan === true
-      ));
-      const artifacts = {
-        fileChangeItem: null,
-        historyItems: turnItems.filter(shouldMergeJsonlHistoryItemIntoThreadRead),
-        imageViewItems: [],
-        progressPlanItem: null,
-      };
-
-      const changes = [];
-      for (const item of fileChanges) {
-        if (Array.isArray(item.changes)) {
-          changes.push(...item.changes);
-        }
-      }
-      if (changes.length > 0) {
-        artifacts.fileChangeItem = {
-          id: `remodex-jsonl-file-change-${turnId}`,
-          type: "fileChange",
-          status: "completed",
-          changes,
-          remodexJsonlFileChangeAggregate: true,
-        };
-      }
-      if (progressPlan) {
-        artifacts.progressPlanItem = {
-          ...progressPlan,
-          id: normalizeNonEmptyString(progressPlan.id) || `remodex-jsonl-progress-plan-${turnId}`,
-        };
-      }
-      artifacts.imageViewItems = turnItems
-        .filter((item) => normalizeHistoryItemToken(item?.type) === "imageview")
-        .map((item, index) => ({
-          ...item,
-          id: normalizeNonEmptyString(item.id) || `remodex-jsonl-image-view-${turnId}-${index + 1}`,
-        }));
-
-      if (
-        artifacts.fileChangeItem
-        || artifacts.progressPlanItem
-        || artifacts.imageViewItems.length > 0
-        || artifacts.historyItems.length > 0
-      ) {
-        artifactsByTurnId.set(turnId, artifacts);
+      const timelineItems = buildOrderedJsonlTimelineItems(turnItems, turnId);
+      if (timelineItems.length > 0) {
+        artifactsByTurnId.set(turnId, { timelineItems });
       }
     }
   } catch (error) {
@@ -2952,66 +2895,262 @@ function rememberJsonlArtifactItemsCache(cacheKey, entry) {
   }
 }
 
-// Fills sparse app-server thread/read turns from local JSONL while preserving server-rich duplicates.
-function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadId = "") {
+// Keeps JSONL-only rows in rollout order while treating app-server rows as the
+// authoritative spine. Matching anchors let us place missing rows without ever
+// moving server-only findings, messages, or richer tool records to the tail.
+function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadId = "", {
+  includeJsonlItem = () => true,
+} = {}) {
   if (!Array.isArray(existingItems) || !Array.isArray(jsonlItems) || jsonlItems.length === 0) {
     return { items: existingItems, didMerge: false };
   }
 
-  const candidates = existingItems.map((item) => ({
-    item,
-    used: false,
-  }));
-  const mergedItems = [];
-  let didMerge = false;
-
-  for (const rawJsonlItem of jsonlItems) {
-    const jsonlItem = sanitizeJsonlHistoryItemForRelayMerge(rawJsonlItem, threadId);
-    const existingIndex = candidates.findIndex((candidate) => (
-      !candidate.used && areEquivalentRelayHistoryItems(candidate.item, jsonlItem)
-    ));
-    if (existingIndex === -1) {
-      mergedItems.push(jsonlItem);
-      didMerge = true;
-      continue;
-    }
-
-    candidates[existingIndex].used = true;
-    mergedItems.push(candidates[existingIndex].item);
-  }
-
-  for (const candidate of candidates) {
-    if (!candidate.used) {
-      mergedItems.push(candidate.item);
-      didMerge = true;
-    }
-  }
-
-  if (!didMerge && mergedItems.every((item, index) => item === existingItems[index])) {
+  const sanitizedJsonlItems = jsonlItems
+    .map((item) => sanitizeJsonlHistoryItemForRelayMerge(item, threadId))
+    .filter(Boolean);
+  if (sanitizedJsonlItems.length === 0) {
     return { items: existingItems, didMerge: false };
   }
 
+  if (existingItems.length === 0) {
+    const insertedItems = sanitizedJsonlItems.filter(includeJsonlItem);
+    return insertedItems.length > 0
+      ? { items: insertedItems, didMerge: true }
+      : { items: existingItems, didMerge: false };
+  }
+
+  const usedExistingIndices = new Set();
+  const resolvedExistingItems = existingItems.slice();
+  const insertionsBefore = new Map();
+  const insertionsAfter = new Map();
+  let pendingItems = [];
+  let previousMatchedIndex = null;
+  let matchedAnchorCount = 0;
+  let didReplaceMatchedItem = false;
+
+  const placePendingItems = () => {
+    if (pendingItems.length === 0) {
+      return;
+    }
+    if (previousMatchedIndex == null) {
+      insertionsBefore.set(0, pendingItems);
+    } else {
+      const existing = insertionsAfter.get(previousMatchedIndex) || [];
+      insertionsAfter.set(previousMatchedIndex, existing.concat(pendingItems));
+    }
+    pendingItems = [];
+  };
+
+  for (const jsonlItem of sanitizedJsonlItems) {
+    const unusedMatch = (candidate, index) => !usedExistingIndices.has(index);
+    const eligibleMatch = (candidate, index) => (
+      (previousMatchedIndex == null || index > previousMatchedIndex)
+      && unusedMatch(candidate, index)
+    );
+    let existingIndex = findRelayHistoryExactMatchIndex(existingItems, jsonlItem, eligibleMatch);
+    if (existingIndex === -1) {
+      // Exact identity remains authoritative even when server and rollout order
+      // disagree. Consume that occurrence before considering a later semantic
+      // lookalike, otherwise repeated rows can bind to the wrong server item.
+      const representedExactIndex = findRelayHistoryExactMatchIndex(
+        existingItems,
+        jsonlItem,
+        unusedMatch
+      );
+      if (representedExactIndex !== -1) {
+        usedExistingIndices.add(representedExactIndex);
+        if (isProgressPlanItem(jsonlItem)) {
+          resolvedExistingItems[representedExactIndex] = resolvedProgressPlanHistoryItem(
+            existingItems[representedExactIndex],
+            jsonlItem
+          );
+          didReplaceMatchedItem = true;
+        }
+        continue;
+      }
+      existingIndex = findRelayHistorySemanticMatchIndex(existingItems, jsonlItem, eligibleMatch);
+    }
+    if (existingIndex === -1) {
+      // The row can already exist before the monotonic placement frontier when
+      // server and rollout order disagree. Consume each represented occurrence
+      // once; an extra identical JSONL occurrence must remain visible instead
+      // of repeatedly matching the same server row and disappearing.
+      const representedIndex = findRelayHistorySemanticMatchIndex(
+        existingItems,
+        jsonlItem,
+        unusedMatch
+      );
+      if (representedIndex !== -1) {
+        usedExistingIndices.add(representedIndex);
+        if (isProgressPlanItem(jsonlItem)) {
+          resolvedExistingItems[representedIndex] = resolvedProgressPlanHistoryItem(
+            existingItems[representedIndex],
+            jsonlItem
+          );
+          didReplaceMatchedItem = true;
+        }
+        continue;
+      }
+      if (includeJsonlItem(jsonlItem)) {
+        pendingItems.push(jsonlItem);
+      }
+      continue;
+    }
+
+    placePendingItems();
+    usedExistingIndices.add(existingIndex);
+    if (isProgressPlanItem(jsonlItem)) {
+      resolvedExistingItems[existingIndex] = resolvedProgressPlanHistoryItem(
+        existingItems[existingIndex],
+        jsonlItem
+      );
+      didReplaceMatchedItem = true;
+    }
+    previousMatchedIndex = existingIndex;
+    matchedAnchorCount += 1;
+  }
+
+  if (matchedAnchorCount === 0) {
+    const unanchoredArtifacts = sanitizedJsonlItems.filter((item) => (
+      includeJsonlItem(item) && isJsonlHistoryArtifactItem(item)
+    ));
+    if (unanchoredArtifacts.length === 0) {
+      return { items: existingItems, didMerge: false };
+    }
+    const firstAssistantIndex = existingItems.findIndex(isRelayAssistantHistoryItem);
+    const insertionIndex = firstAssistantIndex === -1 ? existingItems.length : firstAssistantIndex;
+    return {
+      items: existingItems.slice(0, insertionIndex)
+        .concat(unanchoredArtifacts, existingItems.slice(insertionIndex)),
+      didMerge: true,
+    };
+  }
+  if (pendingItems.length > 0 && previousMatchedIndex != null) {
+    const existing = insertionsAfter.get(previousMatchedIndex) || [];
+    insertionsAfter.set(previousMatchedIndex, existing.concat(pendingItems));
+  }
+
+  if (insertionsBefore.size === 0 && insertionsAfter.size === 0 && !didReplaceMatchedItem) {
+    return { items: existingItems, didMerge: false };
+  }
+
+  const mergedItems = [];
+  for (const [index, item] of resolvedExistingItems.entries()) {
+    mergedItems.push(...(insertionsBefore.get(index) || []));
+    mergedItems.push(item);
+    mergedItems.push(...(insertionsAfter.get(index) || []));
+  }
   return { items: mergedItems, didMerge: true };
+}
+
+function buildOrderedJsonlTimelineItems(turnItems, turnId) {
+  if (!Array.isArray(turnItems) || turnItems.length === 0) {
+    return [];
+  }
+
+  let latestProgressPlanIndex = -1;
+  for (const [index, item] of turnItems.entries()) {
+    if (isProgressPlanItem(item)) {
+      latestProgressPlanIndex = index;
+    }
+  }
+
+  let imageViewIndex = 0;
+  return turnItems.flatMap((item, index) => {
+    if (!shouldIncludeJsonlTimelineItem(item)) {
+      return [];
+    }
+    if (isProgressPlanItem(item) && index !== latestProgressPlanIndex) {
+      return [];
+    }
+
+    const itemType = normalizeHistoryItemToken(item?.type);
+    if (isProgressPlanItem(item)) {
+      return [{
+        ...item,
+        id: normalizeNonEmptyString(item?.id) || `remodex-jsonl-progress-plan-${turnId}`,
+        remodexProgressPlan: true,
+        remodexJsonlProgressPlan: true,
+      }];
+    }
+    if (itemType === "imageview") {
+      imageViewIndex += 1;
+      return [{
+        ...item,
+        id: normalizeNonEmptyString(item?.id)
+          || `remodex-jsonl-image-view-${turnId}-${imageViewIndex}`,
+      }];
+    }
+    return [item];
+  });
+}
+
+function shouldIncludeJsonlTimelineItem(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return Boolean(itemType)
+    && itemType !== "toolcalloutput"
+    && itemType !== "functioncalloutput"
+    && itemType !== "customtoolcalloutput";
+}
+
+function isJsonlHistoryArtifactItem(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return itemType === "filechange"
+    || itemType === "imageview"
+    || isProgressPlanItem(item);
+}
+
+function isProgressPlanItem(item) {
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return (itemType === "plan" || itemType === "todolist")
+    && (item?.remodexJsonlProgressPlan === true || item?.remodexProgressPlan === true);
+}
+
+function resolvedProgressPlanHistoryItem(existingItem, jsonlItem) {
+  return {
+    ...existingItem,
+    text: jsonlItem.text,
+    explanation: jsonlItem.explanation,
+    plan: jsonlItem.plan,
+    remodexProgressPlan: true,
+    remodexJsonlProgressPlan: true,
+  };
+}
+
+function findRelayHistoryExactMatchIndex(items, incomingItem, predicate = () => true) {
+  return items.findIndex((candidate, index) => (
+    predicate(candidate, index) && relayHistoryItemsHaveExactIdentity(candidate, incomingItem)
+  ));
+}
+
+function findRelayHistorySemanticMatchIndex(items, incomingItem, predicate = () => true) {
+  return items.findIndex((candidate, index) => (
+    predicate(candidate, index) && areEquivalentRelayHistoryItems(candidate, incomingItem)
+  ));
+}
+
+function relayHistoryItemsHaveExactIdentity(first, second) {
+  const firstIdentity = relayHistoryItemIdentity(first);
+  const secondIdentity = relayHistoryItemIdentity(second);
+  if (firstIdentity && secondIdentity && firstIdentity === secondIdentity) {
+    return true;
+  }
+  const firstCallId = relayHistoryItemCallId(first);
+  const secondCallId = relayHistoryItemCallId(second);
+  return Boolean(firstCallId && secondCallId && firstCallId === secondCallId);
+}
+
+function isRelayAssistantHistoryItem(item) {
+  const role = normalizeNonEmptyString(item?.role).toLowerCase();
+  const itemType = normalizeHistoryItemToken(item?.type);
+  return role === "assistant"
+    || itemType === "assistantmessage"
+    || (itemType === "message" && role !== "user");
 }
 
 function sanitizeJsonlHistoryItemForRelayMerge(item, threadId) {
   const sanitizedTurn = sanitizeRelayHistoryTurn({ items: [item] }, threadId);
   return sanitizedTurn?.items?.[0] || item;
-}
-
-function shouldMergeJsonlHistoryItemIntoThreadRead(item) {
-  const itemType = normalizeHistoryItemToken(item?.type);
-  if (!itemType) {
-    return false;
-  }
-
-  // These already have specialized lightweight restoration paths below.
-  if (itemType === "filechange" || itemType === "imageview" || itemType === "plan") {
-    return false;
-  }
-
-  // Raw outputs can be huge/noisy; readable tool rows and command rows carry the useful context.
-  return itemType !== "toolcalloutput" && itemType !== "functioncalloutput";
 }
 
 function areEquivalentRelayHistoryItems(first, second) {
@@ -3025,6 +3164,41 @@ function areEquivalentRelayHistoryItems(first, second) {
   const secondCallId = relayHistoryItemCallId(second);
   if (firstCallId && secondCallId && firstCallId === secondCallId) {
     return true;
+  }
+
+  if (isProgressPlanItem(first) && isProgressPlanItem(second)) {
+    return true;
+  }
+
+  // JSONL line ids are source-local fallbacks, not provider identities. They
+  // may reconcile semantically with a real app-server id; occurrence tracking
+  // in the merge keeps intentional repeated rows distinct.
+  if (relayHistoryIdentityIsStable(firstIdentity)
+    && relayHistoryIdentityIsStable(secondIdentity)) {
+    return false;
+  }
+  if (relayHistoryIdentityIsStable(firstCallId)
+    && relayHistoryIdentityIsStable(secondCallId)) {
+    return false;
+  }
+
+  const firstType = normalizeHistoryItemToken(first?.type);
+  const secondType = normalizeHistoryItemToken(second?.type);
+  if (firstType === "imageview" && secondType === "imageview") {
+    const firstPath = normalizeImageViewPathKey(first);
+    const secondPath = normalizeImageViewPathKey(second);
+    if (firstPath && firstPath === secondPath) {
+      return true;
+    }
+  }
+  if (firstType === "filechange" && secondType === "filechange") {
+    const firstPaths = fileChangePathSet(first);
+    const secondPaths = fileChangePathSet(second);
+    if (firstPaths.size > 0
+      && firstPaths.size === secondPaths.size
+      && Array.from(firstPaths).every((pathKey) => secondPaths.has(pathKey))) {
+      return true;
+    }
   }
 
   const firstText = relayHistoryItemText(first);
@@ -3064,6 +3238,14 @@ function relayHistoryItemIdentity(item) {
     || normalizeNonEmptyString(item?.item_id);
 }
 
+function relayHistoryIdentityIsStable(identity) {
+  const normalizedIdentity = normalizeNonEmptyString(identity);
+  if (!normalizedIdentity) {
+    return false;
+  }
+  return !/^(?:user-message-line|response-item-line|apply-patch-line)-\d+$/.test(normalizedIdentity);
+}
+
 function relayHistoryItemCallId(item) {
   return normalizeNonEmptyString(item?.call_id)
     || normalizeNonEmptyString(item?.callId);
@@ -3089,59 +3271,6 @@ function relayHistoryItemText(item) {
   }
 
   return "";
-}
-
-function hasEquivalentFileChangeItem(items, incomingItem) {
-  const incomingId = normalizeNonEmptyString(incomingItem?.id);
-  const incomingPaths = fileChangePathSet(incomingItem);
-  return items.some((item) => {
-    if (normalizeHistoryItemToken(item?.type) !== "filechange") {
-      return false;
-    }
-    if (incomingId && normalizeNonEmptyString(item.id) === incomingId) {
-      return true;
-    }
-    if (item.remodexJsonlFileChangeAggregate === true) {
-      return true;
-    }
-
-    const existingPaths = fileChangePathSet(item);
-    if (incomingPaths.size === 0 || existingPaths.size === 0) {
-      return false;
-    }
-    for (const pathKey of incomingPaths) {
-      if (!existingPaths.has(pathKey)) {
-        return false;
-      }
-    }
-    return true;
-  });
-}
-
-function hasEquivalentProgressPlanItem(items, incomingItem) {
-  const incomingId = normalizeNonEmptyString(incomingItem?.id);
-  return items.some((item) => {
-    if (normalizeHistoryItemToken(item?.type) !== "plan") {
-      return false;
-    }
-    return item.remodexJsonlProgressPlan === true
-      || (incomingId && normalizeNonEmptyString(item.id) === incomingId);
-  });
-}
-
-function hasEquivalentImageViewItem(items, incomingItem) {
-  const incomingId = normalizeNonEmptyString(incomingItem?.id);
-  const incomingPath = normalizeImageViewPathKey(incomingItem);
-  return items.some((item) => {
-    if (normalizeHistoryItemToken(item?.type) !== "imageview") {
-      return false;
-    }
-    const itemId = normalizeNonEmptyString(item.id);
-    if (incomingId && itemId === incomingId) {
-      return true;
-    }
-    return incomingPath && normalizeImageViewPathKey(item) === incomingPath;
-  });
 }
 
 function normalizeImageViewPathKey(item) {
@@ -4021,6 +4150,14 @@ function persistBridgePreferences(
   });
 }
 
+function shouldSuppressRolloutMirrorForThread(
+  threadId,
+  { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {}
+) {
+  return Boolean(desktopIpcActionFollower?.hasLiveThreadState(threadId))
+    || Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId));
+}
+
 module.exports = {
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
@@ -4035,5 +4172,6 @@ module.exports = {
   sanitizeLiveGeneratedImageMessageForRelay,
   sanitizeLiveUserNotification,
   sanitizeThreadHistoryImagesForRelay,
+  shouldSuppressRolloutMirrorForThread,
   startBridge,
 };

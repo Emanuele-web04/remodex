@@ -14,9 +14,24 @@ import Foundation
 // All of them are provisional: rows carrying them must merge with (and upgrade
 // to) the real runtime identity of the same content instead of duplicating it.
 nonisolated enum CodexSyntheticIdentifiers {
-    /// True for item ids minted by any mirror/stream (placeholder or rollout).
+    /// True for item ids minted by any mirror/stream (placeholder, rollout, or
+    /// the local JSONL reader when the provider omitted an item id).
     static func isMirrorMintedItemID(_ itemId: String) -> Bool {
-        itemId.hasPrefix("turn:") || itemId.hasPrefix("rollout-")
+        itemId.hasPrefix("turn:")
+            || itemId.hasPrefix("rollout-")
+            || itemId.hasPrefix("remodex-jsonl-")
+            || itemId.hasPrefix("user-message-line-")
+            || itemId.hasPrefix("response-item-line-")
+            || itemId.hasPrefix("apply-patch-line-")
+            || isProjectedDesktopUserItemID(itemId)
+    }
+
+    /// Source-line fallbacks are unique only inside one rollout file. Equal
+    /// values from another snapshot need semantic proof before reconciliation.
+    static func isJSONLLineFallbackItemID(_ itemId: String) -> Bool {
+        itemId.hasPrefix("user-message-line-")
+            || itemId.hasPrefix("response-item-line-")
+            || itemId.hasPrefix("apply-patch-line-")
     }
 
     /// True only for rollout-mirror synthesized item ids.

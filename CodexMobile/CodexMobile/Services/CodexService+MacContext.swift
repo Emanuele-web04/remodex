@@ -180,7 +180,9 @@ extension CodexService {
                    [String: CodexTurnTerminalState].self,
                    from: savedTurnTerminalStates
                ) {
-                terminalStateByTurnID = decodedTurnTerminalStates
+                terminalStateByTurnID = decodedTurnTerminalStates.filter { turnId, _ in
+                    !CodexSyntheticIdentifiers.isProjectedDesktopTurnID(turnId)
+                }
             } else {
                 terminalStateByTurnID = [:]
             }

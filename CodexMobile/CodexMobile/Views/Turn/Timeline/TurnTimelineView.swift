@@ -516,7 +516,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 let updated = Self.rehomeCollapsedFinalAccessoryStates(
                     initialBlockInfoByMessageID,
                     messages: visible,
-                    completedTurnIDs: completedTurnIDs
+                    completedTurnIDs: completedTurnIDs,
+                    activeTurnID: activeTurnID,
+                    isThreadRunning: isThreadRunning
                 )
                 nextState.blockInfoByMessageID = Self.rehomeHiddenAccessoryStates(
                     updated,

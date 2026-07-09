@@ -162,6 +162,93 @@ test("parseSessionJsonlTurns keeps the active turn when a parallel sibling turn 
   );
 });
 
+test("parseSessionJsonlTurns uses nested response-item turn ownership across interleaved turns", () => {
+  const nestedTurn = (turnId) => ({
+    internal_chat_message_metadata_passthrough: { turn_id: turnId },
+  });
+  const content = [
+    JSON.stringify({
+      timestamp: "2026-07-08T18:00:00.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-a" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-08T18:00:01.000Z",
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: "turn-b" },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-08T18:00:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        id: "reasoning-a",
+        summary: [{ type: "summary_text", text: "Reasoning for A" }],
+        ...nestedTurn("turn-a"),
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-08T18:00:03.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "update_plan",
+        call_id: "plan-a",
+        arguments: JSON.stringify({
+          explanation: "Plan A",
+          plan: [{ step: "Keep A isolated", status: "in_progress" }],
+        }),
+        ...nestedTurn("turn-a"),
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-08T18:00:04.000Z",
+      type: "response_item",
+      payload: {
+        type: "custom_tool_call",
+        name: "apply_patch",
+        call_id: "patch-a",
+        input: "*** Begin Patch\n*** Update File: Sources/A.swift\n@@\n-old\n+new\n*** End Patch\n",
+        ...nestedTurn("turn-a"),
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-08T18:00:05.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "assistant-a",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Answer A" }],
+        ...nestedTurn("turn-a"),
+      },
+    }),
+    JSON.stringify({
+      timestamp: "2026-07-08T18:00:06.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        id: "assistant-b",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Answer B" }],
+        ...nestedTurn("turn-b"),
+      },
+    }),
+  ].join("\n");
+
+  const turns = parseSessionJsonlTurns(content, { threadId: "thread-interleaved" });
+  const turnA = turns.find((turn) => turn.id === "turn-a");
+  const turnB = turns.find((turn) => turn.id === "turn-b");
+
+  assert.ok(turnA);
+  assert.ok(turnB);
+  assert.deepEqual(
+    turnA.items.map((item) => item.id),
+    ["reasoning-a", "plan-a", "patch-a", "assistant-a"]
+  );
+  assert.deepEqual(turnB.items.map((item) => item.id), ["assistant-b"]);
+});
+
 test("parseSessionJsonlTurns closes a synthetic active turn when terminal is the only real id", () => {
   const content = [
     JSON.stringify({

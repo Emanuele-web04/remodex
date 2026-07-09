@@ -454,6 +454,11 @@ final class CodexService {
     var relayMacIdentityPublicKey: String?
     var relayProtocolVersion: Int = codexSecureProtocolVersion
     var lastAppliedBridgeOutboundSeq = 0
+    var lastAppliedBridgeReplayEpoch: String?
+    @ObservationIgnored var pendingCanonicalHistoryRefreshAfterReplayDiscontinuity = false
+    // A Desktop/rollout source handoff needs replace semantics for the mirrored
+    // tail, not an append-only merge that leaves stale synthetic rows behind.
+    @ObservationIgnored var pendingCanonicalSourceReplacementThreadIDs: Set<String> = []
     // Mirrors the bridge package version currently running on the Mac, if the bridge reports it.
     var bridgeInstalledVersion: String?
     // Mirrors the latest published bridge package version, when the bridge can resolve it.
@@ -836,15 +841,20 @@ final class CodexService {
         self.relayMacDeviceId = SecureStore.readString(for: CodexSecureKeys.relayMacDeviceId)
         self.relayMacIdentityPublicKey = SecureStore.readString(for: CodexSecureKeys.relayMacIdentityPublicKey)
         if let rawProtocolVersion = SecureStore.readString(for: CodexSecureKeys.relayProtocolVersion),
-           let parsedProtocolVersion = Int(rawProtocolVersion) {
+           let parsedProtocolVersion = Int(rawProtocolVersion),
+           parsedProtocolVersion == codexSecureProtocolVersion {
             self.relayProtocolVersion = parsedProtocolVersion
         } else {
+            // Protocol capability belongs to this app build, not stale pairing
+            // metadata. A version bump keeps the trusted identity but requires
+            // the bridge to update before the next encrypted reconnect.
             self.relayProtocolVersion = codexSecureProtocolVersion
         }
         if let rawLastAppliedSeq = SecureStore.readString(for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq),
            let parsedLastAppliedSeq = Int(rawLastAppliedSeq) {
             self.lastAppliedBridgeOutboundSeq = parsedLastAppliedSeq
         }
+        self.lastAppliedBridgeReplayEpoch = SecureStore.readString(for: CodexSecureKeys.relayBridgeReplayEpoch)
         migrateCurrentTrustedMacDeviceIdIfNeeded()
         migrateLegacyMacScopedDefaultsIfNeeded()
         loadCurrentMacScopedDefaultsState()

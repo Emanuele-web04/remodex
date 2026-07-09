@@ -100,6 +100,37 @@ test("desktop conversation projector emits plan reasoning and command deltas", (
   );
 });
 
+test("desktop conversation projector marks Litter todo-list items as progress plans", () => {
+  const rawPlan = {
+    id: "dae353b0-litter-plan",
+    type: "todo-list",
+    status: "completed",
+    explanation: "All review fixes are complete.",
+    plan: [
+      { step: "Fix history", status: "completed" },
+      { step: "Verify mirroring", status: "completed" },
+    ],
+  };
+  const state = {
+    turns: [{
+      turnId: "turn-litter-plan",
+      status: "inProgress",
+      items: [rawPlan],
+    }],
+  };
+
+  const thread = projectDesktopConversationStateToThread("thread-litter-plan", state);
+  assert.equal(thread.turns[0].items[0].remodexProgressPlan, true);
+
+  const output = createDesktopConversationProjector().project("thread-litter-plan", state);
+  const lifecycleItems = output.notifications
+    .filter((notification) => notification.method === "item/started"
+      || notification.method === "item/completed")
+    .map((notification) => notification.params.item);
+  assert.equal(lifecycleItems.length, 2);
+  assert.equal(lifecycleItems.every((item) => item.remodexProgressPlan === true), true);
+});
+
 test("desktop conversation projector normalizes Desktop tool aliases for mobile lifecycle", () => {
   const projector = createDesktopConversationProjector();
   const output = projector.project("thread-tool-aliases", {

@@ -23,7 +23,7 @@ struct SidebarThreadRunBadgeView: View {
     private func statusDot(color: Color) -> some View {
         Circle()
             .fill(color)
-            .frame(width: 10, height: 10)
+            .frame(width: 15, height: 15)
             .overlay(
                 Circle()
                     .stroke(Color(.systemBackground), lineWidth: 1)
@@ -62,7 +62,7 @@ private struct SidebarThreadRunSpinner: View {
                     value: isSpinning
                 )
         }
-        .frame(width: 12, height: 12)
+        .frame(width: 15, height: 15)
         .onAppear {
             isSpinning = true
         }

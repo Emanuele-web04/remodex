@@ -643,8 +643,6 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             emptyStateTitle: emptySidebarTitle,
             emptyFilterTitle: emptySidebarFilterTitle,
             projectlessRootPaths: projectlessChatRootPaths,
-            timingLabelProvider: { SidebarRelativeTimeFormatter.compactLabel(for: $0) },
-            showsTimestampRefreshIndicator: { codex.snapshotOnlyPinnedThreadIDs.contains($0.id) },
             runBadgeStateByThreadID: cachedRunBadges,
             onSelectThread: selectThread,
             onCreateThreadInProjectGroup: { group in

@@ -302,6 +302,7 @@ extension CodexService {
                     existing: existingMessages,
                     history: orderedOlderMessages,
                     activeThreadIDs: Set(activeTurnIdByThread.keys),
+                    activeTurnIDs: Set(activeTurnIdByThread.values),
                     runningThreadIDs: runningThreadIDs,
                     preferRecentWindow: false
                 )

@@ -1361,6 +1361,7 @@ extension CodexService {
                         )
                         let existingMessages = messagesByThread[threadId] ?? []
                         let activeThreadIDs = Set(activeTurnIdByThread.keys)
+                        let activeTurnIDs = Set(activeTurnIdByThread.values)
                         let runningIDs = runningThreadIDs
                         let usedRecentWindow = threadHasActiveOrRunningTurn(threadId)
                             && Self.shouldPreferRecentHistoryWindow(
@@ -1377,6 +1378,7 @@ extension CodexService {
                             existing: existingMessages,
                             history: historyMessages,
                             activeThreadIDs: activeThreadIDs,
+                            activeTurnIDs: activeTurnIDs,
                             runningThreadIDs: runningIDs,
                             preferRecentWindow: usedRecentWindow
                         )

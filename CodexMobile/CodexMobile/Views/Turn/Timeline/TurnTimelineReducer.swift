@@ -62,8 +62,26 @@ enum TurnTimelineReducer {
 
         var result = messages
 
-        for (_, indices) in indicesByTurn {
+        for (turnId, indices) in indicesByTurn {
             guard indices.count > 1 else { continue }
+
+            // A late row from an older turn can sit beyond an entire newer turn
+            // after cache reconciliation. Never permute that older turn through
+            // another stable turn's slots; canonical history owns that repair.
+            if let firstIndex = indices.first, let lastIndex = indices.last {
+                let crossesStableBoundary = result[firstIndex...lastIndex].contains { message in
+                    if let candidateTurnId = message.turnId,
+                       !candidateTurnId.isEmpty,
+                       candidateTurnId != turnId {
+                        return true
+                    }
+                    return message.role == .user
+                        && (message.turnId == nil || message.turnId?.isEmpty == true)
+                }
+                if crossesStableBoundary {
+                    continue
+                }
+            }
 
             let turnMessages = indices.map { result[$0] }
 
@@ -345,17 +363,7 @@ enum TurnTimelineReducer {
         }
     }
 
-    // Late terminal replays can arrive with a newer raw order index; stable closed assistant
-    // rows should still render by their semantic creation time inside one turn.
     private static func intraTurnTieBreak(_ a: CodexMessage, _ b: CodexMessage) -> Bool {
-        if a.role == .assistant,
-           b.role == .assistant,
-           !a.isStreaming,
-           !b.isStreaming,
-           a.createdAt != b.createdAt {
-            return a.createdAt < b.createdAt
-        }
-
         return a.orderIndex < b.orderIndex
     }
 
@@ -985,6 +993,14 @@ enum TurnTimelineReducer {
             return false
         }
 
+        if let previousItemID = normalizedIdentifier(previous.itemId),
+           let incomingItemID = normalizedIdentifier(incoming.itemId),
+           previousItemID != incomingItemID,
+           !isProvisionalAssistantIdentity(previousItemID),
+           !isProvisionalAssistantIdentity(incomingItemID) {
+            return false
+        }
+
         let minimumTextLength = min(previous.text.utf8.count, incoming.text.utf8.count)
         guard minimumTextLength >= 24,
               messageTextsMatchForDedupe(previous.text, incoming.text) else {
@@ -1047,6 +1063,7 @@ enum TurnTimelineReducer {
             in: messages,
             threadId: incoming.threadId,
             turnId: incoming.turnId,
+            itemId: incoming.itemId,
             text: incoming.text,
             excludingMessageID: incoming.id
         )

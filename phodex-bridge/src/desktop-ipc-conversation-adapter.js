@@ -287,6 +287,7 @@ function applyAppServerMessageToConversationState({
           type: "todo-list",
           explanation: explanation || null,
           plan,
+          remodexProgressPlan: true,
         });
       }
       conversation.updatedAt = now();

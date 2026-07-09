@@ -38,6 +38,7 @@ final class ContentViewModel {
         let relayMacIdentityPublicKey: String?
         let relayProtocolVersion: Int
         let lastAppliedBridgeOutboundSeq: Int
+        let lastAppliedBridgeReplayEpoch: String?
         let shouldForceQRBootstrapOnNextHandshake: Bool
         let trustedReconnectFailureCount: Int
         let secureConnectionState: CodexSecureConnectionState
@@ -1163,6 +1164,7 @@ extension ContentViewModel {
             relayMacIdentityPublicKey: codex.relayMacIdentityPublicKey,
             relayProtocolVersion: codex.relayProtocolVersion,
             lastAppliedBridgeOutboundSeq: codex.lastAppliedBridgeOutboundSeq,
+            lastAppliedBridgeReplayEpoch: codex.lastAppliedBridgeReplayEpoch,
             shouldForceQRBootstrapOnNextHandshake: codex.shouldForceQRBootstrapOnNextHandshake,
             trustedReconnectFailureCount: codex.trustedReconnectFailureCount,
             secureConnectionState: codex.secureConnectionState,
@@ -1177,6 +1179,7 @@ extension ContentViewModel {
         codex.relayMacIdentityPublicKey = snapshot.relayMacIdentityPublicKey
         codex.relayProtocolVersion = snapshot.relayProtocolVersion
         codex.lastAppliedBridgeOutboundSeq = snapshot.lastAppliedBridgeOutboundSeq
+        codex.lastAppliedBridgeReplayEpoch = snapshot.lastAppliedBridgeReplayEpoch
         codex.shouldForceQRBootstrapOnNextHandshake = snapshot.shouldForceQRBootstrapOnNextHandshake
         codex.trustedReconnectFailureCount = snapshot.trustedReconnectFailureCount
         codex.secureConnectionState = snapshot.secureConnectionState
@@ -1207,5 +1210,10 @@ extension ContentViewModel {
             String(snapshot.lastAppliedBridgeOutboundSeq),
             for: CodexSecureKeys.relayLastAppliedBridgeOutboundSeq
         )
+        if let replayEpoch = snapshot.lastAppliedBridgeReplayEpoch {
+            SecureStore.writeString(replayEpoch, for: CodexSecureKeys.relayBridgeReplayEpoch)
+        } else {
+            SecureStore.deleteValue(for: CodexSecureKeys.relayBridgeReplayEpoch)
+        }
     }
 }

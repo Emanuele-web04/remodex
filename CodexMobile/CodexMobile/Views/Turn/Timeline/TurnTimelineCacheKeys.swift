@@ -57,6 +57,7 @@ enum TurnTimelineCacheKeyBuilder {
             hasher.combine(message.id)
             hasher.combine(message.role)
             hasher.combine(message.kind)
+            hasher.combine(message.assistantPhase)
             hasher.combine(message.turnId)
             hasher.combine(message.isStreaming)
             hasher.combine(message.textRenderSignature)

@@ -83,6 +83,7 @@ struct TurnConversationContainerView: View {
         // be starved by rapid assistant streaming and hide a just-sent user row.
         let messageLayout = Self.buildMessageLayout(
             from: messages,
+            activeTurnID: activeTurnID,
             planSessionSource: planSessionSource
         )
 
@@ -177,17 +178,23 @@ struct TurnConversationContainerView: View {
     // Separates pinned plan content from renderable timeline rows in one pass.
     private static func buildMessageLayout(
         from messages: [CodexMessage],
+        activeTurnID: String?,
         planSessionSource: CodexPlanSessionSource?
     ) -> TimelineMessageLayout {
         var timelineMessages: [CodexMessage] = []
         timelineMessages.reserveCapacity(messages.count)
-        var pinnedTaskPlanMessage: CodexMessage?
+        let pinnedTaskPlanMessage = pinnedTaskPlanMessage(
+            from: messages,
+            activeTurnID: activeTurnID
+        )
         var activeStructuredPromptMessage: CodexMessage?
         let canReplaceComposerWithPrompt = planSessionSource?.isNative == true
 
         for message in messages {
-            if message.shouldDisplayPinnedPlanAccessory {
-                pinnedTaskPlanMessage = message
+            if message.isTaskProgressPlanMessage {
+                // Progress snapshots belong only in the compact composer chip.
+                // Older snapshots stay hidden even after a newer one completes.
+                continue
             } else if message.shouldDisplayInlinePlanResult {
                 timelineMessages.append(message)
             } else if message.isPlanSystemMessage {
@@ -211,6 +218,31 @@ struct TurnConversationContainerView: View {
             pinnedTaskPlanMessage: pinnedTaskPlanMessage,
             activeStructuredPromptMessage: activeStructuredPromptMessage
         )
+    }
+
+    // Litter keeps every update_plan snapshot. Only the newest snapshot may
+    // drive the chip. Prefer the active turn so a late replay from an older turn
+    // cannot replace or clear the plan that currently belongs above the composer.
+    static func pinnedTaskPlanMessage(
+        from messages: [CodexMessage],
+        activeTurnID: String? = nil
+    ) -> CodexMessage? {
+        let normalizedActiveTurnID = activeTurnID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let activeTurnPlan: CodexMessage? = normalizedActiveTurnID.flatMap { activeTurnID in
+            guard !activeTurnID.isEmpty else {
+                return nil
+            }
+            return messages.last { message in
+                message.isTaskProgressPlanMessage
+                    && message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines) == activeTurnID
+            }
+        }
+        guard let latest = activeTurnPlan
+                ?? messages.last(where: { $0.isTaskProgressPlanMessage }),
+              latest.shouldDisplayPinnedPlanAccessory else {
+            return nil
+        }
+        return latest
     }
 }
 
@@ -276,10 +308,28 @@ extension CodexMessage {
         role == .system && kind == .plan
     }
 
+    // Structured todo-list state is task progress even if an old bridge or
+    // cached message incorrectly labeled it as a result. Real proposed-plan
+    // results do not carry mutable step statuses.
+    var isTaskProgressPlanMessage: Bool {
+        guard isPlanSystemMessage else {
+            return false
+        }
+        if resolvedPlanPresentation?.isProgressAccessory == true {
+            return true
+        }
+
+        let steps = planState?.steps ?? []
+        guard !steps.isEmpty else {
+            return false
+        }
+        let proposedBody = proposedPlan?.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        return proposedBody == nil || proposedBody == "Planning..."
+    }
+
     // Hides terminal 3/3-style plans so only genuinely active plans stay pinned above the composer.
     var shouldDisplayPinnedPlanAccessory: Bool {
-        guard isPlanSystemMessage,
-              resolvedPlanPresentation?.isProgressAccessory == true else {
+        guard isTaskProgressPlanMessage else {
             return false
         }
 
@@ -296,7 +346,7 @@ extension CodexMessage {
     }
 
     var shouldDisplayInlinePlanResult: Bool {
-        guard isPlanSystemMessage, !shouldDisplayPinnedPlanAccessory else {
+        guard isPlanSystemMessage, !isTaskProgressPlanMessage else {
             return false
         }
 

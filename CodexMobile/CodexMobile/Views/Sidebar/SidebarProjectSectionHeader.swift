@@ -40,7 +40,9 @@ struct SidebarProjectSectionHeader: View {
     @ViewBuilder
     private var leadingIcon: some View {
         if group.iconSystemName == "remodex.worktree" {
-            CodexWorktreeIcon(pointSize: 16, weight: .medium)
+            // The split-arrow artwork has a narrower intrinsic drawing than
+            // the folder asset, so 17pt gives both project glyphs equal visual weight.
+            CodexWorktreeIcon(pointSize: 17, weight: .medium)
                 .foregroundStyle(.primary)
         } else {
             RemodexIcon.image(systemName: resolvedIconName)

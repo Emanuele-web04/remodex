@@ -6,6 +6,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { randomUUID } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const net = require("node:net");
@@ -15,6 +16,7 @@ const { setTimeout: wait } = require("node:timers/promises");
 
 const {
   applyConversationStateChange,
+  buildDesktopTurnsListResult,
   createDesktopIpcActionFollower,
   desktopFollowerPayloadForResponse,
   projectDesktopAssistantDeltaNotifications,
@@ -22,6 +24,95 @@ const {
   resolveDefaultIpcSocketPath,
   seedConversationStateFromThreadRead,
 } = require("../src/desktop-ipc-action-follower");
+
+test("desktop turns/list returns newest-first pages without reversing reopen history", () => {
+  const chronologicalTurns = [
+    { id: "turn-1", items: [{ id: "message-1", type: "agentMessage", text: "one" }] },
+    { id: "turn-2", items: [{ id: "message-2", type: "agentMessage", text: "two" }] },
+    { id: "turn-3", items: [{ id: "message-3", type: "agentMessage", text: "three" }] },
+  ];
+
+  const firstPage = buildDesktopTurnsListResult(chronologicalTurns, {
+    sortDirection: "desc",
+    limit: 2,
+  });
+  assert.deepEqual(firstPage.data.map((turn) => turn.id), ["turn-3", "turn-2"]);
+  assert.equal(Object.hasOwn(firstPage, "turns"), false);
+  assert.equal(firstPage.hasMore, true);
+  assert.ok(firstPage.nextCursor);
+
+  const secondPage = buildDesktopTurnsListResult(chronologicalTurns, {
+    sortDirection: "desc",
+    limit: 2,
+    cursor: firstPage.nextCursor,
+  });
+  assert.deepEqual(secondPage.data.map((turn) => turn.id), ["turn-1"]);
+  assert.equal(secondPage.hasMore, false);
+  assert.equal(secondPage.nextCursor, null);
+
+  const streamingGrowth = structuredClone(chronologicalTurns);
+  streamingGrowth[2].items[0].text = "three, still streaming";
+  const pageAfterStreamingGrowth = buildDesktopTurnsListResult(streamingGrowth, {
+    sortDirection: "desc",
+    limit: 2,
+    cursor: firstPage.nextCursor,
+  });
+  assert.deepEqual(pageAfterStreamingGrowth.data.map((turn) => turn.id), ["turn-1"]);
+
+  const itemGrowth = structuredClone(chronologicalTurns);
+  itemGrowth[2].items.push({ id: "tool-3", type: "toolCall", text: "running" });
+  const pageAfterNonUserItemGrowth = buildDesktopTurnsListResult(itemGrowth, {
+    sortDirection: "desc",
+    limit: 2,
+    cursor: firstPage.nextCursor,
+  });
+  assert.deepEqual(pageAfterNonUserItemGrowth.data.map((turn) => turn.id), ["turn-1"]);
+
+  const changedSnapshot = buildDesktopTurnsListResult(
+    chronologicalTurns.filter((turn) => turn.id !== "turn-2"),
+    {
+      sortDirection: "desc",
+      limit: 2,
+      cursor: firstPage.nextCursor,
+    }
+  );
+  assert.equal(changedSnapshot, null);
+
+  const prependedSnapshot = buildDesktopTurnsListResult(
+    [{ id: "turn-x", items: [{ id: "message-x" }] }, ...chronologicalTurns],
+    {
+      sortDirection: "desc",
+      limit: 2,
+      cursor: firstPage.nextCursor,
+    }
+  );
+  assert.equal(prependedSnapshot, null);
+});
+
+test("desktop turns/list private cursors never fall through to app-server", (t) => {
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath: path.join(os.tmpdir(), `missing-remodex-${randomUUID()}.sock`),
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+  });
+  t.after(() => follower.stopAll());
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "private-cursor-read",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-with-expired-desktop-page",
+      cursor: "remodex-desktop-turns:desc:id:missing-turn",
+    },
+  }));
+
+  assert.equal(handled, true);
+  assert.equal(outbound.length, 1);
+  assert.equal(outbound[0].id, "private-cursor-read");
+  assert.equal(outbound[0].error.code, -32602);
+});
 
 test("projects desktop pending user input as an app-server request shape", () => {
   const actions = projectPendingDesktopActions("thread-1", {
@@ -1779,6 +1870,578 @@ test("desktop IPC follower mirrors live assistant text growth from desktop state
   assert.equal(deltaMessage.params.remodexDesktopIpcMirror, true);
 });
 
+test("desktop IPC follower discovers running sidebar threads before the phone opens them", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-running-");
+  let serverSocket = null;
+
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  // The sidebar asks for the list, but it never reads either individual chat.
+  follower.observeInbound(JSON.stringify({
+    id: "sidebar-list",
+    method: "thread/list",
+    params: {},
+  }));
+  await waitFor(() => serverSocket);
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-idle-unopened",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{ id: "turn-idle", status: "completed", items: [] }],
+          requests: [],
+        },
+      },
+    },
+  });
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-running-unopened",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            id: "turn-running-unopened",
+            status: "inProgress",
+            items: [{
+              id: "assistant-running-unopened",
+              type: "assistant_message",
+              text: "Working",
+            }],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === "thread-running-unopened"
+  )));
+  assert.equal(
+    outbound.some((message) => message.params?.threadId === "thread-idle-unopened"),
+    false,
+    "idle unopened snapshots should stay local to the bridge"
+  );
+  assert.equal(
+    outbound.some((message) => message.method === "item/completed"),
+    false,
+    "background discovery must not replay historical transcript items"
+  );
+
+  // The idle snapshot is retained inside the bridge, so a later Mac-started
+  // run is still discovered without any per-thread read from the phone.
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-idle-unopened",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 0, "status"],
+          value: "inProgress",
+        }],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === "thread-idle-unopened"
+  )));
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-idle-unopened",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 0, "status"],
+          value: "completed",
+        }],
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-idle-unopened"
+  )));
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-running-unopened",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 0, "items", 0, "text"],
+          value: "Working still",
+        }],
+      },
+    },
+  });
+
+  await wait(25);
+  assert.equal(
+    outbound.some((message) => (
+      message.method === "item/agentMessage/delta"
+        && message.params?.threadId === "thread-running-unopened"
+    )),
+    false,
+    "an unopened running chat should remain lifecycle-only"
+  );
+
+  const readHandled = follower.observeInbound(JSON.stringify({
+    id: "open-running-thread",
+    method: "thread/read",
+    params: { threadId: "thread-running-unopened" },
+  }));
+  assert.equal(readHandled, true);
+  assert.equal(
+    outbound.find((message) => message.id === "open-running-thread")
+      ?.result?.thread?.turns?.[0]?.items?.[0]?.text,
+    "Working still"
+  );
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-running-unopened",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 0, "items", 0, "text"],
+          value: "Working still after open",
+        }],
+      },
+    },
+  });
+
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/agentMessage/delta"
+      && message.params?.threadId === "thread-running-unopened"
+      && message.params?.delta === " after open"
+  )));
+});
+
+test("desktop IPC follower settles an announced background turn after reconnect", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-reconnect-");
+  let serverSocket = null;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+    backgroundDisconnectGraceMs: 250,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-reconnect",
+    "inProgress",
+    { turnId: "turn-background-reconnect" }
+  ));
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === "thread-background-reconnect"
+  )));
+
+  const disconnectedSocket = serverSocket;
+  disconnectedSocket.destroy();
+  await wait(25);
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket && serverSocket !== disconnectedSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-reconnect",
+    "completed",
+    { turnId: "turn-background-reconnect" }
+  ));
+
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-reconnect"
+  )));
+  await wait(275);
+  const completions = outbound.filter((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-reconnect"
+  ));
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].params.status, "completed");
+});
+
+test("desktop IPC follower interrupts announced background turns when Litter stays disconnected", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-disconnect-");
+  let serverSocket = null;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+    backgroundDisconnectGraceMs: 20,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-disconnect",
+    "inProgress",
+    { turnId: "turn-background-disconnect" }
+  ));
+  await waitFor(() => outbound.some((message) => message.method === "turn/started"));
+  serverSocket.destroy();
+
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-disconnect"
+  )));
+  const completed = outbound.find((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-disconnect"
+  ));
+  assert.equal(completed.params.status, "interrupted");
+});
+
+test("desktop IPC follower settles a running background thread before archive", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-archive-");
+  let serverSocket = null;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-archive",
+    "inProgress",
+    { turnId: "turn-background-archive" }
+  ));
+  await waitFor(() => outbound.some((message) => message.method === "turn/started"));
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-archived",
+    sourceClientId: "desktop",
+    version: 2,
+    params: { conversationId: "thread-background-archive" },
+  });
+  await waitFor(() => outbound.some((message) => message.method === "thread/archived"));
+
+  const completionIndex = outbound.findIndex((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-archive"
+  ));
+  const archiveIndex = outbound.findIndex((message) => message.method === "thread/archived");
+  assert.ok(completionIndex >= 0 && completionIndex < archiveIndex);
+  assert.equal(outbound[completionIndex].params.status, "interrupted");
+});
+
+test("desktop IPC follower does not evict an announced background turn", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-lru-");
+  let serverSocket = null;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-lru-protected",
+    "inProgress",
+    { turnId: "turn-background-lru-protected" }
+  ));
+  await waitFor(() => outbound.some((message) => message.method === "turn/started"));
+
+  for (let index = 0; index < 512; index += 1) {
+    writeFrame(serverSocket, backgroundConversationSnapshot(
+      `thread-background-lru-idle-${index}`,
+      "completed",
+      { turnId: `turn-background-lru-idle-${index}` }
+    ));
+  }
+  await wait(75);
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-background-lru-protected",
+      change: {
+        type: "patches",
+        patches: [{ op: "replace", path: ["turns", 0, "status"], value: "completed" }],
+      },
+    },
+  });
+
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/completed"
+      && message.params?.threadId === "thread-background-lru-protected"
+  )));
+});
+
+test("desktop IPC background recovery stays lifecycle-only until open", async (t) => {
+  const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-background-recovery-");
+  let serverSocket = null;
+  const baseline = {
+    turns: [{
+      status: "inProgress",
+      items: [{ id: "assistant-background-recovery", type: "assistant_message", text: "A" }],
+    }],
+    requests: [],
+  };
+  let readAttempts = 0;
+  const server = net.createServer((socket) => {
+    serverSocket = socket;
+    attachFrameReader(socket, (frame) => {
+      if (frame.method === "initialize") {
+        writeFrame(socket, {
+          type: "response",
+          requestId: frame.requestId,
+          resultType: "success",
+          method: "initialize",
+          handledByClientId: "desktop",
+          result: { clientId: "remodex-test" },
+        });
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(() => {
+    server.close();
+    serverSocket?.destroy();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    async readConversationState() {
+      readAttempts += 1;
+      return structuredClone(baseline);
+    },
+    requestTimeoutMs: 500,
+    backgroundDisconnectGraceMs: 1_000,
+  });
+  t.after(() => follower.stopAll());
+
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket);
+  writeFrame(serverSocket, backgroundConversationSnapshot(
+    "thread-background-recovery",
+    "inProgress",
+    { items: [] }
+  ));
+  await waitFor(() => outbound.some((message) => message.method === "turn/started"));
+  const started = outbound.find((message) => message.method === "turn/started");
+  assert.equal(started.params.turnId, "ipc-turn-0");
+
+  const disconnectedSocket = serverSocket;
+  disconnectedSocket.destroy();
+  await wait(25);
+  follower.observeInbound(JSON.stringify({ method: "thread/list", params: {} }));
+  await waitFor(() => serverSocket && serverSocket !== disconnectedSocket);
+
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: "thread-background-recovery",
+      change: {
+        type: "patches",
+        patches: [{
+          op: "replace",
+          path: ["turns", 0, "items", 0, "text"],
+          value: "AB",
+        }],
+      },
+    },
+  });
+  await waitFor(() => readAttempts === 1);
+  await wait(25);
+  assert.equal(
+    outbound.some((message) => message.method === "item/agentMessage/delta"),
+    false
+  );
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "open-background-recovery",
+    method: "thread/read",
+    params: { threadId: "thread-background-recovery" },
+  }));
+  assert.equal(handled, true);
+  const read = outbound.find((message) => message.id === "open-background-recovery");
+  assert.equal(read.result.thread.turns[0].id, "ipc-turn-0");
+  assert.equal(read.result.thread.turns[0].items[0].text, "AB");
+});
+
 test("desktop IPC follower normalizes phone turn starts before Desktop follower requests", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-normalize-");
   const serverFrames = [];
@@ -3264,7 +3927,7 @@ test("desktop IPC follower ignores Remodex-owned live owner broadcasts", async (
   assert.deepEqual(outbound, []);
 });
 
-test("desktop IPC follower stops serving stale active-turn caches to phone reads", async (t) => {
+test("desktop IPC follower yields stale active ownership and cleanly replaces it from a fresh snapshot", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-stale-active-read-");
   let serverSocket = null;
 
@@ -3330,7 +3993,6 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
   await waitFor(() => follower.hasLiveThreadState("thread-stale-active"));
 
   // While Desktop keeps the stream fresh, cached reads answer immediately.
-  assert.equal(follower.hasFreshLiveThreadState("thread-stale-active"), true);
   const freshServed = follower.observeInbound(JSON.stringify({
     id: "read-fresh",
     method: "thread/read",
@@ -3339,14 +4001,11 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
   assert.equal(freshServed, true);
   assert.equal(outbound.some((message) => message.id === "read-fresh"), true);
 
-  // Desktop went silent while the cache still claims an active turn: the cache
-  // is stale evidence, so the read must fall through to the local app-server
-  // instead of pinning a phantom running indicator on the phone. The same
-  // staleness must unmute the rollout fallback mirror (hasFreshLiveThreadState
-  // false while hasLiveThreadState stays true) so the reopened thread recovers.
+  // Desktop went silent while the cache still claims an active turn: both read
+  // serving and mirror ownership must yield so rollout/local recovery can take
+  // over instead of pinning a phantom running indicator on the phone.
   fakeNow += 21_000;
-  assert.equal(follower.hasLiveThreadState("thread-stale-active"), true);
-  assert.equal(follower.hasFreshLiveThreadState("thread-stale-active"), false);
+  assert.equal(follower.hasLiveThreadState("thread-stale-active"), false);
   const staleServed = follower.observeInbound(JSON.stringify({
     id: "read-stale",
     method: "thread/read",
@@ -3355,7 +4014,9 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
   assert.equal(staleServed, false);
   assert.equal(outbound.some((message) => message.id === "read-stale"), false);
 
-  // Idle cached threads have no phantom-running risk: they stay servable.
+  // The next fresh Desktop snapshot starts a new source epoch. It must arrive as
+  // one replacement bootstrap, not as an incremental completion of stale state.
+  const freshEpochStartIndex = outbound.length;
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
@@ -3369,14 +4030,56 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
           turns: [{
             id: "turn-stale-active",
             status: "completed",
-            items: [],
+            items: [{
+              id: "assistant-fresh-epoch",
+              type: "agentMessage",
+              text: "Fresh Desktop epoch.",
+            }],
           }],
           requests: [],
         },
       },
     },
   });
-  await waitFor(() => outbound.some((message) => message.method === "turn/completed"));
+  await waitFor(() => {
+    const messages = outbound.slice(freshEpochStartIndex);
+    return messages.some((message) => message.method === "thread/replaced")
+      && messages.some((message) => message.method === "thread/started");
+  });
+  const freshEpochMessages = outbound.slice(freshEpochStartIndex);
+  const replacementAnnouncementIndex = freshEpochMessages.findIndex((message) => (
+    message.method === "thread/replaced"
+  ));
+  const replacementBootstrapIndex = freshEpochMessages.findIndex((message) => (
+    message.method === "thread/started"
+  ));
+  assert.ok(replacementAnnouncementIndex >= 0);
+  assert.ok(replacementAnnouncementIndex < replacementBootstrapIndex);
+  const replacementBootstrap = freshEpochMessages.find((message) => (
+    message.method === "thread/started"
+  ));
+  assert.equal(replacementBootstrap.params.threadId, "thread-stale-active");
+  assert.equal(replacementBootstrap.params.remodexDesktopMirror, true);
+  assert.deepEqual(
+    replacementBootstrap.params.thread.turns.map((turn) => ({
+      id: turn.id,
+      status: turn.status,
+      itemIDs: turn.items.map((item) => item.id),
+    })),
+    [{
+      id: "turn-stale-active",
+      status: "completed",
+      itemIDs: ["assistant-fresh-epoch"],
+    }]
+  );
+  assert.equal(
+    freshEpochMessages.some((message) => message.method === "turn/completed"),
+    false
+  );
+  assert.equal(follower.hasLiveThreadState("thread-stale-active"), true);
+
+  // Idle cached threads have no phantom-running risk: they stay servable even
+  // after the active-state freshness window elapses again.
   fakeNow += 60_000;
   const idleServed = follower.observeInbound(JSON.stringify({
     id: "read-idle",
@@ -3384,7 +4087,9 @@ test("desktop IPC follower stops serving stale active-turn caches to phone reads
     params: { threadId: "thread-stale-active" },
   }));
   assert.equal(idleServed, true);
-  assert.equal(outbound.some((message) => message.id === "read-idle"), true);
+  const idleResponse = outbound.find((message) => message.id === "read-idle");
+  assert.equal(idleResponse.result.thread.turns[0].status, "completed");
+  assert.equal(idleResponse.result.thread.turns[0].items[0].id, "assistant-fresh-epoch");
 });
 
 test("desktop IPC follower keeps phone interest in a thread across a Desktop disconnect", async (t) => {
@@ -3714,6 +4419,32 @@ test("desktop IPC follower refreshes active-thread recency so re-read threads su
   }));
   assert.equal(heldEvicted, false, "the least-recently-read thread must be the one evicted");
 });
+
+function backgroundConversationSnapshot(threadId, status, {
+  turnId = null,
+  items = [],
+} = {}) {
+  const turn = { status, items };
+  if (turnId) {
+    turn.id = turnId;
+  }
+  return {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 8,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [turn],
+          requests: [],
+        },
+      },
+    },
+  };
+}
 
 function attachFrameReader(socket, onFrame) {
   let buffer = Buffer.alloc(0);

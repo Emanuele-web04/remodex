@@ -58,6 +58,10 @@ test("conversation adapter ignores empty plan updates but keeps explanation-only
     conversations.get(threadId).turns[0].items[0].explanation,
     "Keep the last meaningful plan visible."
   );
+  assert.equal(
+    conversations.get(threadId).turns[0].items[0].remodexProgressPlan,
+    true
+  );
 });
 
 test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", async (t) => {

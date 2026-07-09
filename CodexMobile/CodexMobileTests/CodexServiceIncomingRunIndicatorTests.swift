@@ -22,6 +22,115 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testBackgroundDiscoveryLifecycleUpdatesBadgeWithoutHydratingUnopenedThread() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let otherThreadID = "thread-\(UUID().uuidString)"
+        let turnID = "ipc-turn-0"
+        service.isConnected = true
+        service.isInitialized = true
+        service.threads = [
+            CodexThread(id: threadID, createdAt: Date(), updatedAt: Date()),
+            CodexThread(id: otherThreadID, createdAt: Date(), updatedAt: Date()),
+        ]
+
+        var recordedMethods: [String] = []
+        service.requestTransportOverride = { method, _ in
+            recordedMethods.append(method)
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["data": .array([])]),
+                includeJSONRPC: false
+            )
+        }
+
+        let lifecycleParams: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "turnId": .string(turnID),
+            "remodexDesktopMirror": .bool(true),
+            "remodexBackgroundDiscovery": .bool(true),
+        ]
+        service.handleNotification(method: "turn/started", params: .object(lifecycleParams))
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertTrue(recordedMethods.isEmpty)
+
+        service.handleNotification(method: "turn/completed", params: .object(lifecycleParams))
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertNil(service.terminalStateByTurnID[turnID])
+        XCTAssertTrue(recordedMethods.isEmpty)
+
+        // Projected Desktop ids are only unique inside one thread. Finishing
+        // `ipc-turn-0` in one chat must not suppress the same id in another.
+        service.handleNotification(
+            method: "turn/started",
+            params: .object(lifecycleParams.merging([
+                "threadId": .string(otherThreadID),
+            ]) { _, replacement in replacement })
+        )
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: otherThreadID), .running)
+        XCTAssertEqual(service.activeTurnID(for: otherThreadID), turnID)
+        XCTAssertNil(service.activeTurnId)
+        XCTAssertTrue(recordedMethods.isEmpty)
+    }
+
+    func testLiveBackgroundSnapshotRevivesTurnAfterGuessedInterruption() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let baseParams: [String: JSONValue] = [
+            "threadId": .string(threadID),
+            "turnId": .string(turnID),
+            "remodexDesktopMirror": .bool(true),
+            "remodexBackgroundDiscovery": .bool(true),
+        ]
+
+        service.handleNotification(method: "turn/started", params: .object(baseParams))
+        service.handleNotification(
+            method: "turn/completed",
+            params: .object(baseParams.merging([
+                "status": .string("interrupted"),
+            ]) { _, replacement in replacement })
+        )
+        XCTAssertEqual(service.latestTurnTerminalState(for: threadID), .stopped)
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+
+        service.handleNotification(method: "turn/started", params: .object(baseParams))
+        await flushAsyncSideEffects()
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertEqual(service.activeTurnID(for: threadID), turnID)
+        XCTAssertNil(service.terminalStateByTurnID[turnID])
+    }
+
+    func testHistoryMergeNeverPromotesProjectedTurnIDIntoGlobalTerminalState() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let projectedTurnID = "ipc-turn-0"
+        let realTurnID = "turn-\(UUID().uuidString)"
+        service.suspendAutomaticMacScopedPersistence = true
+
+        let didChange = service.mergeHistoryTurnTerminalStates(
+            threadId: threadID,
+            terminalStatesByTurnID: [
+                projectedTurnID: .completed,
+                realTurnID: .completed,
+            ]
+        )
+
+        XCTAssertTrue(didChange)
+        XCTAssertNil(service.terminalStateByTurnID[projectedTurnID])
+        XCTAssertEqual(service.terminalStateByTurnID[realTurnID], .completed)
+    }
+
     func testDesktopMirroredUserMessageItemStartedAppendsImmediately() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

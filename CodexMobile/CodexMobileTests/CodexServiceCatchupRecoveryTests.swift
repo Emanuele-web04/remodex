@@ -11,6 +11,46 @@ import XCTest
 final class CodexServiceCatchupRecoveryTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testReplayGapDuringHandshakeLatchesCanonicalRefreshUntilInitialization() {
+        let service = makeService()
+        let threadID = "thread-replay-gap"
+        service.activeThreadId = threadID
+        service.hydratedThreadIDs.insert(threadID)
+        service.lastAppliedBridgeOutboundSeq = 10
+        service.isConnected = false
+        service.isInitialized = false
+
+        service.handleNotification(
+            method: "remodex/bufferedReplay/gap",
+            params: .object([
+                "remodexBufferedReplayGap": .bool(true),
+                "lastDiscardedBridgeOutboundSeq": .int(25),
+            ])
+        )
+
+        XCTAssertEqual(service.lastAppliedBridgeOutboundSeq, 25)
+        XCTAssertFalse(service.hydratedThreadIDs.contains(threadID))
+        XCTAssertTrue(service.pendingCanonicalHistoryRefreshAfterReplayDiscontinuity)
+    }
+
+    func testReplayResetCanMoveStaleCursorBackToCurrentBridgeEpoch() {
+        let service = makeService()
+        service.lastAppliedBridgeOutboundSeq = 999
+
+        service.handleNotification(
+            method: "remodex/bufferedReplay/reset",
+            params: .object([
+                "remodexBufferedReplayReset": .bool(true),
+                "resetBridgeOutboundSeqTo": .int(0),
+                "bridgeReplayEpoch": .string("bridge-epoch-current"),
+            ])
+        )
+
+        XCTAssertEqual(service.lastAppliedBridgeOutboundSeq, 0)
+        XCTAssertEqual(service.lastAppliedBridgeReplayEpoch, "bridge-epoch-current")
+        XCTAssertTrue(service.pendingCanonicalHistoryRefreshAfterReplayDiscontinuity)
+    }
+
     func testModernHistoryOpenUsesTurnPaginationWithoutThreadRead() async throws {
         let service = makeService()
         let threadID = "thread-modern-pagination"
@@ -50,6 +90,33 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         XCTAssertEqual(recordedMethods, ["thread/turns/list"])
         XCTAssertTrue(service.initialTurnsLoadedByThreadID.contains(threadID))
         XCTAssertTrue(service.hydratedThreadIDs.contains(threadID))
+    }
+
+    func testEmptyCanonicalReplacementClearsOldRowsButKeepsPendingPrompt() async throws {
+        let service = makeService()
+        let threadID = "thread-empty-replacement"
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = true
+        service.upsertThread(CodexThread(id: threadID, title: "Replacement"))
+        service.messagesByThread[threadID] = [
+            CodexMessage(id: "old", threadId: threadID, role: .assistant, text: "stale", turnId: "turn-line-1", itemId: "response-item-line-3"),
+            CodexMessage(id: "pending", threadId: threadID, role: .user, text: "new", deliveryState: .pending),
+        ]
+        service.pendingCanonicalSourceReplacementThreadIDs.insert(threadID)
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/turns/list")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object(["data": .array([]), "nextCursor": .null]),
+                includeJSONRPC: false
+            )
+        }
+
+        _ = try await service.loadThreadHistoryIfNeeded(threadId: threadID, forceRefresh: true)
+
+        XCTAssertEqual(service.messages(for: threadID).map(\.id), ["pending"])
+        XCTAssertFalse(service.pendingCanonicalSourceReplacementThreadIDs.contains(threadID))
     }
 
     func testHistoryOpenFallsBackToLegacyThreadReadWhenTurnPaginationIsUnsupported() async throws {
