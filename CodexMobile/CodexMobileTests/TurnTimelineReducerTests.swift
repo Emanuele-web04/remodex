@@ -673,6 +673,211 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
     }
 
+    func testCompletedTurnKeepsSummaryOnlyReasoningVisibleAsPlainRow() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Run the focused tests",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Planning targeted test execution**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "The focused tests pass.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "reasoning-summary", "final"])
+        XCTAssertFalse(items.contains { item in
+            if case .previousMessages = item { return true }
+            return false
+        })
+    }
+
+    func testCompletedTurnKeepsSummaryOnlyReasoningBesideCollapsedToolHistory() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the implementation",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "tool",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Searched the implementation",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "tool-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Checking the implementation**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "The implementation is correct.",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 4
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        XCTAssertEqual(items.map(\.id), [
+            "user",
+            "previous-messages:final",
+            "reasoning-summary",
+            "final",
+        ])
+        guard case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected tool history to remain collapsed")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["tool"])
+    }
+
+    func testColdReopenKeepsSummaryOnlyReasoningVisibleWhenFinalAnswerInfersCompletion() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the history",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Reviewing canonical history**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                assistantPhase: "final_answer",
+                text: "History is consistent.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: nil,
+            isThreadRunning: false
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "reasoning-summary", "final"])
+    }
+
+    func testCompletedTurnStillCollapsesReasoningThatHasRealDisclosureDetail() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the implementation",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-detail",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Reviewing implementation**\n\nThe parser and projection both need checking.",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "final",
+                threadID: "thread",
+                role: .assistant,
+                text: "The implementation is correct.",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "final-item",
+                orderIndex: 3
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: ["turn-1"]
+        )
+
+        guard items.count == 3,
+              case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected detailed reasoning inside the previous-messages disclosure")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["reasoning-detail"])
+    }
+
     func testTimelineProjectionInfersOlderCompletedTurnFromFinalAnswerPhaseDuringColdReopen() {
         let now = Date()
         let messages = [
@@ -3117,6 +3322,299 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(fallbackAnchor, "assistant-2")
     }
 
+    func testLargeHistoryResponseAnchorUsesFirstRenderedRowAfterLatestPrompt() {
+        let now = Date()
+        let user = makeMessage(
+            id: "latest-user",
+            threadID: "thread",
+            role: .user,
+            kind: .chat,
+            text: "Please continue",
+            createdAt: now,
+            turnID: "turn-latest"
+        )
+        let commentary = makeMessage(
+            id: "commentary",
+            threadID: "thread",
+            role: .assistant,
+            kind: .chat,
+            text: "Working on it",
+            createdAt: now.addingTimeInterval(1),
+            turnID: "turn-latest"
+        )
+        let final = makeMessage(
+            id: "final",
+            threadID: "thread",
+            role: .assistant,
+            kind: .chat,
+            text: "Done",
+            createdAt: now.addingTimeInterval(2),
+            turnID: "turn-latest"
+        )
+        let collapsed = TurnTimelinePreviousMessagesGroup(
+            finalMessage: final,
+            messages: [commentary]
+        )
+        let items: [TurnTimelineRenderItem] = [
+            .message(user),
+            .previousMessages(collapsed),
+            .message(final),
+        ]
+
+        XCTAssertEqual(
+            TurnTimelineRenderProjection.latestResponseStartAnchorID(in: items),
+            collapsed.id
+        )
+    }
+
+    func testLargeHistoryResponseAnchorFallsBackToEarliestLoadedRow() {
+        let message = makeMessage(
+            id: "first-loaded-response-row",
+            threadID: "thread",
+            role: .assistant,
+            kind: .chat,
+            text: "Continuation of a response whose prompt is on an older page",
+            turnID: "turn-latest"
+        )
+
+        XCTAssertEqual(
+            TurnTimelineRenderProjection.latestResponseStartAnchorID(in: [.message(message)]),
+            "first-loaded-response-row"
+        )
+    }
+
+    func testRecoveredActiveTurnAnchorUsesFirstRenderedRowInsteadOfLatestStreamBlock() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "old-final",
+                threadID: "thread",
+                role: .assistant,
+                text: "Earlier answer",
+                createdAt: now,
+                turnID: "turn-old"
+            ),
+            makeMessage(
+                id: "active-user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect mirroring",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-active"
+            ),
+            makeMessage(
+                id: "active-thinking",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Reviewing the mirrored turn",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-active"
+            ),
+            makeMessage(
+                id: "active-block-1",
+                threadID: "thread",
+                role: .assistant,
+                text: "First streamed block",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-active"
+            ),
+            makeMessage(
+                id: "active-steer",
+                threadID: "thread",
+                role: .user,
+                text: "Also verify the initial position",
+                createdAt: now.addingTimeInterval(3.5),
+                turnID: "turn-active"
+            ),
+            makeMessage(
+                id: "active-block-2",
+                threadID: "thread",
+                role: .assistant,
+                text: "Latest streamed block",
+                createdAt: now.addingTimeInterval(4),
+                turnID: "turn-active",
+                isStreaming: true
+            ),
+        ]
+        let items = messages.map(TurnTimelineRenderItem.message)
+
+        XCTAssertEqual(
+            TurnTimelineRenderProjection.activeTurnResponseStartAnchorID(
+                in: items,
+                activeTurnID: "turn-active"
+            ),
+            "active-user"
+        )
+    }
+
+    func testRecoveredActiveTurnAnchorUsesGroupedRenderItemID() {
+        let now = Date()
+        let toolMessages = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Tool \(index)",
+                createdAt: now.addingTimeInterval(TimeInterval(index)),
+                turnID: "turn-active"
+            )
+        }
+        let group = TurnTimelineToolBurstGroup(messages: toolMessages)
+
+        XCTAssertEqual(
+            TurnTimelineRenderProjection.activeTurnResponseStartAnchorID(
+                in: [.toolBurst(group)],
+                activeTurnID: "turn-active"
+            ),
+            group.id
+        )
+    }
+
+    func testRecoveredActiveTurnAnchorFallsBackToThreadPromptForTurnlessMirrorRows() {
+        let now = Date()
+        let items: [TurnTimelineRenderItem] = [
+            .message(makeMessage(
+                id: "old-user",
+                threadID: "thread",
+                role: .user,
+                text: "Old prompt",
+                createdAt: now
+            )),
+            .message(makeMessage(
+                id: "old-answer",
+                threadID: "thread",
+                role: .assistant,
+                text: "Old answer",
+                createdAt: now.addingTimeInterval(1)
+            )),
+            .message(makeMessage(
+                id: "active-user-turnless",
+                threadID: "thread",
+                role: .user,
+                text: "Mirrored prompt",
+                createdAt: now.addingTimeInterval(2)
+            )),
+            .message(makeMessage(
+                id: "first-catch-up-row",
+                threadID: "thread",
+                role: .assistant,
+                text: "First mirrored block",
+                createdAt: now.addingTimeInterval(3)
+            )),
+            .message(makeMessage(
+                id: "latest-live-row",
+                threadID: "thread",
+                role: .assistant,
+                text: "Latest mirrored block",
+                createdAt: now.addingTimeInterval(4),
+                isStreaming: true
+            )),
+        ]
+
+        XCTAssertEqual(
+            TurnTimelineRenderProjection.activeTurnResponseStartAnchorID(
+                in: items,
+                activeTurnID: "turn-active"
+            ),
+            "first-catch-up-row"
+        )
+    }
+
+    func testRecoveredActiveTurnAnchorUsesFirstOwnedRowWhenPromptIsOnOlderPage() {
+        let items: [TurnTimelineRenderItem] = [
+            .message(makeMessage(
+                id: "first-active-row",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Catch-up begins here",
+                turnID: "turn-active"
+            )),
+            .message(makeMessage(
+                id: "latest-active-row",
+                threadID: "thread",
+                role: .assistant,
+                text: "Live tail",
+                turnID: "turn-active",
+                isStreaming: true
+            )),
+        ]
+
+        XCTAssertEqual(
+            TurnTimelineRenderProjection.activeTurnResponseStartAnchorID(
+                in: items,
+                activeTurnID: "turn-active"
+            ),
+            "first-active-row"
+        )
+    }
+
+    func testRecoveredTurnAnchorOnlyMovesTowardEarlierHydratedRows() {
+        let items: [TurnTimelineRenderItem] = [
+            .message(makeMessage(
+                id: "hydrated-start",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "Earlier canonical row",
+                turnID: "turn-active"
+            )),
+            .message(makeMessage(
+                id: "current-anchor",
+                threadID: "thread",
+                role: .assistant,
+                text: "Initially visible block",
+                turnID: "turn-active"
+            )),
+            .message(makeMessage(
+                id: "later-steer",
+                threadID: "thread",
+                role: .user,
+                text: "Keep going",
+                turnID: "turn-active"
+            )),
+        ]
+
+        XCTAssertTrue(
+            TurnTimelineRenderProjection.shouldReplaceRecoveredTurnAnchor(
+                currentAnchorID: "current-anchor",
+                candidateAnchorID: "hydrated-start",
+                in: items
+            )
+        )
+        XCTAssertFalse(
+            TurnTimelineRenderProjection.shouldReplaceRecoveredTurnAnchor(
+                currentAnchorID: "current-anchor",
+                candidateAnchorID: "later-steer",
+                in: items
+            )
+        )
+    }
+
+    func testRecoveredTurnAnchorAcceptsGroupedReplacementWhenOldRowDisappears() {
+        let toolMessages = (1...5).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: "thread",
+                role: .system,
+                kind: .toolActivity,
+                text: "Tool \(index)",
+                turnID: "turn-active"
+            )
+        }
+        let group = TurnTimelineToolBurstGroup(messages: toolMessages)
+
+        XCTAssertTrue(
+            TurnTimelineRenderProjection.shouldReplaceRecoveredTurnAnchor(
+                currentAnchorID: "tool-1",
+                candidateAnchorID: group.id,
+                in: [.toolBurst(group)]
+            )
+        )
+    }
+
     func testRenderItemsCacheReusesProjectionForSameSignature() {
         let messages = [
             makeMessage(
@@ -5405,6 +5903,128 @@ final class TurnTimelineReducerTests: XCTestCase {
 }
 
 final class TurnScrollStateTrackerTests: XCTestCase {
+    func testRecoveredRunningTurnAnchorsOnlyOutsideNewSendFlow() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldAnchorRecoveredTurnAtStart(
+                isThreadRunning: true,
+                activeTurnID: "turn-active",
+                isSendInFlight: false,
+                shouldAnchorToAssistantResponse: false
+            )
+        )
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldAnchorRecoveredTurnAtStart(
+                isThreadRunning: false,
+                activeTurnID: "turn-recovered",
+                isSendInFlight: false,
+                shouldAnchorToAssistantResponse: false
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldAnchorRecoveredTurnAtStart(
+                isThreadRunning: true,
+                activeTurnID: "turn-new",
+                isSendInFlight: true,
+                shouldAnchorToAssistantResponse: false
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldAnchorRecoveredTurnAtStart(
+                isThreadRunning: true,
+                activeTurnID: "turn-new",
+                isSendInFlight: false,
+                shouldAnchorToAssistantResponse: true
+            )
+        )
+    }
+
+    func testRecoveredTurnOwnershipRetiresBeforeFollowingTheNextTurn() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldRetireRecoveredTurnAnchor(
+                ownsRecoveredTurnPosition: true,
+                recoveredRunGeneration: 4,
+                currentRunGeneration: 4,
+                hasTerminalEvidence: true
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldResumeLiveFollowForNextTurn(
+                isWaitingForNextTurn: true,
+                recoveredRunGeneration: 4,
+                currentRunGeneration: 4,
+                isThreadRunning: false
+            )
+        )
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldResumeLiveFollowForNextTurn(
+                isWaitingForNextTurn: true,
+                recoveredRunGeneration: 4,
+                currentRunGeneration: 5,
+                isThreadRunning: true
+            )
+        )
+    }
+
+    func testBackToBackNewRunGenerationReturnsToLiveFollow() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldRetireRecoveredTurnAnchor(
+                ownsRecoveredTurnPosition: true,
+                recoveredRunGeneration: 8,
+                currentRunGeneration: 9,
+                hasTerminalEvidence: false
+            )
+        )
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldResumeLiveFollowForNextTurn(
+                isWaitingForNextTurn: true,
+                recoveredRunGeneration: 8,
+                currentRunGeneration: 9,
+                isThreadRunning: true
+            )
+        )
+    }
+
+    func testRecoveredTurnDoesNotRetireForTransientStateOrIdentifierReplacement() {
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldRetireRecoveredTurnAnchor(
+                ownsRecoveredTurnPosition: true,
+                recoveredRunGeneration: 12,
+                currentRunGeneration: 12,
+                hasTerminalEvidence: false
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldResumeLiveFollowForNextTurn(
+                isWaitingForNextTurn: true,
+                recoveredRunGeneration: 12,
+                currentRunGeneration: 12,
+                isThreadRunning: true
+            )
+        )
+    }
+
+    func testTurnlessNextRunReturnsToLiveFollowFromMonotonicGeneration() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldResumeLiveFollowForNextTurn(
+                isWaitingForNextTurn: true,
+                recoveredRunGeneration: 2,
+                currentRunGeneration: 3,
+                isThreadRunning: true
+            )
+        )
+    }
+
+    func testUserOwnedScrollCancelsPendingNextTurnLiveFollow() {
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldResumeLiveFollowForNextTurn(
+                isWaitingForNextTurn: false,
+                recoveredRunGeneration: 6,
+                currentRunGeneration: 7,
+                isThreadRunning: true
+            )
+        )
+    }
+
     func testUserDragImmediatelySwitchesFollowBottomToManual() {
         XCTAssertEqual(
             TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .followBottom),
@@ -5412,10 +6032,25 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         )
     }
 
-    func testUserDragKeepsAssistantAnchorModeUntilAnchorCompletes() {
+    func testSendLeavesAppOwnedHistoryAnchorInLiveFollowMode() {
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterSendBegan(
+                shouldAnchorToAssistantResponse: false
+            ),
+            .followBottom
+        )
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterSendBegan(
+                shouldAnchorToAssistantResponse: true
+            ),
+            .anchorAssistantResponse
+        )
+    }
+
+    func testUserDragCancelsPendingAssistantAnchorMode() {
         XCTAssertEqual(
             TurnScrollStateTracker.modeAfterUserDragBegan(currentMode: .anchorAssistantResponse),
-            .anchorAssistantResponse
+            .manual
         )
     }
 

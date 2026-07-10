@@ -267,6 +267,7 @@ private struct TurnTimelineToolBurstView: View {
                 )
             }
         }
+        .id(group.id)
     }
 
     private func toolMessageRow(_ message: CodexMessage) -> some View {

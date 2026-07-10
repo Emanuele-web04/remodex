@@ -22,6 +22,77 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testRunStartGenerationSurvivesDisconnectAndCanonicalIDReplacement() async {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let syntheticTurnID = "ipc-turn-0"
+        let canonicalTurnID = "turn-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: syntheticTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        // Duplicate lifecycle does not create a second logical run.
+        sendTurnStarted(service: service, threadID: threadID, turnID: syntheticTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        await service.disconnect(preserveReconnectIntent: true)
+        sendTurnStarted(service: service, threadID: threadID, turnID: syntheticTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        service.handleNotification(
+            method: "thread/replaced",
+            params: .object([
+                "threadId": .string(threadID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexDesktopIpcMirror": .bool(true),
+            ])
+        )
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(canonicalTurnID),
+                "remodexDesktopMirror": .bool(true),
+                "remodexTurnIdentityContinuity": .bool(true),
+            ])
+        )
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), canonicalTurnID)
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 1)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: canonicalTurnID)
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+
+        XCTAssertTrue(service.threadHasActiveOrRunningTurn(threadID))
+        XCTAssertNil(service.activeTurnID(for: threadID))
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 2)
+        XCTAssertEqual(service.timelineState(for: threadID).renderSnapshot.runStartGeneration, 2)
+    }
+
+    func testDistinctTurnAfterThreadReplacementAdvancesRunGeneration() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: "turn-a")
+        service.handleNotification(
+            method: "thread/replaced",
+            params: .object([
+                "threadId": .string(threadID),
+                "remodexDesktopMirror": .bool(true),
+            ])
+        )
+        sendTurnStarted(service: service, threadID: threadID, turnID: "turn-b")
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), "turn-b")
+        XCTAssertEqual(service.runStartGenerationByThread[threadID], 2)
+    }
+
     func testLateCompletionForPreviousTurnKeepsNewActiveTurnRunning() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -940,6 +1011,29 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertTrue(didPrepare)
         XCTAssertEqual(service.activeThreadId, freshThreadID)
         XCTAssertTrue(recordedMethods.isEmpty)
+    }
+
+    func testPaginatedRunningCatchupStillRequestsCurrentTurnHistory() {
+        let service = makeService()
+
+        service.supportsTurnPagination = true
+        XCTAssertTrue(
+            service.shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                didRunForcedResume: true
+            )
+        )
+
+        service.supportsTurnPagination = false
+        XCTAssertFalse(
+            service.shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                didRunForcedResume: true
+            )
+        )
+        XCTAssertTrue(
+            service.shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                didRunForcedResume: false
+            )
+        )
     }
 
     func testActiveThreadDoesNotReceiveReadyOrFailedBadge() {

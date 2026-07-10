@@ -245,6 +245,7 @@ struct TurnTimelineRenderSnapshot: Equatable {
     let timelineChangeToken: Int
     let activeTurnID: String?
     let isThreadRunning: Bool
+    let runStartGeneration: Int
     let latestTurnTerminalState: CodexTurnTerminalState?
     let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
@@ -267,6 +268,7 @@ struct TurnTimelineRenderSnapshot: Equatable {
             timelineChangeToken: 0,
             activeTurnID: nil,
             isThreadRunning: false,
+            runStartGeneration: 0,
             latestTurnTerminalState: nil,
             completedTurnIDs: [],
             stoppedTurnIDs: [],
@@ -300,6 +302,7 @@ final class ThreadTimelineState {
     var messageRevision: Int
     var activeTurnID: String?
     var isThreadRunning: Bool
+    var runStartGeneration: Int
     var latestTurnTerminalState: CodexTurnTerminalState?
     var completedTurnIDs: Set<String>
     var stoppedTurnIDs: Set<String>
@@ -319,6 +322,7 @@ final class ThreadTimelineState {
         self.messageRevision = 0
         self.activeTurnID = nil
         self.isThreadRunning = false
+        self.runStartGeneration = 0
         self.latestTurnTerminalState = nil
         self.completedTurnIDs = []
         self.stoppedTurnIDs = []
@@ -365,6 +369,13 @@ final class CodexService {
     var activeThreadId: String?
     var activeTurnId: String?
     var activeTurnIdByThread: [String: String] = [:]
+    // Monotonic live turn-start token. Unlike running/id snapshots, this cannot
+    // lose a fast A-completed -> B-started transition to SwiftUI coalescing.
+    var runStartGenerationByThread: [String: Int] = [:]
+    @ObservationIgnored var lastRunStartTurnIDByThread: [String: String] = [:]
+    // Transport teardown clears running booleans before reconnect rehydrates A.
+    // Preserve one same-run start so reconnect does not masquerade as turn B.
+    @ObservationIgnored var pendingReconnectRunContinuityThreadIDs: Set<String> = []
 
     var runningThreadIDs: Set<String> = []
     // Protects active runs that are real but have not yielded a stable turnId yet.

@@ -17,6 +17,9 @@ struct ThinkingDisclosureContent: Equatable {
     let fallbackText: String
 
     var showsDisclosure: Bool { !sections.isEmpty }
+    var isSummaryOnly: Bool {
+        !sections.isEmpty && sections.allSatisfy(\.detail.isEmpty)
+    }
 }
 
 enum ThinkingDisclosureParser {

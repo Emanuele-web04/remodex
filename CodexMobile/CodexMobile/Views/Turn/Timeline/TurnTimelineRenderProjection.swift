@@ -154,6 +154,91 @@ enum TurnTimelineRenderProjection {
         return mergeAdjacentFileChangeItems(items)
     }
 
+    // Finds the first rendered row in the newest user-delimited response. The
+    // returned ID always belongs to a real render item, including collapsed
+    // previous-message and tool-burst rows, so ScrollViewReader can reach it.
+    static func latestResponseStartAnchorID(
+        in items: [TurnTimelineRenderItem]
+    ) -> String? {
+        guard !items.isEmpty else { return nil }
+
+        guard let latestUserIndex = items.lastIndex(where: { item in
+            guard case .message(let message) = item else { return false }
+            return message.role == .user
+        }) else {
+            // A bounded window can begin midway through one very large response.
+            // In that case the earliest loaded row is the closest available start.
+            return items.first?.id
+        }
+
+        let responseStartIndex = items.index(after: latestUserIndex)
+        guard responseStartIndex < items.endIndex else {
+            return items[latestUserIndex].id
+        }
+        return items[responseStartIndex].id
+    }
+
+    // Resolves the first rendered row of a recovered active response. Stable
+    // turn IDs win; mirrored/legacy turnless rows fall back to the newest user
+    // boundary in this thread. Returning the render item's ID keeps grouped
+    // tool/previous-message rows reachable by ScrollViewReader.
+    static func activeTurnResponseStartAnchorID(
+        in items: [TurnTimelineRenderItem],
+        activeTurnID: String?
+    ) -> String? {
+        guard !items.isEmpty else { return nil }
+
+        let normalizedActiveTurnID = normalizedIdentifier(activeTurnID)
+        if let normalizedActiveTurnID {
+            let activeTurnStartIndex = items.firstIndex { item in
+                messages(in: item).contains { message in
+                    normalizedIdentifier(message.turnId) == normalizedActiveTurnID
+                }
+            }
+
+            if let activeTurnStartIndex {
+                return items[activeTurnStartIndex].id
+            }
+        }
+
+        // turn/started and mirrored catch-up rows may both be turnless. The
+        // newest prompt is then the strongest thread-local response boundary.
+        return latestResponseStartAnchorID(in: items)
+    }
+
+    // Canonical history may prepend an earlier row after the live tail is already
+    // visible. Move the recovered-turn anchor only toward that earlier row; a
+    // newly appended steer or response block must never move the viewport down.
+    static func shouldReplaceRecoveredTurnAnchor(
+        currentAnchorID: String?,
+        candidateAnchorID: String,
+        in items: [TurnTimelineRenderItem]
+    ) -> Bool {
+        guard currentAnchorID != candidateAnchorID else { return false }
+        guard let currentAnchorID else { return true }
+
+        let currentIndex = items.firstIndex(where: { $0.id == currentAnchorID })
+        let candidateIndex = items.firstIndex(where: { $0.id == candidateAnchorID })
+        guard let candidateIndex else { return false }
+        guard let currentIndex else {
+            // Projection may replace a raw row with a grouped render item. The
+            // old ID is no longer scrollable, so accept the real replacement.
+            return true
+        }
+        return candidateIndex < currentIndex
+    }
+
+    private static func messages(in item: TurnTimelineRenderItem) -> [CodexMessage] {
+        switch item {
+        case .message(let message):
+            return [message]
+        case .toolBurst(let group):
+            return group.messages
+        case .previousMessages(let group):
+            return group.messages
+        }
+    }
+
     static func collapsedFinalMessageIDs(
         in messages: [CodexMessage],
         completedTurnIDs: Set<String>,
@@ -520,7 +605,16 @@ enum TurnTimelineRenderProjection {
                 return true
             case .plan:
                 return message.shouldDisplayInlinePlanResult
-            case .thinking, .toolActivity, .commandExecution, .chat:
+            case .thinking:
+                let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(
+                    from: message.text
+                )
+                guard !thinkingText.isEmpty else { return false }
+                return ThinkingDisclosureContentCache.content(
+                    messageID: message.id,
+                    text: thinkingText
+                ).isSummaryOnly
+            case .toolActivity, .commandExecution, .chat:
                 return false
             }
         }

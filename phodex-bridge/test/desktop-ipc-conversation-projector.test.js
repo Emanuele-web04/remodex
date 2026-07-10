@@ -49,6 +49,136 @@ test("desktop conversation projector bootstraps active Desktop turns for mobile"
   assert.equal(output.notifications[1].params.remodexDesktopIpcMirror, true);
 });
 
+test("desktop conversation projector reports identity continuity only for the same logical turn", () => {
+  const sameTurnProjector = createDesktopConversationProjector();
+  sameTurnProjector.project("thread-same-repair", {
+    turns: [{
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Keep fixing mirroring" }] },
+      items: [{ id: "stable-assistant", type: "agentMessage", text: "Working" }],
+    }],
+  });
+  const sameTurnRepair = sameTurnProjector.project("thread-same-repair", {
+    turns: [{
+      turnId: "turn-real-a",
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Keep fixing mirroring" }] },
+      items: [{ id: "stable-assistant", type: "agentMessage", text: "Working" }],
+    }],
+  });
+  assert.equal(sameTurnRepair.type, "fullReplace");
+  assert.deepEqual(sameTurnRepair.turnIdentityContinuityTurnIds, ["turn-real-a"]);
+
+  const nextTurnProjector = createDesktopConversationProjector();
+  nextTurnProjector.project("thread-different-repair", {
+    turns: [{
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Turn A prompt" }] },
+      items: [{ id: "assistant-a", type: "agentMessage", text: "A output" }],
+    }],
+  });
+  const differentTurn = nextTurnProjector.project("thread-different-repair", {
+    turns: [{
+      turnId: "turn-real-b",
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "Turn B prompt" }] },
+      items: [{ id: "assistant-b", type: "agentMessage", text: "B output" }],
+    }],
+  });
+  assert.equal(differentTurn.type, "fullReplace");
+  assert.deepEqual(differentTurn.turnIdentityContinuityTurnIds, []);
+
+  const repeatedPromptProjector = createDesktopConversationProjector();
+  repeatedPromptProjector.project("thread-repeated-prompt", {
+    turns: [{
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "continue" }] },
+      items: [{ id: "assistant-repeat-a", type: "agentMessage", text: "A output" }],
+    }],
+  });
+  const repeatedPromptNewTurn = repeatedPromptProjector.project("thread-repeated-prompt", {
+    turns: [{
+      turnId: "turn-repeat-b",
+      status: "inProgress",
+      params: { input: [{ type: "text", text: "continue" }] },
+      items: [{ id: "assistant-repeat-b", type: "agentMessage", text: "B output" }],
+    }],
+  });
+  assert.deepEqual(repeatedPromptNewTurn.turnIdentityContinuityTurnIds, []);
+
+  const parallelProjector = createDesktopConversationProjector();
+  parallelProjector.project("thread-one-to-one-continuity", {
+    turns: [{
+      status: "inProgress",
+      startedAt: 123,
+      params: { input: [{ type: "text", text: "same signature" }] },
+      items: [],
+    }],
+  });
+  const parallelReplacement = parallelProjector.project("thread-one-to-one-continuity", {
+    turns: [
+      {
+        turnId: "turn-real-first",
+        status: "inProgress",
+        startedAt: 123,
+        params: { input: [{ type: "text", text: "same signature" }] },
+        items: [],
+      },
+      {
+        turnId: "turn-real-second",
+        status: "inProgress",
+        startedAt: 123,
+        params: { input: [{ type: "text", text: "same signature" }] },
+        items: [],
+      },
+    ],
+  });
+  assert.equal(parallelReplacement.type, "fullReplace");
+  assert.deepEqual(
+    parallelReplacement.turnIdentityContinuityTurnIds,
+    ["turn-real-first"],
+    "one synthetic alias cannot suppress two canonical run starts"
+  );
+
+  const partialRepairProjector = createDesktopConversationProjector();
+  partialRepairProjector.project("thread-partial-repair", {
+    turns: [
+      {
+        status: "inProgress",
+        items: [{ id: "assistant-partial-a", type: "agentMessage", text: "A" }],
+      },
+      {
+        status: "inProgress",
+        items: [{ id: "assistant-partial-c", type: "agentMessage", text: "C" }],
+      },
+    ],
+  });
+  const partialRepair = partialRepairProjector.project("thread-partial-repair", {
+    turns: [
+      {
+        turnId: "turn-real-partial-a",
+        status: "inProgress",
+        items: [{ id: "assistant-partial-a", type: "agentMessage", text: "A" }],
+      },
+      {
+        status: "inProgress",
+        items: [{ id: "assistant-partial-c", type: "agentMessage", text: "C" }],
+      },
+    ],
+  });
+  assert.equal(partialRepair.type, "fullReplace");
+  assert.deepEqual(
+    partialRepair.notifications
+      .filter((notification) => notification.method === "turn/started")
+      .map((notification) => notification.params.turnId),
+    ["turn-real-partial-a", "ipc-turn-1"]
+  );
+  assert.deepEqual(
+    new Set(partialRepair.turnIdentityContinuityTurnIds),
+    new Set(["turn-real-partial-a", "ipc-turn-1"])
+  );
+});
+
 test("desktop conversation projector emits plan reasoning and command deltas", () => {
   const projector = createDesktopConversationProjector();
   projector.project("thread-deltas", {

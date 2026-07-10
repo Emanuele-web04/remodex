@@ -12,6 +12,7 @@ struct TurnConversationContainerView: View {
     let timelineChangeToken: Int
     let activeTurnID: String?
     let isThreadRunning: Bool
+    let runStartGeneration: Int
     let isSendInFlight: Bool
     let latestTurnTerminalState: CodexTurnTerminalState?
     let completedTurnIDs: Set<String>
@@ -94,6 +95,7 @@ struct TurnConversationContainerView: View {
                 timelineChangeToken: timelineChangeToken,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
+                runStartGeneration: runStartGeneration,
                 isSendInFlight: isSendInFlight,
                 latestTurnTerminalState: latestTurnTerminalState,
                 completedTurnIDs: completedTurnIDs,

@@ -168,7 +168,7 @@ extension CodexService {
         }
         assistantCompletionFingerprintByThread.removeAll()
         recentActivityLineByThread.removeAll()
-        removeAllThreadTimelineState()
+        removeAllThreadTimelineState(preserveRunLifecycle: true)
         assistantRevertStateCacheByThread.removeAll()
         assistantRevertStateRevision = 0
         workspaceCheckpointCopyTaskByTurnID.values.forEach { $0.cancel() }

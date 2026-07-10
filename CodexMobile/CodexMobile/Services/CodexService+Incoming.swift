@@ -688,6 +688,9 @@ extension CodexService {
         let isDesktopMirroredTurn = isDesktopMirroredBridgeEvent(paramsObject)
         let isBackgroundDiscoveryTurn = isBackgroundDiscoveryBridgeEvent(paramsObject)
         let isReplayedEvent = isReplayedBridgeEvent(paramsObject)
+        let preservesRunningSourceEpoch = paramsObject?["remodexTurnIdentityContinuity"]?.boolValue == true
+        let wasThreadRunning = threadId.map(threadHasActiveOrRunningTurn) ?? false
+        let previousActiveTurnID = threadId.flatMap { activeTurnIdByThread[$0] }
 
         // Replay/mirror paths can re-deliver turn/started for turns that already
         // ended. A live background snapshot is the exception only when the
@@ -713,6 +716,25 @@ extension CodexService {
         }
 
         if let threadId, !isReplayedEvent {
+            let preservesReconnectRun = pendingReconnectRunContinuityThreadIDs
+                .remove(threadId) != nil
+            let previousStartedTurnID = lastRunStartTurnIDByThread[threadId]
+            let previousKnownTurnID = previousStartedTurnID ?? previousActiveTurnID
+            let repeatsKnownTurn = turnID != nil && turnID == previousKnownTurnID
+            let startsDistinctIdentifiedTurn = turnID != nil
+                && previousKnownTurnID != nil
+                && turnID != previousKnownTurnID
+            if !preservesRunningSourceEpoch
+                && !repeatsKnownTurn
+                && !(preservesReconnectRun && !startsDistinctIdentifiedTurn)
+                && (!wasThreadRunning || startsDistinctIdentifiedTurn) {
+                runStartGenerationByThread[threadId, default: 0] += 1
+            }
+            if let turnID {
+                lastRunStartTurnIDByThread[threadId] = turnID
+            } else if !wasThreadRunning && !preservesReconnectRun {
+                lastRunStartTurnIDByThread.removeValue(forKey: threadId)
+            }
             markThreadAsRunning(threadId)
             if isDesktopMirroredTurn {
                 markDesktopMirroredRunning(for: threadId)

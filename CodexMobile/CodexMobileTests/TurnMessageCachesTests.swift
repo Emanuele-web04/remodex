@@ -168,6 +168,27 @@ final class TurnMessageCachesTests: XCTestCase {
         XCTAssertEqual(stopped.commandStatus?.statusLabel, "stopped")
     }
 
+    func testSummaryOnlyThinkingRenderModelKeepsVisibleTitleWithoutActivityFallback() throws {
+        let rawText = "**Planning targeted test execution**\n\n<!-- -->"
+        let message = CodexMessage(
+            id: "thinking-summary-only",
+            threadId: "thread-1",
+            role: .system,
+            kind: .thinking,
+            text: rawText,
+            isStreaming: false
+        )
+
+        let model = MessageRowRenderModelCache.model(for: message, displayText: rawText)
+        let content = try XCTUnwrap(model.thinkingContent)
+
+        XCTAssertEqual(model.thinkingText, rawText)
+        XCTAssertNil(model.thinkingActivityPreview)
+        XCTAssertTrue(content.isSummaryOnly)
+        XCTAssertEqual(content.sections.map(\.title), ["Planning targeted test execution"])
+        XCTAssertEqual(content.sections.map(\.detail), [""])
+    }
+
     func testCommandExecutionStatusCacheSeparatesEqualLengthTexts() {
         let running = CommandExecutionStatusCache.status(messageID: "command-cache", text: "Running npm")
         let stopped = CommandExecutionStatusCache.status(messageID: "command-cache", text: "Stopped npm")

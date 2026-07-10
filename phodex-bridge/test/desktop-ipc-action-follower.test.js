@@ -24,6 +24,66 @@ const {
   resolveDefaultIpcSocketPath,
   seedConversationStateFromThreadRead,
 } = require("../src/desktop-ipc-action-follower");
+const {
+  matchDesktopTurnIdentityContinuities,
+} = require("../src/desktop-ipc-conversation-projector");
+
+test("desktop identity repair pairs synthetic turns independently of parallel active turns", () => {
+  const sharedTurn = {
+    status: "inProgress",
+    params: { input: [{ type: "text", text: "Repair A" }] },
+    items: [{ id: "assistant-a-stable", type: "agentMessage", text: "Working" }],
+  };
+  const stableParallelTurn = {
+    id: "turn-c",
+    status: "inProgress",
+    items: [{ id: "assistant-c", type: "agentMessage", text: "Parallel" }],
+  };
+  const matches = matchDesktopTurnIdentityContinuities(
+    [
+      { id: "ipc-turn-0", turn: sharedTurn },
+      { id: "turn-c", turn: stableParallelTurn },
+    ],
+    [
+      { id: "turn-real-a", turn: { ...sharedTurn, turnId: "turn-real-a" } },
+      { id: "turn-c", turn: stableParallelTurn },
+    ]
+  );
+
+  assert.deepEqual([...matches.previousTurnIds], ["ipc-turn-0"]);
+  assert.deepEqual([...matches.nextTurnIds], ["turn-real-a"]);
+
+  const stablePriority = matchDesktopTurnIdentityContinuities(
+    [
+      {
+        id: "ipc-turn-0",
+        turn: {
+          startedAt: 123,
+          params: { input: [{ type: "text", text: "same prompt" }] },
+          items: [{ id: "assistant-fallback", type: "agentMessage", text: "Old" }],
+        },
+      },
+      {
+        id: "ipc-turn-1",
+        turn: {
+          startedAt: 999,
+          params: { input: [{ type: "text", text: "other prompt" }] },
+          items: [{ id: "assistant-stable", type: "agentMessage", text: "Stable" }],
+        },
+      },
+    ],
+    [{
+      id: "turn-real-stable",
+      turn: {
+        startedAt: 123,
+        params: { input: [{ type: "text", text: "same prompt" }] },
+        items: [{ id: "assistant-stable", type: "agentMessage", text: "Stable" }],
+      },
+    }]
+  );
+  assert.deepEqual([...stablePriority.previousTurnIds], ["ipc-turn-1"]);
+  assert.deepEqual([...stablePriority.nextTurnIds], ["turn-real-stable"]);
+});
 
 test("desktop turns/list returns newest-first pages without reversing reopen history", () => {
   const chronologicalTurns = [
@@ -692,6 +752,7 @@ test("desktop IPC follower announces thread replacement when synthetic turn ids 
   await waitFor(() => outbound.some((message) => message.method === "turn/started"));
 
   // The next snapshot has the canonical turn id: the phone must be told to rebuild.
+  const canonicalReplacementStartIndex = outbound.length;
   writeFrame(serverSocket, {
     type: "broadcast",
     method: "thread-stream-state-changed",
@@ -727,6 +788,81 @@ test("desktop IPC follower announces thread replacement when synthetic turn ids 
   const followUpTurnStarted = outbound.slice(replacedIndex + 1)
     .find((message) => message.method === "turn/started");
   assert.equal(followUpTurnStarted.params.turnId, "turn-real-id");
+  assert.equal(followUpTurnStarted.params.remodexTurnIdentityContinuity, true);
+  assert.equal(
+    outbound.slice(canonicalReplacementStartIndex).some((message) => (
+      message.method === "turn/completed" && message.params?.turnId === "ipc-turn-0"
+    )),
+    false,
+    "canonical id repair must not terminate the synthetic alias"
+  );
+
+  // Shape alone is not continuity: if synthetic A ended while IPC was stale
+  // and the next snapshot contains a different real B, B must advance iOS's
+  // monotonic run generation.
+  const distinctThreadId = "thread-full-replace-distinct-turn";
+  follower.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: distinctThreadId },
+  }));
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: distinctThreadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            status: "inProgress",
+            params: { input: [{ type: "text", text: "Synthetic A prompt" }] },
+            items: [{ id: "assistant-a", type: "agentMessage", text: "A output" }],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === distinctThreadId
+      && message.params?.turnId === "ipc-turn-0"
+  )));
+  const distinctReplacementStartIndex = outbound.length;
+  writeFrame(serverSocket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop",
+    version: 6,
+    params: {
+      conversationId: distinctThreadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            turnId: "turn-real-b",
+            status: "inProgress",
+            params: { input: [{ type: "text", text: "Synthetic A prompt" }] },
+            items: [{ id: "assistant-b", type: "agentMessage", text: "B output" }],
+          }],
+          requests: [],
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.slice(distinctReplacementStartIndex).some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === distinctThreadId
+      && message.params?.turnId === "turn-real-b"
+  )));
+  const distinctTurnStarted = outbound.slice(distinctReplacementStartIndex).find((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === distinctThreadId
+      && message.params?.turnId === "turn-real-b"
+  ));
+  assert.notEqual(distinctTurnStarted.params.remodexTurnIdentityContinuity, true);
 });
 
 test("uses the Codex Desktop named pipe as the default Windows IPC path", (t) => {
@@ -4846,6 +4982,13 @@ test("desktop IPC follower coalesces stale normalized snapshot bursts before pub
   await waitFor(() => outbound.some((message) => (
     message.method === "turn/started" && message.params?.turnId === "turn-new"
   )));
+  assert.notEqual(
+    outbound.find((message) => (
+      message.method === "turn/started" && message.params?.turnId === "turn-new"
+    ))?.params?.remodexTurnIdentityContinuity,
+    true,
+    "a distinct replacement turn must advance the phone run generation"
+  );
   assert.equal(
     outbound.some((message) => (
       message.method === "turn/started" && message.params?.turnId === "turn-old"
@@ -5099,7 +5242,7 @@ test("desktop IPC follower forces canonical repair after a normalized reconnect 
   );
 });
 
-test("desktop IPC follower keeps repair armed after a background resume falls through", async (t) => {
+test("desktop IPC follower bootstraps a normalized active turn when the phone opens it", async (t) => {
   const { socketPath, state } = await startInitializedIpcTestServer(
     t,
     "remodex-ipc-background-canonical-repair-"
@@ -5134,20 +5277,62 @@ test("desktop IPC follower keeps repair armed after a background resume falls th
             kind: "canonical",
             history: {
               entitiesByKey: {
+                "turn:turn-background-history": {
+                  turnId: "turn-background-history",
+                  status: "completed",
+                  items: [{
+                    id: "assistant-background-history",
+                    type: "agentMessage",
+                    text: "Older completed output",
+                  }],
+                },
+                "turn:turn-background-parallel": {
+                  turnId: "turn-background-parallel",
+                  turnStartedAtMs: Date.now(),
+                  durationMs: 0,
+                  status: "inProgress",
+                  items: [{
+                    id: "assistant-background-parallel",
+                    type: "agentMessage",
+                    text: "Parallel active block",
+                  }],
+                },
                 "turn:turn-background-repair": {
                   turnId: "turn-background-repair",
                   turnStartedAtMs: Date.now(),
                   durationMs: 0,
                   status: "inProgress",
-                  items: [{ id: "assistant-background-repair", type: "agentMessage", text: "A" }],
+                  params: { input: [{ type: "text", text: "Continue the active task" }] },
+                  items: [
+                    {
+                      id: "assistant-background-first",
+                      type: "agentMessage",
+                      text: "First active block",
+                    },
+                    {
+                      id: "assistant-background-second",
+                      type: "agentMessage",
+                      text: "Second active block",
+                    },
+                  ],
                 },
               },
               islands: [{
                 id: "tail:background-repair",
-                entries: [{
-                  key: "turn:turn-background-repair",
-                  value: "turn:turn-background-repair",
-                }],
+                entries: [
+                  {
+                    key: "turn:turn-background-history",
+                    value: "turn:turn-background-history",
+                  },
+                  {
+                    key: "turn:turn-background-parallel",
+                    value: "turn:turn-background-parallel",
+                  },
+                  {
+                    key: "turn:turn-background-repair",
+                    value: "turn:turn-background-repair",
+                  },
+                ],
               }],
               isComplete: true,
             },
@@ -5159,6 +5344,13 @@ test("desktop IPC follower keeps repair armed after a background resume falls th
   await waitFor(() => outbound.some((message) => (
     message.method === "turn/started" && message.params?.threadId === threadId
   )));
+  assert.equal(
+    outbound.filter((message) => (
+      message.method === "turn/started" && message.params?.threadId === threadId
+    )).length,
+    1,
+    "background discovery should announce the active turn once"
+  );
   outbound.length = 0;
 
   const handled = follower.observeInbound(JSON.stringify({
@@ -5167,7 +5359,48 @@ test("desktop IPC follower keeps repair armed after a background resume falls th
     params: { threadId, excludeTurns: true },
   }));
   assert.equal(handled, false);
-  assert.deepEqual(outbound, []);
+  await waitFor(() => outbound.some((message) => (
+    message.method === "item/started"
+      && message.params?.itemId === "assistant-background-second"
+  )));
+  assert.equal(outbound[0].method, "thread/replaced");
+  assert.deepEqual(
+    outbound
+      .filter((message) => message.method === "turn/started")
+      .map((message) => message.params.turnId),
+    ["turn-background-parallel"],
+    "opening should add the other parallel run without repeating the sidebar-announced run"
+  );
+  assert.deepEqual(
+    outbound
+      .filter((message) => message.method === "item/started")
+      .map((message) => message.params.itemId),
+    [
+      "assistant-background-parallel",
+      "turn-background-repair:input",
+      "assistant-background-first",
+      "assistant-background-second",
+    ],
+    "the phone should receive the complete bounded active-turn baseline before another patch"
+  );
+  assert.deepEqual(
+    outbound
+      .filter((message) => message.method === "item/completed")
+      .map((message) => message.params.itemId),
+    [
+      "assistant-background-parallel",
+      "turn-background-repair:input",
+      "assistant-background-first",
+      "assistant-background-second",
+    ],
+    "each completed baseline item should arrive with its normal terminal notification"
+  );
+  assert.equal(
+    outbound.some((message) => message.params?.itemId === "assistant-background-history"),
+    false,
+    "opening an active chat must not replay completed historical turns"
+  );
+  outbound.length = 0;
 
   writeFrame(state.socket, {
     type: "broadcast",
@@ -5186,19 +5419,133 @@ test("desktop IPC follower keeps repair armed after a background resume falls th
             "entitiesByKey",
             "turn:turn-background-repair",
             "items",
-            0,
+            1,
             "text",
           ],
-          value: "AB",
+          value: "Second active block continued",
         }],
       },
     },
   });
-  await waitFor(() => outbound.some((message) => message.method === "thread/replaced"));
+  await waitFor(() => outbound.some((message) => message.method === "item/agentMessage/delta"));
+  assert.deepEqual(
+    outbound.map((message) => ({
+      method: message.method,
+      itemId: message.params?.itemId,
+      delta: message.params?.delta,
+    })),
+    [{
+      method: "item/agentMessage/delta",
+      itemId: "assistant-background-second",
+      delta: " continued",
+    }],
+    "the next normalized patch should diff against the delivered baseline without replaying it"
+  );
+});
+
+test("desktop IPC follower preserves promoted synthetic-turn identity from prompt and start", async (t) => {
+  const { socketPath, state } = await startInitializedIpcTestServer(
+    t,
+    "remodex-ipc-promoted-identity-"
+  );
+  const outbound = [];
+  const follower = createDesktopIpcActionFollower({
+    socketPath,
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    requestTimeoutMs: 500,
+  });
+  t.after(() => follower.stopAll());
+
+  const threadId = "thread-background-identity-continuity";
+  const startedAt = Date.now();
+  const prompt = [{ type: "text", text: "Continue the same promoted run" }];
+  follower.observeInbound(JSON.stringify({ id: "sidebar", method: "thread/list", params: {} }));
+  await waitFor(() => state.socket);
+  writeFrame(state.socket, {
+    type: "broadcast",
+    method: "thread-stream-state-changed",
+    sourceClientId: "desktop-live",
+    version: 11,
+    params: {
+      conversationId: threadId,
+      change: {
+        type: "snapshot",
+        conversationState: {
+          turns: [{
+            status: "inProgress",
+            turnStartedAtMs: startedAt,
+            durationMs: 0,
+            params: { input: prompt },
+            items: [{
+              id: "assistant-synthetic-alias",
+              type: "agentMessage",
+              text: "Synthetic alias output",
+            }],
+          }],
+          requests: [],
+          threadRuntimeStatus: { type: "active", activeFlags: [] },
+          turnHistory: {
+            kind: "canonical",
+            history: {
+              entitiesByKey: {
+                "turn:turn-promoted-canonical": {
+                  turnId: "turn-promoted-canonical",
+                  status: "inProgress",
+                  turnStartedAtMs: startedAt,
+                  durationMs: 0,
+                  params: { input: prompt },
+                  items: [{
+                    id: "assistant-canonical-alias",
+                    type: "agentMessage",
+                    text: "Canonical alias output",
+                  }],
+                },
+              },
+              islands: [{
+                id: "tail:identity-continuity",
+                entries: [{
+                  key: "turn:turn-promoted-canonical",
+                  value: "turn:turn-promoted-canonical",
+                }],
+              }],
+              isComplete: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.threadId === threadId
+      && String(message.params?.turnId || "").startsWith("ipc-turn-")
+  )));
+  outbound.length = 0;
+
+  const handled = follower.observeInbound(JSON.stringify({
+    id: "metadata-only-identity-resume",
+    method: "thread/resume",
+    params: { threadId, excludeTurns: true },
+  }));
+  assert.equal(handled, false);
+  await waitFor(() => outbound.some((message) => (
+    message.method === "turn/started"
+      && message.params?.turnId === "turn-promoted-canonical"
+  )));
+  const canonicalStart = outbound.find((message) => (
+    message.method === "turn/started"
+      && message.params?.turnId === "turn-promoted-canonical"
+  ));
+  assert.equal(canonicalStart.params.remodexTurnIdentityContinuity, true);
   assert.equal(
-    outbound.some((message) => message.method === "item/agentMessage/delta"),
+    outbound.some((message) => (
+      message.method === "turn/started"
+        && String(message.params?.turnId || "").startsWith("ipc-turn-")
+    )),
     false,
-    "an unverified fall-through must not convert the next patch into a baseline-less delta"
+    "the already-announced synthetic alias must not start twice during promotion"
   );
 });
 

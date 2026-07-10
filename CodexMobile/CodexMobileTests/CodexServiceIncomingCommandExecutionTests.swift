@@ -2055,6 +2055,36 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(thinkingRows[0].text, "**Providing exact 200-word paragraph**")
     }
 
+    func testSummaryOnlyReasoningSurvivesTurnCompletion() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "reasoning-\(UUID().uuidString)"
+        let rawText = "**Planning targeted test execution**\n\n<!-- -->"
+
+        service.upsertStreamingSystemItemMessage(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            kind: .thinking,
+            text: rawText,
+            isStreaming: true
+        )
+        service.recordTurnTerminalState(
+            threadId: threadID,
+            turnId: turnID,
+            state: .completed
+        )
+        service.markTurnCompleted(threadId: threadID, turnId: turnID)
+
+        let thinkingRows = service.messages(for: threadID).filter {
+            $0.role == .system && $0.kind == .thinking
+        }
+        XCTAssertEqual(thinkingRows.count, 1)
+        XCTAssertEqual(thinkingRows[0].text, rawText)
+        XCTAssertFalse(thinkingRows[0].isStreaming)
+    }
+
     func testLateReasoningDeltaAfterTurnCompletionDoesNotCreateNewThinkingRow() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -4360,6 +4390,15 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
                 itemId: "status"
             ),
             CodexMessage(
+                id: "reasoning-summary",
+                threadId: threadID,
+                role: .system,
+                kind: .thinking,
+                text: "**Planning image generation**\n\n<!-- -->",
+                turnId: turnID,
+                itemId: "reasoning-summary"
+            ),
+            CodexMessage(
                 id: "final",
                 threadId: threadID,
                 role: .assistant,
@@ -4390,6 +4429,11 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertTrue(renderItems.contains {
             if case .previousMessages = $0 { return true }
             return false
+        })
+        XCTAssertTrue(renderItems.contains { item in
+            guard case .message(let message) = item else { return false }
+            return message.id == "reasoning-summary"
+                && message.text == "**Planning image generation**\n\n<!-- -->"
         })
     }
 

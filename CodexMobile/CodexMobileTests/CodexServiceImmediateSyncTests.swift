@@ -257,6 +257,55 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
         XCTAssertLessThanOrEqual(source.count, TurnTimelineProjectionPolicy.initialMessageLimit + 1)
     }
 
+    func testProjectionWindowKeepsTheCompleteActiveTurnForMirroring() {
+        let service = makeService()
+        let threadID = "thread-active-mirror-window"
+        let turnID = "turn-active-mirror-window"
+        let olderMessages = (0..<20).map { index in
+            makeMessage(
+                id: "older-\(index)",
+                threadID: threadID,
+                role: .assistant,
+                text: "Older response \(index)",
+                turnID: "older-turn",
+                orderIndex: index
+            )
+        }
+        let prompt = makeMessage(
+            id: "active-prompt",
+            threadID: threadID,
+            role: .user,
+            text: "Mirror this entire active turn",
+            turnID: turnID,
+            orderIndex: 20
+        )
+        let activeTurnRows = (1...120).map { index in
+            makeMessage(
+                id: "active-row-\(index)",
+                threadID: threadID,
+                role: .system,
+                kind: .toolActivity,
+                text: "Active tool output \(index)",
+                turnID: turnID,
+                orderIndex: 20 + index
+            )
+        }
+        service.runningThreadIDs.insert(threadID)
+        service.activeTurnIdByThread[threadID] = turnID
+
+        let source = service.snapshotProjectionSourceMessages(
+            threadId: threadID,
+            from: olderMessages + [prompt] + activeTurnRows,
+            usesPaginatedHistory: true
+        )
+
+        XCTAssertEqual(source.first?.id, "active-prompt")
+        XCTAssertEqual(source.count, 121)
+        XCTAssertTrue(source.contains { $0.id == "active-row-1" })
+        XCTAssertTrue(source.contains { $0.id == "active-row-120" })
+        XCTAssertFalse(source.contains { $0.turnId == "older-turn" })
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexServiceImmediateSyncTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

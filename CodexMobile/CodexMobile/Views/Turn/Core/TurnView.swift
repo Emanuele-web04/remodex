@@ -134,6 +134,7 @@ struct TurnView: View {
                 timelineChangeToken: renderSnapshot.timelineChangeToken,
                 activeTurnID: activeTurnID,
                 isThreadRunning: isThreadRunning,
+                runStartGeneration: renderSnapshot.runStartGeneration,
                 isSendInFlight: viewModel.isSending,
                 latestTurnTerminalState: renderSnapshot.latestTurnTerminalState,
                 completedTurnIDs: renderSnapshot.completedTurnIDs,

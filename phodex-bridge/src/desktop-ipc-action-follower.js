@@ -9,6 +9,8 @@ const net = require("net");
 
 const {
   createDesktopConversationProjector,
+  desktopTurnsShareLogicalIdentity,
+  matchDesktopTurnIdentityContinuities,
   projectDesktopConversationStateToThread,
 } = require("./desktop-ipc-conversation-projector");
 const {
@@ -332,22 +334,68 @@ function createDesktopIpcActionFollower({
       const threadId = readThreadId(message?.params);
       if (threadId && backgroundOnlyThreadIds.delete(threadId)) {
         const rawState = rawStatesByThreadId.get(threadId);
+        let announcedBackgroundTurn = null;
+        let announcedBackgroundTurnId = "";
         // Reconcile any lifecycle that may have completed while the raw
         // baseline was unavailable before handing full ownership to the
         // projector. From this point normal projected events own completion.
         if (rawState) {
           syncBackgroundThreadLifecycle(threadId, null, rawState);
+          announcedBackgroundTurn = announcedBackgroundTurnsByThreadId.get(threadId) || null;
+          announcedBackgroundTurnId = readString(announcedBackgroundTurn?.id);
         } else {
           settleAnnouncedBackgroundTurn(threadId, "interrupted");
         }
         clearBackgroundDisconnectTimer(threadId);
         announcedBackgroundTurnsByThreadId.delete(threadId);
         if (rawState) {
-          // The read response below carries the full baseline. Seed the
-          // projector so the next patch becomes a delta instead of replaying
-          // that baseline a second time.
           const liveState = boundedDesktopLiveStateForThread(threadId, rawState);
-          conversationProjector.seed(threadId, liveState);
+          const hasCanonicalNormalizedHistory = canonicalHistoryThreadIds.has(threadId)
+            || hasNormalizedHistoryOutsideRawTurns(
+              rawState,
+              normalizedLiveIndexesByThreadId.get(threadId)
+            );
+          if (hasCanonicalNormalizedHistory) {
+            // Normalized history reads stay canonical, but the full active turn
+            // is already in this bounded Desktop state. Publish it once now so
+            // the phone does not begin with only the next streamed delta.
+            canonicalHistoryThreadIds.add(threadId);
+            canonicalHistoryReplacementSentThreadIds.add(threadId);
+            conversationProjector.remove(threadId);
+            sendApplicationResponse(JSON.stringify({
+              method: "thread/replaced",
+              params: {
+                threadId,
+                remodexDesktopMirror: true,
+                remodexDesktopIpcMirror: true,
+                remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+              },
+            }));
+            const output = conversationProjector.project(threadId, liveState, {
+              includeAllActiveTurns: true,
+            });
+            for (const notification of output.notifications || []) {
+              const isDuplicateBackgroundStart = notification.method === "turn/started"
+                && readString(notification.params?.turnId) === announcedBackgroundTurnId;
+              if (!isDuplicateBackgroundStart) {
+                const isSamePromotedRun = notification.method === "turn/started"
+                  && announcedBackgroundTurn
+                  && desktopTurnsShareLogicalIdentity(
+                    announcedBackgroundTurn,
+                    notification.params?.turn
+                  );
+                const promotedNotification = isSamePromotedRun
+                  ? notificationWithTurnIdentityContinuity(notification)
+                  : notification;
+                sendApplicationResponse(JSON.stringify(promotedNotification));
+              }
+            }
+          } else {
+            // Legacy reads below carry their full projected baseline. Seed the
+            // projector so the next patch becomes a delta instead of replaying
+            // that baseline a second time.
+            conversationProjector.seed(threadId, liveState);
+          }
           rememberDesktopLiveProjection(threadId, liveState);
         }
       }
@@ -1133,8 +1181,21 @@ function createDesktopIpcActionFollower({
     const previousById = desktopLiveLifecycleByThreadId.get(threadId) || new Map();
     const nextTurns = activeDesktopTurnDescriptors(liveState);
     const nextById = new Map(nextTurns.map((turn) => [turn.id, turn]));
+    const {
+      previousTurnIds: continuityPreviousTurnIds,
+      nextTurnIds: continuityNextTurnIds,
+    } = matchDesktopTurnIdentityContinuities(
+      [...previousById.values()],
+      nextTurns
+    );
     for (const previous of previousById.values()) {
       if (nextById.has(previous.id)) {
+        continue;
+      }
+      if (continuityPreviousTurnIds.has(previous.id)) {
+        // Canonical ID repair is one uninterrupted run. Emitting a terminal
+        // event for the synthetic alias would make iOS release its recovered
+        // viewport before the continuity-tagged canonical start arrives.
         continue;
       }
       const terminalTurn = (liveState.turns || []).find((turn) => turnIdOf(turn) === previous.id);
@@ -1149,11 +1210,16 @@ function createDesktopIpcActionFollower({
       if (previousById.has(next.id)) {
         continue;
       }
-      sendApplicationResponse(JSON.stringify(desktopLiveTurnLifecycleNotification(
+      const startedNotification = desktopLiveTurnLifecycleNotification(
         "turn/started",
         threadId,
         next
-      )));
+      );
+      sendApplicationResponse(JSON.stringify(
+        continuityNextTurnIds.has(next.id)
+          ? notificationWithTurnIdentityContinuity(startedNotification)
+          : startedNotification
+      ));
     }
   }
 
@@ -1223,7 +1289,14 @@ function createDesktopIpcActionFollower({
       }));
     }
     for (const notification of output.notifications || []) {
-      sendApplicationResponse(JSON.stringify(notification));
+      const preservesTurnIdentity = notification.method === "turn/started"
+        && output.turnIdentityContinuityTurnIds?.includes(
+          readString(notification.params?.turnId)
+        );
+      const projectedNotification = preservesTurnIdentity
+        ? notificationWithTurnIdentityContinuity(notification)
+        : notification;
+      sendApplicationResponse(JSON.stringify(projectedNotification));
     }
     rememberDesktopLiveProjection(threadId, liveState);
   }
@@ -2468,7 +2541,11 @@ function activeDesktopTurnDescriptors(state) {
     }
     const id = turnIdOf(turn);
     if (id) {
-      descriptors.push({ id, status: readString(turn?.status) || "inProgress" });
+      descriptors.push({
+        id,
+        status: readString(turn?.status) || "inProgress",
+        turn,
+      });
     }
   }
   return descriptors;
@@ -2490,6 +2567,21 @@ function desktopLiveTurnLifecycleNotification(method, threadId, turn) {
       // survived a prior disconnect, even when the chat is already selected.
       remodexBackgroundDiscovery: method === "turn/started",
       remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+    },
+  };
+}
+
+function notificationWithTurnIdentityContinuity(notification) {
+  if (notification?.method !== "turn/started") {
+    return notification;
+  }
+  return {
+    ...notification,
+    params: {
+      ...(notification.params || {}),
+      // This is the same logical run re-announced under canonical Desktop IDs,
+      // not a new turn. The phone keeps its recovered-turn viewport ownership.
+      remodexTurnIdentityContinuity: true,
     },
   };
 }
@@ -2642,11 +2734,57 @@ function backgroundRawTurn(turn, index) {
   } else if (status === "interrupted" || status === "cancelled" || status === "canceled" || status === "stopped") {
     normalizedStatus = "interrupted";
   }
+  const identityItems = (Array.isArray(turn?.items) ? turn.items : []).flatMap((item) => {
+    const itemId = readString(item?.id) || readString(item?.itemId) || readString(item?.item_id);
+    const itemType = readString(item?.type);
+    if (!itemType || (!itemId && normalizeToken(itemType) !== "usermessage")) {
+      return [];
+    }
+    return [{
+      ...(itemId ? { id: itemId } : {}),
+      type: itemType,
+      ...(normalizeToken(itemType) === "usermessage"
+        ? { content: compactBackgroundPromptEntries(item?.content) }
+        : {}),
+    }];
+  });
+  const paramsInput = Array.isArray(turn?.params?.input)
+    ? compactBackgroundPromptEntries(turn.params.input)
+    : null;
+  const startedAt = turn?.startedAt
+    ?? turn?.started_at
+    ?? turn?.turnStartedAtMs
+    ?? turn?.turn_started_at_ms
+    ?? null;
   return {
     id,
     status: normalizedStatus,
     error: turn?.error ?? null,
+    ...(paramsInput ? { params: { input: paramsInput } } : {}),
+    ...(identityItems.length > 0 ? { items: identityItems } : {}),
+    ...(startedAt != null ? { startedAt } : {}),
   };
+}
+
+// Background discovery retains only the text needed to recognize the same run
+// after id promotion; image payloads and expanded runtime context stay in the
+// canonical raw state instead of being duplicated in lifecycle bookkeeping.
+function compactBackgroundPromptEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+  return entries.flatMap((entry) => {
+    if (typeof entry === "string") {
+      return entry ? [entry] : [];
+    }
+    if (!entry || typeof entry !== "object") {
+      return [];
+    }
+    const text = readString(entry.text)
+      || readString(entry.message)
+      || readString(entry.content);
+    return text ? [{ text }] : [];
+  });
 }
 
 function backgroundTurnLifecycleNotification(method, threadId, turn) {

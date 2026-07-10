@@ -44,6 +44,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     let timelineChangeToken: Int
     let activeTurnID: String?
     let isThreadRunning: Bool
+    let runStartGeneration: Int
     let isSendInFlight: Bool
     let latestTurnTerminalState: CodexTurnTerminalState?
     let completedTurnIDs: Set<String>
@@ -98,6 +99,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var scrollSessionThreadID: String?
     @State private var autoScrollMode: TurnAutoScrollMode = .followBottom
     @State private var initialRecoverySnapPendingThreadID: String?
+    @State private var initialResponseStartAnchorID: String?
+    @State private var ownsInitialActiveTurnStartPosition = false
+    @State private var awaitsInitialRunningStateHydration = false
+    @State private var initiallyAnchoredActiveTurnID: String?
+    @State private var initiallyAnchoredRunGeneration: Int?
+    @State private var awaitsNextTurnLiveFollow = false
     @State private var initialRecoverySnapTask: Task<Void, Never>?
     @State private var followBottomScrollTask: Task<Void, Never>?
     @State private var pendingAssistantBottomSnapTask: Task<Void, Never>?
@@ -113,7 +120,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     /// The service supplies paginated render windows; legacy full-history threads still slice locally.
     private var visibleMessages: ArraySlice<CodexMessage> {
-        if usesPaginatedHistory {
+        if usesPaginatedHistory
+            || isRunStartingOrRunning
+            || activeTurnID != nil
+            || ownsInitialActiveTurnStartPosition {
             return messages[...]
         }
 
@@ -592,7 +602,36 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     private var initialScrollAnchor: UnitPoint {
-        .bottom
+        ownsInitialActiveTurnStartPosition
+            || initialResponseStartAnchorID != nil
+            || boundedHistoryResponseStartAnchorID != nil
+            ? .top
+            : .bottom
+    }
+
+    private var activeTurnResponseStartAnchorID: String? {
+        TurnTimelineRenderProjection.activeTurnResponseStartAnchorID(
+            in: visibleRenderItems,
+            activeTurnID: initiallyAnchoredActiveTurnID ?? activeTurnID
+        )
+    }
+
+    // Large histories intentionally render only a recent window. On an inactive
+    // thread, open that window at the beginning of its newest logical response
+    // instead of at the response's final nested stream block.
+    private var boundedHistoryResponseStartAnchorID: String? {
+        let hasRowsOutsideVisibleWindow = !usesPaginatedHistory
+            && messages.count > visibleTailCount
+        guard !shouldAnchorToAssistantResponse,
+              !isRunStartingOrRunning,
+              hasRemoteEarlierMessages
+                || hasLocallyProjectedEarlierMessages
+                || hasRowsOutsideVisibleWindow else {
+            return nil
+        }
+        return TurnTimelineRenderProjection.latestResponseStartAnchorID(
+            in: visibleRenderItems
+        )
     }
 
     // Native content-growth anchor: bottom while actively following the stream (so growth pins
@@ -640,6 +679,16 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             return
         }
 
+        // Loading older history is explicit user ownership of the viewport.
+        initialRecoverySnapTask?.cancel()
+        initialRecoverySnapTask = nil
+        initialRecoverySnapPendingThreadID = nil
+        initialResponseStartAnchorID = nil
+        ownsInitialActiveTurnStartPosition = false
+        awaitsInitialRunningStateHydration = false
+        initiallyAnchoredActiveTurnID = nil
+        initiallyAnchoredRunGeneration = nil
+        awaitsNextTurnLiveFollow = false
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
         scrollGeometryCoalescer.cancel()
@@ -700,6 +749,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         shouldAnchorToAssistantResponse = false
         autoScrollMode = .followBottom
         initialRecoverySnapPendingThreadID = nil
+        initialResponseStartAnchorID = nil
+        ownsInitialActiveTurnStartPosition = false
+        awaitsInitialRunningStateHydration = false
+        initiallyAnchoredActiveTurnID = nil
+        initiallyAnchoredRunGeneration = nil
+        awaitsNextTurnLiveFollow = false
         isUserDraggingScroll = false
         userScrollCooldownUntil = nil
         pendingAssistantBottomSnapTask?.cancel()
@@ -708,7 +763,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     // Resets per-thread scroll intent so each opened conversation gets one fresh
-    // post-layout recovery snap and starts in bottom-follow mode.
+    // post-layout recovery. Recovered active turns and bounded inactive histories
+    // settle at their response start; turns started in this session follow live.
     private func beginScrollSessionIfNeeded(force: Bool = false) {
         guard force || scrollSessionThreadID != threadID else { return }
 
@@ -725,7 +781,32 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         isRetryingEarlierHistoryLoad = false
         localEarlierRevealTask?.cancel()
         localEarlierRevealTask = nil
-        autoScrollMode = shouldAnchorToAssistantResponse ? .anchorAssistantResponse : .followBottom
+        let shouldAnchorRecoveredTurn = TurnScrollStateTracker.shouldAnchorRecoveredTurnAtStart(
+            isThreadRunning: isThreadRunning,
+            activeTurnID: activeTurnID,
+            isSendInFlight: isSendInFlight,
+            shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse
+        )
+        ownsInitialActiveTurnStartPosition = shouldAnchorRecoveredTurn
+        initiallyAnchoredActiveTurnID = shouldAnchorRecoveredTurn
+            ? activeTurnID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            : nil
+        initiallyAnchoredRunGeneration = shouldAnchorRecoveredTurn
+            ? runStartGeneration
+            : nil
+        awaitsNextTurnLiveFollow = false
+        awaitsInitialRunningStateHydration = !initialTurnsLoaded
+            && !isSendInFlight
+            && !shouldAnchorToAssistantResponse
+        let responseStartAnchorID = shouldAnchorRecoveredTurn && initialTurnsLoaded
+            ? activeTurnResponseStartAnchorID
+            : (shouldAnchorRecoveredTurn ? nil : boundedHistoryResponseStartAnchorID)
+        initialResponseStartAnchorID = responseStartAnchorID
+        let ownsResponseStartPosition = shouldAnchorRecoveredTurn || responseStartAnchorID != nil
+        isScrolledToBottom = !ownsResponseStartPosition
+        autoScrollMode = shouldAnchorToAssistantResponse
+            ? .anchorAssistantResponse
+            : (ownsResponseStartPosition ? .manual : .followBottom)
         initialRecoverySnapPendingThreadID = shouldAnchorToAssistantResponse ? nil : threadID
         isProgressivelyRevealingRecentTail = shouldStageHeavyThreadOpen
     }
@@ -734,6 +815,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func cancelScrollTasks() {
         initialRecoverySnapTask?.cancel()
         initialRecoverySnapTask = nil
+        initialResponseStartAnchorID = nil
+        ownsInitialActiveTurnStartPosition = false
+        awaitsInitialRunningStateHydration = false
+        initiallyAnchoredActiveTurnID = nil
+        initiallyAnchoredRunGeneration = nil
+        awaitsNextTurnLiveFollow = false
         followBottomScrollTask?.cancel()
         followBottomScrollTask = nil
         pendingAssistantBottomSnapTask?.cancel()
@@ -793,6 +880,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             isSendInFlight: isSendInFlight,
             threadID: threadID,
             activeTurnID: activeTurnID,
+            runStartGeneration: runStartGeneration,
             latestTurnTerminalState: latestTurnTerminalState,
             completedTurnIDs: completedTurnIDs,
             stoppedTurnIDs: stoppedTurnIDs,
@@ -802,9 +890,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             onSendInFlightChange: { handleSendInFlightChange(using: proxy) },
             onThreadIDChange: { handleThreadIDChange(using: proxy) },
             onActiveTurnIDChange: { handleActiveTurnIDChange(using: proxy) },
-            onTerminalStateChange: handleTerminalStateChange,
-            onCompletedTurnIDsChange: handleCompletedTurnIDsChange,
-            onStoppedTurnIDsChange: handleStoppedTurnIDsChange,
+            onRunStartGenerationChange: { handleRunStartGenerationChange(using: proxy) },
+            onTerminalStateChange: { handleTerminalStateChange(using: proxy) },
+            onCompletedTurnIDsChange: { handleCompletedTurnIDsChange(using: proxy) },
+            onStoppedTurnIDsChange: { handleStoppedTurnIDsChange(using: proxy) },
             onVisibleTailCountChange: handleVisibleTailCountChange,
             onAssistantAnchorChange: { handleAssistantAnchorChange($0, using: proxy) }
         )
@@ -843,6 +932,26 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleThreadRunningChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("isThreadRunning changed value=\(isThreadRunning)")
+        retireRecoveredTurnAnchorIfNeeded()
+        if resumeLiveFollowForNextTurnIfNeeded(using: proxy) {
+            recomputeRenderItemsAndBlockInfoIfNeeded()
+            handleTimelineMutation(using: proxy)
+            return
+        }
+        if !claimInitialActiveTurnStartPositionIfNeeded(),
+           isThreadRunning,
+           initialResponseStartAnchorID != nil,
+           !ownsInitialActiveTurnStartPosition {
+            // This run started after an inactive history had already settled.
+            // Hand it back to the normal live-follow path.
+            initialRecoverySnapTask?.cancel()
+            initialRecoverySnapTask = nil
+            initialRecoverySnapPendingThreadID = nil
+            initialResponseStartAnchorID = nil
+            autoScrollMode = .followBottom
+            isScrolledToBottom = true
+            scrollToBottom(using: proxy, animated: false)
+        }
         // Run-state changes alter the sticky pending row and bottom inset before
         // the first assistant item exists, so treat them like a timeline mutation.
         recomputeRenderItemsAndBlockInfoIfNeeded()
@@ -851,6 +960,27 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleSendInFlightChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("isSendInFlight changed value=\(isSendInFlight)")
+        if isSendInFlight {
+            ownsInitialActiveTurnStartPosition = false
+            awaitsInitialRunningStateHydration = false
+            initiallyAnchoredActiveTurnID = nil
+            initiallyAnchoredRunGeneration = nil
+            awaitsNextTurnLiveFollow = false
+            initialResponseStartAnchorID = nil
+            initialRecoverySnapPendingThreadID = nil
+            initialRecoverySnapTask?.cancel()
+            initialRecoverySnapTask = nil
+            // A send is an explicit request to enter the new live turn. If the
+            // viewport was held by an app-owned history/recovery anchor, do not
+            // leave it stranded in manual mode after clearing that anchor.
+            autoScrollMode = TurnScrollStateTracker.modeAfterSendBegan(
+                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse
+            )
+            isScrolledToBottom = true
+            if !shouldAnchorToAssistantResponse {
+                scrollToBottom(using: proxy, animated: false)
+            }
+        }
         // Sending mode is the optimistic-user-row gap between tap and turn/start.
         // Re-run normal mutation handling so the row is measured while still pending.
         recomputeRenderItemsAndBlockInfoIfNeeded()
@@ -867,22 +997,68 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleActiveTurnIDChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("activeTurnID changed to=\(activeTurnID ?? "nil")")
-        recomputeBlockInfoIfNeeded()
+        if ownsInitialActiveTurnStartPosition,
+           initiallyAnchoredRunGeneration == runStartGeneration,
+           let normalizedActiveTurnID = activeTurnID?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !normalizedActiveTurnID.isEmpty {
+            // Source repair may replace `ipc-turn-*` with the canonical id for
+            // the same logical run. Keep ownership and retarget history lookup.
+            initiallyAnchoredActiveTurnID = normalizedActiveTurnID
+        }
+        retireRecoveredTurnAnchorIfNeeded()
+        if resumeLiveFollowForNextTurnIfNeeded(using: proxy) {
+            recomputeRenderItemsAndBlockInfoIfNeeded()
+            handleTimelineMutation(using: proxy)
+            return
+        }
+        claimInitialActiveTurnStartPositionIfNeeded()
+        recomputeRenderItemsAndBlockInfoIfNeeded()
         handleTimelineMutation(using: proxy)
     }
 
-    private func handleTerminalStateChange() {
+    private func handleRunStartGenerationChange(using proxy: ScrollViewProxy) {
+        debugTimelineLog("runStartGeneration changed value=\(runStartGeneration)")
+        retireRecoveredTurnAnchorIfNeeded()
+        if resumeLiveFollowForNextTurnIfNeeded(using: proxy) {
+            recomputeRenderItemsAndBlockInfoIfNeeded()
+            handleTimelineMutation(using: proxy)
+            return
+        }
+        recomputeRenderItemsAndBlockInfoIfNeeded()
+        handleTimelineMutation(using: proxy)
+    }
+
+    private func handleTerminalStateChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("latestTurnTerminalState changed to=\(String(describing: latestTurnTerminalState))")
+        retireRecoveredTurnAnchorIfNeeded()
+        if resumeLiveFollowForNextTurnIfNeeded(using: proxy) {
+            recomputeRenderItemsAndBlockInfoIfNeeded()
+            handleTimelineMutation(using: proxy)
+            return
+        }
         recomputeBlockInfoIfNeeded()
     }
 
-    private func handleCompletedTurnIDsChange() {
+    private func handleCompletedTurnIDsChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("completedTurnIDs changed count=\(completedTurnIDs.count)")
+        retireRecoveredTurnAnchorIfNeeded()
+        if resumeLiveFollowForNextTurnIfNeeded(using: proxy) {
+            recomputeRenderItemsAndBlockInfoIfNeeded()
+            handleTimelineMutation(using: proxy)
+            return
+        }
         recomputeRenderItemsAndBlockInfoIfNeeded()
     }
 
-    private func handleStoppedTurnIDsChange() {
+    private func handleStoppedTurnIDsChange(using proxy: ScrollViewProxy) {
         debugTimelineLog("stoppedTurnIDs changed count=\(stoppedTurnIDs.count)")
+        retireRecoveredTurnAnchorIfNeeded()
+        if resumeLiveFollowForNextTurnIfNeeded(using: proxy) {
+            recomputeRenderItemsAndBlockInfoIfNeeded()
+            handleTimelineMutation(using: proxy)
+            return
+        }
         recomputeBlockInfoIfNeeded()
     }
 
@@ -893,6 +1069,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private func handleAssistantAnchorChange(_ newValue: Bool, using proxy: ScrollViewProxy) {
         if newValue {
+            initialRecoverySnapTask?.cancel()
+            initialRecoverySnapTask = nil
+            initialRecoverySnapPendingThreadID = nil
+            initialResponseStartAnchorID = nil
+            ownsInitialActiveTurnStartPosition = false
+            awaitsInitialRunningStateHydration = false
+            initiallyAnchoredActiveTurnID = nil
+            initiallyAnchoredRunGeneration = nil
+            awaitsNextTurnLiveFollow = false
             autoScrollMode = .anchorAssistantResponse
             handleTimelineMutation(using: proxy)
         } else if autoScrollMode == .anchorAssistantResponse {
@@ -905,11 +1090,37 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func handleInitialHistoryLoaded(using proxy: ScrollViewProxy) {
         guard scrollSessionThreadID == threadID,
               !messages.isEmpty,
-              autoScrollMode == .followBottom,
               !shouldAnchorToAssistantResponse,
               !shouldPauseAutomaticScrolling else {
             return
         }
+
+        if ownsInitialActiveTurnStartPosition
+            || claimInitialActiveTurnStartPositionIfNeeded() {
+            awaitsInitialRunningStateHydration = false
+            refreshInitialActiveTurnStartAnchorIfNeeded(using: proxy)
+            return
+        }
+        awaitsInitialRunningStateHydration = false
+
+        // Do not override a real user scroll. Manual mode is app-owned here only
+        // while the bounded-history response anchor is still pending.
+        guard autoScrollMode == .followBottom || initialResponseStartAnchorID != nil else {
+            return
+        }
+
+        if let responseStartAnchorID = boundedHistoryResponseStartAnchorID {
+            initialRecoverySnapTask?.cancel()
+            initialRecoverySnapTask = nil
+            initialResponseStartAnchorID = responseStartAnchorID
+            initialRecoverySnapPendingThreadID = threadID
+            autoScrollMode = .manual
+            isScrolledToBottom = false
+            performInitialRecoverySnapIfNeeded(using: proxy)
+            return
+        }
+
+        guard autoScrollMode == .followBottom else { return }
 
         // A reopened running thread hydrates as one batched bootstrap flush and is
         // already pinned at the bottom; one snap suffices. Re-arming the multi-snap
@@ -925,6 +1136,77 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         initialRecoverySnapTask = nil
         initialRecoverySnapPendingThreadID = threadID
         performInitialRecoverySnapIfNeeded(using: proxy)
+    }
+
+    @discardableResult
+    private func claimInitialActiveTurnStartPositionIfNeeded() -> Bool {
+        guard awaitsInitialRunningStateHydration,
+              TurnScrollStateTracker.shouldAnchorRecoveredTurnAtStart(
+                isThreadRunning: isThreadRunning,
+                activeTurnID: activeTurnID,
+                isSendInFlight: isSendInFlight,
+                shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse
+              ) else {
+            return false
+        }
+
+        ownsInitialActiveTurnStartPosition = true
+        initiallyAnchoredActiveTurnID = activeTurnID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        initiallyAnchoredRunGeneration = runStartGeneration
+        awaitsInitialRunningStateHydration = false
+        autoScrollMode = .manual
+        isScrolledToBottom = false
+        initialRecoverySnapTask?.cancel()
+        initialRecoverySnapTask = nil
+        initialRecoverySnapPendingThreadID = threadID
+        return true
+    }
+
+    private func retireRecoveredTurnAnchorIfNeeded() {
+        let normalizedAnchoredTurnID = initiallyAnchoredActiveTurnID?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let anchoredTurnReachedTerminalState = latestTurnTerminalState != nil
+            || normalizedAnchoredTurnID.map(completedTurnIDs.contains) == true
+            || normalizedAnchoredTurnID.map(stoppedTurnIDs.contains) == true
+        guard TurnScrollStateTracker.shouldRetireRecoveredTurnAnchor(
+            ownsRecoveredTurnPosition: ownsInitialActiveTurnStartPosition,
+            recoveredRunGeneration: initiallyAnchoredRunGeneration,
+            currentRunGeneration: runStartGeneration,
+            hasTerminalEvidence: anchoredTurnReachedTerminalState
+        ) else {
+            return
+        }
+
+        ownsInitialActiveTurnStartPosition = false
+        awaitsInitialRunningStateHydration = false
+        // Keep the retired generation until a strictly newer turn/start proves
+        // that normal live-follow should resume.
+        awaitsNextTurnLiveFollow = true
+        initialRecoverySnapTask?.cancel()
+        initialRecoverySnapTask = nil
+        initialRecoverySnapPendingThreadID = nil
+    }
+
+    @discardableResult
+    private func resumeLiveFollowForNextTurnIfNeeded(using proxy: ScrollViewProxy) -> Bool {
+        guard TurnScrollStateTracker.shouldResumeLiveFollowForNextTurn(
+            isWaitingForNextTurn: awaitsNextTurnLiveFollow,
+            recoveredRunGeneration: initiallyAnchoredRunGeneration,
+            currentRunGeneration: runStartGeneration,
+            isThreadRunning: isThreadRunning
+        ) else {
+            return false
+        }
+
+        awaitsNextTurnLiveFollow = false
+        initialResponseStartAnchorID = nil
+        initiallyAnchoredActiveTurnID = nil
+        initiallyAnchoredRunGeneration = nil
+        autoScrollMode = .followBottom
+        isScrolledToBottom = true
+        scrollToBottom(using: proxy, animated: false)
+        return true
     }
 
     private var timelineLoadingOverlay: some View {
@@ -1080,7 +1362,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
         isScrolledToBottom = nextValue
         if nextValue {
-            if autoScrollMode != .anchorAssistantResponse {
+            if autoScrollMode != .anchorAssistantResponse,
+               initialResponseStartAnchorID == nil,
+               !ownsInitialActiveTurnStartPosition {
                 autoScrollMode = .followBottom
             }
             scheduleProgressiveTailRevealIfNeeded()
@@ -1095,8 +1379,15 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func handleUserScrollDragChanged() {
         guard !isUserDraggingScroll else { return }
         isUserDraggingScroll = true
+        shouldAnchorToAssistantResponse = false
         userScrollCooldownUntil = nil
         initialRecoverySnapPendingThreadID = nil
+        initialResponseStartAnchorID = nil
+        ownsInitialActiveTurnStartPosition = false
+        awaitsInitialRunningStateHydration = false
+        initiallyAnchoredActiveTurnID = nil
+        initiallyAnchoredRunGeneration = nil
+        awaitsNextTurnLiveFollow = false
         initialRecoverySnapTask?.cancel()
         initialRecoverySnapTask = nil
         followBottomScrollTask?.cancel()
@@ -1161,14 +1452,19 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
     }
 
-    // Repairs the initial white/blank viewport race by snapping to bottom multiple
-    // times with increasing delays until the full VStack layout has settled.
+    // Repairs the initial white/blank viewport race with repeated post-layout
+    // snaps. Recovered active and bounded inactive histories use their response
+    // start row; new live turns keep the established bottom recovery behavior.
     private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
+        let responseStartAnchorID = initialResponseStartAnchorID
+        let hasValidRecoveryMode = responseStartAnchorID == nil
+            ? autoScrollMode == .followBottom
+            : autoScrollMode == .manual
         guard initialRecoverySnapPendingThreadID == threadID,
               initialRecoverySnapTask == nil,
               !messages.isEmpty,
               viewportHeight > 0,
-              autoScrollMode == .followBottom,
+              hasValidRecoveryMode,
               !shouldPauseAutomaticScrolling,
               !shouldAnchorToAssistantResponse else {
             return
@@ -1190,20 +1486,32 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                       scrollSessionThreadID == expectedThreadID,
                       !messages.isEmpty,
                       viewportHeight > 0,
-                      autoScrollMode == .followBottom,
+                      initialResponseStartAnchorID == responseStartAnchorID,
+                      responseStartAnchorID == nil
+                        ? autoScrollMode == .followBottom
+                        : autoScrollMode == .manual,
                       !shouldPauseAutomaticScrolling,
                       !shouldAnchorToAssistantResponse else {
                     break
                 }
 
-                scrollToBottom(using: proxy, animated: false)
+                if let responseStartAnchorID {
+                    proxy.scrollTo(responseStartAnchorID, anchor: .top)
+                } else {
+                    scrollToBottom(using: proxy, animated: false)
+                }
             }
+            let stillHasValidRecoveryMode = responseStartAnchorID == nil
+                ? autoScrollMode == .followBottom
+                : autoScrollMode == .manual
             let shouldKeepRecoveryPending = !initialTurnsLoaded
                 && isInitialEarlierPageLoading
-                && autoScrollMode == .followBottom
+                && stillHasValidRecoveryMode
                 && !shouldPauseAutomaticScrolling
             if !shouldKeepRecoveryPending {
                 initialRecoverySnapPendingThreadID = nil
+                // Keep the anchor as the ownership marker after layout settles;
+                // incoming rows then grow below this app-owned opening position.
             }
             initialRecoverySnapTask = nil
         }
@@ -1228,6 +1536,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         }
         autoScrollMode = .followBottom
         initialRecoverySnapPendingThreadID = nil
+        initialResponseStartAnchorID = nil
+        ownsInitialActiveTurnStartPosition = false
+        awaitsInitialRunningStateHydration = false
         pendingAssistantBottomSnapTask?.cancel()
         pendingAssistantBottomSnapTask = nil
         return true
@@ -1236,6 +1547,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Keep mutation handling narrow so scroll geometry remains the follow-bottom source of truth.
     private func handleTimelineMutation(using proxy: ScrollViewProxy) {
         guard !shouldPauseAutomaticScrolling else { return }
+        refreshInitialActiveTurnStartAnchorIfNeeded(using: proxy)
         performInitialRecoverySnapIfNeeded(using: proxy)
 
         if autoScrollMode == .anchorAssistantResponse {
@@ -1246,6 +1558,32 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 schedulePendingAssistantBottomSnap(using: proxy)
             }
         }
+    }
+
+    // The active snapshot can arrive before its canonical history. Keep the
+    // app-owned opening intent and move it only when an earlier real render row
+    // for that same turn becomes available. User interaction clears ownership.
+    private func refreshInitialActiveTurnStartAnchorIfNeeded(using proxy: ScrollViewProxy) {
+        guard ownsInitialActiveTurnStartPosition,
+              initialTurnsLoaded,
+              autoScrollMode == .manual,
+              !shouldAnchorToAssistantResponse,
+              let responseStartAnchorID = activeTurnResponseStartAnchorID else {
+            return
+        }
+
+        if TurnTimelineRenderProjection.shouldReplaceRecoveredTurnAnchor(
+            currentAnchorID: initialResponseStartAnchorID,
+            candidateAnchorID: responseStartAnchorID,
+            in: visibleRenderItems
+        ) {
+            initialRecoverySnapTask?.cancel()
+            initialRecoverySnapTask = nil
+            initialResponseStartAnchorID = responseStartAnchorID
+            initialRecoverySnapPendingThreadID = threadID
+            isScrolledToBottom = false
+        }
+        performInitialRecoverySnapIfNeeded(using: proxy)
     }
 
     // The user row and sticky thinking indicator can appear one layout pass before the
@@ -1506,6 +1844,7 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
     let isSendInFlight: Bool
     let threadID: String
     let activeTurnID: String?
+    let runStartGeneration: Int
     let latestTurnTerminalState: CodexTurnTerminalState?
     let completedTurnIDs: Set<String>
     let stoppedTurnIDs: Set<String>
@@ -1516,6 +1855,7 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
     let onSendInFlightChange: () -> Void
     let onThreadIDChange: () -> Void
     let onActiveTurnIDChange: () -> Void
+    let onRunStartGenerationChange: () -> Void
     let onTerminalStateChange: () -> Void
     let onCompletedTurnIDsChange: () -> Void
     let onStoppedTurnIDsChange: () -> Void
@@ -1535,6 +1875,9 @@ private struct TurnTimelineRenderChangeHandlersModifier: ViewModifier {
             }
             .onChange(of: activeTurnID) { _, _ in
                 performAfterSwiftUIUpdate(onActiveTurnIDChange)
+            }
+            .onChange(of: runStartGeneration) { _, _ in
+                performAfterSwiftUIUpdate(onRunStartGenerationChange)
             }
             .onChange(of: latestTurnTerminalState) { _, _ in
                 performAfterSwiftUIUpdate(onTerminalStateChange)

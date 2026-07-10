@@ -248,6 +248,9 @@ extension CodexService {
         threadsPendingCompletionHaptic.remove(threadId)
         threadsNeedingCanonicalHistoryReconcile.remove(threadId)
         pendingCanonicalSourceReplacementThreadIDs.remove(threadId)
+        pendingReconnectRunContinuityThreadIDs.remove(threadId)
+        runStartGenerationByThread.removeValue(forKey: threadId)
+        lastRunStartTurnIDByThread.removeValue(forKey: threadId)
         provisionalPaginatedHistoryThreadIDs.remove(threadId)
         threadsWithSatisfiedDeferredHistoryHydration.remove(threadId)
         olderThreadHistoryCursorByThreadID.removeValue(forKey: threadId)
@@ -271,7 +274,7 @@ extension CodexService {
     }
 
     // Clears every service-owned timeline cache during global teardown.
-    func removeAllThreadTimelineState() {
+    func removeAllThreadTimelineState(preserveRunLifecycle: Bool = false) {
         threadTimelineStateByThread.removeAll()
         stoppedTurnIDsByThread.removeAll()
         projectedTerminalStateByThreadID.removeAll()
@@ -283,6 +286,11 @@ extension CodexService {
         cancelAllPendingStreamingDeltaFlushes()
         threadsNeedingCanonicalHistoryReconcile.removeAll()
         pendingCanonicalSourceReplacementThreadIDs.removeAll()
+        if !preserveRunLifecycle {
+            pendingReconnectRunContinuityThreadIDs.removeAll()
+            runStartGenerationByThread.removeAll()
+            lastRunStartTurnIDByThread.removeAll()
+        }
         provisionalPaginatedHistoryThreadIDs.removeAll()
         threadsWithSatisfiedDeferredHistoryHydration.removeAll()
         olderThreadHistoryCursorByThreadID.removeAll()
@@ -402,6 +410,7 @@ extension CodexService {
             timelineChangeToken: revision,
             activeTurnID: state.renderSnapshot.activeTurnID,
             isThreadRunning: state.renderSnapshot.isThreadRunning,
+            runStartGeneration: state.renderSnapshot.runStartGeneration,
             latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
             completedTurnIDs: state.renderSnapshot.completedTurnIDs,
             stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
@@ -463,6 +472,7 @@ extension CodexService {
             timelineChangeToken: revision,
             activeTurnID: state.renderSnapshot.activeTurnID,
             isThreadRunning: state.renderSnapshot.isThreadRunning,
+            runStartGeneration: state.renderSnapshot.runStartGeneration,
             latestTurnTerminalState: state.renderSnapshot.latestTurnTerminalState,
             completedTurnIDs: state.renderSnapshot.completedTurnIDs,
             stoppedTurnIDs: state.renderSnapshot.stoppedTurnIDs,
@@ -562,6 +572,7 @@ extension CodexService {
     func clearRunningState(for threadId: String) {
         runningThreadIDs.remove(threadId)
         protectedRunningFallbackThreadIDs.remove(threadId)
+        pendingReconnectRunContinuityThreadIDs.remove(threadId)
         desktopMirroredRunningThreadIDs.remove(threadId)
         desktopMirroredRunningStaleSnapshotCountsByThread.removeValue(forKey: threadId)
         desktopMirroredRunningLastActivityAtByThread.removeValue(forKey: threadId)
@@ -938,9 +949,14 @@ extension CodexService {
             // When reopening a running thread, force a fresh resume snapshot so the
             // timeline catches up with output produced while the thread was off-screen.
             // Keep a sync fallback only when the shared catch-up pipeline skipped
-            // the forced resume for throttling or a transient refresh failure.
+            // the forced resume for throttling or a transient refresh failure. With
+            // pagination, resume intentionally sends `excludeTurns: true`, so it only
+            // refreshes lifecycle metadata and a separate history sync must still load
+            // the complete current turn instead of leaving only the latest live delta.
             if catchupOutcome.didRunForcedResume {
-                shouldRequestImmediateSync = false
+                shouldRequestImmediateSync = shouldRequestImmediateHistorySyncAfterRunningCatchup(
+                    didRunForcedResume: true
+                )
             }
             updateCurrentOutput(for: threadId)
         }
@@ -951,6 +967,12 @@ extension CodexService {
             requestImmediateActiveThreadSync(threadId: threadId, forceHistoryRefresh: true)
         }
         return true
+    }
+
+    func shouldRequestImmediateHistorySyncAfterRunningCatchup(
+        didRunForcedResume: Bool
+    ) -> Bool {
+        !didRunForcedResume || supportsTurnPagination
     }
 
     // Detects a brand-new local thread that has no timeline to hydrate yet.
@@ -5004,6 +5026,13 @@ extension CodexService {
             }
         }
 
+        // A reconnect can re-announce the same in-flight turn after these
+        // volatile running flags are cleared. Preserve one continuity claim so
+        // its start event does not look like a brand-new run generation.
+        pendingReconnectRunContinuityThreadIDs.formUnion(runningThreadIDs)
+        pendingReconnectRunContinuityThreadIDs.formUnion(protectedRunningFallbackThreadIDs)
+        pendingReconnectRunContinuityThreadIDs.formUnion(activeTurnIdByThread.keys)
+
         activeTurnId = nil
         activeTurnIdByThread.removeAll()
         threadsPendingCompletionHaptic.removeAll()
@@ -5365,6 +5394,7 @@ extension CodexService {
         let revision = messageRevisionByThread[threadId] ?? 0
         let activeTurnID = activeTurnIdByThread[threadId]
         let isThreadRunning = threadHasActiveOrRunningTurn(threadId)
+        let runStartGeneration = runStartGenerationByThread[threadId] ?? 0
         let usesPaginatedHistory = supportsTurnPagination && initialTurnsLoadedByThreadID.contains(threadId)
         let projectionSourceMessages = snapshotProjectionSourceMessages(
             threadId: threadId,
@@ -5405,6 +5435,7 @@ extension CodexService {
         state.messageRevision = revision
         state.activeTurnID = activeTurnID
         state.isThreadRunning = isThreadRunning
+        state.runStartGeneration = runStartGeneration
         state.latestTurnTerminalState = latestTurnTerminalState
         state.completedTurnIDs = completedTurnIDs
         state.stoppedTurnIDs = stoppedTurnIDs
@@ -5424,6 +5455,7 @@ extension CodexService {
             timelineChangeToken: revision,
             activeTurnID: activeTurnID,
             isThreadRunning: isThreadRunning,
+            runStartGeneration: runStartGeneration,
             latestTurnTerminalState: latestTurnTerminalState,
             completedTurnIDs: completedTurnIDs,
             stoppedTurnIDs: stoppedTurnIDs,
@@ -5454,10 +5486,28 @@ extension CodexService {
             return messages
         }
 
-        let visibleTail = Array(messages.suffix(limit))
+        let visibleStartIndex: Int = {
+            guard threadHasActiveOrRunningTurn(threadId) else {
+                return messages.count - limit
+            }
+
+            if let activeTurnID = activeTurnIdByThread[threadId],
+               let activeTurnStartIndex = messages.firstIndex(where: { message in
+                   message.turnId == activeTurnID
+               }) {
+                return activeTurnStartIndex
+            }
+
+            // Desktop lifecycle can briefly know that a thread is running before
+            // it has a usable turn id. The latest prompt is then the safest start
+            // of the current turn; if it is not loaded, retain the bounded tail.
+            return messages.lastIndex(where: { $0.role == .user })
+                ?? (messages.count - limit)
+        }()
+        let visibleTail = Array(messages[visibleStartIndex...])
         return visibleTailPreservingTurnArtifacts(
             visibleTail: visibleTail,
-            omittedPrefix: messages.dropLast(limit)
+            omittedPrefix: messages[..<visibleStartIndex]
         )
     }
 
