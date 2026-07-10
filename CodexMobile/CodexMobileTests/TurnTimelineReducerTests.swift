@@ -673,7 +673,7 @@ final class TurnTimelineReducerTests: XCTestCase {
         )
     }
 
-    func testCompletedTurnKeepsSummaryOnlyReasoningVisibleAsPlainRow() {
+    func testCompletedTurnMovesSummaryOnlyReasoningIntoPreviousMessages() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -714,14 +714,14 @@ final class TurnTimelineReducerTests: XCTestCase {
             completedTurnIDs: ["turn-1"]
         )
 
-        XCTAssertEqual(items.map(\.id), ["user", "reasoning-summary", "final"])
-        XCTAssertFalse(items.contains { item in
-            if case .previousMessages = item { return true }
-            return false
-        })
+        XCTAssertEqual(items.map(\.id), ["user", "previous-messages:final", "final"])
+        guard case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected summary reasoning inside previous messages")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["reasoning-summary"])
     }
 
-    func testCompletedTurnKeepsSummaryOnlyReasoningBesideCollapsedToolHistory() {
+    func testCompletedTurnKeepsSummaryReasoningOrderedWithCollapsedToolHistory() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -776,16 +776,15 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(items.map(\.id), [
             "user",
             "previous-messages:final",
-            "reasoning-summary",
             "final",
         ])
         guard case .previousMessages(let group) = items[1] else {
-            return XCTFail("Expected tool history to remain collapsed")
+            return XCTFail("Expected tool and reasoning history to remain collapsed")
         }
-        XCTAssertEqual(group.messages.map(\.id), ["tool"])
+        XCTAssertEqual(group.messages.map(\.id), ["tool", "reasoning-summary"])
     }
 
-    func testColdReopenKeepsSummaryOnlyReasoningVisibleWhenFinalAnswerInfersCompletion() {
+    func testColdReopenMovesSummaryOnlyReasoningWhenFinalAnswerInfersCompletion() {
         let now = Date()
         let messages = [
             makeMessage(
@@ -828,7 +827,102 @@ final class TurnTimelineReducerTests: XCTestCase {
             isThreadRunning: false
         )
 
-        XCTAssertEqual(items.map(\.id), ["user", "reasoning-summary", "final"])
+        XCTAssertEqual(items.map(\.id), ["user", "previous-messages:final", "final"])
+        guard case .previousMessages(let group) = items[1] else {
+            return XCTFail("Expected inferred completed reasoning inside previous messages")
+        }
+        XCTAssertEqual(group.messages.map(\.id), ["reasoning-summary"])
+    }
+
+    func testActiveTurnKeepsSummaryOnlyReasoningVisible() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "user",
+                threadID: "thread",
+                role: .user,
+                text: "Inspect the live run",
+                createdAt: now,
+                turnID: "turn-1",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "reasoning-summary",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Inspecting the live run**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "reasoning-item",
+                isStreaming: true,
+                orderIndex: 2
+            ),
+        ]
+
+        let items = TurnTimelineRenderProjection.project(
+            messages: messages,
+            completedTurnIDs: [],
+            activeTurnID: "turn-1",
+            isThreadRunning: true
+        )
+
+        XCTAssertEqual(items.map(\.id), ["user", "reasoning-summary"])
+    }
+
+    func testReasoningSummaryDedupeKeepsOnlyUnseenCumulativeTitlesInPlace() {
+        let now = Date()
+        let messages = [
+            makeMessage(
+                id: "reasoning-first",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Testing notify command behavior**\n\n<!-- -->\n\n**Analyzing notify hook JSON output format**\n\n<!-- -->",
+                createdAt: now,
+                turnID: "turn-1",
+                itemID: "reasoning-a",
+                orderIndex: 1
+            ),
+            makeMessage(
+                id: "command",
+                threadID: "thread",
+                role: .system,
+                kind: .commandExecution,
+                text: "Completed notify test",
+                createdAt: now.addingTimeInterval(1),
+                turnID: "turn-1",
+                itemID: "command-a",
+                orderIndex: 2
+            ),
+            makeMessage(
+                id: "reasoning-duplicate",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Testing notify command behavior**\n\n<!-- -->\n\n**Analyzing notify hook JSON output format**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(2),
+                turnID: "turn-1",
+                itemID: "reasoning-b",
+                orderIndex: 3
+            ),
+            makeMessage(
+                id: "reasoning-cumulative",
+                threadID: "thread",
+                role: .system,
+                kind: .thinking,
+                text: "**Testing notify command behavior**\n\n<!-- -->\n\n**Analyzing notify hook JSON output format**\n\n<!-- -->\n\n**Planning parser fix**\n\n<!-- -->",
+                createdAt: now.addingTimeInterval(3),
+                turnID: "turn-1",
+                itemID: "reasoning-c",
+                orderIndex: 4
+            ),
+        ]
+
+        let deduped = TurnTimelineReducer.removeDuplicateReasoningSummaryMessages(in: messages)
+
+        XCTAssertEqual(deduped.map(\.id), ["reasoning-first", "command", "reasoning-cumulative"])
+        XCTAssertEqual(deduped.last?.text, "**Planning parser fix**\n\n<!-- -->")
     }
 
     func testCompletedTurnStillCollapsesReasoningThatHasRealDisclosureDetail() {

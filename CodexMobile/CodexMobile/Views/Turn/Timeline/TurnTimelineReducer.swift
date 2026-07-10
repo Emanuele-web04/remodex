@@ -23,7 +23,10 @@ enum TurnTimelineReducer {
         let reordered = enforceIntraTurnOrder(in: anchored)
         let collapsedThinking = collapseThinkingMessages(in: reordered)
         let withoutCommandThinkingEchoes = removeRedundantThinkingCommandActivityMessages(in: collapsedThinking)
-        let dedupedUsers = removeDuplicateUserMessages(in: withoutCommandThinkingEchoes)
+        let withoutRepeatedReasoningSummaries = removeDuplicateReasoningSummaryMessages(
+            in: withoutCommandThinkingEchoes
+        )
+        let dedupedUsers = removeDuplicateUserMessages(in: withoutRepeatedReasoningSummaries)
         let dedupedFileChanges = removeDuplicateFileChangeMessages(in: dedupedUsers)
         let dedupedSubagentActions = removeDuplicateSubagentActionMessages(in: dedupedFileChanges)
         let dedupedAssistant = removeDuplicateAssistantMessages(in: dedupedSubagentActions)
@@ -663,6 +666,62 @@ enum TurnTimelineReducer {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         return command.isEmpty ? nil : command
+    }
+
+    // Codex can emit cumulative reasoning summaries under several stable item
+    // ids in one turn (event_msg plus response_item snapshots). Keep each short
+    // trace title once while preserving the first-seen position and any unseen
+    // suffix titles. Detailed reasoning items remain independent.
+    static func removeDuplicateReasoningSummaryMessages(
+        in messages: [CodexMessage]
+    ) -> [CodexMessage] {
+        var seenSummaryKeysByTurn: [String: Set<String>] = [:]
+        var result: [CodexMessage] = []
+        result.reserveCapacity(messages.count)
+
+        for var message in messages {
+            guard message.role == .system,
+                  message.kind == .thinking,
+                  message.text.utf8.count <= largeTextDedupeByteLimit,
+                  message.text.contains("**"),
+                  let turnID = normalizedIdentifier(message.turnId) else {
+                result.append(message)
+                continue
+            }
+
+            let content = ThinkingDisclosureParser.parse(from: message.text)
+            guard content.isSummaryOnly else {
+                result.append(message)
+                continue
+            }
+
+            var seenKeys = seenSummaryKeysByTurn[turnID, default: Set<String>()]
+            let unseenSections = content.sections.filter { section in
+                let key = reasoningSummaryKey(section.title)
+                guard !key.isEmpty else { return true }
+                return seenKeys.insert(key).inserted
+            }
+            seenSummaryKeysByTurn[turnID] = seenKeys
+
+            guard !unseenSections.isEmpty else {
+                continue
+            }
+            if unseenSections.count != content.sections.count {
+                message.text = unseenSections
+                    .map { "**\($0.title)**\n\n<!-- -->" }
+                    .joined(separator: "\n\n")
+            }
+            result.append(message)
+        }
+
+        return result
+    }
+
+    private static func reasoningSummaryKey(_ title: String) -> String {
+        title
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
     }
 
     // Collapses optimistic phone-send rows with their confirmed runtime echoes so

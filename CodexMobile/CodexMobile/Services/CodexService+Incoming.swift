@@ -306,7 +306,7 @@ extension CodexService {
         case "item/reasoning/summaryTextDelta",
              "item/reasoning/summaryPartAdded",
              "item/reasoning/textDelta":
-            appendReasoningDelta(from: paramsObject)
+            appendReasoningDelta(from: paramsObject, method: method)
 
         case "item/fileChange/outputDelta":
             appendFileChangeDelta(from: paramsObject)
@@ -1082,11 +1082,28 @@ extension CodexService {
             ?? "Turn failed with no details"
     }
 
-    private func appendReasoningDelta(from paramsObject: IncomingParamsObject?) {
+    private func appendReasoningDelta(
+        from paramsObject: IncomingParamsObject?,
+        method: String
+    ) {
         guard let paramsObject else { return }
         let eventObject = envelopeEventObject(from: paramsObject)
 
-        let delta = extractTextDelta(from: paramsObject)
+        let delta: String
+        if method == "item/reasoning/summaryPartAdded" {
+            // A summary part is a separate visible trace. Preserve that boundary
+            // while streaming so `<!-- -->**Next summary**` cannot be parsed as
+            // disclosure detail before item/completed replaces the snapshot.
+            let summaryIndex = paramsObject["summaryIndex"]?.intValue
+                ?? paramsObject["summary_index"]?.intValue
+                ?? eventObject?["summaryIndex"]?.intValue
+                ?? eventObject?["summary_index"]?.intValue
+                ?? 0
+            let embeddedDelta = extractTextDelta(from: paramsObject)
+            delta = "\(summaryIndex > 0 ? "\n\n" : "")\(embeddedDelta)"
+        } else {
+            delta = extractTextDelta(from: paramsObject)
+        }
         guard !delta.isEmpty else { return }
 
         let turnId = extractTurnID(from: paramsObject)

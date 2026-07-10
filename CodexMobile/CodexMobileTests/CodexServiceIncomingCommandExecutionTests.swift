@@ -2055,6 +2055,61 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         XCTAssertEqual(thinkingRows[0].text, "**Providing exact 200-word paragraph**")
     }
 
+    func testReasoningSummaryPartBoundariesStayPlainDuringStreaming() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "reasoning-\(UUID().uuidString)"
+
+        service.handleNotification(
+            method: "turn/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+            ])
+        )
+        service.handleNotification(
+            method: "item/reasoning/summaryPartAdded",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "summaryIndex": .int(0),
+            ])
+        )
+        service.handleNotification(
+            method: "item/reasoning/summaryTextDelta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "summaryIndex": .int(0),
+                "delta": .string("**Testing notify command behavior**\n\n<!-- -->"),
+            ])
+        )
+        service.handleNotification(
+            method: "item/reasoning/summaryPartAdded",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(turnID),
+                "itemId": .string(itemID),
+                "summary_index": .int(1),
+                "delta": .string("**Analyzing notify hook JSON output format**\n\n<!-- -->"),
+            ])
+        )
+        service.flushPendingSystemDeltas(threadId: threadID, itemId: itemID)
+
+        let thinkingRow = service.messages(for: threadID).first(where: {
+            $0.role == .system && $0.kind == .thinking && $0.itemId == itemID
+        })
+        let text = try? XCTUnwrap(thinkingRow?.text)
+        XCTAssertEqual(
+            text,
+            "**Testing notify command behavior**\n\n<!-- -->\n\n**Analyzing notify hook JSON output format**\n\n<!-- -->"
+        )
+        XCTAssertTrue(text.map { ThinkingDisclosureParser.parse(from: $0).isSummaryOnly } ?? false)
+    }
+
     func testSummaryOnlyReasoningSurvivesTurnCompletion() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -4430,11 +4485,11 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
             if case .previousMessages = $0 { return true }
             return false
         })
-        XCTAssertTrue(renderItems.contains { item in
-            guard case .message(let message) = item else { return false }
-            return message.id == "reasoning-summary"
-                && message.text == "**Planning image generation**\n\n<!-- -->"
-        })
+        let previousGroup = renderItems.compactMap { item -> TurnTimelinePreviousMessagesGroup? in
+            guard case .previousMessages(let group) = item else { return nil }
+            return group
+        }.first
+        XCTAssertEqual(previousGroup?.messages.map(\.id), ["preamble", "reasoning-summary"])
     }
 
     private func makeService() -> CodexService {

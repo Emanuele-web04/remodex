@@ -605,16 +605,7 @@ enum TurnTimelineRenderProjection {
                 return true
             case .plan:
                 return message.shouldDisplayInlinePlanResult
-            case .thinking:
-                let thinkingText = ThinkingDisclosureParser.normalizedThinkingContent(
-                    from: message.text
-                )
-                guard !thinkingText.isEmpty else { return false }
-                return ThinkingDisclosureContentCache.content(
-                    messageID: message.id,
-                    text: thinkingText
-                ).isSummaryOnly
-            case .toolActivity, .commandExecution, .chat:
+            case .thinking, .toolActivity, .commandExecution, .chat:
                 return false
             }
         }
