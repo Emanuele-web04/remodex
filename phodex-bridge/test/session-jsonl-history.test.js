@@ -2,6 +2,9 @@
 // Purpose: Verifies local Codex JSONL history fallback pages for empty app-server turn lists.
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 const {
   parseSessionJsonlMetadata,
@@ -112,6 +115,193 @@ test("readThreadTurnsListPageFromSessionJsonl builds a recent turns page from ro
       ["message", "assistant", "fixed"],
     ]
   );
+});
+
+test("bounded JSONL history reads a complete tail turn without loading the full file", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-jsonl-tail-"));
+  const filePath = path.join(directory, "rollout.jsonl");
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const threadId = "thread-bounded-tail";
+  const turnId = "turn-bounded-tail";
+  const lines = [
+    JSON.stringify({
+      type: "session_meta",
+      payload: { id: threadId, cwd: "/repo", timezone: "Europe/Rome" },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        id: "oversized-old-output",
+        type: "function_call_output",
+        turn_id: "turn-old",
+        output: "🙂".repeat(2_500),
+      },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: "turn-old" },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "task_started", turn_id: turnId },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "Carica l’ultima risposta" },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        id: "assistant-bounded-tail",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Pronto" }],
+      },
+    }),
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "task_complete", turn_id: turnId },
+    }),
+  ];
+  fs.writeFileSync(filePath, lines.join("\n"), "utf8");
+
+  let maximumReadLength = 0;
+  const boundedFs = {
+    statSync: (...args) => fs.statSync(...args),
+    openSync: (...args) => fs.openSync(...args),
+    readSync: (...args) => {
+      maximumReadLength = Math.max(maximumReadLength, args[3]);
+      return fs.readSync(...args);
+    },
+    closeSync: (...args) => fs.closeSync(...args),
+    readFileSync: () => {
+      throw new Error("bounded reader must not call readFileSync");
+    },
+  };
+  const readPage = () => readThreadTurnsListPageFromSessionJsonl(filePath, {
+    threadId,
+    limit: 1,
+    maxLimit: 1,
+    fsModule: boundedFs,
+    metadataHeadBytes: 128,
+    initialTailBytes: 1_024,
+    maxTailBytes: 1_024,
+  });
+
+  const firstPage = readPage();
+  const firstUserItem = firstPage.data[0].items.find((item) => item.role === "user");
+  assert.equal(firstPage.data[0].id, turnId);
+  assert.equal(firstPage.data[0].status, "completed");
+  assert.equal(firstUserItem.text, "Carica l’ultima risposta");
+  assert.equal(firstPage.nextCursor, "remodex-jsonl-fallback-older-unavailable");
+  assert.equal(maximumReadLength <= 1_024, true);
+
+  fs.appendFileSync(filePath, `\n${JSON.stringify({
+    type: "event_msg",
+    payload: { type: "token_count", info: { total_token_usage: { total_tokens: 1 } } },
+  })}`, "utf8");
+  const secondPage = readPage();
+  const secondUserItem = secondPage.data[0].items.find((item) => item.role === "user");
+  assert.equal(secondUserItem.id, firstUserItem.id);
+});
+
+test("synthetic JSONL ids stay stable when an append crosses the tail-window boundary", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-jsonl-tail-boundary-"));
+  const filePath = path.join(directory, "rollout.jsonl");
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  const threadId = "thread-tail-boundary";
+  fs.writeFileSync(filePath, [
+    JSON.stringify({ type: "session_meta", payload: { id: threadId, cwd: "/repo" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        id: "old-output",
+        type: "function_call_output",
+        turn_id: "turn-old",
+        output: "x".repeat(1_200),
+      },
+    }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: "turn-old" } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_started" } }),
+    JSON.stringify({
+      type: "event_msg",
+      payload: { type: "user_message", message: "Keep this synthetic turn stable" },
+    }),
+  ].join("\n"), "utf8");
+  assert.ok(fs.statSync(filePath).size < 4_096);
+
+  const readPage = () => readThreadTurnsListPageFromSessionJsonl(filePath, {
+    threadId,
+    limit: 1,
+    maxLimit: 1,
+    metadataHeadBytes: 128,
+    initialTailBytes: 4_096,
+    maxTailBytes: 4_096,
+  });
+  const firstPage = readPage();
+  const firstTurn = firstPage.data[0];
+  const firstUserItem = firstTurn.items.find((item) => item.role === "user");
+  assert.ok(firstTurn.id.startsWith("turn-line-"));
+
+  fs.appendFileSync(filePath, `\n${[
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        id: "assistant-after-boundary",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "y".repeat(3_000) }],
+      },
+    }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete" } }),
+  ].join("\n")}`, "utf8");
+  assert.ok(fs.statSync(filePath).size > 4_096);
+
+  const secondPage = readPage();
+  const secondTurn = secondPage.data[0];
+  const secondUserItem = secondTurn.items.find((item) => item.role === "user");
+  assert.equal(secondTurn.id, firstTurn.id);
+  assert.equal(secondUserItem.id, firstUserItem.id);
+  assert.equal(secondTurn.status, "completed");
+});
+
+test("bounded JSONL history rejects a tail that does not contain a complete turn start", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-jsonl-partial-"));
+  const filePath = path.join(directory, "rollout.jsonl");
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.writeFileSync(filePath, [
+    JSON.stringify({ type: "session_meta", payload: { id: "thread-partial-tail" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        id: "partial-output",
+        type: "function_call_output",
+        turn_id: "turn-started-before-window",
+        output: "X".repeat(4_000),
+      },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        id: "partial-answer",
+        type: "message",
+        role: "assistant",
+        turn_id: "turn-started-before-window",
+        content: [{ type: "output_text", text: "Not safe alone" }],
+      },
+    }),
+  ].join("\n"), "utf8");
+
+  const page = readThreadTurnsListPageFromSessionJsonl(filePath, {
+    threadId: "thread-partial-tail",
+    limit: 1,
+    initialTailBytes: 512,
+    maxTailBytes: 512,
+  });
+
+  assert.equal(page, null);
 });
 
 test("parseSessionJsonlTurns keeps the active turn when a parallel sibling turn completes", () => {

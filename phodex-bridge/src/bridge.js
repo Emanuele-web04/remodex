@@ -5,6 +5,7 @@
 // Depends on: ws, crypto, os, ./bridge-status, ./codex-desktop-refresher, ./codex-transport, ./rollout-watch, ./voice-handler
 
 const WebSocket = require("ws");
+const { constants: bufferConstants } = require("buffer");
 const { createHash, randomBytes } = require("crypto");
 const { execFile, spawn } = require("child_process");
 const fs = require("fs");
@@ -73,8 +74,10 @@ const {
 } = require("./ios-app-compatibility");
 const { createShortPairingCode, SHORT_PAIRING_CODE_LENGTH } = require("./qr");
 const {
-  parseSessionJsonlMetadata,
+  JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlTurns,
+  readRecentSessionJsonlTurns,
+  readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,
 } = require("./session-jsonl-history");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
@@ -100,6 +103,14 @@ const RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES = 128;
 // newer rollout with a different cwd; cache entries are validated against file identity.
 const RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS = 5 * 60_000;
 const RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS = 30_000;
+const RELAY_JSONL_FAST_FIRST_PAGE_WAIT_MS = 1_500;
+const RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS = 60_000;
+const RELAY_JSONL_CANONICAL_HANDOFF_MAX_ENTRIES = 32;
+const JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX = "remodex-jsonl-handoff-v1:";
+const RELAY_JSONL_FULL_ARTIFACT_FALLBACK_MAX_BYTES = Math.max(
+  0,
+  bufferConstants.MAX_STRING_LENGTH - (8 * 1024 * 1024)
+);
 const BRIDGE_PACKAGE_UPDATE_COMMAND = "npm install -g remodex@latest";
 const BRIDGE_PACKAGE_UPDATE_TIMEOUT_MS = 180_000;
 const BRIDGE_RESTART_AFTER_UPDATE_DELAY_MS = 750;
@@ -122,6 +133,12 @@ const RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS = [
   "previousCursor",
   "previous_cursor",
 ];
+const RELAY_TURNS_LIST_PREVIOUS_PAGINATION_RESULT_KEYS = new Set([
+  "prevCursor",
+  "prev_cursor",
+  "previousCursor",
+  "previous_cursor",
+]);
 const jsonlArtifactItemsCacheByThread = new Map();
 const jsonlThreadCwdCacheByThread = new Map();
 const FORWARDED_REQUEST_METHODS_MAX_SIZE = 500;
@@ -137,6 +154,498 @@ function evictOldestEntries(map, maxSize) {
     const key = iterator.next().value;
     map.delete(key);
   }
+}
+
+function createThreadTurnsListFastPageCoordinator({
+  waitMs = RELAY_JSONL_FAST_FIRST_PAGE_WAIT_MS,
+  handoffTTLms = RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS,
+  maxHandoffs = RELAY_JSONL_CANONICAL_HANDOFF_MAX_ENTRIES,
+  payloadSoftLimitBytes = RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES,
+  sanitizeForRelay = sanitizeThreadHistoryImagesForRelay,
+  now = Date.now,
+  setTimeoutImpl = setTimeout,
+  clearTimeoutImpl = clearTimeout,
+  createToken = () => randomBytes(12).toString("hex"),
+} = {}) {
+  const handoffsByToken = new Map();
+  const latestHandoffTokenByThread = new Map();
+  const canonicalFirstPageByKey = new Map();
+
+  function pruneHandoffs() {
+    const cutoff = now() - handoffTTLms;
+    for (const [token, entry] of handoffsByToken) {
+      if (entry.createdAt >= cutoff) {
+        continue;
+      }
+      handoffsByToken.delete(token);
+      if (latestHandoffTokenByThread.get(entry.threadId) === token) {
+        latestHandoffTokenByThread.delete(entry.threadId);
+      }
+    }
+    for (const [cacheKey, entry] of canonicalFirstPageByKey) {
+      if (entry.createdAt < cutoff) {
+        canonicalFirstPageByKey.delete(cacheKey);
+      }
+    }
+    while (handoffsByToken.size > maxHandoffs) {
+      const oldestToken = handoffsByToken.keys().next().value;
+      const oldest = handoffsByToken.get(oldestToken);
+      handoffsByToken.delete(oldestToken);
+      if (oldest && latestHandoffTokenByThread.get(oldest.threadId) === oldestToken) {
+        latestHandoffTokenByThread.delete(oldest.threadId);
+      }
+    }
+  }
+
+  function rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback) {
+    pruneHandoffs();
+    const token = createToken();
+    const entry = {
+      token,
+      threadId,
+      canonicalOutcomePromise,
+      hadNonEmptyJsonl: Boolean(jsonlFallback?.response),
+      anchorTurnId: firstTurnsListTurnId(jsonlFallback?.response),
+      createdAt: now(),
+    };
+    handoffsByToken.set(token, entry);
+    latestHandoffTokenByThread.set(threadId, token);
+    pruneHandoffs();
+    return token;
+  }
+
+  function consumeHandoff(entry) {
+    if (!entry?.token) {
+      return;
+    }
+    handoffsByToken.delete(entry.token);
+    if (latestHandoffTokenByThread.get(entry.threadId) === entry.token) {
+      latestHandoffTokenByThread.delete(entry.threadId);
+    }
+  }
+
+  function canonicalFirstPageOutcome(cacheKey, canonicalRequest, fetchCanonical) {
+    pruneHandoffs();
+    const existing = canonicalFirstPageByKey.get(cacheKey);
+    if (existing) {
+      return existing.canonicalOutcomePromise;
+    }
+    const canonicalOutcomePromise = settleThreadTurnsListCanonicalOutcome(
+      fetchCanonical(canonicalRequest)
+    );
+    canonicalFirstPageByKey.set(cacheKey, {
+      canonicalOutcomePromise,
+      createdAt: now(),
+    });
+    canonicalOutcomePromise.then(() => {
+      forgetCanonicalFirstPage(cacheKey, canonicalOutcomePromise);
+    });
+    return canonicalOutcomePromise;
+  }
+
+  function forgetCanonicalFirstPage(cacheKey, canonicalOutcomePromise) {
+    const existing = canonicalFirstPageByKey.get(cacheKey);
+    if (existing?.canonicalOutcomePromise === canonicalOutcomePromise) {
+      canonicalFirstPageByKey.delete(cacheKey);
+    }
+  }
+
+  function readHandoffEntry(request) {
+    pruneHandoffs();
+    const threadId = threadIdFromRequestParams(request?.params);
+    const cursor = request?.params?.cursor;
+    const token = threadTurnsListHandoffDescriptor(cursor)?.token
+      || latestHandoffTokenByThread.get(threadId)
+      || "";
+    const entry = token ? handoffsByToken.get(token) : null;
+    return entry?.threadId === threadId ? entry : null;
+  }
+
+  async function awaitCanonicalOutcome(canonicalOutcomePromise) {
+    const outcome = await canonicalOutcomePromise;
+    if (!outcome.ok) {
+      throw outcome.error;
+    }
+    return outcome.response;
+  }
+
+  async function extendCanonicalResponseThroughAnchor(
+    response,
+    canonicalRequest,
+    anchorTurnId,
+    fetchCanonical,
+    maxPages = 12
+  ) {
+    if (threadTurnsListResponseContainsAnchor(response, anchorTurnId)) {
+      return response;
+    }
+    const firstResult = response?.result;
+    const turnsKey = findTurnsListResultKey(firstResult);
+    if (!turnsKey) {
+      return null;
+    }
+
+    let lastResult = firstResult;
+    let combinedTurns = [...firstResult[turnsKey]];
+    let cursor = readTurnsListNextCursor(firstResult);
+    const seenCursors = new Set();
+    for (let pageIndex = 0; pageIndex < maxPages && hasRelayCursor(cursor); pageIndex += 1) {
+      const cursorKey = JSON.stringify(cursor);
+      if (seenCursors.has(cursorKey)) {
+        break;
+      }
+      seenCursors.add(cursorKey);
+      const nextRequest = {
+        ...canonicalRequest,
+        params: buildAdaptiveTurnsListPageParams(
+          canonicalRequest.params,
+          RELAY_TURNS_LIST_SAFE_RETRY_LIMIT,
+          cursor
+        ),
+      };
+      const nextResponse = await awaitCanonicalOutcome(
+        settleThreadTurnsListCanonicalOutcome(fetchCanonical(nextRequest))
+      );
+      const nextResult = nextResponse?.result;
+      const nextTurnsKey = findTurnsListResultKey(nextResult);
+      if (!nextTurnsKey) {
+        break;
+      }
+      for (const turn of nextResult[nextTurnsKey]) {
+        const turnId = turnListTurnIdentifier(turn);
+        if (!turnId || !combinedTurns.some((existing) => turnListTurnIdentifier(existing) === turnId)) {
+          combinedTurns.push(turn);
+        }
+      }
+      lastResult = nextResult;
+      const combinedResponse = buildSafeTurnsListResponse(
+        canonicalRequest.id,
+        firstResult,
+        lastResult,
+        turnsKey,
+        combinedTurns
+      );
+      if (threadTurnsListResponseContainsAnchor(combinedResponse, anchorTurnId)) {
+        // The cursor belongs after every turn through the anchor. Keep that
+        // complete boundary intact, compacting items if needed; never slice
+        // turns and accidentally make the omitted range unreachable.
+        return buildCompactedCompleteTurnsListResponse({
+          requestId: canonicalRequest.id,
+          firstResult,
+          lastResult,
+          turnsKey,
+          turns: combinedTurns,
+          sanitizeForRelay,
+          sanitizeContext: buildThreadTurnsListRelaySanitizeContext(canonicalRequest),
+          payloadSoftLimitBytes,
+        });
+      }
+      const nextCursor = readTurnsListNextCursor(nextResult);
+      if (nextResult[nextTurnsKey].length === 0 || !hasRelayCursor(nextCursor)) {
+        break;
+      }
+      cursor = nextCursor;
+    }
+    return null;
+  }
+
+  async function resolveCanonicalRequest(request, fetchCanonical, existingEntry = null, {
+    alignToHandoffAnchor = false,
+    validateHandoffAnchor = false,
+    handoffAnchorTurnId = "",
+  } = {}) {
+    const canonicalRequest = canonicalThreadTurnsListRequest(request);
+    let entry = existingEntry;
+    let response = null;
+    const anchorTurnId = entry?.anchorTurnId || handoffAnchorTurnId;
+    const canMatchCanonicalAnchor = anchorTurnId
+      && !isSyntheticJsonlHistoryTurnId(anchorTurnId);
+    if (entry) {
+      const observedOutcomePromise = entry.canonicalOutcomePromise;
+      const firstOutcome = await observedOutcomePromise;
+      const firstResponseIsUsable = firstOutcome.ok
+        && !isEmptyTurnsListResponse(firstOutcome.response);
+      if (firstResponseIsUsable) {
+        response = firstOutcome.response;
+      } else {
+        if (entry.canonicalOutcomePromise === observedOutcomePromise) {
+          entry.canonicalOutcomePromise = settleThreadTurnsListCanonicalOutcome(
+            fetchCanonical(canonicalRequest)
+          );
+          entry.createdAt = now();
+        }
+      }
+    }
+
+    response = response || await awaitCanonicalOutcome(
+      entry?.canonicalOutcomePromise
+        || settleThreadTurnsListCanonicalOutcome(fetchCanonical(canonicalRequest))
+    );
+    if (entry?.hadNonEmptyJsonl && isEmptyTurnsListResponse(response)) {
+      throw new Error("Canonical thread history was empty after a non-empty JSONL first page.");
+    }
+    if (validateHandoffAnchor
+        && canMatchCanonicalAnchor
+        && !threadTurnsListResponseContainsAnchor(response, anchorTurnId)) {
+      response = await extendCanonicalResponseThroughAnchor(
+        response,
+        canonicalRequest,
+        anchorTurnId,
+        fetchCanonical
+      );
+      if (!response) {
+        throw new Error("Canonical history does not contain the JSONL handoff anchor yet.");
+      }
+    }
+    const rebound = rebindThreadTurnsListResponseId(response, request.id);
+    if (!alignToHandoffAnchor || !canMatchCanonicalAnchor) {
+      return rebound;
+    }
+    const aligned = alignThreadTurnsListResponseToAnchor(rebound, anchorTurnId);
+    if (!aligned) {
+      throw new Error("Canonical history no longer contains the JSONL handoff anchor.");
+    }
+    return aligned;
+  }
+
+  async function resolve(request, { fetchCanonical, readJsonl }) {
+    const params = request?.params || {};
+    const cursor = params.cursor;
+    const handoffDescriptor = threadTurnsListHandoffDescriptor(cursor);
+    const isHandoffRequest = cursor === JSONL_OLDER_HANDOFF_CURSOR
+      || Boolean(handoffDescriptor);
+    const requiresCanonical = params.remodexRequireCanonical === true;
+    const hasOrdinaryCursor = hasRelayCursor(cursor) && !isHandoffRequest;
+
+    if (hasOrdinaryCursor) {
+      return {
+        source: "canonical",
+        response: await resolveCanonicalRequest(request, fetchCanonical),
+        usesJsonl: false,
+      };
+    }
+
+    if (isHandoffRequest || requiresCanonical) {
+      const handoffEntry = readHandoffEntry(request);
+      const response = await resolveCanonicalRequest(request, fetchCanonical, handoffEntry, {
+        alignToHandoffAnchor: isHandoffRequest,
+        validateHandoffAnchor: true,
+        handoffAnchorTurnId: handoffDescriptor?.anchorTurnId || "",
+      });
+      consumeHandoff(handoffEntry);
+      return {
+        source: "canonical",
+        response,
+        usesJsonl: false,
+      };
+    }
+
+    const canonicalRequest = canonicalThreadTurnsListRequest(request);
+    const threadId = threadIdFromRequestParams(params);
+    const canonicalFirstPageCacheKey = canonicalThreadTurnsListRequestShapeKey(canonicalRequest);
+    const canonicalOutcomePromise = canonicalFirstPageOutcome(
+      canonicalFirstPageCacheKey,
+      canonicalRequest,
+      fetchCanonical
+    );
+    let jsonlFallback = null;
+    try {
+      jsonlFallback = await readJsonl(request);
+    } catch {
+      jsonlFallback = null;
+    }
+    if (!jsonlFallback?.response) {
+      const response = await awaitCanonicalOutcome(canonicalOutcomePromise);
+      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
+      return {
+        source: "canonical",
+        response: rebindThreadTurnsListResponseId(response, request.id),
+        usesJsonl: false,
+      };
+    }
+
+    let timeoutId = null;
+    const deadline = new Promise((resolveDeadline) => {
+      timeoutId = setTimeoutImpl(() => resolveDeadline({ deadline: true }), waitMs);
+    });
+    const first = await Promise.race([canonicalOutcomePromise, deadline]);
+    if (timeoutId != null) {
+      clearTimeoutImpl(timeoutId);
+    }
+
+    if (first?.ok && !isEmptyTurnsListResponse(first.response)) {
+      if (shouldPreferJsonlFirstPage(first.response, jsonlFallback.response)) {
+        const token = rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback);
+        return {
+          source: "jsonl",
+          response: buildJsonlCanonicalHandoffResponse(
+            jsonlFallback.response,
+            request.id,
+            token,
+            firstTurnsListTurnId(jsonlFallback.response)
+          ),
+          usesJsonl: true,
+        };
+      }
+      forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
+      return {
+        source: "canonical",
+        response: rebindThreadTurnsListResponseId(first.response, request.id),
+        usesJsonl: false,
+        jsonlFallback,
+      };
+    }
+
+    const token = rememberHandoff(threadId, canonicalOutcomePromise, jsonlFallback);
+    return {
+      source: "jsonl",
+      response: buildJsonlCanonicalHandoffResponse(
+        jsonlFallback.response,
+        request.id,
+        token,
+        firstTurnsListTurnId(jsonlFallback.response)
+      ),
+      usesJsonl: true,
+    };
+  }
+
+  return { resolve };
+}
+
+function settleThreadTurnsListCanonicalOutcome(promise) {
+  return Promise.resolve(promise).then(
+    (response) => ({ ok: true, response }),
+    (error) => ({ ok: false, error })
+  );
+}
+
+function threadTurnsListHandoffDescriptor(cursor) {
+  if (typeof cursor !== "string" || !cursor.startsWith(JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX)) {
+    return null;
+  }
+  const raw = cursor.slice(JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX.length);
+  const separatorIndex = raw.lastIndexOf(":");
+  if (separatorIndex < 0) {
+    return raw ? { anchorTurnId: "", token: raw } : null;
+  }
+  const token = raw.slice(separatorIndex + 1);
+  if (!token) {
+    return null;
+  }
+  let anchorTurnId = "";
+  try {
+    anchorTurnId = decodeURIComponent(raw.slice(0, separatorIndex));
+  } catch {
+    return null;
+  }
+  return { anchorTurnId, token };
+}
+
+function canonicalThreadTurnsListRequest(request) {
+  const params = { ...(request?.params || {}) };
+  delete params.remodexRequireCanonical;
+  if (params.cursor === JSONL_OLDER_HANDOFF_CURSOR || threadTurnsListHandoffDescriptor(params.cursor)) {
+    delete params.cursor;
+  }
+  return { ...request, params };
+}
+
+function canonicalThreadTurnsListRequestShapeKey(canonicalRequest) {
+  const params = canonicalRequest?.params || {};
+  return JSON.stringify(sortJsonValueForCacheKey({
+    threadId: threadIdFromRequestParams(params),
+    params,
+  }));
+}
+
+function sortJsonValueForCacheKey(value) {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValueForCacheKey);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, sortJsonValueForCacheKey(value[key])])
+  );
+}
+
+function rebindThreadTurnsListResponseId(response, requestId) {
+  return response && typeof response === "object"
+    ? { ...response, id: requestId }
+    : response;
+}
+
+function buildJsonlCanonicalHandoffResponse(response, requestId, token, anchorTurnId = "") {
+  const result = response?.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return response;
+  }
+  return {
+    ...response,
+    id: requestId,
+    result: {
+      ...result,
+      nextCursor: `${JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX}${encodeURIComponent(anchorTurnId)}:${token}`,
+      remodexJsonlFallback: true,
+      remodexCanonicalHandoff: true,
+    },
+  };
+}
+
+function shouldPreferJsonlFirstPage(canonicalResponse, jsonlResponse) {
+  const canonicalResult = canonicalResponse?.result;
+  const jsonlResult = jsonlResponse?.result;
+  const canonicalTurnsKey = findTurnsListResultKey(canonicalResult);
+  const jsonlTurnsKey = findTurnsListResultKey(jsonlResult);
+  if (!canonicalTurnsKey || !jsonlTurnsKey) {
+    return false;
+  }
+  const jsonlTurn = jsonlResult[jsonlTurnsKey]?.[0];
+  const jsonlTurnId = turnListTurnIdentifier(jsonlTurn);
+  return Boolean(jsonlTurnId)
+    && !canonicalResult[canonicalTurnsKey].some((turn) => turnListTurnIdentifier(turn) === jsonlTurnId)
+    && shouldMergeLatestJsonlTurn(jsonlTurn);
+}
+
+function firstTurnsListTurnId(response) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  return turnsKey ? turnListTurnIdentifier(result[turnsKey]?.[0]) : "";
+}
+
+function threadTurnsListResponseContainsAnchor(response, anchorTurnId) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  return Boolean(turnsKey) && result[turnsKey].some((turn) => (
+    turnListTurnIdentifier(turn) === anchorTurnId
+  ));
+}
+
+function alignThreadTurnsListResponseToAnchor(response, anchorTurnId) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  if (!turnsKey) {
+    return null;
+  }
+  const anchorIndex = result[turnsKey].findIndex((turn) => (
+    turnListTurnIdentifier(turn) === anchorTurnId
+  ));
+  if (anchorIndex < 0) {
+    return null;
+  }
+  if (anchorIndex === 0) {
+    return response;
+  }
+  return {
+    ...response,
+    result: {
+      ...result,
+      [turnsKey]: result[turnsKey].slice(anchorIndex),
+    },
+  };
 }
 
 function startBridge({
@@ -217,6 +726,7 @@ function startBridge({
   const desktopIpcLiveOwnerObservedInboundKeys = new Set();
   const jsonlTurnsListRolloutCacheByThread = new Map();
   const jsonlTurnsListRolloutMissCacheByThread = new Map();
+  const threadTurnsListFastPageCoordinator = createThreadTurnsListFastPageCoordinator();
   const trackedForwardedRequestMethods = new Set([
     "account/login/start",
     "account/login/cancel",
@@ -774,25 +1284,41 @@ function startBridge({
 
     rememberThreadFromMessage("phone", rawMessage);
     (async () => {
+      let didRespond = false;
+      const respondOnce = (payload) => {
+        if (didRespond) {
+          return;
+        }
+        didRespond = true;
+        sendResponse(payload);
+      };
       try {
-        const response = await fetchAdaptiveThreadTurnsListForRelay(request, {
-          fetchPage: (params) => sendCodexRequest("thread/turns/list", params),
+        const selection = await threadTurnsListFastPageCoordinator.resolve(request, {
+          fetchCanonical: (canonicalRequest) => fetchAdaptiveThreadTurnsListForRelay(canonicalRequest, {
+            fetchPage: (params) => sendCodexRequest("thread/turns/list", params),
+          }),
+          readJsonl: (jsonlRequest) => maybeBuildJsonlThreadTurnsListFallback(jsonlRequest, null),
         });
-        const jsonlFallback = maybeBuildJsonlThreadTurnsListFallback(request, response);
-        const responsePayload = jsonlFallback?.response ?? response;
-        const finalSanitizeContext = buildThreadTurnsListRelaySanitizeContext(request);
-        relaySanitizedResponseMethodsById.set(String(request.id), {
-          method: "thread/turns/list",
-          ...finalSanitizeContext,
-          createdAt: Date.now(),
+        let responsePayload = selection.response;
+        if (selection.source === "canonical" && selection.jsonlFallback?.response?.result) {
+          responsePayload = maybeMergeLatestJsonlTurnIntoTurnsListResponse(
+            request,
+            selection.response,
+            selection.jsonlFallback.response.result
+          ) || selection.response;
+        }
+        sendBridgeManagedThreadTurnsListResponse(request, responsePayload, respondOnce, {
+          skipJsonlArtifactAugmentation: selection.usesJsonl,
         });
-        sendResponse(sanitizeThreadHistoryImagesForRelay(
-          JSON.stringify(responsePayload),
-          "thread/turns/list",
-          finalSanitizeContext
-        ));
       } catch (error) {
-        sendResponse(createJsonRpcErrorResponse(
+        const jsonlFallback = maybeBuildJsonlThreadTurnsListFallback(request, null);
+        if (jsonlFallback?.response) {
+          sendBridgeManagedThreadTurnsListResponse(request, jsonlFallback.response, respondOnce, {
+            skipJsonlArtifactAugmentation: true,
+          });
+          return;
+        }
+        respondOnce(createJsonRpcErrorResponse(
           request.id,
           error,
           "thread_turns_list_failed"
@@ -803,16 +1329,34 @@ function startBridge({
     return true;
   }
 
+  function sendBridgeManagedThreadTurnsListResponse(request, response, sendResponse, {
+    skipJsonlArtifactAugmentation = false,
+  } = {}) {
+    const finalSanitizeContext = buildThreadTurnsListRelaySanitizeContext(request, {
+      skipJsonlArtifactAugmentation,
+    });
+    relaySanitizedResponseMethodsById.set(String(request.id), {
+      method: "thread/turns/list",
+      ...finalSanitizeContext,
+      createdAt: Date.now(),
+    });
+    sendResponse(sanitizeThreadHistoryImagesForRelay(
+      JSON.stringify(response),
+      "thread/turns/list",
+      finalSanitizeContext
+    ));
+  }
+
   function maybeBuildJsonlThreadTurnsListFallback(request, response) {
     const params = request?.params || {};
     const threadId = normalizeNonEmptyString(params.threadId)
       || normalizeNonEmptyString(params.thread_id);
-    if (!threadId || hasRelayCursor(params.cursor)) {
+    if (!threadId || hasRelayCursor(params.cursor) || params.remodexRequireCanonical === true) {
       return null;
     }
 
     try {
-      const responseIsEmpty = isEmptyTurnsListResponse(response);
+      const responseIsEmpty = response == null || isEmptyTurnsListResponse(response);
       const rolloutPath = resolveJsonlTurnsListRolloutPathForFallback({
         threadId,
         responseIsEmpty,
@@ -835,7 +1379,7 @@ function startBridge({
       }
 
       if (!responseIsEmpty) {
-        const mergedResponse = maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, result, params);
+        const mergedResponse = maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, result);
         return mergedResponse ? { response: mergedResponse, usesJsonl: true } : null;
       }
 
@@ -1984,6 +2528,7 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
     const remaining = requestedLimit - combinedTurns.length;
     const pageLimit = selectAdaptiveTurnsListBatchLimit(combinedTurns.length, remaining);
     const pageParams = buildAdaptiveTurnsListPageParams(params, pageLimit, nextCursor);
+    const responseBeforePage = response;
     let page;
 
     try {
@@ -2029,7 +2574,31 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
     response = buildSafeTurnsListResponse(request.id, firstResult, lastResult, turnsKey, combinedTurns);
 
     if (measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay, sanitizeContext) >= payloadSoftLimitBytes) {
-      response = buildLargestSafeTurnsListResponse({
+      if (responseBeforePage) {
+        // The server cursor belongs after the entire oversized batch. Return
+        // the previous complete cursor boundary instead of slicing turns out
+        // of this batch and making them unreachable.
+        response = responseBeforePage;
+        break;
+      }
+      if (pageTurns.length > pageLimit) {
+        const completeResponse = buildCompactedCompleteTurnsListResponse({
+          requestId: request.id,
+          firstResult,
+          lastResult,
+          turnsKey,
+          turns: pageTurns,
+          sanitizeForRelay,
+          sanitizeContext,
+          payloadSoftLimitBytes,
+        });
+        if (!completeResponse) {
+          throw new Error("thread/turns/list returned an oversized batch without a safe cursor boundary.");
+        }
+        response = completeResponse;
+        break;
+      }
+      const boundedResponse = buildLargestSafeTurnsListResponse({
         requestId: request.id,
         firstResult,
         lastResult,
@@ -2039,7 +2608,11 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
         sanitizeForRelay,
         sanitizeContext,
         payloadSoftLimitBytes,
-      }) ?? buildEmptyTurnsListResponse(request);
+      });
+      if (!boundedResponse) {
+        throw new Error("The newest chat turn is too large to relay safely.");
+      }
+      response = boundedResponse;
       break;
     }
 
@@ -2062,22 +2635,10 @@ async function fetchAdaptiveThreadTurnsListForRelay(request, {
     }
   }
 
-  return response ?? {
-    id: request.id,
-    result: {
-      data: [],
-    },
-  };
-}
-
-function buildEmptyTurnsListResponse(request) {
-  return {
-    id: request.id,
-    result: {
-      data: [],
-      nextCursor: null,
-    },
-  };
+  if (!response) {
+    throw new Error("thread/turns/list completed without a relayable page.");
+  }
+  return response;
 }
 
 function isEmptyTurnsListResponse(response) {
@@ -2106,7 +2667,7 @@ function resolveJsonlTurnsListRolloutPathForFallback({
     : findAndCachePath(threadId);
 }
 
-function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonlResult, params = {}) {
+function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonlResult) {
   const responseResult = response?.result;
   const responseTurnsKey = findTurnsListResultKey(responseResult);
   const jsonlTurnsKey = findTurnsListResultKey(jsonlResult);
@@ -2125,16 +2686,17 @@ function maybeMergeLatestJsonlTurnIntoTurnsListResponse(request, response, jsonl
     return null;
   }
 
-  const requestedLimit = Number.isInteger(params?.limit) && params.limit > 0
-    ? params.limit
-    : responseTurns.length + 1;
-  const mergedTurns = [jsonlTurn, ...responseTurns].slice(0, requestedLimit);
+  // Keep the canonical page intact. Slicing this back to the requested limit
+  // can retain the newer JSONL turn while dropping the canonical cursor anchor,
+  // making that canonical turn permanently unreachable.
+  const mergedTurns = [jsonlTurn, ...responseTurns];
   return {
     id: request.id,
     result: {
       ...responseResult,
       [responseTurnsKey]: mergedTurns,
       remodexJsonlMergedLatest: true,
+      remodexJsonlFallback: true,
     },
   };
 }
@@ -2161,6 +2723,10 @@ function turnListTurnIdentifier(turn) {
     || normalizeNonEmptyString(turn?.turn_id);
 }
 
+function isSyntheticJsonlHistoryTurnId(turnId) {
+  return normalizeNonEmptyString(turnId).startsWith("turn-line-");
+}
+
 async function fetchSafeThreadTurnsListFallback(request, {
   fetchPage,
   now,
@@ -2175,35 +2741,29 @@ async function fetchSafeThreadTurnsListFallback(request, {
   const safeLimit = Math.min(requestedLimit, RELAY_TURNS_LIST_SAFE_RETRY_LIMIT);
   const safeParams = buildAdaptiveTurnsListPageParams(params, safeLimit, params?.cursor);
 
-  try {
-    const page = await fetchMeasuredAdaptiveTurnsListPage(fetchPage, safeParams, now);
-    const pageResult = unwrapAppServerPayloadResult(page.result);
-    const turnsKey = findTurnsListResultKey(pageResult);
-    if (!turnsKey) {
-      return buildEmptyTurnsListResponse(request);
-    }
-
-    // If the normal pagination path returns a bad first page, retry once with a small page.
-    // The retry response is intentionally minimal so Swift does not decode stale server metadata.
-    const response = buildLargestSafeTurnsListResponse({
-      requestId: request.id,
-      firstResult: pageResult,
-      lastResult: pageResult,
-      turnsKey,
-      turns: pageResult[turnsKey],
-      maxTurns: safeLimit,
-      sanitizeForRelay,
-      sanitizeContext,
-      payloadSoftLimitBytes,
-    });
-    if (response) {
-      return response;
-    }
-  } catch {
-    // Fall through to a valid empty page: the phone can keep the thread open instead of crashing.
+  const page = await fetchMeasuredAdaptiveTurnsListPage(fetchPage, safeParams, now);
+  const pageResult = unwrapAppServerPayloadResult(page.result);
+  const turnsKey = findTurnsListResultKey(pageResult);
+  if (!turnsKey) {
+    throw new Error("thread/turns/list returned no turns array.");
   }
 
-  return buildEmptyTurnsListResponse(request);
+  // If the normal pagination path returns a bad first page, retry once with a small page.
+  // The retry response is intentionally minimal so Swift does not decode stale server metadata.
+  const response = buildCompactedCompleteTurnsListResponse({
+    requestId: request.id,
+    firstResult: pageResult,
+    lastResult: pageResult,
+    turnsKey,
+    turns: pageResult[turnsKey],
+    sanitizeForRelay,
+    sanitizeContext,
+    payloadSoftLimitBytes,
+  });
+  if (response) {
+    return response;
+  }
+  throw new Error("thread/turns/list returned a page that is too large to relay safely.");
 }
 
 async function fetchMeasuredAdaptiveTurnsListPage(fetchPage, params, now) {
@@ -2251,6 +2811,48 @@ function buildSafeTurnsListResponse(requestId, firstResult, lastResult, turnsKey
     id: requestId,
     result: buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, turns),
   };
+}
+
+function buildCompactedCompleteTurnsListResponse({
+  requestId,
+  firstResult,
+  lastResult,
+  turnsKey,
+  turns,
+  sanitizeForRelay,
+  sanitizeContext = {},
+  payloadSoftLimitBytes,
+}) {
+  const response = buildSafeTurnsListResponse(
+    requestId,
+    firstResult,
+    lastResult,
+    turnsKey,
+    turns
+  );
+  if (measureSanitizedTurnsListResponseBytes(response, sanitizeForRelay, sanitizeContext) < payloadSoftLimitBytes) {
+    return response;
+  }
+
+  for (const maxChars of [
+    RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS,
+    Math.floor(RELAY_HISTORY_TEXT_TAIL_LIMIT_CHARS / 4),
+    1_000,
+    0,
+  ]) {
+    const compacted = buildSafeTurnsListResponse(
+      requestId,
+      firstResult,
+      lastResult,
+      turnsKey,
+      turns.map((turn) => compactTurnsListTurnForRelay(turn, maxChars))
+    );
+    compacted.result.remodexPageCompactedForRelay = true;
+    if (measureSanitizedTurnsListResponseBytes(compacted, sanitizeForRelay, sanitizeContext) < payloadSoftLimitBytes) {
+      return compacted;
+    }
+  }
+  return null;
 }
 
 // Trims oversized history pages progressively: normal page -> 5 turns -> ... -> 1 turn.
@@ -2354,10 +2956,35 @@ function compactEmergencySingleTurnForRelay(turn, maxChars, maxItems) {
   }
 
   const items = Array.isArray(turn.items) ? turn.items : [];
-  safeTurn.items = items.slice(-maxItems).map((item) => compactHistoryItemForRelay(item, maxChars));
+  safeTurn.items = selectEmergencyHistoryItemsForRelay(items, maxItems)
+    .map((item) => compactHistoryItemForRelay(item, maxChars));
   safeTurn.remodexEmergencySingleTurnForRelay = true;
   safeTurn.remodexPageCompactedForRelay = true;
   return safeTurn;
+}
+
+function selectEmergencyHistoryItemsForRelay(items, maxItems) {
+  if (!Array.isArray(items) || items.length <= maxItems) {
+    return Array.isArray(items) ? items : [];
+  }
+
+  const selectedIndices = new Set();
+  const firstUserIndex = items.findIndex((item) => isUserRoleItem(item));
+  if (firstUserIndex >= 0) {
+    selectedIndices.add(firstUserIndex);
+  }
+  for (let index = items.length - 1; index >= 0 && selectedIndices.size < maxItems; index -= 1) {
+    const type = normalizeHistoryItemToken(items[index]?.type);
+    if (type === "plan" || type === "filechange") {
+      selectedIndices.add(index);
+    }
+  }
+  for (let index = items.length - 1; index >= 0 && selectedIndices.size < maxItems; index -= 1) {
+    selectedIndices.add(index);
+  }
+  return [...selectedIndices]
+    .sort((left, right) => left - right)
+    .map((index) => items[index]);
 }
 
 function buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, turns) {
@@ -2365,8 +2992,11 @@ function buildAdaptiveTurnsListResult(firstResult, lastResult, turnsKey, turns) 
   result[turnsKey] = turns;
 
   for (const key of RELAY_TURNS_LIST_PAGINATION_RESULT_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(lastResult, key)) {
-      result[key] = lastResult[key];
+    const sourceResult = RELAY_TURNS_LIST_PREVIOUS_PAGINATION_RESULT_KEYS.has(key)
+      ? firstResult
+      : lastResult;
+    if (Object.prototype.hasOwnProperty.call(sourceResult, key)) {
+      result[key] = sourceResult[key];
     } else {
       delete result[key];
     }
@@ -2697,7 +3327,7 @@ function readAndCacheJsonlThreadCwd(cacheKey, rolloutPath, stat = null) {
 
   let cwd = "";
   try {
-    const metadata = parseSessionJsonlMetadata(fs.readFileSync(rolloutPath, "utf8"));
+    const metadata = readSessionJsonlMetadataFromFile(rolloutPath);
     const parsedCwd = normalizeNonEmptyString(metadata?.cwd);
     cwd = parsedCwd && path.isAbsolute(parsedCwd) ? parsedCwd : "";
   } catch {
@@ -2733,7 +3363,15 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
     return { turns, didAugment: false };
   }
 
-  const jsonlArtifactsByTurnId = readJsonlArtifactItemsByTurnId(normalizedThreadId);
+  const requestedTurnIds = new Set(turns.map((turn) => (
+    normalizeNonEmptyString(turn?.id)
+      || normalizeNonEmptyString(turn?.turnId)
+      || normalizeNonEmptyString(turn?.turn_id)
+  )).filter(Boolean));
+  const jsonlArtifactsByTurnId = readJsonlArtifactItemsByTurnId(
+    normalizedThreadId,
+    requestedTurnIds
+  );
   if (jsonlArtifactsByTurnId.size === 0) {
     return { turns, didAugment: false };
   }
@@ -2775,7 +3413,7 @@ function augmentRelayHistoryTurnsWithJsonlArtifacts(turns, threadId = "", {
   return { turns: didAugment ? augmentedTurns : turns, didAugment };
 }
 
-function readJsonlArtifactItemsByTurnId(threadId) {
+function readJsonlArtifactItemsByTurnId(threadId, requestedTurnIds = new Set()) {
   const emptyArtifactsByTurnId = new Map();
   const normalizedThreadId = normalizeNonEmptyString(threadId);
   if (!normalizedThreadId) {
@@ -2784,7 +3422,11 @@ function readJsonlArtifactItemsByTurnId(threadId) {
 
   const sessionsRoot = resolveSessionsRoot();
   const cacheKey = buildJsonlArtifactItemsCacheKey(sessionsRoot, normalizedThreadId);
-  const cachedArtifacts = readCachedJsonlArtifactItems(cacheKey, normalizedThreadId);
+  const cachedArtifacts = readCachedJsonlArtifactItems(
+    cacheKey,
+    normalizedThreadId,
+    requestedTurnIds
+  );
   if (cachedArtifacts) {
     return cachedArtifacts;
   }
@@ -2796,7 +3438,13 @@ function readJsonlArtifactItemsByTurnId(threadId) {
       return emptyArtifactsByTurnId;
     }
 
-    return readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, normalizedThreadId);
+    return readAndCacheJsonlArtifactItems(
+      cacheKey,
+      rolloutPath,
+      normalizedThreadId,
+      null,
+      requestedTurnIds
+    );
   } catch (error) {
     jsonlArtifactItemsCacheByThread.delete(cacheKey);
     console.warn(`[remodex] history jsonl artifact augmentation failed for ${normalizedThreadId}: ${error.message}`);
@@ -2813,7 +3461,7 @@ function buildJsonlThreadCacheKey(sessionsRoot, threadId) {
   return `${sessionsRoot}\0${threadId}`;
 }
 
-function readCachedJsonlArtifactItems(cacheKey, threadId) {
+function readCachedJsonlArtifactItems(cacheKey, threadId, requestedTurnIds = new Set()) {
   const cached = jsonlArtifactItemsCacheByThread.get(cacheKey);
   if (!cached) {
     return null;
@@ -2827,7 +3475,13 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
 
   if (stat.mtimeMs !== cached.mtimeMs || stat.size !== cached.size) {
     try {
-      return readAndCacheJsonlArtifactItems(cacheKey, cached.rolloutPath, threadId, stat);
+      return readAndCacheJsonlArtifactItems(
+        cacheKey,
+        cached.rolloutPath,
+        threadId,
+        stat,
+        requestedTurnIds
+      );
     } catch (error) {
       jsonlArtifactItemsCacheByThread.delete(cacheKey);
       console.warn(`[remodex] history jsonl artifact cache refresh failed for ${threadId}: ${error.message}`);
@@ -2836,6 +3490,11 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
   }
 
   const now = Date.now();
+  const coversRequestedTurns = cached.coversEntireRollout
+    || [...requestedTurnIds].every((turnId) => cached.coveredTurnIds?.has(turnId));
+  if (!coversRequestedTurns) {
+    return null;
+  }
   if (now - cached.checkedAt <= RELAY_JSONL_ARTIFACT_CACHE_TTL_MS) {
     return cached.artifactsByTurnId;
   }
@@ -2844,11 +3503,37 @@ function readCachedJsonlArtifactItems(cacheKey, threadId) {
   return null;
 }
 
-function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = null) {
+function readAndCacheJsonlArtifactItems(
+  cacheKey,
+  rolloutPath,
+  threadId,
+  stat = null,
+  requestedTurnIds = new Set()
+) {
   const rolloutStat = stat || fs.statSync(rolloutPath);
   const artifactsByTurnId = new Map();
+  let coveredTurnIds = new Set();
+  let coversEntireRollout = false;
   try {
-    const turns = parseSessionJsonlTurns(fs.readFileSync(rolloutPath, "utf8"), { threadId });
+    const recent = readRecentSessionJsonlTurns(rolloutPath, {
+      threadId,
+      limit: RELAY_TURNS_LIST_SAFE_RETRY_LIMIT,
+    });
+    let turns = recent?.turns || [];
+    coversEntireRollout = recent ? !recent.hasOlderTurns : false;
+    coveredTurnIds = new Set(turns.map((turn) => normalizeNonEmptyString(turn?.id)).filter(Boolean));
+    const missesRequestedTurn = [...requestedTurnIds].some((turnId) => !coveredTurnIds.has(turnId));
+
+    // Preserve the old exact artifact behavior for files V8 can safely decode,
+    // but only pay that cost when an older cursor page actually asks for a turn
+    // outside the fast tail. Multi-gigabyte files never enter this path.
+    if (!coversEntireRollout
+        && missesRequestedTurn
+        && rolloutStat.size <= RELAY_JSONL_FULL_ARTIFACT_FALLBACK_MAX_BYTES) {
+      turns = parseSessionJsonlTurns(fs.readFileSync(rolloutPath, "utf8"), { threadId });
+      coversEntireRollout = true;
+      coveredTurnIds = new Set(turns.map((turn) => normalizeNonEmptyString(turn?.id)).filter(Boolean));
+    }
     for (const turn of turns) {
       const turnId = normalizeNonEmptyString(turn?.id);
       const turnItems = Array.isArray(turn?.items) ? turn.items : [];
@@ -2872,6 +3557,8 @@ function readAndCacheJsonlArtifactItems(cacheKey, rolloutPath, threadId, stat = 
     size: rolloutStat.size,
     checkedAt: Date.now(),
     artifactsByTurnId,
+    coveredTurnIds,
+    coversEntireRollout,
   });
   return artifactsByTurnId;
 }
@@ -3930,6 +4617,32 @@ function trimTurnsListPayloadForRelay(parsed, turnsKey, originalRawMessage = nul
     }
   }
 
+  // A bounded JSONL first page can still describe one exceptionally large
+  // turn with many small items. Keep that provisional response relay-safe while
+  // preserving its handoff flags/cursor; the canonical background page will
+  // replace it with the authoritative history.
+  if (result.remodexJsonlFallback === true) {
+    for (const maxItems of [64, 16, 4, 1]) {
+      for (const maxChars of [1_000, 0]) {
+        const emergencyTurns = turns.map((turn) => (
+          compactEmergencySingleTurnForRelay(turn, maxChars, maxItems)
+        ));
+        const emergencyPayload = JSON.stringify({
+          ...parsed,
+          result: {
+            ...result,
+            [turnsKey]: emergencyTurns,
+            remodexPageCompactedForRelay: true,
+            remodexEmergencyJsonlPageForRelay: true,
+          },
+        });
+        if (Buffer.byteLength(emergencyPayload, "utf8") <= RELAY_THREAD_PAYLOAD_SOFT_LIMIT_BYTES) {
+          return emergencyPayload;
+        }
+      }
+    }
+  }
+
   return fallbackCompactedPayload ?? (originalRawMessage ?? encoded);
 }
 
@@ -4161,11 +4874,14 @@ function shouldSuppressRolloutMirrorForThread(
 module.exports = {
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
+  canonicalThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
+  createThreadTurnsListFastPageCoordinator,
   disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
   isContextualUserItemNotification,
+  maybeMergeLatestJsonlTurnIntoTurnsListResponse,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,

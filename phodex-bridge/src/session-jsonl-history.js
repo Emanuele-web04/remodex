@@ -11,19 +11,38 @@ const {
   visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 
+const JSONL_OLDER_HANDOFF_CURSOR = "remodex-jsonl-fallback-older-unavailable";
+const DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES = 256 * 1024;
+const DEFAULT_SESSION_JSONL_INITIAL_TAIL_BYTES = 4 * 1024 * 1024;
+const DEFAULT_SESSION_JSONL_MAX_TAIL_BYTES = 64 * 1024 * 1024;
+
 function readThreadTurnsListPageFromSessionJsonl(filePath, {
   threadId = "",
   limit = 5,
   maxLimit = 5,
   cursor = null,
   fsModule = fs,
+  metadataHeadBytes = DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES,
+  initialTailBytes = DEFAULT_SESSION_JSONL_INITIAL_TAIL_BYTES,
+  maxTailBytes = DEFAULT_SESSION_JSONL_MAX_TAIL_BYTES,
 } = {}) {
   if (!filePath || cursor != null) {
     return null;
   }
 
-  const content = fsModule.readFileSync(filePath, "utf8");
-  const turns = parseSessionJsonlTurns(content, { threadId });
+  const recent = readRecentSessionJsonlTurns(filePath, {
+    threadId,
+    limit: Math.min(
+      Number.isInteger(limit) && limit > 0 ? limit : 5,
+      Number.isInteger(maxLimit) && maxLimit > 0 ? maxLimit : 5,
+      5
+    ),
+    fsModule,
+    metadataHeadBytes,
+    initialTailBytes,
+    maxTailBytes,
+  });
+  const turns = recent?.turns || [];
   if (turns.length === 0) {
     return null;
   }
@@ -34,9 +53,270 @@ function readThreadTurnsListPageFromSessionJsonl(filePath, {
   const pageTurns = turns.slice(-safeLimit).reverse();
   return {
     data: pageTurns,
-    nextCursor: turns.length > pageTurns.length ? "remodex-jsonl-fallback-older-unavailable" : null,
+    nextCursor: recent.hasOlderTurns || turns.length > pageTurns.length
+      ? JSONL_OLDER_HANDOFF_CURSOR
+      : null,
     remodexJsonlFallback: true,
   };
+}
+
+// Reads only a bounded snapshot of an append-only rollout. Truncated tails are
+// accepted only when the latest turn's own start and visible user prompt are in
+// the window, so a fast page can never invent ownership for cut-off items.
+function readRecentSessionJsonlTurns(filePath, {
+  threadId = "",
+  limit = 5,
+  fsModule = fs,
+  metadataHeadBytes = DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES,
+  initialTailBytes = DEFAULT_SESSION_JSONL_INITIAL_TAIL_BYTES,
+  maxTailBytes = DEFAULT_SESSION_JSONL_MAX_TAIL_BYTES,
+} = {}) {
+  if (!filePath) {
+    return null;
+  }
+
+  // Keep simple in-memory test doubles compatible without weakening the real
+  // filesystem path, which must never stringify a multi-gigabyte rollout.
+  if (!supportsBoundedSessionJsonlReads(fsModule)) {
+    const content = fsModule.readFileSync(filePath, "utf8");
+    const turns = parseSessionJsonlTurns(content, { threadId });
+    return turns.length > 0 ? { turns, hasOlderTurns: false, bytesRead: Buffer.byteLength(content, "utf8") } : null;
+  }
+
+  const stat = fsModule.statSync(filePath);
+  const snapshotSize = Math.max(0, Number(stat?.size) || 0);
+  if (snapshotSize === 0) {
+    return null;
+  }
+
+  const safeLimit = Math.max(1, Math.min(Number.isInteger(limit) ? limit : 5, 5));
+  const safeMetadataHeadBytes = Math.max(1, Math.min(metadataHeadBytes, snapshotSize));
+  const safeMaximumTailBytes = Math.max(1, Math.min(maxTailBytes, snapshotSize));
+  let tailBytes = Math.max(1, Math.min(initialTailBytes, safeMaximumTailBytes));
+  const fileHandle = fsModule.openSync(filePath, "r");
+
+  try {
+    const metadataBuffer = readSessionJsonlRange(
+      fileHandle,
+      0,
+      safeMetadataHeadBytes,
+      fsModule
+    );
+    const initialMetadata = parseSessionJsonlInitialMetadata(metadataBuffer.toString("utf8"));
+
+    while (true) {
+      const rawStart = Math.max(0, snapshotSize - tailBytes);
+      const tailBuffer = readSessionJsonlRange(
+        fileHandle,
+        rawStart,
+        snapshotSize - rawStart,
+        fsModule
+      );
+      const aligned = alignSessionJsonlTailBuffer(tailBuffer, rawStart);
+      if (aligned) {
+        const content = aligned.buffer.toString("utf8");
+        const sourceLineByteOffsets = sessionJsonlLineByteOffsets(
+          aligned.buffer,
+          aligned.sourceByteOffset
+        );
+        const turns = parseSessionJsonlTurns(content, {
+          threadId,
+          initialMetadata,
+          sourceByteOffset: aligned.sourceByteOffset,
+          sourceLineByteOffsets,
+        });
+        const observedStartedTurnIDs = observedTaskStartedTurnIDs(content, {
+          sourceByteOffset: aligned.sourceByteOffset,
+          sourceLineByteOffsets,
+        });
+        const safeTurns = rawStart === 0
+          ? turns
+          : turns.filter((turn) => (
+            observedStartedTurnIDs.has(normalizeString(turn?.id))
+              && turnHasVisibleUserItem(turn)
+          ));
+
+        if (safeTurns.length >= safeLimit || tailBytes >= safeMaximumTailBytes || rawStart === 0) {
+          if (safeTurns.length === 0) {
+            return null;
+          }
+          return {
+            turns: safeTurns,
+            hasOlderTurns: rawStart > 0 || turns.length > safeTurns.length,
+            bytesRead: metadataBuffer.length + tailBuffer.length,
+          };
+        }
+      }
+
+      if (tailBytes >= safeMaximumTailBytes || rawStart === 0) {
+        return null;
+      }
+      tailBytes = Math.min(safeMaximumTailBytes, tailBytes * 2);
+    }
+  } finally {
+    fsModule.closeSync(fileHandle);
+  }
+}
+
+function readSessionJsonlMetadataFromFile(filePath, {
+  fsModule = fs,
+  metadataHeadBytes = DEFAULT_SESSION_JSONL_METADATA_HEAD_BYTES,
+} = {}) {
+  if (!filePath) {
+    return { threadId: "", cwd: "" };
+  }
+  if (!supportsBoundedSessionJsonlReads(fsModule)) {
+    return parseSessionJsonlMetadata(fsModule.readFileSync(filePath, "utf8"));
+  }
+
+  const stat = fsModule.statSync(filePath);
+  const snapshotSize = Math.max(0, Number(stat?.size) || 0);
+  if (snapshotSize === 0) {
+    return { threadId: "", cwd: "" };
+  }
+  const fileHandle = fsModule.openSync(filePath, "r");
+  try {
+    const head = readSessionJsonlRange(
+      fileHandle,
+      0,
+      Math.min(snapshotSize, Math.max(1, metadataHeadBytes)),
+      fsModule
+    );
+    const metadata = parseSessionJsonlInitialMetadata(head.toString("utf8"));
+    return { threadId: metadata.threadId, cwd: metadata.cwd };
+  } finally {
+    fsModule.closeSync(fileHandle);
+  }
+}
+
+function supportsBoundedSessionJsonlReads(fsModule) {
+  return typeof fsModule?.statSync === "function"
+    && typeof fsModule?.openSync === "function"
+    && typeof fsModule?.readSync === "function"
+    && typeof fsModule?.closeSync === "function";
+}
+
+function readSessionJsonlRange(fileHandle, start, length, fsModule) {
+  const safeLength = Math.max(0, length);
+  const buffer = Buffer.allocUnsafe(safeLength);
+  const bytesRead = safeLength > 0
+    ? fsModule.readSync(fileHandle, buffer, 0, safeLength, start)
+    : 0;
+  return buffer.subarray(0, bytesRead);
+}
+
+function alignSessionJsonlTailBuffer(buffer, rawStart) {
+  if (rawStart === 0) {
+    return { buffer, sourceByteOffset: 0 };
+  }
+  const firstLineFeed = buffer.indexOf(0x0a);
+  if (firstLineFeed === -1 || firstLineFeed + 1 >= buffer.length) {
+    return null;
+  }
+  return {
+    buffer: buffer.subarray(firstLineFeed + 1),
+    sourceByteOffset: rawStart + firstLineFeed + 1,
+  };
+}
+
+function sessionJsonlLineByteOffsets(buffer, sourceByteOffset) {
+  const offsets = [sourceByteOffset];
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] === 0x0a && index + 1 < buffer.length) {
+      offsets.push(sourceByteOffset + index + 1);
+    }
+  }
+  return offsets;
+}
+
+function observedTaskStartedTurnIDs(content, {
+  sourceByteOffset = 0,
+  sourceLineByteOffsets = null,
+} = {}) {
+  const turnIDs = new Set();
+  const raw = String(content || "");
+  let lineIndex = -1;
+  let lineStart = 0;
+  let fallbackSourceByteOffset = sourceByteOffset;
+  while (lineStart < raw.length) {
+    lineIndex += 1;
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    const currentLineStart = lineStart;
+    const lineEndWithSeparator = lineEnd < raw.length ? lineEnd + 1 : lineEnd;
+    const sourceLineNumber = sourceLineByteOffsets?.[lineIndex]
+      ?? fallbackSourceByteOffset;
+    fallbackSourceByteOffset += Buffer.byteLength(
+      raw.substring(currentLineStart, lineEndWithSeparator),
+      "utf8"
+    );
+    const line = raw.substring(lineStart, lineEnd).trim();
+    lineStart = lineEnd + 1;
+    if (!line) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(line);
+      const payload = objectValue(entry?.payload);
+      if (entry?.type !== "event_msg" || normalizeString(payload?.type) !== "task_started") {
+        continue;
+      }
+      const turnID = normalizeString(payload?.turn_id)
+        || normalizeString(payload?.turnId)
+        || `turn-line-${sourceLineNumber}`;
+      if (turnID) {
+        turnIDs.add(turnID);
+      }
+    } catch {
+      // A live rollout may end with a partial line; ignore it until the next read.
+    }
+  }
+  return turnIDs;
+}
+
+function turnHasVisibleUserItem(turn) {
+  return Array.isArray(turn?.items) && turn.items.some((item) => isUserRoleItem(item));
+}
+
+function parseSessionJsonlInitialMetadata(content) {
+  let threadId = "";
+  let cwd = "";
+  let timeZone = "";
+  const raw = String(content || "");
+  let lineStart = 0;
+  while (lineStart < raw.length) {
+    let lineEnd = raw.indexOf("\n", lineStart);
+    if (lineEnd === -1) {
+      lineEnd = raw.length;
+    }
+    const line = raw.substring(lineStart, lineEnd).trim();
+    lineStart = lineEnd + 1;
+    if (!line) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(line);
+      if (entry?.type !== "session_meta") {
+        continue;
+      }
+      const payload = objectValue(entry.payload);
+      threadId = normalizeString(payload?.id)
+        || normalizeString(payload?.thread_id)
+        || normalizeString(payload?.threadId);
+      cwd = normalizeString(payload?.cwd)
+        || normalizeString(payload?.current_working_directory)
+        || normalizeString(payload?.working_directory);
+      timeZone = normalizeString(payload?.timezone)
+        || normalizeString(payload?.timeZone)
+        || normalizeString(payload?.time_zone);
+      break;
+    } catch {
+      // Metadata is expected at the head; an incomplete oversized line is not trusted.
+    }
+  }
+  return { threadId, cwd, timeZone };
 }
 
 // Extracts thread-level context that app-server history can omit for desktop-origin runs.
@@ -84,14 +364,19 @@ function parseSessionJsonlMetadata(content) {
   return { threadId, cwd };
 }
 
-function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
+function parseSessionJsonlTurns(content, {
+  threadId = "",
+  initialMetadata = null,
+  sourceByteOffset = 0,
+  sourceLineByteOffsets = null,
+} = {}) {
   const turns = [];
   const turnsById = new Map();
   let activeTurnId = "";
   let pendingSyntheticTerminal = null;
-  let sessionThreadId = normalizeString(threadId);
-  let sessionCwd = "";
-  let sessionTimeZone = "";
+  let sessionThreadId = normalizeString(threadId) || normalizeString(initialMetadata?.threadId);
+  let sessionCwd = normalizeString(initialMetadata?.cwd);
+  let sessionTimeZone = normalizeString(initialMetadata?.timeZone);
   const skippedCallIds = new Set();
   const toolCallsByCallId = new Map();
   const pendingUserMessages = [];
@@ -99,12 +384,21 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
   const raw = String(content || "");
   let index = -1;
   let lineStart = 0;
+  let fallbackSourceByteOffset = sourceByteOffset;
   while (lineStart < raw.length) {
     index += 1;
     let lineEnd = raw.indexOf("\n", lineStart);
     if (lineEnd === -1) {
       lineEnd = raw.length;
     }
+    const currentLineStart = lineStart;
+    const lineEndWithSeparator = lineEnd < raw.length ? lineEnd + 1 : lineEnd;
+    const sourceLineNumber = sourceLineByteOffsets?.[index]
+      ?? fallbackSourceByteOffset;
+    fallbackSourceByteOffset += Buffer.byteLength(
+      raw.substring(currentLineStart, lineEndWithSeparator),
+      "utf8"
+    );
     const line = raw.substring(lineStart, lineEnd).trim();
     lineStart = lineEnd + 1;
     if (!line) {
@@ -159,7 +453,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         activeTurnId = normalizeString(payload?.turn_id)
           || normalizeString(payload?.turnId)
           || activeTurnId
-          || `turn-line-${index + 1}`;
+          || `turn-line-${sourceLineNumber}`;
         const turn = ensureTurn(turns, turnsById, activeTurnId, sessionThreadId, entry.timestamp);
         applyHistoryTimeZone(turn, sessionTimeZone);
         flushPendingUserMessagesToTurn(turn, pendingUserMessages);
@@ -211,11 +505,11 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
             || normalizeString(payload?.turnId)
             || responseItemTurnId(completedItem)
             || activeTurnId
-            || `turn-line-${index + 1}`,
+            || `turn-line-${sourceLineNumber}`,
           sessionThreadId,
           entry.timestamp
         );
-        const item = normalizeResponseItemForHistory(completedItem, index + 1, {
+        const item = normalizeResponseItemForHistory(completedItem, sourceLineNumber, {
           cwd: sessionCwd,
           toolCallsByCallId,
         });
@@ -228,7 +522,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
 
       if (eventType === "user_message") {
         const explicitTurnId = normalizeString(payload?.turn_id) || normalizeString(payload?.turnId);
-        const item = createUserMessageHistoryItem(payload, index + 1, entry.timestamp);
+        const item = createUserMessageHistoryItem(payload, sourceLineNumber, entry.timestamp);
         if (!item.text) {
           continue;
         }
@@ -241,7 +535,7 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
         const turn = ensureTurn(
           turns,
           turnsById,
-          explicitTurnId || activeTurnId || `turn-line-${index + 1}`,
+          explicitTurnId || activeTurnId || `turn-line-${sourceLineNumber}`,
           sessionThreadId,
           entry.timestamp
         );
@@ -268,12 +562,12 @@ function parseSessionJsonlTurns(content, { threadId = "" } = {}) {
       const turn = ensureTurn(
         turns,
         turnsById,
-        responseItemTurnId(payload) || activeTurnId || `turn-line-${index + 1}`,
+        responseItemTurnId(payload) || activeTurnId || `turn-line-${sourceLineNumber}`,
         sessionThreadId,
         entry.timestamp
       );
       applyHistoryTimeZone(turn, sessionTimeZone);
-      const item = normalizeResponseItemForHistory(payload, index + 1, {
+      const item = normalizeResponseItemForHistory(payload, sourceLineNumber, {
         cwd: sessionCwd,
         toolCallsByCallId,
       });
@@ -1176,7 +1470,10 @@ function normalizeString(value) {
 }
 
 module.exports = {
+  JSONL_OLDER_HANDOFF_CURSOR,
   parseSessionJsonlMetadata,
   parseSessionJsonlTurns,
+  readRecentSessionJsonlTurns,
+  readSessionJsonlMetadataFromFile,
   readThreadTurnsListPageFromSessionJsonl,
 };

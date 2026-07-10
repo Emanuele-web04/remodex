@@ -92,6 +92,50 @@ final class CodexServiceThreadDisplayPhaseTests: XCTestCase {
         XCTAssertTrue(service.canLoadOlderThreadHistory(threadId: threadID))
     }
 
+    func testTimedOutExistingThreadWithoutCacheRemainsLoading() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        service.activeThreadId = threadID
+        service.threads = [
+            CodexThread(
+                id: threadID,
+                title: "Large existing chat",
+                preview: "Existing history",
+                syncState: .live
+            )
+        ]
+
+        service.markThreadHistoryDeferredAfterTimeout(threadId: threadID)
+
+        XCTAssertFalse(service.initialTurnsLoadedByThreadID.contains(threadID))
+        XCTAssertFalse(service.hydratedThreadIDs.contains(threadID))
+        XCTAssertTrue(service.threadsNeedingCanonicalHistoryReconcile.contains(threadID))
+        XCTAssertEqual(service.threadDisplayPhase(threadId: threadID), .loading)
+    }
+
+    func testRepairClearsPersistedAuthoritativeEmptyHistoryState() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        service.threads = [
+            CodexThread(
+                id: threadID,
+                title: "Previously poisoned chat",
+                preview: "Existing history",
+                syncState: .live
+            )
+        ]
+        service.hydratedThreadIDs.insert(threadID)
+        service.initialTurnsLoadedByThreadID.insert(threadID)
+        service.markThreadLocalHistoryStartAuthoritative(threadID, clearRemoteCursor: true)
+
+        service.repairEmptyThreadHistoryLoadStateIfNeeded(threadId: threadID)
+
+        XCTAssertFalse(service.hydratedThreadIDs.contains(threadID))
+        XCTAssertFalse(service.initialTurnsLoadedByThreadID.contains(threadID))
+        XCTAssertFalse(service.hasAuthoritativeLocalHistoryStart(threadId: threadID))
+        XCTAssertEqual(service.threadDisplayPhase(threadId: threadID), .loading)
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexServiceThreadDisplayPhaseTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard

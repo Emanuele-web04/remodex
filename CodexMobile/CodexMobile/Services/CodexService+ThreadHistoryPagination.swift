@@ -18,8 +18,11 @@ enum ThreadHistoryHydrationPolicy {
     // Huge desktop transcripts can make thread/read stall before the bridge can compact the payload.
     // Match Litter's cursor-driven paging: hydrate a tiny recent window, then prepend on demand.
     static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
-    static let initialPageSoftTimeoutNanoseconds: UInt64 = 8_000_000_000
-    static let initialTurnPageSize = 5
+    // The bridge gives its local app-server call up to 20 seconds. Keep the
+    // phone-side deadline above that so giant sessions can return a bounded
+    // first page or a real bridge error instead of being abandoned mid-flight.
+    static let initialPageSoftTimeoutNanoseconds: UInt64 = 25_000_000_000
+    static let initialTurnPageSize = 1
     static let olderTurnPageSize = 5
     static let duplicateOlderPageSkipLimit = 12
 }
@@ -128,6 +131,7 @@ enum TimelineTextClippingPolicy {
 struct ThreadTurnsHistoryPage {
     let turns: [JSONValue]
     let nextCursor: JSONValue
+    let isProvisionalJsonlFallback: Bool
 }
 
 extension CodexService {
@@ -136,7 +140,8 @@ extension CodexService {
         threadId: String,
         limit: Int,
         cursor: JSONValue?,
-        timeoutNanoseconds: UInt64
+        timeoutNanoseconds: UInt64,
+        requireCanonical: Bool = false
     ) async throws -> ThreadTurnsHistoryPage {
         var params: RPCObject = [
             "threadId": .string(threadId),
@@ -145,6 +150,9 @@ extension CodexService {
         ]
         if let cursor, cursorHasValue(cursor) {
             params["cursor"] = cursor
+        }
+        if requireCanonical {
+            params["remodexRequireCanonical"] = .bool(true)
         }
 
         let response = try await sendRequest(
@@ -166,21 +174,26 @@ extension CodexService {
 
         return ThreadTurnsHistoryPage(
             turns: turns,
-            nextCursor: threadTurnsListCursor(from: resultObject)
+            nextCursor: threadTurnsListCursor(from: resultObject),
+            isProvisionalJsonlFallback: resultObject["remodexJsonlFallback"]?.boolValue == true
         )
     }
 
     // Starts with Litter-sized pages so long chats always expose older history through a real cursor.
-    func fetchInitialThreadTurnsHistoryPage(threadId: String) async throws -> ThreadTurnsHistoryPage {
+    func fetchInitialThreadTurnsHistoryPage(
+        threadId: String,
+        requireCanonical: Bool = false
+    ) async throws -> ThreadTurnsHistoryPage {
         let startedAt = Date()
         let page = try await fetchThreadTurnsHistoryPage(
             threadId: threadId,
             limit: ThreadHistoryHydrationPolicy.initialTurnPageSize,
             cursor: nil,
-            timeoutNanoseconds: ThreadHistoryHydrationPolicy.initialPageSoftTimeoutNanoseconds
+            timeoutNanoseconds: ThreadHistoryHydrationPolicy.initialPageSoftTimeoutNanoseconds,
+            requireCanonical: requireCanonical
         )
         let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000)
-        debugSyncLog("thread/turns/list initial thread=\(threadId) limit=\(ThreadHistoryHydrationPolicy.initialTurnPageSize) turns=\(page.turns.count) hasNextCursor=\(cursorHasValue(page.nextCursor)) elapsedMs=\(elapsedMs)")
+        debugSyncLog("thread/turns/list initial thread=\(threadId) limit=\(ThreadHistoryHydrationPolicy.initialTurnPageSize) turns=\(page.turns.count) provisional=\(page.isProvisionalJsonlFallback) hasNextCursor=\(cursorHasValue(page.nextCursor)) elapsedMs=\(elapsedMs)")
         return page
     }
 
@@ -478,10 +491,39 @@ extension CodexService {
 
     // Fails open after a chat-load timeout but leaves a retryable reconcile trail behind.
     func markThreadHistoryDeferredAfterTimeout(threadId: String) {
-        hydratedThreadIDs.insert(threadId)
-        initialTurnsLoadedByThreadID.insert(threadId)
+        markThreadHistoryDeferred(
+            threadId: threadId,
+            activeErrorMessage: "Couldn't load this chat yet. Retrying in the background."
+        )
+    }
+
+    // An empty page is only authoritative for a thread already proven to be a
+    // brand-new blank chat. Existing chats keep loading until real rows arrive.
+    func markThreadHistoryDeferredAfterEmptyPage(threadId: String) {
+        markThreadHistoryDeferred(
+            threadId: threadId,
+            activeErrorMessage: "Couldn't verify this chat's history yet. Retrying in the background."
+        )
+    }
+
+    func markThreadHistoryDeferredAfterUnavailablePage(threadId: String) {
+        markThreadHistoryDeferred(
+            threadId: threadId,
+            activeErrorMessage: "Couldn't retrieve this chat's history yet. Retrying in the background."
+        )
+    }
+
+    private func markThreadHistoryDeferred(threadId: String, activeErrorMessage: String) {
+        let hasCachedMessages = !(messagesByThread[threadId]?.isEmpty ?? true)
+        if hasCachedMessages {
+            hydratedThreadIDs.insert(threadId)
+            initialTurnsLoadedByThreadID.insert(threadId)
+        } else {
+            hydratedThreadIDs.remove(threadId)
+            initialTurnsLoadedByThreadID.remove(threadId)
+        }
         if activeThreadId == threadId, (messagesByThread[threadId]?.isEmpty ?? true) {
-            lastErrorMessage = "Couldn't load this chat yet. Retrying in the background."
+            lastErrorMessage = activeErrorMessage
         } else {
             olderHistoryLoadErrorByThreadID[threadId] = "Couldn't load earlier messages. Tap to retry."
         }
@@ -492,8 +534,26 @@ extension CodexService {
     func clearDeferredThreadHistoryErrorIfNeeded(threadId: String) {
         olderHistoryLoadErrorByThreadID.removeValue(forKey: threadId)
         if activeThreadId == threadId,
-           lastErrorMessage == "Couldn't load this chat yet. Retrying in the background." {
+           lastErrorMessage == "Couldn't load this chat yet. Retrying in the background."
+            || lastErrorMessage == "Couldn't verify this chat's history yet. Retrying in the background."
+            || lastErrorMessage == "Couldn't retrieve this chat's history yet. Retrying in the background." {
             lastErrorMessage = nil
+        }
+    }
+
+    // Clears the poisoned state left by older builds that persisted an empty
+    // transcript as both hydrated and authoritative.
+    func repairEmptyThreadHistoryLoadStateIfNeeded(threadId: String) {
+        guard messagesByThread[threadId]?.isEmpty ?? true else {
+            return
+        }
+
+        hydratedThreadIDs.remove(threadId)
+        initialTurnsLoadedByThreadID.remove(threadId)
+        let removedAuthoritativeStart = threadsWithAuthoritativeLocalHistoryStart.remove(threadId) != nil
+        let removedExhaustedCursor = exhaustedOlderThreadHistoryCursorByThreadID.removeValue(forKey: threadId) != nil
+        if removedAuthoritativeStart || removedExhaustedCursor {
+            persistThreadHistoryPaginationState()
         }
     }
 
@@ -505,12 +565,12 @@ extension CodexService {
         )
     }
 
-    // First paginated pages can be larger than the default render window when a turn has many items.
-    func seedThreadTimelineProjectionForPaginatedHistory(threadId: String, decodedMessageCount: Int) {
+    // One turn can contain thousands of tool rows; keep first paint bounded and
+    // let the existing reveal control expand the window deliberately.
+    func seedThreadTimelineProjectionForPaginatedHistory(threadId: String, decodedMessageCount _: Int) {
         threadTimelineProjectionLimitByThreadID[threadId] = max(
             threadTimelineProjectionLimitByThreadID[threadId] ?? 0,
-            TurnTimelineProjectionPolicy.initialMessageLimit,
-            decodedMessageCount
+            TurnTimelineProjectionPolicy.initialMessageLimit
         )
     }
 
@@ -751,5 +811,12 @@ extension CodexService {
                 || message.localizedCaseInsensitiveContains("thread/turns/list")
         )
             && message.localizedCaseInsensitiveContains("timed out")
+    }
+
+    func shouldDeferThreadHistoryAfterBridgeFailure(_ error: CodexServiceError) -> Bool {
+        guard case .rpcError(let rpcError) = error else {
+            return false
+        }
+        return rpcError.data?.objectValue?["errorCode"]?.stringValue == "thread_turns_list_failed"
     }
 }

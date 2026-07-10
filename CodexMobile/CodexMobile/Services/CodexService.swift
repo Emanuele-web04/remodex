@@ -459,6 +459,9 @@ final class CodexService {
     // A Desktop/rollout source handoff needs replace semantics for the mirrored
     // tail, not an append-only merge that leaves stale synthetic rows behind.
     @ObservationIgnored var pendingCanonicalSourceReplacementThreadIDs: Set<String> = []
+    // A bounded JSONL first paint is useful immediately but remains provisional
+    // until the app-server returns its exact cursor-backed page.
+    @ObservationIgnored var provisionalPaginatedHistoryThreadIDs: Set<String> = []
     // Mirrors the bridge package version currently running on the Mac, if the bridge reports it.
     var bridgeInstalledVersion: String?
     // Mirrors the latest published bridge package version, when the bridge can resolve it.
@@ -603,6 +606,8 @@ final class CodexService {
     @ObservationIgnored var canonicalHistoryReconcileTaskByThreadID: [String: Task<Void, Never>] = [:]
     // Tracks delayed retry timers for canonical reconcile so teardown can cancel the backoff too.
     @ObservationIgnored var canonicalHistoryReconcileRetryTaskByThreadID: [String: Task<Void, Never>] = [:]
+    // Increases retry spacing for chats whose first history page remains unavailable.
+    @ObservationIgnored var canonicalHistoryReconcileRetryAttemptByThreadID: [String: Int] = [:]
     // Coalesces sidebar/bootstrap thread/list refreshes so launch paths do not duplicate the same fetch.
     @ObservationIgnored var threadListFetchTaskByLimit: [Int: (id: UUID, task: Task<[CodexThread], Error>)] = [:]
     var isAppInForeground = true

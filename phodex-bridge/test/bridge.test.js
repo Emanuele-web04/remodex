@@ -12,10 +12,13 @@ const path = require("node:path");
 const {
   buildThreadTurnsListRelaySanitizeContext,
   buildHeartbeatBridgeStatus,
+  canonicalThreadTurnsListRequest,
   createMacOSBridgeWakeAssertion,
+  createThreadTurnsListFastPageCoordinator,
   disableUnsupportedReasoningSummaryForTurnStart,
   fetchAdaptiveThreadTurnsListForRelay,
   hasRelayConnectionGoneStale,
+  maybeMergeLatestJsonlTurnIntoTurnsListResponse,
   normalizeRelayBoundJsonRpcMessage,
   persistBridgePreferences,
   resolveJsonlTurnsListRolloutPathForFallback,
@@ -139,6 +142,606 @@ test("resolveJsonlTurnsListRolloutPathForFallback searches JSONL for stale non-e
     ["cache", "thread-jsonl-stale"],
     ["find", "thread-jsonl-stale"],
   ]);
+});
+
+test("resolveJsonlTurnsListRolloutPathForFallback rescans after empty canonical responses", () => {
+  const calls = [];
+  const rolloutPath = resolveJsonlTurnsListRolloutPathForFallback({
+    threadId: "thread-jsonl-cached-empty",
+    responseIsEmpty: true,
+    readCachedPath(threadId) {
+      calls.push(["cache", threadId]);
+      return "/tmp/thread-jsonl-cached-empty.jsonl";
+    },
+    findAndCachePath(threadId) {
+      calls.push(["find", threadId]);
+      return "/tmp/thread-jsonl-fresh-empty.jsonl";
+    },
+  });
+
+  assert.equal(rolloutPath, "/tmp/thread-jsonl-fresh-empty.jsonl");
+  assert.deepEqual(calls, [["find", "thread-jsonl-cached-empty"]]);
+});
+
+test("thread turns-list fast page returns JSONL once and reuses the late canonical page", async () => {
+  let releaseDeadline = null;
+  let resolveCanonical = null;
+  let canonicalFetches = 0;
+  const canonicalResponse = new Promise((resolve) => {
+    resolveCanonical = resolve;
+  });
+  const coordinator = createThreadTurnsListFastPageCoordinator({
+    createToken: () => "handoff-token",
+    setTimeoutImpl(callback) {
+      releaseDeadline = callback;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+  });
+  const request = {
+    id: "req-fast-jsonl",
+    method: "thread/turns/list",
+    params: { threadId: "thread-fast-jsonl", limit: 1 },
+  };
+  const resolveOptions = {
+    fetchCanonical: async () => {
+      canonicalFetches += 1;
+      return canonicalResponse;
+    },
+    readJsonl: async () => ({
+      response: {
+        id: request.id,
+        result: {
+          data: [{ id: "turn-jsonl", items: [{ id: "item-jsonl" }] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+          remodexJsonlFallback: true,
+        },
+      },
+      usesJsonl: true,
+    }),
+  };
+
+  const fastSelectionPromise = coordinator.resolve(request, resolveOptions);
+  for (let attempt = 0; attempt < 10 && !releaseDeadline; attempt += 1) {
+    await Promise.resolve();
+  }
+  assert.ok(releaseDeadline);
+  releaseDeadline();
+  const fastSelection = await fastSelectionPromise;
+
+  assert.equal(fastSelection.source, "jsonl");
+  assert.equal(fastSelection.usesJsonl, true);
+  assert.equal(fastSelection.response.result.data[0].id, "turn-jsonl");
+  assert.equal(
+    fastSelection.response.result.nextCursor,
+    "remodex-jsonl-handoff-v1:turn-jsonl:handoff-token"
+  );
+  assert.equal(fastSelection.response.result.remodexCanonicalHandoff, true);
+
+  const canonicalSelectionPromise = coordinator.resolve({
+    ...request,
+    id: "req-canonical-reconcile",
+    params: {
+      ...request.params,
+      remodexRequireCanonical: true,
+    },
+  }, resolveOptions);
+  resolveCanonical({
+    id: "bridge-internal-request",
+    result: {
+      data: [{ id: "turn-jsonl", items: [{ id: "item-canonical" }] }],
+      nextCursor: "canonical-cursor",
+    },
+  });
+  const canonicalSelection = await canonicalSelectionPromise;
+
+  assert.equal(canonicalFetches, 1);
+  assert.equal(canonicalSelection.source, "canonical");
+  assert.equal(canonicalSelection.response.id, "req-canonical-reconcile");
+  assert.equal(canonicalSelection.response.result.data[0].id, "turn-jsonl");
+  assert.equal(canonicalSelection.response.result.nextCursor, "canonical-cursor");
+
+  await coordinator.resolve({
+    ...request,
+    id: "req-consumed-handoff",
+    params: {
+      ...request.params,
+      cursor: fastSelection.response.result.nextCursor,
+    },
+  }, resolveOptions);
+  assert.equal(canonicalFetches, 2);
+});
+
+test("thread turns-list first-page singleflight isolates request shapes and rebinds response ids", async () => {
+  const coordinator = createThreadTurnsListFastPageCoordinator();
+  const canonicalFetches = [];
+  const canonicalResolversByLimit = new Map();
+  const options = {
+    fetchCanonical: (canonicalRequest) => new Promise((resolve) => {
+      const limit = canonicalRequest.params.limit;
+      canonicalFetches.push({ id: canonicalRequest.id, limit });
+      canonicalResolversByLimit.set(limit, resolve);
+    }),
+    readJsonl: async () => null,
+  };
+  const request = {
+    id: "req-shape-limit-1-a",
+    method: "thread/turns/list",
+    params: { threadId: "thread-shared-shape", limit: 1 },
+  };
+
+  const limitOneFirst = coordinator.resolve(request, options);
+  const limitEight = coordinator.resolve({
+    ...request,
+    id: "req-shape-limit-8",
+    params: { ...request.params, limit: 8 },
+  }, options);
+  const limitOneSecond = coordinator.resolve({
+    ...request,
+    id: "req-shape-limit-1-b",
+  }, options);
+
+  assert.deepEqual(canonicalFetches, [
+    { id: "req-shape-limit-1-a", limit: 1 },
+    { id: "req-shape-limit-8", limit: 8 },
+  ]);
+
+  canonicalResolversByLimit.get(1)({
+    id: "canonical-limit-1",
+    result: {
+      data: [{ id: "turn-limit-1", items: [] }],
+      nextCursor: "cursor-after-limit-1",
+    },
+  });
+  canonicalResolversByLimit.get(8)({
+    id: "canonical-limit-8",
+    result: {
+      data: [
+        { id: "turn-limit-8-a", items: [] },
+        { id: "turn-limit-8-b", items: [] },
+      ],
+      nextCursor: "cursor-after-limit-8",
+    },
+  });
+
+  const [firstSelection, eightSelection, secondSelection] = await Promise.all([
+    limitOneFirst,
+    limitEight,
+    limitOneSecond,
+  ]);
+  assert.equal(firstSelection.response.id, "req-shape-limit-1-a");
+  assert.equal(eightSelection.response.id, "req-shape-limit-8");
+  assert.equal(secondSelection.response.id, "req-shape-limit-1-b");
+  assert.equal(firstSelection.response.result.data.length, 1);
+  assert.equal(secondSelection.response.result.data.length, 1);
+  assert.equal(eightSelection.response.result.data.length, 2);
+});
+
+test("thread turns-list fast page keeps an immediate canonical response authoritative", async () => {
+  let deadlineWasScheduled = false;
+  const coordinator = createThreadTurnsListFastPageCoordinator({
+    setTimeoutImpl() {
+      deadlineWasScheduled = true;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+  });
+  const selection = await coordinator.resolve({
+    id: "req-fast-canonical",
+    method: "thread/turns/list",
+    params: { threadId: "thread-fast-canonical", limit: 1 },
+  }, {
+    fetchCanonical: async () => ({
+      id: "req-fast-canonical",
+      result: {
+        data: [{ id: "turn-canonical", items: [] }],
+        nextCursor: null,
+      },
+    }),
+    readJsonl: async () => ({
+      response: {
+        id: "req-fast-canonical",
+        result: {
+          data: [{ id: "turn-jsonl", items: [] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  });
+
+  assert.equal(deadlineWasScheduled, true);
+  assert.equal(selection.source, "canonical");
+  assert.equal(selection.response.result.data[0].id, "turn-canonical");
+});
+
+test("thread turns-list fast page prefers a newer running JSONL turn over stale canonical history", async () => {
+  const coordinator = createThreadTurnsListFastPageCoordinator({
+    createToken: () => "newer-jsonl-token",
+    setTimeoutImpl: () => 1,
+    clearTimeoutImpl() {},
+  });
+  const selection = await coordinator.resolve({
+    id: "req-newer-jsonl",
+    method: "thread/turns/list",
+    params: { threadId: "thread-newer-jsonl", limit: 1 },
+  }, {
+    fetchCanonical: async () => ({
+      id: "req-newer-jsonl",
+      result: {
+        data: [{ id: "turn-canonical-older", status: "completed", items: [] }],
+        nextCursor: "cursor-after-canonical-older",
+      },
+    }),
+    readJsonl: async () => ({
+      response: {
+        id: "req-newer-jsonl",
+        result: {
+          data: [{ id: "turn-jsonl-running", status: "running", items: [] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  });
+
+  assert.equal(selection.source, "jsonl");
+  assert.equal(selection.response.result.data[0].id, "turn-jsonl-running");
+  assert.equal(selection.response.result.remodexCanonicalHandoff, true);
+});
+
+test("thread turns-list handoff never returns newer canonical turns as older history", async () => {
+  let releaseDeadline = null;
+  let resolveCanonical = null;
+  const canonicalResponse = new Promise((resolve) => {
+    resolveCanonical = resolve;
+  });
+  const coordinator = createThreadTurnsListFastPageCoordinator({
+    createToken: () => "anchor-token",
+    setTimeoutImpl(callback) {
+      releaseDeadline = callback;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+  });
+  const request = {
+    id: "req-anchor-fast",
+    method: "thread/turns/list",
+    params: { threadId: "thread-anchor", limit: 1 },
+  };
+  const options = {
+    fetchCanonical: async () => canonicalResponse,
+    readJsonl: async () => ({
+      response: {
+        id: request.id,
+        result: {
+          data: [{ id: "turn-anchor", items: [{ id: "anchor-item" }] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  };
+
+  const firstSelectionPromise = coordinator.resolve(request, options);
+  for (let attempt = 0; attempt < 10 && !releaseDeadline; attempt += 1) {
+    await Promise.resolve();
+  }
+  releaseDeadline();
+  const firstSelection = await firstSelectionPromise;
+  const handoffCursor = firstSelection.response.result.nextCursor;
+  const olderSelectionPromise = coordinator.resolve({
+    ...request,
+    id: "req-anchor-older",
+    params: { ...request.params, cursor: handoffCursor },
+  }, options);
+
+  resolveCanonical({
+    id: "bridge-internal-anchor",
+    result: {
+      data: [
+        { id: "turn-newer", items: [] },
+        { id: "turn-anchor", items: [{ id: "canonical-anchor-item" }] },
+        { id: "turn-older", items: [] },
+      ],
+      nextCursor: "cursor-after-older",
+    },
+  });
+  const olderSelection = await olderSelectionPromise;
+
+  assert.deepEqual(
+    olderSelection.response.result.data.map((turn) => turn.id),
+    ["turn-anchor", "turn-older"]
+  );
+  assert.equal(olderSelection.response.id, "req-anchor-older");
+});
+
+test("canonical reconciliation follows the canonical cursor until it reaches the JSONL anchor", async () => {
+  let releaseDeadline = null;
+  let resolveParkedCanonical = null;
+  let canonicalFetches = 0;
+  const parkedCanonical = new Promise((resolve) => {
+    resolveParkedCanonical = resolve;
+  });
+  const coordinator = createThreadTurnsListFastPageCoordinator({
+    createToken: () => "stale-anchor-token",
+    setTimeoutImpl(callback) {
+      releaseDeadline = callback;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+  });
+  const request = {
+    id: "req-stale-anchor-fast",
+    method: "thread/turns/list",
+    params: { threadId: "thread-stale-anchor", limit: 1 },
+  };
+  const options = {
+    fetchCanonical: async (canonicalRequest) => {
+      canonicalFetches += 1;
+      if (canonicalFetches === 1) {
+        return parkedCanonical;
+      }
+      assert.equal(canonicalRequest.params.cursor, "cursor-to-jsonl-anchor");
+      return {
+        id: "fresh-canonical",
+        result: {
+          data: [{ id: "turn-jsonl-anchor", items: [{ id: "canonical-anchor" }] }],
+          nextCursor: "cursor-after-jsonl-anchor",
+        },
+      };
+    },
+    readJsonl: async () => ({
+      response: {
+        id: request.id,
+        result: {
+          data: [{ id: "turn-jsonl-anchor", items: [{ id: "jsonl-anchor" }] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  };
+
+  const firstSelectionPromise = coordinator.resolve(request, options);
+  for (let attempt = 0; attempt < 10 && !releaseDeadline; attempt += 1) {
+    await Promise.resolve();
+  }
+  releaseDeadline();
+  await firstSelectionPromise;
+
+  const reconcilePromise = coordinator.resolve({
+    ...request,
+    id: "req-stale-anchor-reconcile",
+    params: { ...request.params, remodexRequireCanonical: true },
+  }, options);
+  resolveParkedCanonical({
+    id: "stale-canonical",
+    result: {
+      data: [{ id: "turn-newer-than-jsonl-anchor", items: [] }],
+      nextCursor: "cursor-to-jsonl-anchor",
+    },
+  });
+  const reconciled = await reconcilePromise;
+
+  assert.equal(canonicalFetches, 2);
+  assert.equal(reconciled.response.id, "req-stale-anchor-reconcile");
+  assert.deepEqual(
+    reconciled.response.result.data.map((turn) => turn.id),
+    ["turn-newer-than-jsonl-anchor", "turn-jsonl-anchor"]
+  );
+  assert.equal(reconciled.response.result.nextCursor, "cursor-after-jsonl-anchor");
+});
+
+test("canonical reconciliation compacts every turn through the anchor under the relay budget", async () => {
+  let releaseDeadline = null;
+  let resolveParkedCanonical = null;
+  let canonicalFetches = 0;
+  const payloadSoftLimitBytes = 1_200;
+  const parkedCanonical = new Promise((resolve) => {
+    resolveParkedCanonical = resolve;
+  });
+  const coordinator = createThreadTurnsListFastPageCoordinator({
+    createToken: () => "oversized-anchor-token",
+    payloadSoftLimitBytes,
+    sanitizeForRelay: (rawMessage) => rawMessage,
+    setTimeoutImpl(callback) {
+      releaseDeadline = callback;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+  });
+  const request = {
+    id: "req-oversized-anchor-fast",
+    method: "thread/turns/list",
+    params: { threadId: "thread-oversized-anchor", limit: 1 },
+  };
+  const largeText = "x".repeat(900);
+  const options = {
+    fetchCanonical: async (canonicalRequest) => {
+      canonicalFetches += 1;
+      if (canonicalFetches === 1) {
+        return parkedCanonical;
+      }
+      assert.equal(canonicalRequest.params.cursor, "cursor-to-oversized-anchor");
+      return {
+        id: "oversized-anchor-page",
+        result: {
+          data: [{
+            id: "turn-oversized-anchor",
+            items: [{ id: "item-anchor", type: "agentMessage", text: largeText }],
+          }],
+          nextCursor: "cursor-after-oversized-anchor",
+        },
+      };
+    },
+    readJsonl: async () => ({
+      response: {
+        id: request.id,
+        result: {
+          data: [{ id: "turn-oversized-anchor", items: [{ id: "jsonl-anchor" }] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  };
+
+  const firstSelectionPromise = coordinator.resolve(request, options);
+  for (let attempt = 0; attempt < 10 && !releaseDeadline; attempt += 1) {
+    await Promise.resolve();
+  }
+  releaseDeadline();
+  await firstSelectionPromise;
+
+  const reconcilePromise = coordinator.resolve({
+    ...request,
+    id: "req-oversized-anchor-reconcile",
+    params: { ...request.params, remodexRequireCanonical: true },
+  }, options);
+  resolveParkedCanonical({
+    id: "oversized-newer-page",
+    result: {
+      data: [{
+        id: "turn-newer-than-oversized-anchor",
+        items: [{ id: "item-newer", type: "agentMessage", text: largeText }],
+      }],
+      nextCursor: "cursor-to-oversized-anchor",
+    },
+  });
+  const reconciled = await reconcilePromise;
+
+  assert.equal(canonicalFetches, 2);
+  assert.deepEqual(
+    reconciled.response.result.data.map((turn) => turn.id),
+    ["turn-newer-than-oversized-anchor", "turn-oversized-anchor"]
+  );
+  assert.equal(reconciled.response.result.nextCursor, "cursor-after-oversized-anchor");
+  assert.equal(reconciled.response.result.remodexPageCompactedForRelay, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(reconciled.response), "utf8") < payloadSoftLimitBytes);
+});
+
+test("canonical reconciliation does not search forever for a synthetic JSONL anchor", async () => {
+  let releaseDeadline = null;
+  let resolveCanonical = null;
+  let canonicalFetches = 0;
+  const parkedCanonical = new Promise((resolve) => {
+    resolveCanonical = resolve;
+  });
+  const coordinator = createThreadTurnsListFastPageCoordinator({
+    createToken: () => "synthetic-anchor-token",
+    setTimeoutImpl(callback) {
+      releaseDeadline = callback;
+      return 1;
+    },
+    clearTimeoutImpl() {},
+  });
+  const request = {
+    id: "req-synthetic-anchor-fast",
+    method: "thread/turns/list",
+    params: { threadId: "thread-synthetic-anchor", limit: 1 },
+  };
+  const options = {
+    fetchCanonical: async () => {
+      canonicalFetches += 1;
+      return parkedCanonical;
+    },
+    readJsonl: async () => ({
+      response: {
+        id: request.id,
+        result: {
+          data: [{ id: "turn-line-2048", items: [{ id: "jsonl-synthetic-item" }] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  };
+
+  const firstSelectionPromise = coordinator.resolve(request, options);
+  for (let attempt = 0; attempt < 10 && !releaseDeadline; attempt += 1) {
+    await Promise.resolve();
+  }
+  releaseDeadline();
+  const firstSelection = await firstSelectionPromise;
+  const reconcilePromise = coordinator.resolve({
+    ...request,
+    id: "req-synthetic-anchor-reconcile",
+    params: {
+      ...request.params,
+      cursor: firstSelection.response.result.nextCursor,
+    },
+  }, options);
+  resolveCanonical({
+    id: "canonical-synthetic-anchor-replacement",
+    result: {
+      data: [
+        { id: "turn-real-latest", items: [{ id: "canonical-latest-item" }] },
+        { id: "turn-real-older", items: [{ id: "canonical-older-item" }] },
+      ],
+      nextCursor: "cursor-after-real-older",
+    },
+  });
+  const reconciled = await reconcilePromise;
+
+  assert.equal(canonicalFetches, 1);
+  assert.deepEqual(
+    reconciled.response.result.data.map((turn) => turn.id),
+    ["turn-real-latest", "turn-real-older"]
+  );
+  assert.equal(reconciled.response.result.nextCursor, "cursor-after-real-older");
+});
+
+test("canonical turns-list requests strip bridge-only handoff state", () => {
+  const request = {
+    id: "req-handoff-strip",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-handoff-strip",
+      limit: 1,
+      cursor: "remodex-jsonl-handoff-v1:token",
+      remodexRequireCanonical: true,
+    },
+  };
+
+  assert.deepEqual(canonicalThreadTurnsListRequest(request), {
+    ...request,
+    params: {
+      threadId: "thread-handoff-strip",
+      limit: 1,
+    },
+  });
+  assert.equal(request.params.cursor, "remodex-jsonl-handoff-v1:token");
+});
+
+test("newer JSONL turns never displace the canonical cursor anchor at limit one", () => {
+  const request = {
+    id: "req-jsonl-newer-limit-one",
+    method: "thread/turns/list",
+    params: { threadId: "thread-jsonl-newer-limit-one", limit: 1 },
+  };
+  const merged = maybeMergeLatestJsonlTurnIntoTurnsListResponse(
+    request,
+    {
+      id: request.id,
+      result: {
+        data: [{ id: "turn-canonical-anchor", status: "completed", items: [] }],
+        nextCursor: "cursor-after-canonical-anchor",
+      },
+    },
+    {
+      data: [{ id: "turn-jsonl-newer", status: "running", items: [] }],
+      nextCursor: "remodex-jsonl-fallback-older-unavailable",
+    }
+  );
+
+  assert.deepEqual(
+    merged.result.data.map((turn) => turn.id),
+    ["turn-jsonl-newer", "turn-canonical-anchor"]
+  );
+  assert.equal(merged.result.nextCursor, "cursor-after-canonical-anchor");
+  assert.equal(merged.result.remodexJsonlFallback, true);
+  assert.equal(merged.result.remodexJsonlMergedLatest, true);
 });
 
 test("normalizeRelayBoundJsonRpcMessage converts tracked method-bearing responses for iOS", () => {
@@ -377,8 +980,18 @@ test("fetchAdaptiveThreadTurnsListForRelay caps initial mobile pages to five tur
   };
   const fetches = [];
   const pages = [
-    { data: makeTurns(1, 1), nextCursor: "cursor-after-1", stableMeta: "first-page" },
-    { data: makeTurns(2, 4), nextCursor: "cursor-after-5", stableMeta: "second-page" },
+    {
+      data: makeTurns(1, 1),
+      nextCursor: "cursor-after-1",
+      prevCursor: "cursor-before-1",
+      stableMeta: "first-page",
+    },
+    {
+      data: makeTurns(2, 4),
+      nextCursor: "cursor-after-5",
+      prevCursor: "cursor-before-2",
+      stableMeta: "second-page",
+    },
     { data: makeTurns(6, 15), nextCursor: "cursor-after-20", stableMeta: "third-page" },
   ];
 
@@ -401,6 +1014,7 @@ test("fetchAdaptiveThreadTurnsListForRelay caps initial mobile pages to five tur
   );
   assert.equal(response.result.stableMeta, undefined);
   assert.equal(response.result.nextCursor, "cursor-after-5");
+  assert.equal(response.result.prevCursor, "cursor-before-1");
   assert.deepEqual(
     fetches.map((params) => ({ limit: params.limit, cursor: params.cursor })),
     [
@@ -742,7 +1356,7 @@ test("fetchAdaptiveThreadTurnsListForRelay retries malformed first pages with a 
   );
 });
 
-test("fetchAdaptiveThreadTurnsListForRelay keeps only a safe slice when the combined page stays too large", async () => {
+test("fetchAdaptiveThreadTurnsListForRelay stops at the previous cursor boundary when the next batch is too large", async () => {
   const response = await fetchAdaptiveThreadTurnsListForRelay({
     id: "req-turns-list-large-combined",
     method: "thread/turns/list",
@@ -775,9 +1389,9 @@ test("fetchAdaptiveThreadTurnsListForRelay keeps only a safe slice when the comb
 
   assert.deepEqual(
     response.result.data.map((turn) => turn.id),
-    ["turn-1", "turn-2", "turn-3", "turn-4", "turn-5"]
+    ["turn-1"]
   );
-  assert.equal(response.result.nextCursor, "cursor-after-large");
+  assert.equal(response.result.nextCursor, "cursor-after-first");
 });
 
 test("fetchAdaptiveThreadTurnsListForRelay falls back to one turn when five are still too large", async () => {
@@ -815,70 +1429,64 @@ test("fetchAdaptiveThreadTurnsListForRelay falls back to one turn when five are 
     response.result.data.map((turn) => turn.id),
     ["turn-1"]
   );
-  assert.equal(response.result.nextCursor, "cursor-after-large");
+  assert.equal(response.result.nextCursor, "cursor-after-first");
 });
 
-test("fetchAdaptiveThreadTurnsListForRelay returns an empty page when the first page has no payload", async () => {
-  const response = await fetchAdaptiveThreadTurnsListForRelay({
-    id: "req-turns-list-missing-payload",
-    method: "thread/turns/list",
-    params: {
-      threadId: "thread-missing-payload",
-      limit: 2,
-      sortDirection: "desc",
-    },
-  }, {
-    fetchPage: async () => null,
-  });
-
-  assert.equal(response.id, "req-turns-list-missing-payload");
-  assert.deepEqual(response.result.data, []);
-  assert.equal(response.result.nextCursor, null);
-});
-
-test("fetchAdaptiveThreadTurnsListForRelay returns an empty page when no fallback is available", async () => {
-  const response = await fetchAdaptiveThreadTurnsListForRelay({
-    id: "req-turns-list-empty-fallback",
-    method: "thread/turns/list",
-    params: {
-      threadId: "thread-empty-fallback",
-      limit: 10,
-    },
-  }, {
-    fetchPage: async () => null,
-  });
-
-  assert.deepEqual(response, {
-    id: "req-turns-list-empty-fallback",
-    result: {
-      data: [],
-      nextCursor: null,
-    },
-  });
-});
-
-test("fetchAdaptiveThreadTurnsListForRelay does not copy malformed page fields into empty fallback", async () => {
-  const response = await fetchAdaptiveThreadTurnsListForRelay({
-    id: "req-turns-list-malformed-object",
-    method: "thread/turns/list",
-    params: {
-      threadId: "thread-malformed-object",
-      limit: 10,
-    },
-  }, {
-    fetchPage: async () => ({
-      unexpected: { nested: ["server-shape"] },
-      next_cursor: "cursor-that-should-not-survive",
+test("fetchAdaptiveThreadTurnsListForRelay rejects when the first page has no payload", async () => {
+  await assert.rejects(
+    fetchAdaptiveThreadTurnsListForRelay({
+      id: "req-turns-list-missing-payload",
+      method: "thread/turns/list",
+      params: {
+        threadId: "thread-missing-payload",
+        limit: 2,
+        sortDirection: "desc",
+      },
+    }, {
+      fetchPage: async () => null,
     }),
+    /returned no turns array/
+  );
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay preserves a genuinely empty server page", async () => {
+  const response = await fetchAdaptiveThreadTurnsListForRelay({
+    id: "req-turns-list-genuinely-empty",
+    method: "thread/turns/list",
+    params: {
+      threadId: "thread-genuinely-empty",
+      limit: 10,
+    },
+  }, {
+    fetchPage: async () => ({ data: [], nextCursor: null }),
   });
 
   assert.deepEqual(response, {
-    id: "req-turns-list-malformed-object",
+    id: "req-turns-list-genuinely-empty",
     result: {
       data: [],
       nextCursor: null,
     },
   });
+});
+
+test("fetchAdaptiveThreadTurnsListForRelay rejects a malformed page instead of fabricating empty history", async () => {
+  await assert.rejects(
+    fetchAdaptiveThreadTurnsListForRelay({
+      id: "req-turns-list-malformed-object",
+      method: "thread/turns/list",
+      params: {
+        threadId: "thread-malformed-object",
+        limit: 10,
+      },
+    }, {
+      fetchPage: async () => ({
+        unexpected: { nested: ["server-shape"] },
+        next_cursor: "cursor-that-should-not-survive",
+      }),
+    }),
+    /returned no turns array/
+  );
 });
 
 test("isContextualUserItemNotification drops only contextual live user items", () => {
@@ -1358,8 +1966,12 @@ test("sanitizeThreadHistoryImagesForRelay reconciles fallback ids without collap
   const repeatedAssistantText = "Still checking the same operation.";
   const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "08");
   fs.mkdirSync(sessionsDir, { recursive: true });
+  const rolloutPath = path.join(
+    sessionsDir,
+    `rollout-2026-07-08T20-00-00-${threadId}.jsonl`
+  );
   fs.writeFileSync(
-    path.join(sessionsDir, `rollout-2026-07-08T20-00-00-${threadId}.jsonl`),
+    rolloutPath,
     [
       JSON.stringify({
         type: "session_meta",
@@ -1414,6 +2026,19 @@ test("sanitizeThreadHistoryImagesForRelay reconciles fallback ids without collap
         payload: { type: "task_complete", turn_id: turnId },
       }),
     ].join("\n"),
+    "utf8"
+  );
+  const rolloutContent = fs.readFileSync(rolloutPath, "utf8");
+  const repeatedTextMarker = JSON.stringify(repeatedAssistantText);
+  let repeatedTextOffset = -1;
+  let repeatedTextSearchStart = 0;
+  for (let occurrence = 0; occurrence < 3; occurrence += 1) {
+    repeatedTextOffset = rolloutContent.indexOf(repeatedTextMarker, repeatedTextSearchStart);
+    repeatedTextSearchStart = repeatedTextOffset + repeatedTextMarker.length;
+  }
+  const thirdAssistantLineStart = rolloutContent.lastIndexOf("\n", repeatedTextOffset) + 1;
+  const thirdAssistantByteOffset = Buffer.byteLength(
+    rolloutContent.slice(0, thirdAssistantLineStart),
     "utf8"
   );
 
@@ -1472,7 +2097,7 @@ test("sanitizeThreadHistoryImagesForRelay reconciles fallback ids without collap
     "server-assistant-one",
     "server-command-real",
     "server-assistant-two",
-    "response-item-line-8",
+    `response-item-line-${thirdAssistantByteOffset}`,
   ]);
   assert.equal(items.filter((item) => item.role === "assistant").length, 3);
   assert.equal(items.some((item) => item.id?.startsWith("user-message-line-")), false);
@@ -1714,9 +2339,9 @@ test("sanitizeThreadHistoryImagesForRelay caches JSONL artifact scans until the 
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-cache-"));
   const previousCodexHome = process.env.CODEX_HOME;
   process.env.CODEX_HOME = codexHome;
-  const originalReadFileSync = fs.readFileSync;
+  const originalOpenSync = fs.openSync;
   t.after(() => {
-    fs.readFileSync = originalReadFileSync;
+    fs.openSync = originalOpenSync;
     if (previousCodexHome == null) {
       delete process.env.CODEX_HOME;
     } else {
@@ -1782,11 +2407,11 @@ test("sanitizeThreadHistoryImagesForRelay caches JSONL artifact scans until the 
   );
 
   let rolloutReads = 0;
-  fs.readFileSync = function readFileSyncWithRolloutCounter(filePath, ...args) {
+  fs.openSync = function openSyncWithRolloutCounter(filePath, ...args) {
     if (path.resolve(String(filePath)) === rolloutPath) {
       rolloutReads += 1;
     }
-    return originalReadFileSync.call(this, filePath, ...args);
+    return originalOpenSync.call(this, filePath, ...args);
   };
 
   const makeTurnsPage = (turnId, requestId) => JSON.stringify({
@@ -1836,6 +2461,92 @@ test("sanitizeThreadHistoryImagesForRelay caches JSONL artifact scans until the 
   assert.equal(changedPage.result.data[0].items[0].type, "fileChange");
   assert.equal(changedPage.result.data[0].items[0].changes[0].path, "Sources/Two.swift");
   assert.equal(rolloutReads, 2);
+});
+
+test("sanitizeThreadHistoryImagesForRelay lazily restores artifacts for an older cursor turn", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-older-artifact-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-jsonl-older-artifact";
+  const oldTurnId = "turn-jsonl-oldest";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "09");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  const lines = [
+    JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: oldTurnId } }),
+    JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "Keep the old plan" } }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "update_plan",
+        call_id: "call-old-plan",
+        arguments: JSON.stringify({
+          explanation: "Old exact plan",
+          plan: [{ step: "Preserve this old row", status: "completed" }],
+        }),
+      },
+    }),
+    JSON.stringify({
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        call_id: "huge-old-output",
+        output: "Z".repeat(4_500_000),
+      },
+    }),
+    JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: oldTurnId } }),
+  ];
+  for (let index = 1; index <= 5; index += 1) {
+    lines.push(
+      JSON.stringify({ type: "event_msg", payload: { type: "task_started", turn_id: `turn-recent-${index}` } }),
+      JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: `Recent ${index}` } }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          id: `assistant-recent-${index}`,
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: `Done ${index}` }],
+        },
+      }),
+      JSON.stringify({ type: "event_msg", payload: { type: "task_complete", turn_id: `turn-recent-${index}` } })
+    );
+  }
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-09T00-00-00-${threadId}.jsonl`),
+    lines.join("\n"),
+    "utf8"
+  );
+
+  const sanitized = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-old-artifact-page",
+    result: {
+      data: [{
+        id: oldTurnId,
+        items: [{
+          id: "assistant-old-server",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Old answer" }],
+        }],
+      }],
+      nextCursor: null,
+    },
+  }), "thread/turns/list", { threadId }));
+
+  assert.equal(sanitized.result.data[0].items[0].type, "plan");
+  assert.equal(sanitized.result.data[0].items[0].remodexJsonlProgressPlan, true);
+  assert.equal(sanitized.result.data[0].items.at(-1).id, "assistant-old-server");
 });
 
 test("sanitizeThreadHistoryImagesForRelay restores JSONL update_plan as progress plan history", (t) => {
@@ -2768,6 +3479,62 @@ test("sanitizeThreadHistoryImagesForRelay preserves oversized turns pages instea
     sanitized.result.data.every((turn) => turn.items.every((item) => item.relayPayloadTruncated === true)),
     true
   );
+});
+
+test("sanitizeThreadHistoryImagesForRelay bounds an extreme provisional JSONL turn", () => {
+  const fillerItems = Array.from({ length: 50_000 }, (_, index) => ({
+    id: `tool-item-${index}-${"x".repeat(48)}`,
+    type: "commandExecution",
+    role: "tool",
+    itemId: `tool-call-${index}-${"y".repeat(48)}`,
+    text: "done",
+  }));
+  const rawMessage = JSON.stringify({
+    id: "req-extreme-jsonl-page",
+    result: {
+      data: [{
+        id: "turn-line-4096",
+        items: [
+          { id: "critical-user", type: "user_message", role: "user", text: "Keep the prompt" },
+          { id: "critical-plan", type: "plan", text: "Keep the latest plan" },
+          { id: "critical-file-change", type: "fileChange", text: "Keep the file change" },
+          ...fillerItems,
+        ],
+      }],
+      nextCursor: "remodex-jsonl-handoff-v1:turn-line-4096:extreme-token",
+      remodexJsonlFallback: true,
+      remodexCanonicalHandoff: true,
+    },
+  });
+
+  const sanitizedRaw = sanitizeThreadHistoryImagesForRelay(
+    rawMessage,
+    "thread/turns/list",
+    { skipJsonlArtifactAugmentation: true }
+  );
+  const sanitized = JSON.parse(sanitizedRaw);
+  const keptItems = sanitized.result.data[0].items;
+  const itemIds = keptItems.map((item) => item.id);
+  const itemById = new Map(keptItems.map((item) => [item.id, item]));
+
+  assert.ok(Buffer.byteLength(sanitizedRaw, "utf8") <= 4 * 1024 * 1024);
+  assert.equal(sanitized.result.remodexEmergencyJsonlPageForRelay, true);
+  assert.equal(sanitized.result.remodexJsonlFallback, true);
+  assert.equal(sanitized.result.remodexCanonicalHandoff, true);
+  assert.equal(
+    sanitized.result.nextCursor,
+    "remodex-jsonl-handoff-v1:turn-line-4096:extreme-token"
+  );
+  assert.equal(sanitized.result.data[0].id, "turn-line-4096");
+  assert.ok(sanitized.result.data[0].items.length <= 64);
+  assert.equal(itemIds.includes("critical-user"), true);
+  assert.equal(itemIds.includes("critical-plan"), true);
+  assert.equal(itemIds.includes("critical-file-change"), true);
+  assert.equal(itemIds.includes(fillerItems.at(-1).id), true);
+  assert.equal(itemById.get("critical-user")?.text, "Keep the prompt");
+  assert.equal(itemById.get("critical-plan")?.text, "Keep the latest plan");
+  assert.equal(itemById.get("critical-file-change")?.text, "Keep the file change");
+  assert.equal(itemById.get(fillerItems.at(-1).id)?.text, "done");
 });
 
 test("sanitizeThreadHistoryImagesForRelay compacts oversized history before the newest turn tail", () => {

@@ -223,6 +223,40 @@ final class CodexServiceImmediateSyncTests: XCTestCase {
         XCTAssertTrue(projected.contains { $0.id == "plan" })
     }
 
+    func testProjectionWindowPreservesThePromptForAToolHeavyVisibleTurn() {
+        let service = makeService()
+        let threadID = "thread-prompt-window"
+        let turnID = "turn-prompt-window"
+        let prompt = makeMessage(
+            id: "prompt",
+            threadID: threadID,
+            role: .user,
+            text: "Fix this large task",
+            turnID: turnID,
+            orderIndex: 0
+        )
+        let filler = (1...90).map { index in
+            makeMessage(
+                id: "tool-\(index)",
+                threadID: threadID,
+                role: .system,
+                kind: .toolActivity,
+                text: "Ran command \(index)",
+                turnID: turnID,
+                orderIndex: index
+            )
+        }
+
+        let source = service.snapshotProjectionSourceMessages(
+            threadId: threadID,
+            from: [prompt] + filler,
+            usesPaginatedHistory: true
+        )
+
+        XCTAssertTrue(source.contains { $0.id == "prompt" })
+        XCTAssertLessThanOrEqual(source.count, TurnTimelineProjectionPolicy.initialMessageLimit + 1)
+    }
+
     private func makeService() -> CodexService {
         let suiteName = "CodexServiceImmediateSyncTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
