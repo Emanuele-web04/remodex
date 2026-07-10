@@ -1470,10 +1470,21 @@ extension CodexService {
                 }
 
                 if let runningTurnID = snapshot.interruptibleTurnID,
-                   turnTerminalState(for: runningTurnID) != nil {
+                   turnTerminalState(for: runningTurnID, threadId: normalizedThreadID) != nil {
+                    let currentActiveTurnID = activeTurnID(for: normalizedThreadID)
+                    let isStaleDesktopCandidateForDifferentActiveTurn = currentActiveTurnID != nil
+                        && currentActiveTurnID != runningTurnID
+                        && (CodexSyntheticIdentifiers.isProjectedDesktopTurnID(runningTurnID)
+                            || isDesktopMirroredRunning(normalizedThreadID))
+                    // A stale Litter/app-server probe can still report completed A
+                    // after live mirroring has already promoted B. Recognizing A as
+                    // terminal must not tear down the different, newer active turn.
+                    if isStaleDesktopCandidateForDifferentActiveTurn {
+                        return true
+                    }
                     clearRunningState(for: normalizedThreadID)
                     setProtectedRunningFallback(false, for: normalizedThreadID)
-                    if let existingTurnID = activeTurnID(for: normalizedThreadID) {
+                    if let existingTurnID = currentActiveTurnID {
                         setActiveTurnID(nil, for: normalizedThreadID)
                         if threadIdByTurnID[existingTurnID] == normalizedThreadID {
                             threadIdByTurnID.removeValue(forKey: existingTurnID)
@@ -2205,7 +2216,7 @@ extension CodexService {
         if resolution == .completed {
             recordTurnTerminalState(threadId: threadId, turnId: turnId, state: .completed)
         }
-        noteTurnFinished(turnId: turnId)
+        noteTurnFinished(threadId: threadId, turnId: turnId)
         markTurnCompleted(threadId: threadId, turnId: turnId)
     }
 

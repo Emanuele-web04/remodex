@@ -544,6 +544,7 @@ function threadTurnsListHandoffDescriptor(cursor) {
 function canonicalThreadTurnsListRequest(request) {
   const params = { ...(request?.params || {}) };
   delete params.remodexRequireCanonical;
+  delete params.remodexTurnStateOnly;
   if (params.cursor === JSONL_OLDER_HANDOFF_CURSOR || threadTurnsListHandoffDescriptor(params.cursor)) {
     delete params.cursor;
   }
@@ -803,6 +804,7 @@ function startBridge({
       isLocallyOwnedThread: (threadId) => Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId)),
       normalizeTurnStartParams: normalizeTurnStartParamsForCodex,
       socketPath: config.desktopIpcSocketPath || undefined,
+      snapshotDebounceMs: config.desktopIpcSnapshotDebounceMs,
     })
     : null;
   const desktopIpcLiveOwner = !config.codexEndpoint

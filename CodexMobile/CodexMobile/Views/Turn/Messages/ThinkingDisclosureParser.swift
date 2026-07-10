@@ -177,7 +177,14 @@ enum ThinkingDisclosureParser {
     }
 
     private static func joinedThinkingBlock(from lines: [String]) -> String {
-        lines.joined(separator: "\n")
+        lines
+            // Codex reasoning summaries can carry an empty HTML comment as a
+            // stream separator. It is invisible content, not disclosure detail.
+            .filter { line in
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                return !(trimmed.hasPrefix("<!--") && trimmed.hasSuffix("-->"))
+            }
+            .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

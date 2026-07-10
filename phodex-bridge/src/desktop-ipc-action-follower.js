@@ -205,6 +205,10 @@ function createDesktopIpcActionFollower({
   socketPath = resolveDefaultIpcSocketPath(),
   netModule = net,
   now = () => Date.now(),
+  snapshotDebounceMs = 0,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+  onNormalizedHistoryIndexRebuilt = () => {},
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   ownershipProbeTimeoutMs = OWNERSHIP_PROBE_TIMEOUT_MS,
   backgroundDisconnectGraceMs = BACKGROUND_DISCONNECT_GRACE_MS,
@@ -223,6 +227,16 @@ function createDesktopIpcActionFollower({
   });
   const rawStatesByThreadId = new Map();
   const rawStateUpdatedAtByThreadId = new Map();
+  const pendingSnapshotsByThreadId = new Map();
+  // History and live updates have different authorities. Once Desktop exposes
+  // normalized history that the legacy turns array does not fully cover, keep
+  // canonical paging on app-server/JSONL for this Desktop source epoch while
+  // still allowing a bounded Desktop tail to own live deltas.
+  const canonicalHistoryThreadIds = new Set();
+  const canonicalHistoryReplacementSentThreadIds = new Set();
+  const projectedLiveActiveTurnIdsByThreadId = new Map();
+  const desktopLiveLifecycleByThreadId = new Map();
+  const normalizedLiveIndexesByThreadId = new Map();
   const staleYieldedThreadIds = new Set();
   const conversationProjector = createDesktopConversationProjector({ now });
   const pendingRoutesByRequestId = new Map();
@@ -274,10 +288,16 @@ function createDesktopIpcActionFollower({
   // liveOwnerThreadIds (still-owned local streams must not become hijackable) and
   // without rejecting held requests (removeDesktopThreadState handles real removal).
   function forgetEvictedThreadState(threadId) {
+    cancelPendingSnapshot(threadId);
     settleAnnouncedBackgroundTurn(threadId, "interrupted");
     backgroundOnlyThreadIds.delete(threadId);
     rawStatesByThreadId.delete(threadId);
     rawStateUpdatedAtByThreadId.delete(threadId);
+    canonicalHistoryThreadIds.delete(threadId);
+    canonicalHistoryReplacementSentThreadIds.delete(threadId);
+    projectedLiveActiveTurnIdsByThreadId.delete(threadId);
+    desktopLiveLifecycleByThreadId.delete(threadId);
+    normalizedLiveIndexesByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
     baselineRecoveryStateByThreadId.delete(threadId);
@@ -326,7 +346,9 @@ function createDesktopIpcActionFollower({
           // The read response below carries the full baseline. Seed the
           // projector so the next patch becomes a delta instead of replaying
           // that baseline a second time.
-          conversationProjector.seed(threadId, rawState);
+          const liveState = boundedDesktopLiveStateForThread(threadId, rawState);
+          conversationProjector.seed(threadId, liveState);
+          rememberDesktopLiveProjection(threadId, liveState);
         }
       }
     }
@@ -367,8 +389,16 @@ function createDesktopIpcActionFollower({
   }
 
   function stopAll() {
+    for (const threadId of pendingSnapshotsByThreadId.keys()) {
+      cancelPendingSnapshot(threadId);
+    }
     rawStatesByThreadId.clear();
     rawStateUpdatedAtByThreadId.clear();
+    canonicalHistoryThreadIds.clear();
+    canonicalHistoryReplacementSentThreadIds.clear();
+    projectedLiveActiveTurnIdsByThreadId.clear();
+    desktopLiveLifecycleByThreadId.clear();
+    normalizedLiveIndexesByThreadId.clear();
     conversationProjector.reset();
     pendingRoutesByRequestId.clear();
     activeThreadIds.clear();
@@ -451,6 +481,16 @@ function createDesktopIpcActionFollower({
       return;
     }
 
+    const pendingSnapshot = pendingSnapshotsByThreadId.get(threadId);
+    if (pendingSnapshot && isPatchChange(params.change)) {
+      const patchedSnapshot = applyConversationStateChange(pendingSnapshot.state, params.change);
+      if (patchedSnapshot) {
+        pendingSnapshot.state = patchedSnapshot;
+        return;
+      }
+      flushPendingSnapshot(threadId);
+    }
+
     const previousState = rawStatesByThreadId.get(threadId) || null;
     const nextState = applyConversationStateChange(previousState, params.change);
     if (!nextState) {
@@ -479,29 +519,127 @@ function createDesktopIpcActionFollower({
       return;
     }
 
+    if (isSnapshotChange(params.change) && snapshotDebounceMs > 0) {
+      schedulePendingSnapshot(threadId, nextState);
+      return;
+    }
+
+    commitConversationState(threadId, nextState, {
+      isFullSnapshot: isSnapshotChange(params.change),
+      change: params.change,
+    });
+  }
+
+  function schedulePendingSnapshot(threadId, state) {
+    cancelPendingSnapshot(threadId);
+    const timer = setTimeoutFn(() => {
+      const pending = pendingSnapshotsByThreadId.get(threadId);
+      if (!pending || pending.timer !== timer) {
+        return;
+      }
+      pendingSnapshotsByThreadId.delete(threadId);
+      commitConversationState(threadId, pending.state, { isFullSnapshot: true });
+    }, Math.max(0, snapshotDebounceMs));
+    timer?.unref?.();
+    pendingSnapshotsByThreadId.set(threadId, { state, timer });
+  }
+
+  function flushPendingSnapshot(threadId) {
+    const pending = pendingSnapshotsByThreadId.get(threadId);
+    if (!pending) {
+      return false;
+    }
+    clearTimeoutFn(pending.timer);
+    pendingSnapshotsByThreadId.delete(threadId);
+    commitConversationState(threadId, pending.state, { isFullSnapshot: true });
+    return true;
+  }
+
+  function cancelPendingSnapshot(threadId) {
+    const pending = pendingSnapshotsByThreadId.get(threadId);
+    if (!pending) {
+      return false;
+    }
+    clearTimeoutFn(pending.timer);
+    pendingSnapshotsByThreadId.delete(threadId);
+    return true;
+  }
+
+  function commitConversationState(threadId, nextState, {
+    isFullSnapshot = false,
+    change = null,
+  } = {}) {
+    if (liveOwnerThreadIds.has(threadId) || isLocallyOwnedThread(threadId)) {
+      releaseDesktopThreadState(threadId);
+      return false;
+    }
+    if (isFullSnapshot) {
+      rebuildNormalizedLiveIndex(threadId, nextState);
+    } else {
+      updateNormalizedLiveIndex(threadId, nextState, change);
+    }
+    const previousState = rawStatesByThreadId.get(threadId) || null;
     rawStatesByThreadId.set(threadId, nextState);
     rawStateUpdatedAtByThreadId.set(threadId, now());
     // A usable state arrived: recovery bookkeeping and pre-baseline queued
     // patches are obsolete (snapshots replace state wholesale).
     baselineRecoveryStateByThreadId.delete(threadId);
-    if (!isPatchChange(params.change)) {
+    if (isFullSnapshot) {
       queuedChangesByThreadId.delete(threadId);
     }
     if (backgroundOnlyThreadIds.has(threadId)) {
       syncBackgroundThreadLifecycle(threadId, previousState, nextState);
     } else {
-      syncProjectedConversationState(threadId, nextState);
+      syncProjectedConversationState(threadId, nextState, {
+        isFullSnapshot,
+      });
     }
     syncProjectedActions(threadId, projectPendingDesktopActions(threadId, nextState));
     releaseHeldFollowerRequests(threadId, { toDesktop: true });
+    return true;
+  }
+
+  function rebuildNormalizedLiveIndex(threadId, state) {
+    const index = createNormalizedLiveIndex(state);
+    if (index) {
+      normalizedLiveIndexesByThreadId.set(threadId, index);
+      onNormalizedHistoryIndexRebuilt(threadId);
+    } else {
+      normalizedLiveIndexesByThreadId.delete(threadId);
+    }
+  }
+
+  function updateNormalizedLiveIndex(threadId, state, change) {
+    const index = normalizedLiveIndexesByThreadId.get(threadId);
+    if (!index) {
+      if (hasNormalizedTurnStore(state)) {
+        rebuildNormalizedLiveIndex(threadId, state);
+      }
+      return;
+    }
+    if (normalizedLiveIndexNeedsRebuild(change)) {
+      rebuildNormalizedLiveIndex(threadId, state);
+      return;
+    }
+    refreshTouchedNormalizedActiveTurns(index, state, change);
   }
 
   function onDisconnect() {
     // Patch baselines are connection-scoped (Desktop re-sends a snapshot after
     // reconnect), but the projector cache is not: keeping it lets the reconnect
     // snapshot diff against already-mirrored content instead of replaying it.
+    for (const threadId of pendingSnapshotsByThreadId.keys()) {
+      cancelPendingSnapshot(threadId);
+    }
     rawStatesByThreadId.clear();
     rawStateUpdatedAtByThreadId.clear();
+    // A reconnect is a new Desktop source epoch. The first normalized snapshot
+    // must repair canonical history instead of silently seeding content that may
+    // have changed while IPC was down.
+    canonicalHistoryReplacementSentThreadIds.clear();
+    projectedLiveActiveTurnIdsByThreadId.clear();
+    desktopLiveLifecycleByThreadId.clear();
+    normalizedLiveIndexesByThreadId.clear();
     recoveringThreadIds.clear();
     baselineRecoveryStateByThreadId.clear();
     queuedChangesByThreadId.clear();
@@ -525,6 +663,7 @@ function createDesktopIpcActionFollower({
   // The bridge's own live owner just claimed this thread's stream, so drop stale
   // Desktop state instead of hijacking future phone requests into Desktop IPC.
   function releaseDesktopThreadState(threadId) {
+    cancelPendingSnapshot(threadId);
     settleAnnouncedBackgroundTurn(threadId, "interrupted");
     if (backgroundOnlyThreadIds.delete(threadId)) {
       activeThreadIds.delete(threadId);
@@ -536,6 +675,11 @@ function createDesktopIpcActionFollower({
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     rawStateUpdatedAtByThreadId.delete(threadId);
+    canonicalHistoryThreadIds.delete(threadId);
+    canonicalHistoryReplacementSentThreadIds.delete(threadId);
+    projectedLiveActiveTurnIdsByThreadId.delete(threadId);
+    desktopLiveLifecycleByThreadId.delete(threadId);
+    normalizedLiveIndexesByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
     baselineRecoveryStateByThreadId.delete(threadId);
@@ -548,6 +692,7 @@ function createDesktopIpcActionFollower({
   // picks the thread up next, its broadcasts must be processed immediately
   // instead of being dropped until the phone happens to issue another read.
   function removeDesktopThreadState(threadId) {
+    cancelPendingSnapshot(threadId);
     settleAnnouncedBackgroundTurn(threadId, "interrupted");
     if (backgroundOnlyThreadIds.delete(threadId)) {
       activeThreadIds.delete(threadId);
@@ -559,6 +704,11 @@ function createDesktopIpcActionFollower({
     syncProjectedActions(threadId, []);
     rawStatesByThreadId.delete(threadId);
     rawStateUpdatedAtByThreadId.delete(threadId);
+    canonicalHistoryThreadIds.delete(threadId);
+    canonicalHistoryReplacementSentThreadIds.delete(threadId);
+    projectedLiveActiveTurnIdsByThreadId.delete(threadId);
+    desktopLiveLifecycleByThreadId.delete(threadId);
+    normalizedLiveIndexesByThreadId.delete(threadId);
     conversationProjector.remove(threadId);
     queuedChangesByThreadId.delete(threadId);
     baselineRecoveryStateByThreadId.delete(threadId);
@@ -789,8 +939,9 @@ function createDesktopIpcActionFollower({
     }
   }
 
-  // Serves Desktop-owned history/read requests from the cached IPC snapshot so
-  // mobile can backfill threads that only exist in Codex Desktop.
+  // Legacy Desktop snapshots can still serve reads, but normalized history is
+  // permanently canonical for this Desktop source epoch. A later snapshot that
+  // happens to refill raw turns must not reclaim paging and flap live sources.
   function tryServeDesktopOwnedRead(message) {
     const method = readString(message?.method);
     if (!DESKTOP_STATE_READ_METHODS.has(method) || message?.id == null) {
@@ -806,11 +957,40 @@ function createDesktopIpcActionFollower({
       return ownsDesktopCursor ? rejectDesktopTurnsCursor(message) : false;
     }
     const rawState = rawStatesByThreadId.get(threadId);
+    if (pendingSnapshotsByThreadId.has(threadId)) {
+      return ownsDesktopCursor ? rejectDesktopTurnsCursor(message) : false;
+    }
     if (!rawState) {
       return ownsDesktopCursor ? rejectDesktopTurnsCursor(message) : false;
     }
 
     rememberActiveThread(threadId);
+    // Newer Litter snapshots keep materialized history in
+    // turnHistory.history.entitiesByKey while leaving the legacy top-level
+    // turns array empty or limited to only the current turn. The Desktop
+    // projector cannot decode the remaining normalized store, so a partial
+    // legacy projection is not authoritative. Yield before answering with
+    // truncated history and let app-server/JSONL paging reconstruct it.
+    if (hasNormalizedHistoryOutsideRawTurns(
+      rawState,
+      normalizedLiveIndexesByThreadId.get(threadId)
+    )) {
+      canonicalHistoryThreadIds.add(threadId);
+    }
+    if (canonicalHistoryThreadIds.has(threadId)) {
+      if (isDesktopLiveTurnStateSnapshotRequest(message)) {
+        const liveState = boundedDesktopLiveStateForThread(threadId, rawState);
+        sendApplicationResponse(JSON.stringify({
+          id: message.id,
+          result: buildDesktopLiveTurnStateResult(liveState.turns),
+        }));
+        return true;
+      }
+      // Falling through only starts a canonical request. It may be a metadata-
+      // only resume or may fail before history arrives, so keep the repair
+      // signal armed until a live update can force a verified reload.
+      return ownsDesktopCursor ? rejectDesktopTurnsCursor(message) : false;
+    }
     const thread = projectDesktopConversationStateToThread(threadId, rawState, { now });
     // A run that Desktop stopped streaming updates for is not a live run: serving
     // it from cache would answer thread-list refreshes with a phantom "running"
@@ -850,9 +1030,75 @@ function createDesktopIpcActionFollower({
     return true;
   }
 
+  function isDesktopLiveTurnStateSnapshotRequest(message) {
+    if (readString(message?.method) !== "thread/turns/list"
+      || readString(message?.params?.cursor)
+      || message?.params?.remodexRequireCanonical === true) {
+      return false;
+    }
+    if (message?.params?.remodexTurnStateOnly === true) {
+      return true;
+    }
+    // Remodex iPhone 2.1 predates the explicit marker. Its running-state probe
+    // has this unique request shape; actual history pages use limits 1 and 5.
+    return Number(message?.params?.limit) === 8
+      && normalizeToken(readString(message?.params?.sortDirection) || "desc") === "desc";
+  }
+
+  function buildDesktopLiveTurnStateResult(turns) {
+    const data = (Array.isArray(turns) ? turns : [])
+      .slice()
+      .reverse()
+      .map((turn) => {
+        const id = readString(turn?.id)
+          || readString(turn?.turnId)
+          || readString(turn?.turn_id);
+        return {
+          ...(id ? { id } : {}),
+          // Unknown status must never invent an interruptible turn. Live
+          // activity still carries explicit inProgress/running statuses.
+          status: readString(turn?.status) || "completed",
+        };
+      });
+    return {
+      data,
+      nextCursor: null,
+      hasMore: false,
+      remodexDesktopLiveState: true,
+    };
+  }
+
   function hasActiveProjectedTurn(thread) {
     return (thread?.turns || []).some((turn) => turn?.status === "inProgress")
       || readString(thread?.status?.type) === "active";
+  }
+
+  function hasNormalizedHistoryOutsideRawTurns(rawState, normalizedIndex = null) {
+    if (normalizedIndex) {
+      return normalizedIndex.hasHistoryOutsideRawTurns;
+    }
+    const turnHistory = rawState?.turnHistory ?? rawState?.turn_history;
+    const history = turnHistory?.history;
+    const entities = history?.entitiesByKey ?? history?.entities_by_key;
+    if (!entities || typeof entities !== "object" || Array.isArray(entities)) {
+      return false;
+    }
+    const rawTurnIds = new Set((Array.isArray(rawState?.turns) ? rawState.turns : [])
+      .map((turn) => (
+        readString(turn?.id)
+        || readString(turn?.turnId)
+        || readString(turn?.turn_id)
+      ))
+      .filter(Boolean));
+    for (const [key, entity] of Object.entries(entities)) {
+      const normalizedTurnId = key.startsWith("turn:")
+        ? readString(key.slice("turn:".length))
+        : readString(entity?.turnId) || readString(entity?.turn_id);
+      if (normalizedTurnId && !rawTurnIds.has(normalizedTurnId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   function isRawStateStaleForActiveRead(threadId) {
@@ -860,14 +1106,104 @@ function createDesktopIpcActionFollower({
     return now() - updatedAt > STALE_ACTIVE_READ_MAX_AGE_MS;
   }
 
-  function syncProjectedConversationState(threadId, nextState) {
+  function boundedDesktopLiveStateForThread(threadId, state) {
+    return boundedDesktopLiveState(
+      state,
+      now(),
+      projectedLiveActiveTurnIdsByThreadId.get(threadId) || new Set(),
+      normalizedLiveIndexesByThreadId.get(threadId) || null
+    );
+  }
+
+  function rememberDesktopLiveProjection(threadId, liveState) {
+    const activeTurns = activeDesktopTurnDescriptors(liveState);
+    const activeTurnIds = new Set(activeTurns.map((turn) => turn.id));
+    if (activeTurnIds.size > 0) {
+      projectedLiveActiveTurnIdsByThreadId.set(threadId, activeTurnIds);
+    } else {
+      projectedLiveActiveTurnIdsByThreadId.delete(threadId);
+    }
+    desktopLiveLifecycleByThreadId.set(
+      threadId,
+      new Map(activeTurns.map((turn) => [turn.id, turn]))
+    );
+  }
+
+  function emitDesktopSnapshotLifecycleTransition(threadId, liveState) {
+    const previousById = desktopLiveLifecycleByThreadId.get(threadId) || new Map();
+    const nextTurns = activeDesktopTurnDescriptors(liveState);
+    const nextById = new Map(nextTurns.map((turn) => [turn.id, turn]));
+    for (const previous of previousById.values()) {
+      if (nextById.has(previous.id)) {
+        continue;
+      }
+      const terminalTurn = (liveState.turns || []).find((turn) => turnIdOf(turn) === previous.id);
+      const terminalStatus = readString(terminalTurn?.status) || "completed";
+      sendApplicationResponse(JSON.stringify(desktopLiveTurnLifecycleNotification(
+        "turn/completed",
+        threadId,
+        { id: previous.id, status: terminalStatus }
+      )));
+    }
+    for (const next of nextTurns) {
+      if (previousById.has(next.id)) {
+        continue;
+      }
+      sendApplicationResponse(JSON.stringify(desktopLiveTurnLifecycleNotification(
+        "turn/started",
+        threadId,
+        next
+      )));
+    }
+  }
+
+  function syncProjectedConversationState(threadId, nextState, { isFullSnapshot = false } = {}) {
     const resumedAfterStaleYield = staleYieldedThreadIds.delete(threadId);
+    if (!canonicalHistoryThreadIds.has(threadId)
+      && hasNormalizedHistoryOutsideRawTurns(
+        nextState,
+        normalizedLiveIndexesByThreadId.get(threadId)
+      )) {
+      canonicalHistoryThreadIds.add(threadId);
+    }
+    const liveState = boundedDesktopLiveStateForThread(threadId, nextState);
+    if (canonicalHistoryThreadIds.has(threadId)
+      && !canonicalHistoryReplacementSentThreadIds.has(threadId)) {
+      canonicalHistoryReplacementSentThreadIds.add(threadId);
+      conversationProjector.remove(threadId);
+      // Seed the bounded live tail before asking the phone for canonical
+      // history. Subsequent 8-50ms Desktop patches then become small deltas
+      // instead of replaying hundreds of current-turn items as a baseline.
+      conversationProjector.seed(threadId, liveState);
+      sendApplicationResponse(JSON.stringify({
+        method: "thread/replaced",
+        params: {
+          threadId,
+          remodexDesktopMirror: true,
+          remodexDesktopIpcMirror: true,
+          remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+        },
+      }));
+      emitDesktopSnapshotLifecycleTransition(threadId, liveState);
+      rememberDesktopLiveProjection(threadId, liveState);
+      return;
+    }
+    if (isFullSnapshot && canonicalHistoryThreadIds.has(threadId)) {
+      // Litter can immediately rehydrate the same normalized snapshot with a
+      // completely different set of item IDs. Treat full snapshots as source
+      // baselines: preserve only turn lifecycle, then seed. Item diffs resume
+      // on subsequent patches and cannot replay hundreds of old rows.
+      emitDesktopSnapshotLifecycleTransition(threadId, liveState);
+      conversationProjector.seed(threadId, liveState);
+      rememberDesktopLiveProjection(threadId, liveState);
+      return;
+    }
     if (resumedAfterStaleYield) {
       // Switching back from rollout/app-server history to fresh Desktop state
       // is a source epoch change. Force a baseline + thread/replaced repair.
       conversationProjector.remove(threadId);
     }
-    const output = conversationProjector.project(threadId, nextState);
+    const output = conversationProjector.project(threadId, liveState);
     if (resumedAfterStaleYield || output.type === "fullReplace" || output.type === "baseline") {
       // fullReplace: synthesized turn ids just became real, stale rows must go.
       // baseline: the projector cache was evicted, so updates that arrived while
@@ -889,6 +1225,7 @@ function createDesktopIpcActionFollower({
     for (const notification of output.notifications || []) {
       sendApplicationResponse(JSON.stringify(notification));
     }
+    rememberDesktopLiveProjection(threadId, liveState);
   }
 
   // Unopened chats only need run-state signals for the sidebar. Sending the
@@ -896,12 +1233,19 @@ function createDesktopIpcActionFollower({
   // every running Desktop chat onto the phone during a sidebar refresh.
   function syncBackgroundThreadLifecycle(threadId, _previousState, nextState) {
     const announcedTurn = announcedBackgroundTurnsByThreadId.get(threadId) || null;
-    const nextActiveTurn = latestActiveRawTurn(nextState);
     const previousTurnId = readString(announcedTurn?.id);
+    const retainedTurnIds = previousTurnId ? new Set([previousTurnId]) : new Set();
+    const liveState = boundedDesktopLiveState(
+      nextState,
+      now(),
+      retainedTurnIds,
+      normalizedLiveIndexesByThreadId.get(threadId) || null
+    );
+    const nextActiveTurn = latestActiveRawTurn(liveState);
     const nextTurnId = readString(nextActiveTurn?.id);
 
     if (previousTurnId && previousTurnId !== nextTurnId) {
-      const settledTurn = backgroundRawTurnById(nextState, previousTurnId)
+      const settledTurn = backgroundRawTurnById(liveState, previousTurnId)
         || announcedTurn;
       const settledStatus = readString(settledTurn?.status);
       settleAnnouncedBackgroundTurn(
@@ -979,12 +1323,18 @@ function createDesktopIpcActionFollower({
       return;
     }
     if (envelope.method === "thread-archived") {
+      cancelPendingSnapshot(threadId);
       settleAnnouncedBackgroundTurn(threadId, "interrupted");
       if (backgroundOnlyThreadIds.delete(threadId)) {
         activeThreadIds.delete(threadId);
       }
       rawStatesByThreadId.delete(threadId);
       rawStateUpdatedAtByThreadId.delete(threadId);
+      canonicalHistoryThreadIds.delete(threadId);
+      canonicalHistoryReplacementSentThreadIds.delete(threadId);
+      projectedLiveActiveTurnIdsByThreadId.delete(threadId);
+      desktopLiveLifecycleByThreadId.delete(threadId);
+      normalizedLiveIndexesByThreadId.delete(threadId);
       conversationProjector.remove(threadId);
       syncProjectedActions(threadId, []);
     }
@@ -1241,9 +1591,17 @@ function createDesktopIpcActionFollower({
 
     rawStatesByThreadId.set(threadId, nextState);
     rawStateUpdatedAtByThreadId.set(threadId, now());
+    rebuildNormalizedLiveIndex(threadId, nextState);
     if (baselineState && typeof baselineState === "object"
       && !backgroundOnlyThreadIds.has(threadId)) {
-      conversationProjector.seed(threadId, baselineState);
+      const liveState = boundedDesktopLiveState(
+        baselineState,
+        now(),
+        projectedLiveActiveTurnIdsByThreadId.get(threadId) || new Set(),
+        createNormalizedLiveIndex(baselineState)
+      );
+      conversationProjector.seed(threadId, liveState);
+      rememberDesktopLiveProjection(threadId, liveState);
     }
     if (backgroundOnlyThreadIds.has(threadId)) {
       syncBackgroundThreadLifecycle(threadId, baselineState, nextState);
@@ -1261,11 +1619,18 @@ function createDesktopIpcActionFollower({
     // phone; used to keep fallback mirrors (rollout tail) silent.
     hasLiveThreadState(threadId) {
       const normalizedThreadId = readString(threadId);
+      if (pendingSnapshotsByThreadId.has(normalizedThreadId)) {
+        return false;
+      }
       const rawState = rawStatesByThreadId.get(normalizedThreadId);
       if (!rawState) {
         return false;
       }
-      const thread = projectDesktopConversationStateToThread(normalizedThreadId, rawState, { now });
+      const liveState = boundedDesktopLiveStateForThread(normalizedThreadId, rawState);
+      if (!Array.isArray(liveState.turns) || liveState.turns.length === 0) {
+        return false;
+      }
+      const thread = projectDesktopConversationStateToThread(normalizedThreadId, liveState, { now });
       if (hasActiveProjectedTurn(thread) && isRawStateStaleForActiveRead(normalizedThreadId)) {
         staleYieldedThreadIds.add(normalizedThreadId);
         return false;
@@ -1776,6 +2141,183 @@ function isSnapshotChange(change) {
   return change?.type === "snapshot" || change?.type === "Snapshot";
 }
 
+function normalizedTurnStore(state) {
+  const turnHistory = state?.turnHistory ?? state?.turn_history;
+  const history = turnHistory?.history;
+  const entities = history?.entitiesByKey ?? history?.entities_by_key;
+  if (!entities || typeof entities !== "object" || Array.isArray(entities)) {
+    return null;
+  }
+  return { history, entities };
+}
+
+function hasNormalizedTurnStore(state) {
+  return Boolean(normalizedTurnStore(state));
+}
+
+function normalizedTurnIdForEntity(entityKey, entity) {
+  const keyedTurnId = entityKey.startsWith("turn:")
+    ? readString(entityKey.slice("turn:".length))
+    : "";
+  const entityTurnId = readString(entity?.turnId) || readString(entity?.turn_id);
+  const looksLikeTurn = Boolean(keyedTurnId)
+    || (Boolean(entityTurnId) && (entity?.status != null || Array.isArray(entity?.items)));
+  return looksLikeTurn ? keyedTurnId || entityTurnId : "";
+}
+
+function createNormalizedLiveIndex(state) {
+  const store = normalizedTurnStore(state);
+  if (!store) {
+    return null;
+  }
+  const rawTurns = Array.isArray(state?.turns) ? state.turns : [];
+  const rawTurnIds = new Set();
+  const rawIndexByTurnId = new Map();
+  for (let rawIndex = 0; rawIndex < rawTurns.length; rawIndex += 1) {
+    const rawTurnId = turnIdOf(rawTurns[rawIndex]);
+    if (rawTurnId) {
+      rawTurnIds.add(rawTurnId);
+      rawIndexByTurnId.set(rawTurnId, rawIndex);
+    }
+  }
+  const turnIdByEntityKey = new Map();
+  const normalizedTurnIds = new Set();
+  for (const [entityKey, entity] of Object.entries(store.entities)) {
+    if (!entity || typeof entity !== "object") {
+      continue;
+    }
+    const turnId = normalizedTurnIdForEntity(entityKey, entity);
+    if (!turnId) {
+      continue;
+    }
+    turnIdByEntityKey.set(entityKey, turnId);
+    normalizedTurnIds.add(turnId);
+  }
+
+  const entries = [];
+  const entryIndexByTurnId = new Map();
+  const appendEntityKey = (key) => {
+    const entityKey = readString(key);
+    const turnId = entityKey ? turnIdByEntityKey.get(entityKey) : "";
+    if (!turnId || entryIndexByTurnId.has(turnId)) {
+      return;
+    }
+    entryIndexByTurnId.set(turnId, entries.length);
+    entries.push({ id: turnId, entityKey, rawIndex: rawIndexByTurnId.get(turnId) ?? null });
+  };
+  for (const island of Array.isArray(store.history?.islands) ? store.history.islands : []) {
+    for (const entry of Array.isArray(island?.entries) ? island.entries : []) {
+      appendEntityKey(readString(entry?.value) || readString(entry?.key));
+    }
+  }
+  if (entries.length === 0) {
+    for (const entityKey of turnIdByEntityKey.keys()) {
+      appendEntityKey(entityKey);
+    }
+  }
+  for (let rawIndex = 0; rawIndex < rawTurns.length; rawIndex += 1) {
+    const rawTurn = rawTurns[rawIndex];
+    if (!rawTurn || typeof rawTurn !== "object") {
+      continue;
+    }
+    const rawTurnId = turnIdOf(rawTurn) || `ipc-turn-${entries.length}`;
+    if (entryIndexByTurnId.has(rawTurnId)) {
+      continue;
+    }
+    entryIndexByTurnId.set(rawTurnId, entries.length);
+    entries.push({
+      id: rawTurnId,
+      entityKey: null,
+      rawIndex: rawIndexByTurnId.get(rawTurnId) ?? rawIndex,
+    });
+  }
+
+  const index = {
+    entries,
+    entryIndexByTurnId,
+    turnIdByEntityKey,
+    activeTurnIds: new Set(),
+    hasHistoryOutsideRawTurns: Array.from(normalizedTurnIds).some(
+      (turnId) => !rawTurnIds.has(turnId)
+    ),
+  };
+  for (const entry of entries) {
+    const turn = resolveIndexedTurn(state, entry);
+    if (turn && isActiveRawTurn(turn)) {
+      index.activeTurnIds.add(entry.id);
+    }
+  }
+  return index;
+}
+
+function normalizedLiveIndexNeedsRebuild(change) {
+  for (const patch of Array.isArray(change?.patches) ? change.patches : []) {
+    const path = Array.isArray(patch?.path) ? patch.path : [];
+    if (path.length === 0) {
+      return true;
+    }
+    if (path[0] === "turns") {
+      if (path.length <= 2 || path[2] === "id" || path[2] === "turnId" || path[2] === "turn_id") {
+        return true;
+      }
+      continue;
+    }
+    if (path[0] !== "turnHistory" && path[0] !== "turn_history") {
+      continue;
+    }
+    if (path.length <= 3 || path[1] !== "history") {
+      return true;
+    }
+    if (path[2] === "islands") {
+      return true;
+    }
+    if (path[2] !== "entitiesByKey" && path[2] !== "entities_by_key") {
+      continue;
+    }
+    if (path.length <= 4 || path[4] === "turnId" || path[4] === "turn_id" || path[4] === "id") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function refreshTouchedNormalizedActiveTurns(index, state, change) {
+  const touchedTurnIds = new Set();
+  for (const patch of Array.isArray(change?.patches) ? change.patches : []) {
+    const path = Array.isArray(patch?.path) ? patch.path : [];
+    if (path[0] === "turns" && Number.isInteger(path[1]) && path[2] === "status") {
+      const rawTurn = Array.isArray(state?.turns) ? state.turns[path[1]] : null;
+      const turnId = turnIdOf(rawTurn);
+      if (turnId) {
+        touchedTurnIds.add(turnId);
+      }
+      continue;
+    }
+    if ((path[0] === "turnHistory" || path[0] === "turn_history")
+      && path[1] === "history"
+      && (path[2] === "entitiesByKey" || path[2] === "entities_by_key")
+      && path[4] === "status") {
+      const turnId = index.turnIdByEntityKey.get(readString(path[3]));
+      if (turnId) {
+        touchedTurnIds.add(turnId);
+      }
+    }
+  }
+  if (touchedTurnIds.size === 0) {
+    return;
+  }
+  for (const turnId of touchedTurnIds) {
+    const entryIndex = index.entryIndexByTurnId.get(turnId);
+    const entry = entryIndex == null ? null : index.entries[entryIndex];
+    const turn = entry ? resolveIndexedTurn(state, entry) : null;
+    if (turn && isActiveRawTurn(turn)) {
+      index.activeTurnIds.add(turnId);
+    } else {
+      index.activeTurnIds.delete(turnId);
+    }
+  }
+}
+
 function latestActiveRawTurn(state) {
   const turns = Array.isArray(state?.turns) ? state.turns : [];
   for (let index = turns.length - 1; index >= 0; index -= 1) {
@@ -1790,6 +2332,217 @@ function latestActiveRawTurn(state) {
   return null;
 }
 
+function boundedDesktopLiveState(
+  state,
+  nowValue = Date.now(),
+  retainedTurnIds = new Set(),
+  normalizedIndex = null
+) {
+  return {
+    ...(state && typeof state === "object" ? state : {}),
+    turns: boundedDesktopLiveTurns(state, nowValue, retainedTurnIds, normalizedIndex),
+  };
+}
+
+function boundedDesktopLiveTurns(
+  state,
+  nowValue = Date.now(),
+  retainedTurnIds = new Set(),
+  normalizedIndex = null
+) {
+  if (normalizedIndex) {
+    return boundedIndexedDesktopLiveTurns(
+      state,
+      normalizedIndex,
+      nowValue,
+      retainedTurnIds
+    );
+  }
+  const orderedTurns = backgroundHistoryTurns(state);
+  if (orderedTurns.length <= 1) {
+    return normalizeBoundedTurnsForRuntime(
+      orderedTurns.map((turn, index) => withStableProjectedTurnId(turn, index)),
+      state
+    );
+  }
+
+  // History is canonical elsewhere. Live projection needs only the newest turn,
+  // fresh parallel work, and turns retained for one terminal diff.
+  const selectedIndexes = new Set([orderedTurns.length - 1]);
+  const freshActiveIndexes = [];
+  for (let index = 0; index < orderedTurns.length; index += 1) {
+    const turn = orderedTurns[index];
+    if (isActiveRawTurn(turn) && isRawTurnActivityFresh(turn, nowValue)) {
+      freshActiveIndexes.push(index);
+    }
+    const turnId = turnIdOf(turn);
+    if (turnId && retainedTurnIds.has(turnId)) {
+      selectedIndexes.add(index);
+    }
+  }
+  // Preserve parallel live work without letting an ancient stale inProgress
+  // entity resurrect itself. Two active turns plus the canonical tail keeps
+  // projection bounded even for multi-gigabyte histories.
+  for (const index of freshActiveIndexes.slice(-2)) {
+    selectedIndexes.add(index);
+  }
+  const selectedTurns = Array.from(selectedIndexes)
+    .sort((left, right) => left - right)
+    .map((index) => withStableProjectedTurnId(orderedTurns[index], index));
+  return normalizeBoundedTurnsForRuntime(selectedTurns, state);
+}
+
+function boundedIndexedDesktopLiveTurns(state, index, nowValue, retainedTurnIds) {
+  if (index.entries.length === 0) {
+    return [];
+  }
+  const selectedTurnIds = new Set();
+  const tailEntry = index.entries[index.entries.length - 1];
+  if (tailEntry?.id) {
+    selectedTurnIds.add(tailEntry.id);
+  }
+  for (const turnId of retainedTurnIds) {
+    if (index.entryIndexByTurnId.has(turnId)) {
+      selectedTurnIds.add(turnId);
+    }
+  }
+  const freshActiveTurnIds = [];
+  for (const turnId of index.activeTurnIds) {
+    const entryIndex = index.entryIndexByTurnId.get(turnId);
+    if (entryIndex == null) {
+      continue;
+    }
+    const turn = resolveIndexedTurn(state, index.entries[entryIndex]);
+    if (turn && isRawTurnActivityFresh(turn, nowValue)) {
+      freshActiveTurnIds.push(turnId);
+    }
+  }
+  freshActiveTurnIds.sort((left, right) => (
+    index.entryIndexByTurnId.get(left) - index.entryIndexByTurnId.get(right)
+  ));
+  for (const turnId of freshActiveTurnIds.slice(-2)) {
+    selectedTurnIds.add(turnId);
+  }
+  const selectedTurns = Array.from(selectedTurnIds)
+    .map((turnId) => index.entryIndexByTurnId.get(turnId))
+    .filter((entryIndex) => entryIndex != null)
+    .sort((left, right) => left - right)
+    .map((entryIndex) => {
+      const entry = index.entries[entryIndex];
+      const turn = resolveIndexedTurn(state, entry);
+      if (!turn) {
+        return null;
+      }
+      return turnIdOf(turn) ? turn : { ...turn, id: entry.id };
+    })
+    .filter(Boolean);
+  return normalizeBoundedTurnsForRuntime(selectedTurns, state);
+}
+
+function resolveIndexedTurn(state, entry) {
+  if (entry.rawIndex != null) {
+    return Array.isArray(state?.turns) ? state.turns[entry.rawIndex] : null;
+  }
+  const store = normalizedTurnStore(state);
+  return entry.entityKey && store ? store.entities[entry.entityKey] || null : null;
+}
+
+function turnIdOf(turn) {
+  return readString(turn?.id)
+    || readString(turn?.turnId)
+    || readString(turn?.turn_id);
+}
+
+function withStableProjectedTurnId(turn, fullHistoryIndex) {
+  return turnIdOf(turn)
+    ? turn
+    : { ...turn, id: `ipc-turn-${fullHistoryIndex}` };
+}
+
+function activeDesktopTurnDescriptors(state) {
+  const turns = Array.isArray(state?.turns) ? state.turns : [];
+  const descriptors = [];
+  for (const turn of turns) {
+    if (!isActiveRawTurn(turn)) {
+      continue;
+    }
+    const id = turnIdOf(turn);
+    if (id) {
+      descriptors.push({ id, status: readString(turn?.status) || "inProgress" });
+    }
+  }
+  return descriptors;
+}
+
+function desktopLiveTurnLifecycleNotification(method, threadId, turn) {
+  const status = readString(turn?.status) || (method === "turn/started" ? "inProgress" : "completed");
+  return {
+    method,
+    params: {
+      threadId,
+      turnId: turn.id,
+      id: turn.id,
+      status,
+      turn: { id: turn.id, status },
+      remodexDesktopMirror: true,
+      remodexDesktopIpcMirror: true,
+      // Lets a live authoritative start clear a guessed `.stopped` marker that
+      // survived a prior disconnect, even when the chat is already selected.
+      remodexBackgroundDiscovery: method === "turn/started",
+      remodexActionSource: DESKTOP_IPC_ACTION_SOURCE,
+    },
+  };
+}
+
+function normalizeBoundedTurnsForRuntime(turns, state) {
+  if (!isExplicitlyIdleDesktopRuntime(state)) {
+    return turns;
+  }
+  return turns.map((turn) => (
+    isActiveRawTurn(turn)
+      ? { ...turn, status: "completed" }
+      : turn
+  ));
+}
+
+function desktopRuntimeStatusToken(state) {
+  return normalizeToken(
+    readString(state?.threadRuntimeStatus?.type)
+      || readString(state?.thread_runtime_status?.type)
+      || readString(state?.runtimeStatus?.type)
+      || readString(state?.runtime_status?.type)
+  );
+}
+
+function isExplicitlyIdleDesktopRuntime(state) {
+  const status = desktopRuntimeStatusToken(state);
+  return status === "idle"
+    || status === "inactive"
+    || status === "completed"
+    || status === "stopped"
+    || status === "notrunning";
+}
+
+function isActiveRawTurn(turn) {
+  const status = normalizeToken(turn?.status);
+  return status === "inprogress"
+    || status === "running"
+    || status === "active"
+    || status === "processing";
+}
+
+function isRawTurnActivityFresh(turn, nowValue) {
+  const startedAt = Number(turn?.turnStartedAtMs ?? turn?.turn_started_at_ms);
+  const durationMs = Number(turn?.durationMs ?? turn?.duration_ms);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) {
+    return false;
+  }
+  const activityAt = Number.isFinite(durationMs) && durationMs >= 0
+    ? startedAt + durationMs
+    : startedAt;
+  return nowValue - activityAt <= STALE_ACTIVE_READ_MAX_AGE_MS;
+}
+
 function backgroundRawTurnById(state, turnId) {
   const turns = Array.isArray(state?.turns) ? state.turns : [];
   for (let index = turns.length - 1; index >= 0; index -= 1) {
@@ -1799,6 +2552,78 @@ function backgroundRawTurnById(state, turnId) {
     }
   }
   return null;
+}
+
+function backgroundHistoryTurns(state) {
+  const turns = Array.isArray(state?.turns) ? state.turns.filter(Boolean) : [];
+  const turnHistory = state?.turnHistory ?? state?.turn_history;
+  const history = turnHistory?.history;
+  const entities = history?.entitiesByKey ?? history?.entities_by_key;
+  if (!entities || typeof entities !== "object" || Array.isArray(entities)) {
+    return turns;
+  }
+
+  const rawTurnsById = new Map();
+  for (const turn of turns) {
+    const turnId = readString(turn?.id)
+      || readString(turn?.turnId)
+      || readString(turn?.turn_id);
+    if (turnId) {
+      rawTurnsById.set(turnId, turn);
+    }
+  }
+  const orderedTurns = [];
+  const addedTurnIds = new Set();
+  const addedEntityKeys = new Set();
+  const appendEntity = (key) => {
+    const entityKey = readString(key);
+    const entity = entities[entityKey];
+    if (!entityKey || addedEntityKeys.has(entityKey) || !entity || typeof entity !== "object") {
+      return;
+    }
+    const keyedTurnId = entityKey.startsWith("turn:")
+      ? readString(entityKey.slice("turn:".length))
+      : "";
+    const entityTurnId = readString(entity?.turnId) || readString(entity?.turn_id);
+    const turnId = keyedTurnId || entityTurnId;
+    const looksLikeTurn = Boolean(keyedTurnId)
+      || (Boolean(entityTurnId) && (entity?.status != null || Array.isArray(entity?.items)));
+    if (!looksLikeTurn || !turnId || addedTurnIds.has(turnId)) {
+      return;
+    }
+    addedEntityKeys.add(entityKey);
+    addedTurnIds.add(turnId);
+    // Prefer the fresher legacy/live object when Litter materialized this same
+    // turn in both stores, but keep the canonical island position.
+    orderedTurns.push(rawTurnsById.get(turnId) || entity);
+  };
+
+  // Litter's islands preserve timeline order even though entitiesByKey is a
+  // normalized object store. Prefer that order, then tolerate snapshots that
+  // provide only the entity map.
+  for (const island of Array.isArray(history?.islands) ? history.islands : []) {
+    for (const entry of Array.isArray(island?.entries) ? island.entries : []) {
+      appendEntity(readString(entry?.value) || readString(entry?.key));
+    }
+  }
+  // When islands exist they are the canonical order. Do not append orphaned
+  // normalized entities after the tail: a stale unreferenced inProgress turn
+  // would otherwise look newer than the real current turn. Entity-map order is
+  // only a compatibility fallback for snapshots that omit islands entirely.
+  if (orderedTurns.length === 0) {
+    for (const key of Object.keys(entities)) {
+      appendEntity(key);
+    }
+  }
+  for (const turn of turns) {
+    const turnId = readString(turn?.id)
+      || readString(turn?.turnId)
+      || readString(turn?.turn_id);
+    if (!turnId || !addedTurnIds.has(turnId)) {
+      orderedTurns.push(turn);
+    }
+  }
+  return orderedTurns.length > 0 ? orderedTurns : turns;
 }
 
 function backgroundRawTurn(turn, index) {

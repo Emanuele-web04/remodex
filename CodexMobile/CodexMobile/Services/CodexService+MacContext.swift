@@ -86,8 +86,14 @@ extension CodexService {
             aiChangeSetsByID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
                 partialResult[changeSet.id] = changeSet
             }
-            aiChangeSetIDByTurnID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
-                partialResult[changeSet.turnId] = changeSet.id
+            aiChangeSetIDByTurnKey = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
+                guard let turnKey = AIChangeSetTurnKey(
+                    threadId: changeSet.threadId,
+                    turnId: changeSet.turnId
+                ) else {
+                    return
+                }
+                partialResult[turnKey] = changeSet.id
             }
             aiChangeSetIDByAssistantMessageID = loadedChangeSets.reduce(into: [:]) { partialResult, changeSet in
                 if let assistantMessageId = changeSet.assistantMessageId {
@@ -265,7 +271,7 @@ extension CodexService {
             recentActivityLineByThread.removeAll()
             contextWindowUsageByThread.removeAll()
             aiChangeSetsByID.removeAll()
-            aiChangeSetIDByTurnID.removeAll()
+            aiChangeSetIDByTurnKey.removeAll()
             aiChangeSetIDByAssistantMessageID.removeAll()
             clearAllRunningState()
             readyThreadIDs.removeAll()

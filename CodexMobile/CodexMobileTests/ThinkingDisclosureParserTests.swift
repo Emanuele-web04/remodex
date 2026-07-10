@@ -48,6 +48,16 @@ final class ThinkingDisclosureParserTests: XCTestCase {
         )
     }
 
+    func testParseTreatsCommentOnlySummaryDetailAsEmpty() {
+        let parsed = ThinkingDisclosureParser.parse(
+            from: "**Planning targeted test execution**\n\n<!-- -->"
+        )
+
+        XCTAssertEqual(parsed.sections.count, 1)
+        XCTAssertEqual(parsed.sections[0].title, "Planning targeted test execution")
+        XCTAssertTrue(parsed.sections[0].detail.isEmpty)
+    }
+
     func testParseCoalescesAdjacentDuplicateSummariesAndKeepsPreamble() {
         let parsed = ThinkingDisclosureParser.parse(
             from: """

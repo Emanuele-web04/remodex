@@ -38,7 +38,10 @@ extension CodexService {
         if let directThreadId = extractThreadID(from: paramsObject),
            !directThreadId.isEmpty,
            !isReplayedEvent,
-           turnTerminalState(for: extractTurnID(from: paramsObject)) == nil {
+           turnTerminalState(
+               for: extractTurnID(from: paramsObject),
+               threadId: directThreadId
+           ) == nil {
             markThreadAsRunning(directThreadId)
         }
 
@@ -51,7 +54,8 @@ extension CodexService {
             return
         }
 
-        if !isReplayedEvent, turnTerminalState(for: turnId) == nil {
+        if !isReplayedEvent,
+           turnTerminalState(for: turnId, threadId: context.threadId) == nil {
             markThreadAsRunning(context.threadId)
             if activeTurnID(for: context.threadId) == nil {
                 setActiveTurnID(turnId, for: context.threadId)
@@ -289,8 +293,13 @@ extension CodexService {
             return
         }
 
+        let lifecycleTurnID = extractTurnID(from: paramsObject)
+        let lifecycleThreadID = resolveThreadID(
+            from: paramsObject,
+            turnIdHint: lifecycleTurnID
+        )
         // Replayed item lifecycle events for finished turns must not revive running UI.
-        if turnTerminalState(for: extractTurnID(from: paramsObject)) != nil {
+        if turnTerminalState(for: lifecycleTurnID, threadId: lifecycleThreadID) != nil {
             return
         }
 

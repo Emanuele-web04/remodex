@@ -157,8 +157,8 @@ test("live owner broadcasts Remodex-owned thread snapshots over Desktop IPC", as
     frames,
     (frame) => frame.type === "broadcast" && frame.method === "thread-stream-state-changed"
   );
-  assert.equal(broadcast.version, 8);
-  assert.equal(broadcast.params.version, 8);
+  assert.equal(broadcast.version, 11);
+  assert.equal(broadcast.params.version, 11);
   assert.equal(broadcast.params.conversationId, "thread-live-owner");
     assert.equal(broadcast.params.remodexOwnerSource, "desktop-ipc-live-owner");
   assert.equal(broadcast.params.change.type, "snapshot");
@@ -268,8 +268,8 @@ test("live owner broadcasts patches after the first owned thread snapshot", asyn
         && JSON.stringify(patch.path) === JSON.stringify(["turns", 0])
       ))
   );
-  assert.equal(turnPatchBroadcast.version, 8);
-  assert.equal(turnPatchBroadcast.params.version, 8);
+  assert.equal(turnPatchBroadcast.version, 11);
+  assert.equal(turnPatchBroadcast.params.version, 11);
 
   owner.observeOutbound(JSON.stringify({
     method: "item/agentMessage/delta",
@@ -362,8 +362,8 @@ test("live owner starts a local IPC router when no Codex IPC socket exists", asy
       && frame.params?.conversationId === "thread-router-owned"
       && frame.params?.change?.type === "snapshot"
   );
-  assert.equal(snapshot.version, 8);
-  assert.equal(snapshot.params.version, 8);
+  assert.equal(snapshot.version, 11);
+  assert.equal(snapshot.params.version, 11);
   assert.equal(snapshot.params.change.conversationState.id, "thread-router-owned");
 
   writeFrame(desktopSocket, {
@@ -2181,7 +2181,7 @@ test("live owner broadcasts a removed snapshot before archive cleanup", async (t
       && frame.params?.remodexOwnerReleased === true
   );
   assert.equal(removed.params.remodexOwnerSource, "desktop-ipc-live-owner");
-  assert.equal(removed.params.version, 8);
+  assert.equal(removed.params.version, 11);
   assert.equal(removed.params.change.type, "snapshot");
   assert.deepEqual(removed.params.change.conversationState.turns, []);
   assert.deepEqual(removed.params.change.conversationState.requests, []);
@@ -2704,7 +2704,7 @@ test("live owner serves follower load-complete-history with a fresh snapshot rev
   ));
   assert.ok(snapshot, "expected snapshot broadcast with the returned revision");
   assert.equal(snapshot.params.hostId, "local");
-  assert.equal(snapshot.version, 8);
+  assert.equal(snapshot.version, 11);
   const turnIds = snapshot.params.change.conversationState.turns.map((turn) => turn.turnId);
   assert.ok(turnIds.includes("turn-history-1"));
 });

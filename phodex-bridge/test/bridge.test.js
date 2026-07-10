@@ -701,6 +701,7 @@ test("canonical turns-list requests strip bridge-only handoff state", () => {
       limit: 1,
       cursor: "remodex-jsonl-handoff-v1:token",
       remodexRequireCanonical: true,
+      remodexTurnStateOnly: true,
     },
   };
 

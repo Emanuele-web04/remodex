@@ -22,6 +22,102 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
     }
 
+    func testLateCompletionForPreviousTurnKeepsNewActiveTurnRunning() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let firstTurnID = "ipc-turn-0"
+        let secondTurnID = "ipc-turn-1"
+
+        sendTurnStarted(service: service, threadID: threadID, turnID: firstTurnID)
+        sendTurnStarted(service: service, threadID: threadID, turnID: secondTurnID)
+
+        service.upsertStreamingSystemItemMessage(
+            threadId: threadID,
+            turnId: secondTurnID,
+            itemId: "thinking-second",
+            kind: .thinking,
+            text: "Thinking for the newer turn",
+            isStreaming: true
+        )
+        let otherThreadID = "thread-\(UUID().uuidString)"
+        let otherTurnID = "turn-\(UUID().uuidString)"
+        service.upsertStreamingSystemItemMessage(
+            threadId: otherThreadID,
+            turnId: otherTurnID,
+            itemId: "thinking-other-thread",
+            kind: .thinking,
+            text: "Thinking in another thread",
+            isStreaming: true
+        )
+        let otherThreadStreamingKey = service.streamingItemMessageKey(
+            threadId: otherThreadID,
+            itemId: "thinking-other-thread"
+        )
+        service.watchRunningThreadIfNeeded(threadID)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: firstTurnID)
+
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertTrue(service.runningThreadIDs.contains(threadID))
+        XCTAssertTrue(service.readyThreadIDs.isEmpty)
+        XCTAssertTrue(service.threadsPendingCompletionHaptic.contains(threadID))
+        XCTAssertNotNil(service.runningThreadWatchByID[threadID])
+        XCTAssertNil(service.latestTurnTerminalStateByThread[threadID])
+        XCTAssertEqual(
+            service.projectedTerminalStateByThreadID[threadID]?[firstTurnID],
+            .completed
+        )
+        XCTAssertNotNil(
+            service.streamingSystemMessageByItemID[
+                service.streamingItemMessageKey(threadId: threadID, itemId: "thinking-second")
+            ]
+        )
+        XCTAssertTrue(
+            service.messages(for: threadID).contains { message in
+                message.turnId == secondTurnID
+                    && message.kind == .thinking
+                    && message.isStreaming
+            }
+        )
+        XCTAssertNotNil(service.streamingSystemMessageByItemID[otherThreadStreamingKey])
+
+        // Replayed lifecycle for old A must not replace still-running B.
+        sendTurnStarted(service: service, threadID: threadID, turnID: firstTurnID)
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+
+        let messageCountBeforeLateItem = service.messages(for: threadID).count
+        service.handleNotification(
+            method: "item/started",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(firstTurnID),
+                "item": .object([
+                    "id": .string("late-thinking-a"),
+                    "type": .string("reasoning"),
+                    "summary": .array([.string("Stale A activity")]),
+                ]),
+            ])
+        )
+        XCTAssertEqual(service.messages(for: threadID).count, messageCountBeforeLateItem)
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+
+        service.handleNotification(
+            method: "item/agentMessage/delta",
+            params: .object([
+                "threadId": .string(threadID),
+                "turnId": .string(firstTurnID),
+                "itemId": .string("late-agent-a"),
+                "delta": .string("Late text from the closed turn"),
+            ])
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: firstTurnID)
+        XCTAssertEqual(service.messages(for: threadID).count, messageCountBeforeLateItem)
+        XCTAssertEqual(service.activeTurnID(for: threadID), secondTurnID)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+    }
+
     func testBackgroundDiscoveryLifecycleUpdatesBadgeWithoutHydratingUnopenedThread() async {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
@@ -128,6 +224,10 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
         XCTAssertTrue(didChange)
         XCTAssertNil(service.terminalStateByTurnID[projectedTurnID])
+        XCTAssertEqual(
+            service.projectedTerminalStateByThreadID[threadID]?[projectedTurnID],
+            .completed
+        )
         XCTAssertEqual(service.terminalStateByTurnID[realTurnID], .completed)
     }
 

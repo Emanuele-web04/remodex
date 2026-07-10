@@ -18,8 +18,8 @@ const CLIENT_STATUS_CHANGED = "client-status-changed";
 const DESKTOP_IPC_METHOD_VERSIONS = new Map([
   ["initialize", 1],
   [CLIENT_STATUS_CHANGED, 1],
-  // Desktop pins thread-stream-state-changed at version 8 and drops mismatches.
-  ["thread-stream-state-changed", 8],
+  // Desktop pins thread-stream-state-changed at version 11 and drops mismatches.
+  ["thread-stream-state-changed", 11],
   ["thread-archived", 2],
   ["thread-unarchived", 1],
   ["thread-read-state-changed", 1],

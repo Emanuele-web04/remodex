@@ -377,6 +377,8 @@ final class CodexService {
     var latestTurnTerminalStateByThread: [String: CodexTurnTerminalState] = [:]
     // Preserves terminal outcome per turn so completed/stopped blocks stay distinguishable.
     var terminalStateByTurnID: [String: CodexTurnTerminalState] = [:]
+    // Projected `ipc-turn-N` ids are only unique inside one thread/source epoch.
+    @ObservationIgnored var projectedTerminalStateByThreadID: [String: [String: CodexTurnTerminalState]] = [:]
     // Ordered pending runtime approvals keyed by request id so concurrent prompts do not overwrite each other.
     var pendingApprovals: [CodexApprovalRequest] = []
     var lastRawMessage: String?
@@ -697,7 +699,7 @@ final class CodexService {
     var bufferedSecureControlMessages: [String: [String]] = [:]
     // Assistant-scoped patch ledger used by the revert-changes flow.
     var aiChangeSetsByID: [String: AIChangeSet] = [:]
-    var aiChangeSetIDByTurnID: [String: String] = [:]
+    var aiChangeSetIDByTurnKey: [AIChangeSetTurnKey: String] = [:]
     var aiChangeSetIDByAssistantMessageID: [String: String] = [:]
     @ObservationIgnored var workspaceCheckpointCopyTaskByTurnID: [String: Task<Void, Never>] = [:]
     // Keeps hot-path thread lookups O(1) instead of rescanning the full sidebar list.
@@ -782,7 +784,7 @@ final class CodexService {
         self.composerDraftsByThreadID = [:]
         rebuildSubagentIdentityDirectory()
         self.aiChangeSetsByID = [:]
-        self.aiChangeSetIDByTurnID = [:]
+        self.aiChangeSetIDByTurnKey = [:]
         self.aiChangeSetIDByAssistantMessageID = [:]
 
         let savedModelId = defaults.string(forKey: Self.selectedModelIdDefaultsKey)?
