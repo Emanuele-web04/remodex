@@ -16,13 +16,15 @@ enum TurnTimelineProjectionPolicy {
 
 enum ThreadHistoryHydrationPolicy {
     // Huge desktop transcripts can make thread/read stall before the bridge can compact the payload.
-    // Match Litter's cursor-driven paging: hydrate a tiny recent window, then prepend on demand.
+    // Start with enough complete turns to establish a useful, coherent baseline. A one-turn
+    // JSONL fallback is still allowed by the bridge, but it must never become the normal
+    // cold-open contract for a conversation with prior history.
     static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
     // The bridge gives its local app-server call up to 20 seconds. Keep the
     // phone-side deadline above that so giant sessions can return a bounded
     // first page or a real bridge error instead of being abandoned mid-flight.
     static let initialPageSoftTimeoutNanoseconds: UInt64 = 25_000_000_000
-    static let initialTurnPageSize = 1
+    static let initialTurnPageSize = 5
     static let olderTurnPageSize = 5
     static let duplicateOlderPageSkipLimit = 12
 }

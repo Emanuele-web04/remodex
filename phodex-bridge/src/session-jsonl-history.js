@@ -6,8 +6,10 @@ const fs = require("fs");
 const { buildApplyPatchFileChangeItem } = require("./apply-patch-changes");
 const { terminalEventClosesTrackedTurn } = require("./rollout-turn-semantics");
 const {
+  buildRemodexSourceItemKey,
   isContextualUserText,
   isUserRoleItem,
+  responseItemMessageText: sharedResponseItemMessageText,
   visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 
@@ -380,6 +382,7 @@ function parseSessionJsonlTurns(content, {
   const skippedCallIds = new Set();
   const toolCallsByCallId = new Map();
   const pendingUserMessages = [];
+  const assistantAliasOccurrencesByBaseKey = new Map();
 
   const raw = String(content || "");
   let index = -1;
@@ -583,6 +586,7 @@ function parseSessionJsonlTurns(content, {
           item.timestamp = itemTimestamp;
         }
         applyHistoryTimeZone(item, sessionTimeZone);
+        applyHistoryAssistantSourceAlias(item, turn.id, assistantAliasOccurrencesByBaseKey);
         addHistoryItemToTurn(turn, item);
       }
     }
@@ -858,6 +862,20 @@ function normalizeResponseItemForHistory(payload, lineNumber, { cwd = "", toolCa
     item.role = "assistant";
   }
 
+  return item;
+}
+
+function applyHistoryAssistantSourceAlias(item, turnId, occurrencesByBaseKey = new Map()) {
+  if (normalizeHistoryToken(item?.type) !== "message"
+    || normalizeString(item?.role).toLowerCase() !== "assistant") {
+    return item;
+  }
+  const sourceKey = buildRemodexSourceItemKey(turnId, responseItemMessageText(item));
+  const occurrence = (occurrencesByBaseKey.get(sourceKey) || 0) + 1;
+  occurrencesByBaseKey.set(sourceKey, occurrence);
+  if (sourceKey && occurrence === 1) {
+    item.remodexSourceItemKey = sourceKey;
+  }
   return item;
 }
 
@@ -1355,18 +1373,7 @@ function responseItemTurnId(payload) {
 }
 
 function responseItemMessageText(payload) {
-  const directText = normalizeString(payload.text) || normalizeString(payload.message);
-  if (directText) {
-    return directText;
-  }
-
-  const content = Array.isArray(payload.content) ? payload.content : [];
-  return content
-    .map((item) => objectValue(item))
-    .filter(Boolean)
-    .map((item) => responseItemContentText(item))
-    .filter(Boolean)
-    .join("\n");
+  return sharedResponseItemMessageText(payload);
 }
 
 function responseItemContentText(item) {

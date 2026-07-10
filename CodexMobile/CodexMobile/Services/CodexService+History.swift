@@ -101,6 +101,7 @@ extension CodexService {
                     ?? turnTimeZoneIdentifier
                 offset += 0.001
                 let itemID = itemObject["id"]?.stringValue
+                let sourceItemKey = itemObject["remodexSourceItemKey"]?.stringValue
                 let decodedText = decodeItemText(from: itemObject)
                 let skillMentions = decodeHistorySkillMentions(from: itemObject)
                 let pluginMentions = decodeHistoryPluginMentions(from: itemObject)
@@ -115,6 +116,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         skillMentions: skillMentions,
@@ -132,6 +134,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         attachments: imageAttachments
@@ -152,6 +155,7 @@ extension CodexService {
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
+                        sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
                         skillMentions: mappedRole == .user ? skillMentions : [],
@@ -927,6 +931,22 @@ extension CodexService {
             if processedHistoryMessages.isMultiple(of: 32),
                Task.isCancelled {
                 throw CancellationError()
+            }
+
+            if let incomingSourceItemKey = normalizedHistoryIdentifier(message.sourceItemKey),
+               let incomingTurnID = normalizedHistoryIdentifier(message.turnId) {
+                let eligibleAliasIndices = merged.indices.filter { index in
+                    let candidate = merged[index]
+                    return candidate.role == message.role
+                        && normalizedHistoryIdentifier(candidate.turnId) == incomingTurnID
+                        && normalizedHistoryIdentifier(candidate.sourceItemKey) == incomingSourceItemKey
+                        && sourceItemIdentityAllowsReconcile(candidate.itemId, message.itemId)
+                        && (candidate.kind == message.kind || candidate.kind == .chat || message.kind == .chat)
+                }
+                if eligibleAliasIndices.count == 1, let index = eligibleAliasIndices.first {
+                    reconcileMessage(at: index, with: message)
+                    continue
+                }
             }
 
             if let incomingItemId = normalizedHistoryIdentifier(message.itemId),
@@ -1737,6 +1757,9 @@ extension CodexService {
         if value.deliveryState == .pending {
             value.deliveryState = .confirmed
         }
+        if value.sourceItemKey == nil {
+            value.sourceItemKey = serverMessage.sourceItemKey
+        }
 
         if CodexTimestampParser.isTrustworthyServerDate(serverMessage.createdAt),
            abs(value.createdAt.timeIntervalSince(serverMessage.createdAt)) > 0.5 {
@@ -2327,6 +2350,25 @@ extension CodexService {
         return !CodexSyntheticIdentifiers.isMirrorMintedItemID(itemId)
     }
 
+    // Source aliases are semantic bridge hints, not provider identities. They may collide when
+    // two real assistant items intentionally contain the same text, so only use them to bridge
+    // one mirror identity and one provider identity (or the exact same item id).
+    nonisolated static func sourceItemIdentityAllowsReconcile(
+        _ existingItemId: String?,
+        _ incomingItemId: String?
+    ) -> Bool {
+        let existing = normalizedHistoryIdentifier(existingItemId)
+        let incoming = normalizedHistoryIdentifier(incomingItemId)
+        guard let existing, let incoming else {
+            return false
+        }
+        if existing == incoming {
+            return true
+        }
+        return CodexSyntheticIdentifiers.isMirrorMintedItemID(existing)
+            != CodexSyntheticIdentifiers.isMirrorMintedItemID(incoming)
+    }
+
     // Running assistant rows may absorb history only when the provider item identity agrees.
     nonisolated static func assistantHistoryIdentityAllowsRunningReconcile(
         localMessage: CodexMessage,
@@ -2842,6 +2884,7 @@ extension CodexService {
         threadId: String,
         turnId: String?,
         itemId: String?,
+        sourceItemKey: String? = nil,
         createdAt: Date,
         timeZoneIdentifier: String? = nil,
         skillMentions: [String] = [],
@@ -2874,6 +2917,7 @@ extension CodexService {
                 timeZoneIdentifier: timeZoneIdentifier,
                 turnId: turnId,
                 itemId: itemId,
+                sourceItemKey: sourceItemKey,
                 isStreaming: false,
                 deliveryState: .confirmed,
                 attachments: attachments,

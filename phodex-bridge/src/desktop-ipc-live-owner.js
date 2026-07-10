@@ -41,6 +41,10 @@ const DEFAULT_RECONNECT_MS = 1_500;
 const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 75;
 const DEFAULT_INITIAL_HISTORY_RETRY_MS = 1_000;
 const DEFAULT_INITIAL_HISTORY_MAX_ATTEMPTS = 5;
+// Ownership is only authoritative while the Desktop stream keeps updating.
+// A reconnect can otherwise leave a thread in ownedThreadIds indefinitely and
+// suppress the rollout mirror that is carrying the real live activity.
+const DEFAULT_LIVE_OWNERSHIP_FRESHNESS_MS = 20_000;
 // Desktop's webview refreshes its recent-conversations list when it receives a
 // thread-unarchived broadcast for its host. Give the rollout writer a moment to
 // persist session_meta + the first user event so the refreshed thread/list scan
@@ -118,6 +122,7 @@ function createDesktopIpcLiveOwner({
   reconnectMs = DEFAULT_RECONNECT_MS,
   initialHistoryRetryMs = DEFAULT_INITIAL_HISTORY_RETRY_MS,
   initialHistoryMaxAttempts = DEFAULT_INITIAL_HISTORY_MAX_ATTEMPTS,
+  liveOwnershipFreshnessMs = DEFAULT_LIVE_OWNERSHIP_FRESHNESS_MS,
   netModule = net,
   now = () => Date.now(),
   logPrefix = "[remodex]",
@@ -1585,6 +1590,20 @@ function createDesktopIpcLiveOwner({
     isThreadOwned(threadId) {
       return ownedThreadIds.has(readString(threadId));
     },
+    isFreshThreadOwned(threadId) {
+      const normalizedThreadId = readString(threadId);
+      if (!ownedThreadIds.has(normalizedThreadId)) {
+        return false;
+      }
+      // This bridge owns the local app-server turn directly. A quiet active
+      // turn remains authoritative; releasing it solely because no patch
+      // arrived for 20 seconds starts the rollout mirror as a second source.
+      if (hasActiveLocalTurn(normalizedThreadId)) {
+        return true;
+      }
+      const updatedAt = Number(conversations.get(normalizedThreadId)?.updatedAt) || 0;
+      return now() - updatedAt <= liveOwnershipFreshnessMs;
+    },
     _debugSnapshot(threadId) {
       return cloneJSON(conversations.get(threadId) || null);
     },
@@ -1597,6 +1616,9 @@ function createDisabledDesktopIpcLiveOwner() {
     observeOutbound() {},
     stopAll() {},
     isThreadOwned() {
+      return false;
+    },
+    isFreshThreadOwned() {
       return false;
     },
   };

@@ -9,6 +9,7 @@ import Foundation
 private struct AssistantEventIdentity {
     let turnId: String?
     let itemId: String?
+    let sourceItemKey: String?
     let phase: String?
 }
 
@@ -151,6 +152,7 @@ extension CodexService {
                 threadId: context.threadId,
                 turnId: turnId,
                 itemId: context.identity.itemId,
+                sourceItemKey: context.identity.sourceItemKey,
                 assistantPhase: context.identity.phase,
                 text: text
             )
@@ -200,6 +202,7 @@ extension CodexService {
                 threadId: context.threadId,
                 turnId: context.identity.turnId,
                 itemId: context.identity.itemId,
+                sourceItemKey: context.identity.sourceItemKey,
                 assistantPhase: context.identity.phase,
                 text: text
             )
@@ -231,6 +234,7 @@ extension CodexService {
             threadId: context.threadId,
             turnId: turnId,
             itemId: context.identity.itemId,
+            sourceItemKey: context.identity.sourceItemKey,
             assistantPhase: context.identity.phase,
             text: text
         )
@@ -451,12 +455,33 @@ private extension CodexService {
         return AssistantEventIdentity(
             turnId: turnId,
             itemId: itemId,
+            sourceItemKey: extractRemodexSourceItemKey(
+                paramsObject: paramsObject,
+                eventObject: eventObject,
+                itemObject: itemObject
+            ),
             phase: extractAssistantPhase(
                 paramsObject: paramsObject,
                 eventObject: eventObject,
                 itemObject: itemObject
             )
         )
+    }
+
+    // The local bridge derives this from the source turn plus message content. It is not a
+    // provider id and is used only to reconcile the same assistant item across source handoffs.
+    func extractRemodexSourceItemKey(
+        paramsObject: IncomingParamsObject,
+        eventObject: IncomingParamsObject?,
+        itemObject: IncomingParamsObject?
+    ) -> String? {
+        firstNonEmptyString([
+            paramsObject["remodexSourceItemKey"]?.stringValue,
+            eventObject?["remodexSourceItemKey"]?.stringValue,
+            itemObject?["remodexSourceItemKey"]?.stringValue,
+            paramsObject["item"]?.objectValue?["remodexSourceItemKey"]?.stringValue,
+            eventObject?["item"]?.objectValue?["remodexSourceItemKey"]?.stringValue,
+        ])
     }
 
     // Resolves assistant event context and preserves turn->thread mapping when available.

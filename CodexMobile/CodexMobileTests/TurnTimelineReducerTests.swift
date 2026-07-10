@@ -5765,84 +5765,74 @@ final class TurnTimelineReducerTests: XCTestCase {
 }
 
 final class TurnScrollStateTrackerTests: XCTestCase {
-    func testLiveTurnEvidenceAlwaysOpensAtTail() {
+    func testOnlyALocalSendOpensAtLiveTail() {
         XCTAssertTrue(
             TurnScrollStateTracker.shouldOpenAtLiveTail(
+                isSendInFlight: true
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldOpenAtLiveTail(
+                isSendInFlight: false
+            )
+        )
+    }
+
+    func testReopenedLiveEvidenceUsesStartAnchorInsteadOfTail() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.hasLiveTurnEvidence(
                 isThreadRunning: true,
                 activeTurnID: nil,
-                isSendInFlight: false,
-                hasStreamingTail: false
-            )
-        )
-        XCTAssertTrue(
-            TurnScrollStateTracker.shouldOpenAtLiveTail(
-                isThreadRunning: false,
-                activeTurnID: "turn-recovered",
-                isSendInFlight: false,
-                hasStreamingTail: false
-            )
-        )
-        XCTAssertTrue(
-            TurnScrollStateTracker.shouldOpenAtLiveTail(
-                isThreadRunning: false,
-                activeTurnID: nil,
-                isSendInFlight: true,
-                hasStreamingTail: false
-            )
-        )
-        XCTAssertTrue(
-            TurnScrollStateTracker.shouldOpenAtLiveTail(
-                isThreadRunning: false,
-                activeTurnID: nil,
-                isSendInFlight: false,
                 hasStreamingTail: true
             )
         )
-    }
-
-    func testInactiveHistoryDoesNotClaimLiveTailPolicy() {
         XCTAssertFalse(
             TurnScrollStateTracker.shouldOpenAtLiveTail(
+                isSendInFlight: false
+            )
+        )
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeForInitialResponseStartAnchor(
+                hasLiveTurnEvidence: true
+            ),
+            .anchorTurnStartThenFollow
+        )
+    }
+
+    func testInactiveHistoryUsesManualStartAnchor() {
+        XCTAssertFalse(
+            TurnScrollStateTracker.hasLiveTurnEvidence(
                 isThreadRunning: false,
                 activeTurnID: "   ",
-                isSendInFlight: false,
                 hasStreamingTail: false
             )
         )
     }
 
-    func testLateLiveEvidenceReleasesOnlyAnAppOwnedHistoryAnchor() {
-        XCTAssertTrue(
-            TurnScrollStateTracker.shouldReleaseInitialHistoryAnchorForLiveTail(
-                shouldOpenAtLiveTail: true,
-                hasInitialResponseStartAnchor: true,
-                shouldAnchorToAssistantResponse: false,
+    func testLiveStartAnchorResumesFollowOnlyAfterDwell() {
+        XCTAssertGreaterThanOrEqual(
+            TurnScrollStateTracker.initialLiveTurnStartAnchorDwellNanoseconds,
+            1_000_000_000
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldPinDuringGeometryChange(
+                currentMode: .anchorTurnStartThenFollow,
                 isAutomaticScrollingPaused: false
             )
         )
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldReleaseInitialHistoryAnchorForLiveTail(
-                shouldOpenAtLiveTail: true,
-                hasInitialResponseStartAnchor: false,
-                shouldAnchorToAssistantResponse: false,
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterInitialResponseStartAnchorDwell(
+                currentMode: .anchorTurnStartThenFollow,
                 isAutomaticScrollingPaused: false
-            )
+            ),
+            .followBottom
         )
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldReleaseInitialHistoryAnchorForLiveTail(
-                shouldOpenAtLiveTail: true,
-                hasInitialResponseStartAnchor: true,
-                shouldAnchorToAssistantResponse: true,
-                isAutomaticScrollingPaused: false
-            )
-        )
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldReleaseInitialHistoryAnchorForLiveTail(
-                shouldOpenAtLiveTail: true,
-                hasInitialResponseStartAnchor: true,
-                shouldAnchorToAssistantResponse: false,
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterInitialResponseStartAnchorDwell(
+                currentMode: .anchorTurnStartThenFollow,
                 isAutomaticScrollingPaused: true
-            )
+            ),
+            .anchorTurnStartThenFollow
         )
     }
 

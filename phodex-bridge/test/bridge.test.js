@@ -64,6 +64,36 @@ test("rollout suppression follows the follower's current ownership signal", () =
   assert.equal(liveStateChecks, 2);
 });
 
+test("rollout suppression releases a stale Desktop owner so a growing rollout can mirror", () => {
+  const desktopIpcActionFollower = {
+    hasLiveThreadState() {
+      return true;
+    },
+    hasFreshLiveThreadState() {
+      return false;
+    },
+  };
+  const desktopIpcLiveOwner = {
+    isThreadOwned() {
+      return true;
+    },
+    isFreshThreadOwned() {
+      return false;
+    },
+  };
+
+  assert.equal(shouldSuppressRolloutMirrorForThread(
+    "thread-stale-desktop",
+    { desktopIpcActionFollower, desktopIpcLiveOwner }
+  ), false);
+
+  desktopIpcLiveOwner.isFreshThreadOwned = () => true;
+  assert.equal(shouldSuppressRolloutMirrorForThread(
+    "thread-fresh-desktop",
+    { desktopIpcActionFollower, desktopIpcLiveOwner }
+  ), true);
+});
+
 test("normalizeRelayBoundJsonRpcMessage rewrites payload-only responses to result", () => {
   const normalized = normalizeRelayBoundJsonRpcMessage(JSON.stringify({
     id: "req-payload-only",
@@ -192,7 +222,7 @@ test("thread turns-list fast page returns JSONL once and reuses the late canonic
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-jsonl", items: [{ id: "item-jsonl" }] }],
+          data: [{ id: "turn-jsonl", items: [{ id: "item-jsonl", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
           remodexJsonlFallback: true,
         },
@@ -342,7 +372,7 @@ test("thread turns-list fast page keeps an immediate canonical response authorit
       response: {
         id: "req-fast-canonical",
         result: {
-          data: [{ id: "turn-jsonl", items: [] }],
+          data: [{ id: "turn-jsonl", items: [{ id: "jsonl-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -351,6 +381,73 @@ test("thread turns-list fast page keeps an immediate canonical response authorit
   });
 
   assert.equal(deadlineWasScheduled, true);
+  assert.equal(selection.source, "canonical");
+  assert.equal(selection.response.result.data[0].id, "turn-canonical");
+});
+
+test("thread turns-list refuses an empty JSONL tail as a history baseline", async () => {
+  const coordinator = createThreadTurnsListFastPageCoordinator();
+  const selection = await coordinator.resolve({
+    id: "req-empty-jsonl-tail",
+    method: "thread/turns/list",
+    params: { threadId: "thread-empty-jsonl-tail", limit: 5 },
+  }, {
+    fetchCanonical: async () => ({
+      id: "canonical-empty-jsonl-tail",
+      result: {
+        data: [{ id: "turn-canonical", items: [{ id: "canonical-opener" }] }],
+        nextCursor: null,
+      },
+    }),
+    readJsonl: async () => ({
+      response: {
+        id: "req-empty-jsonl-tail",
+        result: {
+          data: [{ id: "turn-jsonl-tail", status: "running", items: [] }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  });
+
+  assert.equal(selection.source, "canonical");
+  assert.equal(selection.response.result.data[0].id, "turn-canonical");
+});
+
+test("thread turns-list refuses an assistant and file-change-only running JSONL tail", async () => {
+  const coordinator = createThreadTurnsListFastPageCoordinator();
+  const selection = await coordinator.resolve({
+    id: "req-artifact-jsonl-tail",
+    method: "thread/turns/list",
+    params: { threadId: "thread-artifact-jsonl-tail", limit: 5 },
+  }, {
+    fetchCanonical: async () => ({
+      id: "canonical-artifact-jsonl-tail",
+      result: {
+        data: [{ id: "turn-canonical", items: [{ id: "canonical-user", type: "user_message", role: "user" }] }],
+        nextCursor: null,
+      },
+    }),
+    readJsonl: async () => ({
+      response: {
+        id: "req-artifact-jsonl-tail",
+        result: {
+          data: [{
+            id: "turn-jsonl-tail",
+            status: "running",
+            items: [
+              { id: "orphan-file-change", type: "file_change" },
+              { id: "assistant-tail", type: "message", role: "assistant", text: "tail only" },
+            ],
+          }],
+          nextCursor: "remodex-jsonl-fallback-older-unavailable",
+        },
+      },
+      usesJsonl: true,
+    }),
+  });
+
   assert.equal(selection.source, "canonical");
   assert.equal(selection.response.result.data[0].id, "turn-canonical");
 });
@@ -377,7 +474,7 @@ test("thread turns-list fast page prefers a newer running JSONL turn over stale 
       response: {
         id: "req-newer-jsonl",
         result: {
-          data: [{ id: "turn-jsonl-running", status: "running", items: [] }],
+          data: [{ id: "turn-jsonl-running", status: "running", items: [{ id: "jsonl-running-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -415,7 +512,7 @@ test("thread turns-list handoff never returns newer canonical turns as older his
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-anchor", items: [{ id: "anchor-item" }] }],
+          data: [{ id: "turn-anchor", items: [{ id: "anchor-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -495,7 +592,7 @@ test("canonical reconciliation follows the canonical cursor until it reaches the
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-jsonl-anchor", items: [{ id: "jsonl-anchor" }] }],
+          data: [{ id: "turn-jsonl-anchor", items: [{ id: "jsonl-anchor", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -579,7 +676,7 @@ test("canonical reconciliation compacts every turn through the anchor under the 
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-oversized-anchor", items: [{ id: "jsonl-anchor" }] }],
+          data: [{ id: "turn-oversized-anchor", items: [{ id: "jsonl-anchor", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },
@@ -650,7 +747,7 @@ test("canonical reconciliation does not search forever for a synthetic JSONL anc
       response: {
         id: request.id,
         result: {
-          data: [{ id: "turn-line-2048", items: [{ id: "jsonl-synthetic-item" }] }],
+          data: [{ id: "turn-line-2048", items: [{ id: "jsonl-synthetic-item", type: "user_message", role: "user" }] }],
           nextCursor: "remodex-jsonl-fallback-older-unavailable",
         },
       },

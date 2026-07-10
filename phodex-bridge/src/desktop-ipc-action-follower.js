@@ -1693,7 +1693,9 @@ function createDesktopIpcActionFollower({
     hasLiveThreadState(threadId) {
       const normalizedThreadId = readString(threadId);
       if (pendingSnapshotsByThreadId.has(normalizedThreadId)) {
-        return false;
+        // A debounced snapshot is an in-flight authoritative Desktop update.
+        // Do not briefly wake rollout between IPC patches and duplicate rows.
+        return true;
       }
       const rawState = rawStatesByThreadId.get(normalizedThreadId);
       if (!rawState) {
@@ -1709,6 +1711,33 @@ function createDesktopIpcActionFollower({
         return false;
       }
       return true;
+    },
+    // Fallback rollout mirroring must only yield to a Desktop snapshot that
+    // has actually moved recently. Keep hasLiveThreadState's broader meaning
+    // for callers that need cached/idle Desktop state, but expose this explicit
+    // lease check for source arbitration.
+    hasFreshLiveThreadState(threadId) {
+      const normalizedThreadId = readString(threadId);
+      if (pendingSnapshotsByThreadId.has(normalizedThreadId)) {
+        return Boolean(normalizedThreadId);
+      }
+      const rawState = rawStatesByThreadId.get(normalizedThreadId);
+      if (!rawState) {
+        return false;
+      }
+      const liveState = boundedDesktopLiveStateForThread(normalizedThreadId, rawState);
+      if (!Array.isArray(liveState.turns) || liveState.turns.length === 0) {
+        return false;
+      }
+      const thread = projectDesktopConversationStateToThread(normalizedThreadId, liveState, { now });
+      // A connected Desktop stream with an explicitly active projected turn is
+      // authoritative even during a quiet tool/reasoning interval. Applying
+      // the 20s cache age to that case woke rollout too, producing duplicate
+      // live sources. Idle snapshots still expire normally below.
+      if (hasActiveProjectedTurn(thread)) {
+        return ipc.isConnected();
+      }
+      return !isRawStateStaleForActiveRead(normalizedThreadId);
     },
   };
 }
@@ -1948,6 +1977,9 @@ function createDesktopIpcClient({
 
   return {
     ensureConnected,
+    isConnected() {
+      return Boolean(socket && !socket.destroyed && clientId);
+    },
     sendRequest,
     sendDiscoveryRequest,
     close,

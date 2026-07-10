@@ -10,6 +10,9 @@ import Foundation
 enum TurnAutoScrollMode {
     case followBottom
     case anchorAssistantResponse
+    // A reopened live turn first shows its coherent response boundary, then
+    // returns to normal live-follow once that one-shot placement has settled.
+    case anchorTurnStartThenFollow
     case manual
 }
 
@@ -17,6 +20,9 @@ struct TurnScrollStateTracker {
     static let bottomThreshold: CGFloat = 12
     static let userScrollCooldown: TimeInterval = 0.25
     static let contentHeightCorrectionThreshold: CGFloat = 1
+    // Give a reopened live turn enough time to be read from its response
+    // boundary before its next delta is allowed to reclaim the live tail.
+    static let initialLiveTurnStartAnchorDwellNanoseconds: UInt64 = 1_200_000_000
 
     static func shouldShowScrollToLatestButton(messageCount: Int, isScrolledToBottom: Bool) -> Bool {
         messageCount > 0 && !isScrolledToBottom
@@ -77,7 +83,7 @@ struct TurnScrollStateTracker {
         switch currentMode {
         case .followBottom:
             return true
-        case .anchorAssistantResponse:
+        case .anchorAssistantResponse, .anchorTurnStartThenFollow:
             return false
         case .manual:
             return false
@@ -100,31 +106,43 @@ struct TurnScrollStateTracker {
         currentMode == .followBottom ? .manual : currentMode
     }
 
-    // Opening any live turn should show the newest streamed content immediately.
-    // A non-empty active-turn id counts as live evidence while the explicit
-    // running flag is still hydrating after a thread switch.
+    // A local send is explicit user intent to enter the new turn at its live tail.
+    // Reopening an already-running desktop turn is different: first show its
+    // opener/response boundary so the user has context before live-follow resumes.
     static func shouldOpenAtLiveTail(
+        isSendInFlight: Bool
+    ) -> Bool {
+        isSendInFlight
+    }
+
+    // Live evidence still matters while choosing how much of a reopened thread
+    // to render. It must not, by itself, decide the initial scroll position.
+    static func hasLiveTurnEvidence(
         isThreadRunning: Bool,
         activeTurnID: String?,
-        isSendInFlight: Bool,
         hasStreamingTail: Bool
     ) -> Bool {
         let normalizedActiveTurnID = activeTurnID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let hasActiveTurn = normalizedActiveTurnID?.isEmpty == false
-        return isThreadRunning || hasActiveTurn || isSendInFlight || hasStreamingTail
+        return isThreadRunning || hasActiveTurn || hasStreamingTail
     }
 
-    static func shouldReleaseInitialHistoryAnchorForLiveTail(
-        shouldOpenAtLiveTail: Bool,
-        hasInitialResponseStartAnchor: Bool,
-        shouldAnchorToAssistantResponse: Bool,
+    static func modeForInitialResponseStartAnchor(
+        hasLiveTurnEvidence: Bool
+    ) -> TurnAutoScrollMode {
+        hasLiveTurnEvidence ? .anchorTurnStartThenFollow : .manual
+    }
+
+    static func modeAfterInitialResponseStartAnchorDwell(
+        currentMode: TurnAutoScrollMode,
         isAutomaticScrollingPaused: Bool
-    ) -> Bool {
-        shouldOpenAtLiveTail
-            && hasInitialResponseStartAnchor
-            && !shouldAnchorToAssistantResponse
-            && !isAutomaticScrollingPaused
+    ) -> TurnAutoScrollMode {
+        guard currentMode == .anchorTurnStartThenFollow,
+              !isAutomaticScrollingPaused else {
+            return currentMode
+        }
+        return .followBottom
     }
 
     static func isAutomaticScrollingPaused(

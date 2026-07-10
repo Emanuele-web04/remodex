@@ -81,6 +81,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var initialResponseStartAnchorID: String?
     @State private var initialLiveTailThreadID: String?
     @State private var initialRecoverySnapTask: Task<Void, Never>?
+    @State private var initialLiveTurnStartAnchorDwellTask: Task<Void, Never>?
+    @State private var initialLiveTurnStartAnchorDwellGeneration = 0
     @State private var followBottomScrollTask: Task<Void, Never>?
     @State private var pendingAssistantBottomSnapTask: Task<Void, Never>?
     @State private var progressiveTailRevealTask: Task<Void, Never>?
@@ -96,6 +98,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     /// The service supplies paginated render windows; legacy full-history threads still slice locally.
     private var visibleMessages: ArraySlice<CodexMessage> {
         if usesPaginatedHistory
+            || hasLiveTurnEvidence
             || shouldOpenAtLiveTail {
             return messages[...]
         }
@@ -562,9 +565,17 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
     private var shouldOpenAtLiveTail: Bool {
         TurnScrollStateTracker.shouldOpenAtLiveTail(
+            isSendInFlight: isSendInFlight
+        )
+    }
+
+    // Keep all rows for a running/recovered turn so its opener is available for
+    // the one-shot initial anchor. This is deliberately separate from the
+    // local-send tail policy below.
+    private var hasLiveTurnEvidence: Bool {
+        TurnScrollStateTracker.hasLiveTurnEvidence(
             isThreadRunning: isThreadRunning,
             activeTurnID: activeTurnID,
-            isSendInFlight: isSendInFlight,
             // Live rows often arrive before thread/read has rehydrated the
             // explicit running fields during a fast sidebar switch.
             hasStreamingTail: messages.suffix(12).contains(where: \.isStreaming)
@@ -572,16 +583,18 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     // Large histories intentionally render only a recent window. On an inactive
-    // thread, open that window at the beginning of its newest logical response
-    // instead of at the response's final nested stream block.
+    // thread, or any reopened live thread, open at the beginning of its newest
+    // logical response instead of at the response's final nested stream block.
     private var boundedHistoryResponseStartAnchorID: String? {
         let hasRowsOutsideVisibleWindow = !usesPaginatedHistory
             && messages.count > visibleTailCount
+        let shouldAnchorOpeningResponse = hasLiveTurnEvidence
+            || hasRemoteEarlierMessages
+            || hasLocallyProjectedEarlierMessages
+            || hasRowsOutsideVisibleWindow
         guard !shouldAnchorToAssistantResponse,
               !shouldOpenAtLiveTail,
-              hasRemoteEarlierMessages
-                || hasLocallyProjectedEarlierMessages
-                || hasRowsOutsideVisibleWindow else {
+              shouldAnchorOpeningResponse else {
             return nil
         }
         return TurnTimelineRenderProjection.latestResponseStartAnchorID(
@@ -630,6 +643,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         initialRecoverySnapPendingThreadID = nil
         initialResponseStartAnchorID = nil
         initialLiveTailThreadID = nil
+        cancelInitialLiveTurnStartAnchorDwell()
+        autoScrollMode = .manual
         progressiveTailRevealTask?.cancel()
         progressiveTailRevealTask = nil
         scrollGeometryCoalescer.cancel()
@@ -692,6 +707,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         initialRecoverySnapPendingThreadID = nil
         initialResponseStartAnchorID = nil
         initialLiveTailThreadID = threadID
+        cancelInitialLiveTurnStartAnchorDwell()
         isUserDraggingScroll = false
         userScrollCooldownUntil = nil
         pendingAssistantBottomSnapTask?.cancel()
@@ -700,8 +716,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     // Resets per-thread scroll intent so each opened conversation gets one fresh
-    // post-layout recovery. Live turns open at the tail; only bounded inactive
-    // histories settle at the beginning of their newest response.
+    // post-layout recovery. A reopened live turn first settles at the beginning
+    // of its newest coherent response, then resumes normal live-follow. Only a
+    // locally initiated send opens directly at the tail.
     private func beginScrollSessionIfNeeded(force: Bool = false) {
         guard force || scrollSessionThreadID != threadID else { return }
 
@@ -725,7 +742,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         isScrolledToBottom = !ownsResponseStartPosition
         autoScrollMode = shouldAnchorToAssistantResponse
             ? .anchorAssistantResponse
-            : (ownsResponseStartPosition ? .manual : .followBottom)
+            : (ownsResponseStartPosition
+                ? TurnScrollStateTracker.modeForInitialResponseStartAnchor(
+                    hasLiveTurnEvidence: hasLiveTurnEvidence
+                )
+                : .followBottom)
         initialRecoverySnapPendingThreadID = shouldAnchorToAssistantResponse ? nil : threadID
         isProgressivelyRevealingRecentTail = shouldStageHeavyThreadOpen
     }
@@ -735,6 +756,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         initialRecoverySnapTask?.cancel()
         initialRecoverySnapTask = nil
         initialResponseStartAnchorID = nil
+        cancelInitialLiveTurnStartAnchorDwell()
         followBottomScrollTask?.cancel()
         followBottomScrollTask = nil
         pendingAssistantBottomSnapTask?.cancel()
@@ -747,6 +769,12 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         isRetryingEarlierHistoryLoad = false
         localEarlierRevealTask?.cancel()
         localEarlierRevealTask = nil
+    }
+
+    private func cancelInitialLiveTurnStartAnchorDwell() {
+        initialLiveTurnStartAnchorDwellGeneration &+= 1
+        initialLiveTurnStartAnchorDwellTask?.cancel()
+        initialLiveTurnStartAnchorDwellTask = nil
     }
 
     // Keeps the remote "Load earlier" affordance visible while a page is in flight.
@@ -852,9 +880,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         handleTimelineMutation(using: proxy)
     }
 
-    // If live-state evidence arrives after an inactive history already claimed
-    // the opening offset, release only that app-owned anchor and jump to the tail.
-    // A user drag clears the anchor first, so this never overrides manual reading.
+    // Only an explicit local send may release an app-owned opening anchor for the
+    // tail. Passive live-state hydration must never jump a reopened chat away
+    // from its turn opener.
     private func resumeLiveTailIfNeeded(using proxy: ScrollViewProxy) {
         guard scrollSessionThreadID == threadID,
               !shouldPauseAutomaticScrolling else {
@@ -867,12 +895,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             initialLiveTailThreadID = threadID
         }
 
-        guard TurnScrollStateTracker.shouldReleaseInitialHistoryAnchorForLiveTail(
-            shouldOpenAtLiveTail: shouldOpenAtLiveTail,
-            hasInitialResponseStartAnchor: initialResponseStartAnchorID != nil,
-            shouldAnchorToAssistantResponse: shouldAnchorToAssistantResponse,
-            isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
-        ) else { return }
+        guard shouldOpenAtLiveTail,
+              initialResponseStartAnchorID != nil,
+              !shouldAnchorToAssistantResponse else { return }
 
         initialRecoverySnapTask?.cancel()
         initialRecoverySnapTask = nil
@@ -891,6 +916,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             initialRecoverySnapPendingThreadID = nil
             initialRecoverySnapTask?.cancel()
             initialRecoverySnapTask = nil
+            cancelInitialLiveTurnStartAnchorDwell()
             // A send is an explicit request to enter the new live turn. If the
             // viewport was held by an app-owned history/recovery anchor, do not
             // leave it stranded in manual mode after clearing that anchor.
@@ -985,7 +1011,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
 
         // Do not override a real user scroll. Manual mode is app-owned here only
         // while the bounded-history response anchor is still pending.
-        guard autoScrollMode == .followBottom || initialResponseStartAnchorID != nil else {
+        guard autoScrollMode == .followBottom
+                || autoScrollMode == .anchorTurnStartThenFollow
+                || initialResponseStartAnchorID != nil else {
             return
         }
 
@@ -994,7 +1022,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             initialRecoverySnapTask = nil
             initialResponseStartAnchorID = responseStartAnchorID
             initialRecoverySnapPendingThreadID = threadID
-            autoScrollMode = .manual
+            autoScrollMode = TurnScrollStateTracker.modeForInitialResponseStartAnchor(
+                hasLiveTurnEvidence: hasLiveTurnEvidence
+            )
             isScrolledToBottom = false
             performInitialRecoverySnapIfNeeded(using: proxy)
             return
@@ -1138,7 +1168,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         // follow-bottom to manual before the first bottom jump lands.
         if !nextValue,
            initialRecoverySnapPendingThreadID == threadID,
-           autoScrollMode == .followBottom {
+           (autoScrollMode == .followBottom || autoScrollMode == .anchorTurnStartThenFollow) {
             return
         }
 
@@ -1194,6 +1224,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         initialLiveTailThreadID = nil
         initialRecoverySnapTask?.cancel()
         initialRecoverySnapTask = nil
+        cancelInitialLiveTurnStartAnchorDwell()
         followBottomScrollTask?.cancel()
         followBottomScrollTask = nil
         pendingAssistantBottomSnapTask?.cancel()
@@ -1257,13 +1288,13 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     }
 
     // Repairs the initial white/blank viewport race with repeated post-layout
-    // snaps. Bounded inactive histories use their response start; live turns
-    // always use the bottom sentinel.
+    // snaps. Reopened live turns use their response start once, then return to
+    // normal follow-bottom only for subsequent live growth.
     private func performInitialRecoverySnapIfNeeded(using proxy: ScrollViewProxy) {
         let responseStartAnchorID = initialResponseStartAnchorID
         let hasValidRecoveryMode = responseStartAnchorID == nil
             ? autoScrollMode == .followBottom
-            : autoScrollMode == .manual
+            : (autoScrollMode == .manual || autoScrollMode == .anchorTurnStartThenFollow)
         guard initialRecoverySnapPendingThreadID == threadID,
               initialRecoverySnapTask == nil,
               !messages.isEmpty,
@@ -1293,7 +1324,7 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                       initialResponseStartAnchorID == responseStartAnchorID,
                       responseStartAnchorID == nil
                         ? autoScrollMode == .followBottom
-                        : autoScrollMode == .manual,
+                        : (autoScrollMode == .manual || autoScrollMode == .anchorTurnStartThenFollow),
                       !shouldPauseAutomaticScrolling,
                       !shouldAnchorToAssistantResponse else {
                     break
@@ -1307,17 +1338,56 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
             }
             let stillHasValidRecoveryMode = responseStartAnchorID == nil
                 ? autoScrollMode == .followBottom
-                : autoScrollMode == .manual
+                : (autoScrollMode == .manual || autoScrollMode == .anchorTurnStartThenFollow)
             let shouldKeepRecoveryPending = !initialTurnsLoaded
                 && isInitialEarlierPageLoading
                 && stillHasValidRecoveryMode
                 && !shouldPauseAutomaticScrolling
             if !shouldKeepRecoveryPending {
                 initialRecoverySnapPendingThreadID = nil
-                // Keep the anchor as the ownership marker after layout settles;
-                // incoming rows then grow below this app-owned opening position.
+                // Keep the anchor as the ownership marker after layout settles.
+                // A reopened live turn gets a short dwell before a future delta
+                // can reclaim the tail; no bootstrap row may pull it away now.
+                scheduleInitialLiveTurnStartAnchorDwellIfNeeded()
             }
             initialRecoverySnapTask = nil
+        }
+    }
+
+    // A live turn can receive its next delta immediately after the initial
+    // layout settles. Hold the response-start position briefly so reopen never
+    // looks like a flash at the correct context followed by an instant tail jump.
+    private func scheduleInitialLiveTurnStartAnchorDwellIfNeeded() {
+        guard autoScrollMode == .anchorTurnStartThenFollow,
+              initialLiveTurnStartAnchorDwellTask == nil else {
+            return
+        }
+
+        let expectedThreadID = threadID
+        initialLiveTurnStartAnchorDwellGeneration &+= 1
+        let expectedGeneration = initialLiveTurnStartAnchorDwellGeneration
+        initialLiveTurnStartAnchorDwellTask = Task { @MainActor in
+            defer {
+                if initialLiveTurnStartAnchorDwellGeneration == expectedGeneration {
+                    initialLiveTurnStartAnchorDwellTask = nil
+                }
+            }
+            try? await Task.sleep(
+                nanoseconds: TurnScrollStateTracker.initialLiveTurnStartAnchorDwellNanoseconds
+            )
+
+            guard !Task.isCancelled,
+                  initialLiveTurnStartAnchorDwellGeneration == expectedGeneration,
+                  scrollSessionThreadID == expectedThreadID,
+                  autoScrollMode == .anchorTurnStartThenFollow,
+                  !shouldPauseAutomaticScrolling else {
+                return
+            }
+
+            autoScrollMode = TurnScrollStateTracker.modeAfterInitialResponseStartAnchorDwell(
+                currentMode: autoScrollMode,
+                isAutomaticScrollingPaused: shouldPauseAutomaticScrolling
+            )
         }
     }
 

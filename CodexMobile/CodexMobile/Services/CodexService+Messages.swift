@@ -381,6 +381,7 @@ extension CodexService {
                in: rawMessages,
                threadId: threadId,
                turnId: updatedMessage.turnId,
+               itemId: updatedMessage.itemId,
                text: updatedMessage.text,
                excludingMessageID: messageId
            ) {
@@ -602,11 +603,15 @@ extension CodexService {
 
     // Schedules one full reconcile after a lightweight running catch-up once the thread settles.
     func scheduleCanonicalHistoryReconcileIfNeeded(for threadId: String) {
+        // A provisional JSONL page needs its canonical replacement even while the turn is
+        // running. The merge is revision-guarded below; deferring it until completion leaves a
+        // reopen showing only a partial tail for the entire active turn.
+        let mayReconcileDuringActiveTurn = provisionalPaginatedHistoryThreadIDs.contains(threadId)
         guard threadsNeedingCanonicalHistoryReconcile.contains(threadId),
               canonicalHistoryReconcileTaskByThreadID[threadId] == nil,
               canonicalHistoryReconcileRetryTaskByThreadID[threadId] == nil,
               isConnected,
-              !threadHasActiveOrRunningTurn(threadId),
+              (mayReconcileDuringActiveTurn || !threadHasActiveOrRunningTurn(threadId)),
               thread(for: threadId)?.syncState == .live else {
             return
         }
@@ -639,7 +644,8 @@ extension CodexService {
             guard let self,
                   self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
                   self.isConnected,
-                  !self.threadHasActiveOrRunningTurn(threadId),
+                  (self.provisionalPaginatedHistoryThreadIDs.contains(threadId)
+                      || !self.threadHasActiveOrRunningTurn(threadId)),
                   self.thread(for: threadId)?.syncState == .live else {
                 return
             }
@@ -654,7 +660,8 @@ extension CodexService {
                 } else if outcome.needsCanonicalRetry,
                           self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
                           self.isConnected,
-                          !self.threadHasActiveOrRunningTurn(threadId),
+                          (self.provisionalPaginatedHistoryThreadIDs.contains(threadId)
+                              || !self.threadHasActiveOrRunningTurn(threadId)),
                           self.thread(for: threadId)?.syncState == .live {
                     shouldRetry = true
                     if outcome == .deferredAfterTimeout
@@ -673,7 +680,8 @@ extension CodexService {
                     self.handleMissingThread(threadId)
                 } else if self.threadsNeedingCanonicalHistoryReconcile.contains(threadId),
                           self.isConnected,
-                          !self.threadHasActiveOrRunningTurn(threadId),
+                          (self.provisionalPaginatedHistoryThreadIDs.contains(threadId)
+                              || !self.threadHasActiveOrRunningTurn(threadId)),
                           self.thread(for: threadId)?.syncState == .live {
                     shouldRetry = true
                     retryDelayNanoseconds = self.nextCanonicalHistoryReconcileRetryDelay(for: threadId)
@@ -3862,6 +3870,7 @@ extension CodexService {
         threadId: String,
         turnId: String?,
         itemId: String?,
+        sourceItemKey: String? = nil,
         assistantPhase: String? = nil,
         text: String
     ) {
@@ -3875,6 +3884,7 @@ extension CodexService {
         var resolvedAssistantMessageId: String?
         let explicitTurnId = normalizedStreamingItemID(turnId)
         let explicitItemId = normalizedStreamingItemID(itemId)
+        let normalizedSourceItemKey = normalizedStreamingItemID(sourceItemKey)
         let activeTurnIdForThread = activeTurnIdByThread[threadId]
         let hasExplicitIdentity = explicitTurnId != nil || explicitItemId != nil
 
@@ -3905,6 +3915,64 @@ extension CodexService {
         }
         flushPendingAssistantDeltas(for: threadId, turnId: resolvedTurnId, itemId: explicitItemId)
 
+        // The bridge can replay one assistant item as a JSONL/rollout row and later as an
+        // item with Codex's provider id. The alias is generated per turn, so it is safe to use
+        // as an exact source identity here and avoids text-only reconciliation across handoffs.
+        if let normalizedSourceItemKey,
+           let resolvedTurnId {
+            let eligibleAliasIndices = (messagesByThread[threadId] ?? []).indices.filter { index in
+                let candidate = messagesByThread[threadId]![index]
+                return candidate.role == .assistant
+                    && candidate.turnId == resolvedTurnId
+                    && candidate.sourceItemKey == normalizedSourceItemKey
+                    && Self.sourceItemIdentityAllowsReconcile(candidate.itemId, explicitItemId)
+            }
+            if eligibleAliasIndices.count == 1, let aliasMatchIndex = eligibleAliasIndices.first {
+                let existingAliasText = messagesByThread[threadId]?[aliasMatchIndex].text ?? ""
+                // Buffered/rollout replay is older than a still-streaming local row. Do not let a
+                // shorter stale copy replace live text or close its stream just because its source
+                // alias matches.
+                if isApplyingReplayedBridgeEvent,
+                   messagesByThread[threadId]?[aliasMatchIndex].isStreaming == true,
+                   existingAliasText.utf8.count > trimmedText.utf8.count {
+                    return
+                }
+                messagesByThread[threadId]?[aliasMatchIndex].text = Self.assistantCompletionTextPreservingImages(
+                    existingText: existingAliasText,
+                    canonicalText: trimmedText
+                )
+                messagesByThread[threadId]?[aliasMatchIndex].isStreaming = false
+                applyAssistantPhaseIfNeeded(
+                    threadId: threadId,
+                    messageIndex: aliasMatchIndex,
+                    assistantPhase: normalizedPhase
+                )
+                if let explicitItemId,
+                   (messagesByThread[threadId]?[aliasMatchIndex].itemId == nil
+                       || messagesByThread[threadId]?[aliasMatchIndex].itemId.map(CodexSyntheticIdentifiers.isMirrorMintedItemID) == true) {
+                    promoteAssistantItemIdentity(
+                        threadId: threadId,
+                        turnId: resolvedTurnId,
+                        messageIndex: aliasMatchIndex,
+                        providerItemId: explicitItemId
+                    )
+                }
+                refreshDerivedPlanMetadata(threadId: threadId, messageIndex: aliasMatchIndex)
+                resolvedAssistantMessageId = messagesByThread[threadId]?[aliasMatchIndex].id
+                assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
+                if let resolvedAssistantMessageId {
+                    persistMessages()
+                    noteAssistantMessage(
+                        threadId: threadId,
+                        turnId: resolvedTurnId,
+                        assistantMessageId: resolvedAssistantMessageId
+                    )
+                    updateCurrentOutput(for: threadId)
+                }
+                return
+            }
+        }
+
         if resolvedTurnId == nil, explicitItemId == nil,
            let fingerprint = assistantCompletionFingerprintByThread[threadId],
            fingerprint.text == trimmedText,
@@ -3915,6 +3983,7 @@ extension CodexService {
         if let replayTerminalMessageId = absorbAssistantBlockReplayCompletion(
             threadId: threadId,
             turnId: resolvedTurnId,
+            itemId: explicitItemId,
             text: trimmedText
         ) {
             applyAssistantPhaseIfNeeded(
@@ -3922,6 +3991,16 @@ extension CodexService {
                 messageId: replayTerminalMessageId,
                 assistantPhase: normalizedPhase
             )
+            if let replayTerminalMessageIndex = findMessageIndex(
+                threadId: threadId,
+                messageId: replayTerminalMessageId
+            ) {
+                applyAssistantSourceItemKeyIfNeeded(
+                    threadId: threadId,
+                    messageIndex: replayTerminalMessageIndex,
+                    sourceItemKey: normalizedSourceItemKey
+                )
+            }
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
             _ = mergeGeneratedImageArtifactsIntoAssistantMessage(
                 threadId: threadId,
@@ -3961,6 +4040,11 @@ extension CodexService {
             if messagesByThread[threadId]?[imagePreviewIndex].itemId == nil, let explicitItemId {
                 messagesByThread[threadId]?[imagePreviewIndex].itemId = explicitItemId
             }
+            applyAssistantSourceItemKeyIfNeeded(
+                threadId: threadId,
+                messageIndex: imagePreviewIndex,
+                sourceItemKey: normalizedSourceItemKey
+            )
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: imagePreviewIndex)
             let messageId = messagesByThread[threadId]?[imagePreviewIndex].id
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
@@ -3994,6 +4078,11 @@ extension CodexService {
                 threadId: threadId,
                 messageIndex: duplicateIndex,
                 assistantPhase: normalizedPhase
+            )
+            applyAssistantSourceItemKeyIfNeeded(
+                threadId: threadId,
+                messageIndex: duplicateIndex,
+                sourceItemKey: normalizedSourceItemKey
             )
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
             assistantCompletionFingerprintByThread[threadId] = (text: trimmedText, timestamp: now)
@@ -4052,6 +4141,11 @@ extension CodexService {
                     if messagesByThread[threadId]?[targetIndex].turnId == nil {
                         messagesByThread[threadId]?[targetIndex].turnId = resolvedTurnId
                     }
+                    applyAssistantSourceItemKeyIfNeeded(
+                        threadId: threadId,
+                        messageIndex: targetIndex,
+                        sourceItemKey: normalizedSourceItemKey
+                    )
                     refreshDerivedPlanMetadata(threadId: threadId, messageIndex: targetIndex)
                     resolvedAssistantMessageId = messagesByThread[threadId]?[targetIndex].id
                 }
@@ -4115,6 +4209,11 @@ extension CodexService {
             if messagesByThread[threadId]?[messageIndex].turnId == nil {
                 messagesByThread[threadId]?[messageIndex].turnId = resolvedTurnId
             }
+            applyAssistantSourceItemKeyIfNeeded(
+                threadId: threadId,
+                messageIndex: messageIndex,
+                sourceItemKey: normalizedSourceItemKey
+            )
             refreshDerivedPlanMetadata(threadId: threadId, messageIndex: messageIndex)
             resolvedAssistantMessageId = messagesByThread[threadId]?[messageIndex].id
         } else {
@@ -4136,6 +4235,11 @@ extension CodexService {
                 if messagesByThread[threadId]?[existingItemIndex].turnId == nil {
                     messagesByThread[threadId]?[existingItemIndex].turnId = resolvedTurnId
                 }
+                applyAssistantSourceItemKeyIfNeeded(
+                    threadId: threadId,
+                    messageIndex: existingItemIndex,
+                    sourceItemKey: normalizedSourceItemKey
+                )
                 refreshDerivedPlanMetadata(threadId: threadId, messageIndex: existingItemIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[existingItemIndex].id
             } else if let duplicateIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
@@ -4160,6 +4264,11 @@ extension CodexService {
                 if messagesByThread[threadId]?[duplicateIndex].turnId == nil {
                     messagesByThread[threadId]?[duplicateIndex].turnId = resolvedTurnId
                 }
+                applyAssistantSourceItemKeyIfNeeded(
+                    threadId: threadId,
+                    messageIndex: duplicateIndex,
+                    sourceItemKey: normalizedSourceItemKey
+                )
                 refreshDerivedPlanMetadata(threadId: threadId, messageIndex: duplicateIndex)
                 resolvedAssistantMessageId = messagesByThread[threadId]?[duplicateIndex].id
             } else {
@@ -4171,6 +4280,7 @@ extension CodexService {
                     text: trimmedText,
                     turnId: resolvedTurnId,
                     itemId: explicitItemId,
+                    sourceItemKey: normalizedSourceItemKey,
                     isStreaming: false,
                     deliveryState: .confirmed
                 )
@@ -4198,6 +4308,58 @@ extension CodexService {
             )
         }
         updateCurrentOutput(for: threadId)
+    }
+
+    // Keep the bridge alias once it has been proven for this row. It is intentionally
+    // write-once: a different alias in the same turn is a distinct assistant item.
+    func applyAssistantSourceItemKeyIfNeeded(
+        threadId: String,
+        messageIndex: Int,
+        sourceItemKey: String?
+    ) {
+        guard let sourceItemKey,
+              !sourceItemKey.isEmpty,
+              messagesByThread[threadId]?[messageIndex].sourceItemKey == nil else {
+            return
+        }
+        messagesByThread[threadId]?[messageIndex].sourceItemKey = sourceItemKey
+    }
+
+    // A canonical provider id replaces a synthetic mirror id. Move every live lookup and queued
+    // delta to the new identity in the same mutation so a late chunk cannot revive a second row.
+    func promoteAssistantItemIdentity(
+        threadId: String,
+        turnId: String,
+        messageIndex: Int,
+        providerItemId: String
+    ) {
+        guard let oldItemId = messagesByThread[threadId]?[messageIndex].itemId,
+              oldItemId != providerItemId else {
+            messagesByThread[threadId]?[messageIndex].itemId = providerItemId
+            return
+        }
+        messagesByThread[threadId]?[messageIndex].itemId = providerItemId
+
+        let oldLookupKey = assistantStreamingMessageKey(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: oldItemId
+        )
+        let newLookupKey = assistantStreamingMessageKey(
+            threadId: threadId,
+            turnId: turnId,
+            itemId: providerItemId
+        )
+        if let messageID = streamingAssistantMessageByItemKey.removeValue(forKey: oldLookupKey) {
+            streamingAssistantMessageByItemKey[newLookupKey] = messageID
+        }
+
+        migratePendingAssistantDelta(
+            threadId: threadId,
+            turnId: turnId,
+            sourceItemId: oldItemId,
+            destinationItemId: providerItemId
+        )
     }
 
     // Renders image-generation artifacts as assistant image previews without embedding image bytes.
@@ -4457,6 +4619,7 @@ extension CodexService {
     private func absorbAssistantBlockReplayCompletion(
         threadId: String,
         turnId: String?,
+        itemId: String?,
         text: String
     ) -> String? {
         guard var threadMessages = messagesByThread[threadId] else {
@@ -4467,6 +4630,7 @@ extension CodexService {
             in: threadMessages,
             threadId: threadId,
             turnId: turnId,
+            itemId: itemId,
             text: text
         ) {
             var didMutate = false
@@ -4673,6 +4837,7 @@ extension CodexService {
                 in: nextMessages,
                 threadId: threadId,
                 turnId: message.turnId,
+                itemId: message.itemId,
                 text: message.text,
                 excludingMessageID: message.id
             ) else {
@@ -4704,6 +4869,7 @@ extension CodexService {
         in messages: [CodexMessage],
         threadId: String,
         turnId: String?,
+        itemId: String?,
         text: String,
         excludingMessageID: String
     ) -> String? {
@@ -4711,6 +4877,7 @@ extension CodexService {
             in: messages,
             threadId: threadId,
             turnId: turnId,
+            itemId: itemId,
             text: text,
             excludingMessageID: excludingMessageID
         ) {
@@ -5127,7 +5294,6 @@ extension CodexService {
             migratePendingTurnFallbackDelta(
                 threadId: threadId,
                 turnId: turnId,
-                destinationStreamID: streamID,
                 normalizedItemId: normalizedItemId
             )
         }
@@ -5156,33 +5322,48 @@ extension CodexService {
     private func migratePendingTurnFallbackDelta(
         threadId: String,
         turnId: String,
-        destinationStreamID: String,
         normalizedItemId: String?
     ) {
-        let fallbackStreamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: nil)
-        guard fallbackStreamID != destinationStreamID,
-              let fallbackDelta = pendingAssistantDeltaByStreamID.removeValue(forKey: fallbackStreamID) else {
+        migratePendingAssistantDelta(
+            threadId: threadId,
+            turnId: turnId,
+            sourceItemId: nil,
+            destinationItemId: normalizedItemId
+        )
+    }
+
+    // One identity migration path for turn-scoped fallback -> item and synthetic item ->
+    // provider item. It preserves the stream queue order, concatenates pending text once, and
+    // keeps a batch replay-only only when both sides were replay-only.
+    private func migratePendingAssistantDelta(
+        threadId: String,
+        turnId: String,
+        sourceItemId: String?,
+        destinationItemId: String?
+    ) {
+        let sourceStreamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: sourceItemId)
+        let destinationStreamID = assistantDeltaStreamID(threadId: threadId, turnId: turnId, itemId: destinationItemId)
+        guard sourceStreamID != destinationStreamID,
+              let sourceDelta = pendingAssistantDeltaByStreamID.removeValue(forKey: sourceStreamID) else {
             return
         }
 
-        let fallbackContext = pendingAssistantDeltaContextByStreamID[fallbackStreamID]
-        pendingAssistantDeltaContextByStreamID.removeValue(forKey: fallbackStreamID)
-        pendingAssistantDeltaStreamOrder.removeAll { $0 == fallbackStreamID }
-        if pendingAssistantDeltaByStreamID[destinationStreamID] == nil,
-           !pendingAssistantDeltaStreamOrder.contains(destinationStreamID) {
+        let sourceContext = pendingAssistantDeltaContextByStreamID.removeValue(forKey: sourceStreamID)
+        pendingAssistantDeltaStreamOrder.removeAll { $0 == sourceStreamID }
+        if !pendingAssistantDeltaStreamOrder.contains(destinationStreamID) {
             pendingAssistantDeltaStreamOrder.append(destinationStreamID)
         }
         pendingAssistantDeltaByStreamID[destinationStreamID] = mergeAssistantDelta(
             existingText: pendingAssistantDeltaByStreamID[destinationStreamID] ?? "",
-            incomingDelta: fallbackDelta
+            incomingDelta: sourceDelta
         )
         let destinationIsReplay = pendingAssistantDeltaContextByStreamID[destinationStreamID]?.isReplay ?? true
         pendingAssistantDeltaContextByStreamID[destinationStreamID] = (
             threadId: threadId,
             turnId: turnId.trimmingCharacters(in: .whitespacesAndNewlines),
-            itemId: normalizedItemId,
-            assistantPhase: fallbackContext?.assistantPhase,
-            isReplay: destinationIsReplay && (fallbackContext?.isReplay ?? true)
+            itemId: destinationItemId,
+            assistantPhase: sourceContext?.assistantPhase,
+            isReplay: destinationIsReplay && (sourceContext?.isReplay ?? true)
         )
     }
 
@@ -5481,6 +5662,10 @@ extension CodexService {
 
     // Both paginated and legacy threads use the same bounded render window. Paginated fetches
     // prepend pages into the backing cache, then this projection reveals them deliberately.
+    //
+    // The newest materialized turn is an exception: it is the turn a user just opened and it
+    // must remain coherent even while running metadata catches up after reconnect. In particular,
+    // never render just the final 80 tool/reasoning rows of a 500-row turn without its prompt.
     func snapshotProjectionSourceMessages(
         threadId: String,
         from messages: [CodexMessage],
@@ -5494,29 +5679,57 @@ extension CodexService {
             return messages
         }
 
-        let visibleStartIndex: Int = {
-            guard threadHasActiveOrRunningTurn(threadId) else {
-                return messages.count - limit
-            }
-
-            if let activeTurnID = activeTurnIdByThread[threadId],
-               let activeTurnStartIndex = messages.firstIndex(where: { message in
-                   message.turnId == activeTurnID
-               }) {
-                return activeTurnStartIndex
-            }
-
-            // Desktop lifecycle can briefly know that a thread is running before
-            // it has a usable turn id. The latest prompt is then the safest start
-            // of the current turn; if it is not loaded, retain the bounded tail.
-            return messages.lastIndex(where: { $0.role == .user })
-                ?? (messages.count - limit)
-        }()
+        let shouldKeepCompleteNewestTurn = threadHasActiveOrRunningTurn(threadId)
+            || pendingReconnectRunContinuityThreadIDs.contains(threadId)
+            || desktopMirroredRunningThreadIDs.contains(threadId)
+        let visibleStartIndex = shouldKeepCompleteNewestTurn
+            ? (newestMaterializedTurnStartIndex(in: messages) ?? (messages.count - limit))
+            : (messages.count - limit)
         let visibleTail = Array(messages[visibleStartIndex...])
         return visibleTailPreservingTurnArtifacts(
             visibleTail: visibleTail,
             omittedPrefix: messages[..<visibleStartIndex]
         )
+    }
+
+    // Finds the opener for the newest turn represented by the local backing cache instead of
+    // trusting lifecycle state alone. `turn/started` and reconnect replay can be late, stale, or
+    // turnless; the newest concrete turn in chronological history is the only safe first-paint
+    // anchor. Prefer its user opener, then fall back to the contiguous item block when a source
+    // omitted that opener.
+    func newestMaterializedTurnStartIndex(in messages: [CodexMessage]) -> Int? {
+        var newestTurnID: String?
+        for message in messages.reversed() {
+            guard let turnID = message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !turnID.isEmpty else {
+                continue
+            }
+            newestTurnID = turnID
+            break
+        }
+        guard let newestTurnID else {
+            return messages.lastIndex(where: { $0.role == .user })
+        }
+
+        if let openerIndex = messages.firstIndex(where: { message in
+            message.role == .user
+                && message.turnId?.trimmingCharacters(in: .whitespacesAndNewlines) == newestTurnID
+        }) {
+            return openerIndex
+        }
+
+        guard let newestItemIndex = messages.lastIndex(where: {
+            $0.turnId?.trimmingCharacters(in: .whitespacesAndNewlines) == newestTurnID
+        }) else {
+            return messages.lastIndex(where: { $0.role == .user })
+        }
+        var startIndex = newestItemIndex
+        while startIndex > messages.startIndex,
+              messages[messages.index(before: startIndex)].turnId?
+                .trimmingCharacters(in: .whitespacesAndNewlines) == newestTurnID {
+            startIndex = messages.index(before: startIndex)
+        }
+        return startIndex
     }
 
     // Preserve the visible turn's prompt and durable artifacts when its tool-heavy
@@ -5545,17 +5758,9 @@ extension CodexService {
             return true
         }
 
-        let sameTurnContextIDs = Set(missingVisibleTurnContext.map(\.id))
-        let recentOmittedArtifacts = omittedPrefix
-            .suffix(300)
-            .filter { message in
-                isPreservableTurnArtifact(message, kinds: preservedArtifactKinds)
-                    && !visibleMessageIDs.contains(message.id)
-                    && !sameTurnContextIDs.contains(message.id)
-            }
-            .suffix(8)
-
-        let preservedContext = Array(missingVisibleTurnContext) + Array(recentOmittedArtifacts)
+        // Never borrow plan/file-change rows from an omitted *different* turn. That creates an
+        // orphan card above the prompt and makes a partial source look like a corrupted timeline.
+        let preservedContext = Array(missingVisibleTurnContext)
         guard !preservedContext.isEmpty else {
             return visibleTail
         }

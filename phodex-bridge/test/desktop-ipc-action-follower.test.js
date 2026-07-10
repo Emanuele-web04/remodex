@@ -4962,7 +4962,10 @@ test("desktop IPC follower coalesces stale normalized snapshot bursts before pub
 
   sendSnapshot({ oldStatus: "inProgress", includeNewTurn: false });
   await wait(25);
-  assert.equal(follower.hasLiveThreadState("thread-snapshot-coalesce"), false);
+  // The debounced snapshot is already authoritative for source arbitration:
+  // rollout must stay suppressed while the follower coalesces the burst.
+  assert.equal(follower.hasLiveThreadState("thread-snapshot-coalesce"), true);
+  assert.equal(follower.hasFreshLiveThreadState("thread-snapshot-coalesce"), true);
   assert.equal(follower.observeInbound(JSON.stringify({
     id: "provisional-explicit-state",
     method: "thread/turns/list",

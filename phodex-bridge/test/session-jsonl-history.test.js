@@ -115,6 +115,11 @@ test("readThreadTurnsListPageFromSessionJsonl builds a recent turns page from ro
       ["message", "assistant", "fixed"],
     ]
   );
+  assert.match(
+    page.data[0].items[1].remodexSourceItemKey,
+    /^turn-jsonl:[a-f0-9]{16}$/,
+    "JSONL history must carry the same turn-scoped assistant alias as live rollout events"
+  );
 });
 
 test("bounded JSONL history reads a complete tail turn without loading the full file", (t) => {

@@ -104,7 +104,10 @@ const RELAY_JSONL_ARTIFACT_CACHE_MAX_ENTRIES = 128;
 const RELAY_JSONL_THREAD_CWD_CACHE_TTL_MS = 5 * 60_000;
 const RELAY_JSONL_THREAD_EMPTY_CWD_CACHE_TTL_MS = 30_000;
 const RELAY_JSONL_FAST_FIRST_PAGE_WAIT_MS = 1_500;
-const RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS = 60_000;
+// The phone may be backgrounded between the provisional JSONL page and its
+// canonical reconciliation. Keep the handoff long enough that a normal
+// foreground/reconnect does not turn a coherent first page into a dead cursor.
+const RELAY_JSONL_CANONICAL_HANDOFF_TTL_MS = 10 * 60_000;
 const RELAY_JSONL_CANONICAL_HANDOFF_MAX_ENTRIES = 32;
 const JSONL_CANONICAL_HANDOFF_CURSOR_PREFIX = "remodex-jsonl-handoff-v1:";
 const RELAY_JSONL_FULL_ARTIFACT_FALLBACK_MAX_BYTES = Math.max(
@@ -454,6 +457,14 @@ function createThreadTurnsListFastPageCoordinator({
     } catch {
       jsonlFallback = null;
     }
+    // A rollout tail is a useful emergency baseline only when it contains a
+    // whole turn package. Never let a bare tail (for example a file-change or
+    // final assistant fragment) win the race with canonical history: iOS would
+    // render it as a complete conversation and then merge the real opener in
+    // later, which is exactly how orphan cards and duplicate rows appeared.
+    if (jsonlFallback?.response && !isCoherentJsonlFirstPageResponse(jsonlFallback.response)) {
+      jsonlFallback = null;
+    }
     if (!jsonlFallback?.response) {
       const response = await awaitCanonicalOutcome(canonicalOutcomePromise);
       forgetCanonicalFirstPage(canonicalFirstPageCacheKey, canonicalOutcomePromise);
@@ -615,6 +626,39 @@ function firstTurnsListTurnId(response) {
   const result = response?.result;
   const turnsKey = findTurnsListResultKey(result);
   return turnsKey ? turnListTurnIdentifier(result[turnsKey]?.[0]) : "";
+}
+
+function isCoherentJsonlFirstPageResponse(response) {
+  const result = response?.result;
+  const turnsKey = findTurnsListResultKey(result);
+  const turns = turnsKey ? result[turnsKey] : null;
+  if (!Array.isArray(turns) || turns.length === 0) {
+    return false;
+  }
+  // A running turn must contain its materialized user opener. Otherwise an
+  // orphan file card or assistant tail can win the fast-page race and later
+  // be mistaken for a complete conversation. Explicit terminal turns are
+  // allowed without a user item because older compacted/system turns can be
+  // legitimately item-only.
+  const newestTurn = turns[0];
+  const items = Array.isArray(newestTurn?.items) ? newestTurn.items : null;
+  if (!items) {
+    return false;
+  }
+  if (items.length === 0) {
+    return false;
+  }
+  const status = String(newestTurn?.status || "").replace(/[_-]/g, "").toLowerCase();
+  const isExplicitTerminal = new Set(["completed", "failed", "aborted", "cancelled", "canceled", "interrupted"])
+    .has(status);
+  if (isExplicitTerminal) {
+    return true;
+  }
+  return items.some((item) => {
+    const role = String(item?.role || "").toLowerCase();
+    const type = String(item?.type || "").replace(/[_-]/g, "").toLowerCase();
+    return role === "user" || type === "usermessage";
+  });
 }
 
 function threadTurnsListResponseContainsAnchor(response, anchorTurnId) {
@@ -1314,7 +1358,7 @@ function startBridge({
         });
       } catch (error) {
         const jsonlFallback = maybeBuildJsonlThreadTurnsListFallback(request, null);
-        if (jsonlFallback?.response) {
+        if (jsonlFallback?.response && isCoherentJsonlFirstPageResponse(jsonlFallback.response)) {
           sendBridgeManagedThreadTurnsListResponse(request, jsonlFallback.response, respondOnce, {
             skipJsonlArtifactAugmentation: true,
           });
@@ -1369,10 +1413,20 @@ function startBridge({
         return null;
       }
 
+      // A first page is the local baseline for a newly opened thread. Honor a
+      // caller's larger request, but never manufacture the old one-turn tail:
+      // it has no room to preserve surrounding history while canonical data is
+      // still catching up.
+      const requestedLimit = Number.isInteger(params.limit) && params.limit > 0
+        ? params.limit
+        : RELAY_TURNS_LIST_MAX_INITIAL_LIMIT;
+      const firstPageLimit = params.cursor == null
+        ? Math.max(requestedLimit, RELAY_TURNS_LIST_MAX_INITIAL_LIMIT)
+        : requestedLimit;
       const result = readThreadTurnsListPageFromSessionJsonl(rolloutPath, {
         threadId,
-        limit: params.limit,
-        maxLimit: 1,
+        limit: firstPageLimit,
+        maxLimit: RELAY_TURNS_LIST_MAX_INITIAL_LIMIT,
         cursor: params.cursor,
       });
       const turnsKey = findTurnsListResultKey(result);
@@ -4869,8 +4923,15 @@ function shouldSuppressRolloutMirrorForThread(
   threadId,
   { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {}
 ) {
-  return Boolean(desktopIpcActionFollower?.hasLiveThreadState(threadId))
-    || Boolean(desktopIpcLiveOwner?.isThreadOwned(threadId));
+  // Desktop ownership is an expiring live lease, not a permanent boolean. A
+  // stale IPC snapshot used to mute an actively growing rollout forever.
+  const followerIsFresh = typeof desktopIpcActionFollower?.hasFreshLiveThreadState === "function"
+    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId)
+    : desktopIpcActionFollower?.hasLiveThreadState(threadId);
+  const ownerIsFresh = typeof desktopIpcLiveOwner?.isFreshThreadOwned === "function"
+    ? desktopIpcLiveOwner.isFreshThreadOwned(threadId)
+    : false;
+  return Boolean(followerIsFresh) || Boolean(ownerIsFresh);
 }
 
 module.exports = {

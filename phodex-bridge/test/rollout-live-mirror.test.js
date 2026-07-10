@@ -717,6 +717,11 @@ test("desktop-origin mirror dedupes the same assistant text across event and res
     && message.params.message === "Final answer text"
   ));
   assert.equal(duplicates.length, 1, "event_msg and response_item copies of the same text must collapse");
+  assert.match(
+    duplicates[0].params.remodexSourceItemKey,
+    /^turn-dedupe-shapes:[a-f0-9]{16}$/,
+    "the source alias must survive a later response_item with a different provider id"
+  );
 });
 
 test("desktop-origin mirror dedupes cumulative reasoning summaries across rollout shapes", async (t) => {
@@ -1736,6 +1741,7 @@ test("desktop-origin stale runs resume live mirroring when the rollout grows aga
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 100,
+    activityHeartbeatMs: 10,
   });
   t.after(() => controller.stopAll());
 
@@ -1751,16 +1757,18 @@ test("desktop-origin stale runs resume live mirroring when the rollout grows aga
 
   appendRolloutLines(rolloutPath, [
     agentMessage("Back from the dead", "final_answer"),
-    taskComplete("turn-stale-resume"),
   ]);
-  await wait(30);
+  await wait(40);
 
   const agentMessageNotification = outbound.find((message) => message.method === "codex/event/agent_message");
   assert.ok(agentMessageNotification);
   assert.equal(agentMessageNotification.params.turnId, "turn-stale-resume");
-  const completed = outbound.find((message) => message.method === "turn/completed");
-  assert.ok(completed);
-  assert.equal(completed.params.turnId, "turn-stale-resume");
+  const heartbeat = outbound.find((message) => (
+    message.method === "turn/activity"
+    && message.params.turnId === "turn-stale-resume"
+    && message.params.remodexRolloutBootstrapComplete !== true
+  ));
+  assert.ok(heartbeat, "growth must re-enable heartbeats for the resumed coherent turn");
 });
 
 test("desktop-origin live tail closes mirrored turns on turn_aborted", async (t) => {
@@ -2186,6 +2194,141 @@ test("desktop-origin detection stays narrow", () => {
   assert.equal(isDesktopRolloutOrigin({ originator: "codexmobile_ios", source: "ios" }), false);
 });
 
+test("desktop-origin bootstrap expands past an oversized opener instead of replaying a tail", async (t) => {
+  const oversizedOpener = `OPENING-PROMPT:${"x".repeat((4 * 1024 * 1024) + 128)}`;
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-oversized-bootstrap-opener",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      taskStarted("turn-oversized-bootstrap-opener"),
+      runtimeWorldState(),
+      runtimeTurnContext(),
+      userMessage(oversizedOpener),
+      agentMessage("The complete active turn is present"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 100,
+  });
+  t.after(() => controller.stopAll());
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-oversized-bootstrap-opener" },
+  }));
+
+  await wait(80);
+  const opener = outbound.find((message) => (
+    message.method === "codex/event/user_message"
+    && message.params.turnId === "turn-oversized-bootstrap-opener"
+  ));
+  assert.ok(opener, "bootstrap must include the active turn opener");
+  assert.equal(opener.params.message.startsWith("OPENING-PROMPT:"), true);
+  assert.equal(
+    outbound.some((message) => message.method === "codex/event/agent_message"),
+    true
+  );
+});
+
+test("desktop-origin bootstrap preserves response_item user openers exactly once", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-response-user-opener",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [
+      responseUserMessage("Response opener before start", "user-before"),
+      taskStarted("turn-response-user-opener"),
+      responseUserMessage("Response opener after start", "user-after"),
+      agentMessage("Assistant after both openers"),
+    ],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 100,
+  });
+  t.after(() => controller.stopAll());
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-response-user-opener" },
+  }));
+
+  await wait(40);
+  const users = outbound.filter((message) => message.method === "codex/event/user_message");
+  assert.deepEqual(users.map((message) => message.params.message), [
+    "Response opener before start",
+    "Response opener after start",
+  ]);
+  const assistantIndex = outbound.findIndex((message) => (
+    message.method === "codex/event/agent_message"
+  ));
+  assert.ok(assistantIndex > outbound.indexOf(users[1]));
+});
+
+test("desktop-origin bootstrap represents an image-only response user opener", async (t) => {
+  const { homeDir } = createTemporaryRolloutHome({
+    threadId: "thread-response-image-opener", originator: "Codex Desktop", source: "desktop",
+    lines: [responseImageUserMessage(), taskStarted("turn-response-image-opener"), agentMessage("image handled")],
+  });
+  const previousCodexHome = process.env.CODEX_HOME; process.env.CODEX_HOME = homeDir;
+  t.after(() => { restoreCodexHome(previousCodexHome); fs.rmSync(homeDir, { recursive: true, force: true }); });
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({ sendApplicationResponse: (m) => outbound.push(JSON.parse(m)), pollIntervalMs: 5, idleTimeoutMs: 100 });
+  t.after(() => controller.stopAll());
+  controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId: "thread-response-image-opener" } }));
+  await wait(40);
+  assert.equal(outbound.find((m) => m.method === "codex/event/user_message")?.params.message, "Image attachment");
+});
+
+test("capped bootstrap suppresses orphan deltas and recovers from a new appended boundary", async (t) => {
+  const threadId = "thread-capped-awaiting";
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId, originator: "Codex Desktop", source: "desktop",
+    lines: [taskStarted("turn-old"), userMessage("Old opener")],
+  });
+  // A single malformed sparse-like payload pushes the old boundary outside the
+  // 64MB bounded bootstrap window without allocating parsed JSON objects.
+  fs.appendFileSync(rolloutPath, `${"x".repeat((65 * 1024 * 1024) + 128)}\n${agentMessage("OLD ORPHAN")}\n`);
+  const previousCodexHome = process.env.CODEX_HOME; process.env.CODEX_HOME = homeDir;
+  t.after(() => { restoreCodexHome(previousCodexHome); fs.rmSync(homeDir, { recursive: true, force: true }); });
+  let bytesRead = 0;
+  const trackedFs = { ...fs, readSync(...args) { const count = fs.readSync(...args); bytesRead += count; return count; } };
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({ sendApplicationResponse: (m) => outbound.push(JSON.parse(m)), fsModule: trackedFs, pollIntervalMs: 5, idleTimeoutMs: 200 });
+  t.after(() => controller.stopAll());
+  controller.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
+  await wait(80);
+  assert.equal(outbound.some((m) => m.params?.message === "OLD ORPHAN"), false);
+  const afterBootstrap = bytesRead;
+  appendRolloutLines(rolloutPath, [agentMessage("ignored orphan delta")]);
+  await wait(30);
+  assert.ok(bytesRead - afterBootstrap < 16 * 1024, "awaiting mode reads only the appended delta");
+  assert.equal(outbound.some((m) => m.params?.message === "ignored orphan delta"), false);
+  appendRolloutLines(rolloutPath, [userMessage("Recovered opener"), taskStarted("turn-recovered"), agentMessage("Recovered assistant")]);
+  await wait(50);
+  const methods = outbound.filter((m) => m.method === "codex/event/user_message" || m.method === "codex/event/agent_message");
+  assert.deepEqual(methods.map((m) => m.params.message), ["Recovered opener", "Recovered assistant"]);
+});
+
 function createTemporaryRolloutHome({ threadId, originator, source, lines }) {
   const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "rollout-live-mirror-"));
   const threadDir = path.join(homeDir, "sessions", "2026", "03", "15");
@@ -2230,6 +2373,14 @@ function taskStartedWithoutTurnId() {
       model_context_window: 258400,
     },
   });
+}
+
+function runtimeWorldState() {
+  return JSON.stringify({ type: "world_state", payload: { version: 1 } });
+}
+
+function runtimeTurnContext() {
+  return JSON.stringify({ type: "turn_context", payload: { source: "desktop" } });
 }
 
 function userMessage(message) {
@@ -2303,6 +2454,26 @@ function responseMessage(message, phase = "final_answer", id = "msg-response", t
     timestamp: "2026-03-15T19:47:40.000Z",
     type: "response_item",
     payload,
+  });
+}
+
+function responseUserMessage(message, id = "msg-response-user") {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:36.500Z",
+    type: "response_item",
+    payload: {
+      type: "message",
+      id,
+      role: "user",
+      content: [{ type: "input_text", text: message }],
+    },
+  });
+}
+
+function responseImageUserMessage() {
+  return JSON.stringify({
+    timestamp: "2026-03-15T19:47:36.500Z", type: "response_item",
+    payload: { type: "message", id: "msg-response-image", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,abc" }] },
   });
 }
 

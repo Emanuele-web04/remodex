@@ -6,6 +6,7 @@
 
 const os = require("os");
 const path = require("path");
+const { createHash } = require("crypto");
 
 const FRAME_HEADER_BYTES = 4;
 const MAX_FRAME_BYTES = 256 * 1024 * 1024;
@@ -179,7 +180,19 @@ function visibleUserPromptText(text) {
   }
   const requestIndex = cleaned.lastIndexOf(PROMPT_REQUEST_BEGIN);
   if (requestIndex >= 0) {
-    return cleaned.slice(requestIndex + PROMPT_REQUEST_BEGIN.length).trim();
+    const request = cleaned.slice(requestIndex + PROMPT_REQUEST_BEGIN.length).trim();
+    // A few IDE/review exports end with the delimiter but omit its request
+    // suffix. They still contain a real visible prompt before that marker;
+    // returning an empty string made live mirroring erase the opener while
+    // JSONL history retained it. Re-check only the body before the delimiter.
+    // A hidden runtime fragment
+    // can itself contain a trailing delimiter; falling back to the whole input
+    // would surface that fragment to the phone.
+    if (request) {
+      return request;
+    }
+    const body = cleaned.slice(0, requestIndex).trimEnd();
+    return isContextualUserText(body) ? "" : body;
   }
   const envelopeText = extractVisibleRuntimeEnvelope(cleaned);
   if (envelopeText != null) {
@@ -404,8 +417,37 @@ function resolveDefaultIpcSocketPath() {
   return path.join(os.tmpdir(), "codex-ipc", `ipc-${uid}.sock`);
 }
 
+// A source-neutral alias joins the same assistant prose when rollout events
+// lack Codex's provider item id but JSONL/canonical history has one. It is
+// deliberately scoped by turn and text, never used as a global text dedupe.
+function buildRemodexSourceItemKey(turnId, text) {
+  const normalizedTurnId = readString(turnId) || "turnless";
+  const normalizedText = readString(text);
+  if (!normalizedText) {
+    return "";
+  }
+  const textHash = createHash("sha256").update(normalizedText).digest("hex").slice(0, 16);
+  return `${normalizedTurnId}:${textHash}`;
+}
+
+function responseItemMessageText(payload) {
+  const direct = readString(payload?.text) || readString(payload?.message);
+  if (direct) return direct;
+  const content = Array.isArray(payload?.content) ? payload.content : [];
+  return content.map((part) => {
+    const type = normalizeToken(part?.type).replace(/[_-]/g, "");
+    if (type === "skill") return `$${readString(part?.id) || readString(part?.name)}`;
+    if (type === "mention") return `@${readString(part?.name) || readString(part?.id)}`;
+    return readString(part?.text)
+      || readString(part?.content)
+      || readString(part?.message)
+      || readString(part?.data?.text);
+  }).filter(Boolean).join("\n");
+}
+
 module.exports = {
   CLIENT_STATUS_CHANGED,
+  buildRemodexSourceItemKey,
   DESKTOP_IPC_METHOD_VERSIONS,
   FRAME_HEADER_BYTES,
   MAX_FRAME_BYTES,
@@ -419,6 +461,7 @@ module.exports = {
   readString,
   readText,
   readUserItemText,
+  responseItemMessageText,
   requestIdKey,
   resolveDefaultIpcSocketPath,
   safeParseJSON,

@@ -1012,7 +1012,7 @@ final class TurnViewModelQueueTests: XCTestCase {
         XCTAssertNil(service.activeTurnId)
     }
 
-    func testVisibleTailPreservesRecentFileChangeArtifactsFromOmittedPreviousTurn() {
+    func testVisibleTailDoesNotInjectArtifactsFromOmittedPreviousTurn() {
         let service = makeService()
         let fileChange = makeMessage(
             id: "file-change",
@@ -1042,8 +1042,7 @@ final class TurnViewModelQueueTests: XCTestCase {
             omittedPrefix: ArraySlice(omittedPrefix)
         )
 
-        XCTAssertEqual(result.prefix(2).map(\.id), ["file-change", "plan"])
-        XCTAssertEqual(result.count, visibleTail.count + 2)
+        XCTAssertEqual(result.map(\.id), visibleTail.map(\.id))
     }
 
     func testInterruptTurnDoesNotTargetCompletedLatestTurnWhenRunningTurnHasNoID() async {
