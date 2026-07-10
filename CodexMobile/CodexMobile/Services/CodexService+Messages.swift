@@ -1253,6 +1253,7 @@ extension CodexService {
             var loadedProvisionalJsonlFallback = false
             var paginatedNextCursor: JSONValue?
             var shouldSeedPaginatedInitialCursor = false
+            var decodedThreadFromHistory: CodexThread?
             var threadObject: RPCObject
             if supportsTurnPagination {
                 do {
@@ -1329,7 +1330,7 @@ extension CodexService {
                         extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
                         if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
                            let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
-                            upsertThread(decoded, treatAsServerState: true)
+                            decodedThreadFromHistory = decoded
                         }
                     } else {
                         throw error
@@ -1365,7 +1366,7 @@ extension CodexService {
                 extractContextWindowUsageIfAvailable(threadId: threadId, threadObject: threadObject)
                 if let threadData = try? JSONEncoder().encode(JSONValue.object(threadObject)),
                    let decoded = try? JSONDecoder().decode(CodexThread.self, from: threadData) {
-                    upsertThread(decoded, treatAsServerState: true)
+                    decodedThreadFromHistory = decoded
                 }
             }
 
@@ -1380,6 +1381,13 @@ extension CodexService {
                 debugSyncLog("thread history returned no visible rows despite prior-content evidence thread=\(threadId); keeping cached timeline and retrying")
                 return .deferredAfterEmptyPage
             }
+
+            if let decodedThreadFromHistory {
+                upsertThread(decodedThreadFromHistory, treatAsServerState: true)
+            }
+            // Only an accepted canonical or paginated response confirms that
+            // an active cached-only sidebar row is a real server thread.
+            restoredThreadSnapshotIDs.remove(threadId)
 
             if loadedViaPagination,
                !loadedProvisionalJsonlFallback,

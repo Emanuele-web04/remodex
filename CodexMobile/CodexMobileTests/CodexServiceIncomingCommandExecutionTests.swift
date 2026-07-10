@@ -2074,7 +2074,7 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
                 "threadId": .string(threadID),
                 "turnId": .string(turnID),
                 "itemId": .string(itemID),
-                "summaryIndex": .int(0),
+                "summaryIndex": .integer(0),
             ])
         )
         service.handleNotification(
@@ -2083,7 +2083,7 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
                 "threadId": .string(threadID),
                 "turnId": .string(turnID),
                 "itemId": .string(itemID),
-                "summaryIndex": .int(0),
+                "summaryIndex": .integer(0),
                 "delta": .string("**Testing notify command behavior**\n\n<!-- -->"),
             ])
         )
@@ -2093,7 +2093,7 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
                 "threadId": .string(threadID),
                 "turnId": .string(turnID),
                 "itemId": .string(itemID),
-                "summary_index": .int(1),
+                "summary_index": .integer(1),
                 "delta": .string("**Analyzing notify hook JSON output format**\n\n<!-- -->"),
             ])
         )

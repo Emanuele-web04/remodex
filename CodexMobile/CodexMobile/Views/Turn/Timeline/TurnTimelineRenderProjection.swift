@@ -178,67 +178,6 @@ enum TurnTimelineRenderProjection {
         return items[responseStartIndex].id
     }
 
-    // Resolves the first rendered row of a recovered active response. Stable
-    // turn IDs win; mirrored/legacy turnless rows fall back to the newest user
-    // boundary in this thread. Returning the render item's ID keeps grouped
-    // tool/previous-message rows reachable by ScrollViewReader.
-    static func activeTurnResponseStartAnchorID(
-        in items: [TurnTimelineRenderItem],
-        activeTurnID: String?
-    ) -> String? {
-        guard !items.isEmpty else { return nil }
-
-        let normalizedActiveTurnID = normalizedIdentifier(activeTurnID)
-        if let normalizedActiveTurnID {
-            let activeTurnStartIndex = items.firstIndex { item in
-                messages(in: item).contains { message in
-                    normalizedIdentifier(message.turnId) == normalizedActiveTurnID
-                }
-            }
-
-            if let activeTurnStartIndex {
-                return items[activeTurnStartIndex].id
-            }
-        }
-
-        // turn/started and mirrored catch-up rows may both be turnless. The
-        // newest prompt is then the strongest thread-local response boundary.
-        return latestResponseStartAnchorID(in: items)
-    }
-
-    // Canonical history may prepend an earlier row after the live tail is already
-    // visible. Move the recovered-turn anchor only toward that earlier row; a
-    // newly appended steer or response block must never move the viewport down.
-    static func shouldReplaceRecoveredTurnAnchor(
-        currentAnchorID: String?,
-        candidateAnchorID: String,
-        in items: [TurnTimelineRenderItem]
-    ) -> Bool {
-        guard currentAnchorID != candidateAnchorID else { return false }
-        guard let currentAnchorID else { return true }
-
-        let currentIndex = items.firstIndex(where: { $0.id == currentAnchorID })
-        let candidateIndex = items.firstIndex(where: { $0.id == candidateAnchorID })
-        guard let candidateIndex else { return false }
-        guard let currentIndex else {
-            // Projection may replace a raw row with a grouped render item. The
-            // old ID is no longer scrollable, so accept the real replacement.
-            return true
-        }
-        return candidateIndex < currentIndex
-    }
-
-    private static func messages(in item: TurnTimelineRenderItem) -> [CodexMessage] {
-        switch item {
-        case .message(let message):
-            return [message]
-        case .toolBurst(let group):
-            return group.messages
-        case .previousMessages(let group):
-            return group.messages
-        }
-    }
-
     static func collapsedFinalMessageIDs(
         in messages: [CodexMessage],
         completedTurnIDs: Set<String>,

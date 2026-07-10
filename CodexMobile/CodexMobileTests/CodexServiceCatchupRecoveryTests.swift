@@ -243,6 +243,51 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         service.canonicalHistoryReconcileRetryTaskByThreadID[threadID]?.cancel()
     }
 
+    func testEmptyLegacyReplacementDoesNotConfirmRestoredSidebarThread() async throws {
+        let service = makeService()
+        let threadID = "thread-empty-legacy-restored"
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsTurnPagination = false
+        service.upsertThread(CodexThread(id: threadID, title: "Cached title", preview: "Cached history"))
+        service.messagesByThread[threadID] = [
+            CodexMessage(
+                id: "cached-row",
+                threadId: threadID,
+                role: .assistant,
+                text: "Cached answer",
+                turnId: "cached-turn",
+                itemId: "cached-item"
+            ),
+        ]
+        service.restoredThreadSnapshotIDs.insert(threadID)
+        service.pendingCanonicalSourceReplacementThreadIDs.insert(threadID)
+        service.requestTransportOverride = { method, _ in
+            XCTAssertEqual(method, "thread/read")
+            return RPCMessage(
+                id: .string(UUID().uuidString),
+                result: .object([
+                    "thread": .object([
+                        "id": .string(threadID),
+                        "title": .string("Server title"),
+                        "turns": .array([]),
+                    ]),
+                ]),
+                includeJSONRPC: false
+            )
+        }
+
+        let outcome = try await service.loadThreadHistoryIfNeeded(threadId: threadID, forceRefresh: true)
+
+        XCTAssertEqual(outcome, .deferredAfterEmptyPage)
+        XCTAssertEqual(service.thread(for: threadID)?.displayTitle, "Cached title")
+        XCTAssertEqual(service.messages(for: threadID).map(\.id), ["cached-row"])
+        XCTAssertTrue(service.restoredThreadSnapshotIDs.contains(threadID))
+        service.isConnected = false
+        service.canonicalHistoryReconcileTaskByThreadID[threadID]?.cancel()
+        service.canonicalHistoryReconcileRetryTaskByThreadID[threadID]?.cancel()
+    }
+
     func testEmptyInitialPaginationForExistingThreadStaysLoadingAndRetryable() async throws {
         let service = makeService()
         let threadID = "thread-empty-existing"
@@ -251,6 +296,7 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         service.supportsTurnPagination = true
         service.activeThreadId = threadID
         service.upsertThread(CodexThread(id: threadID, title: "Existing chat", preview: "Older message"))
+        service.restoredThreadSnapshotIDs.insert(threadID)
         service.requestTransportOverride = { method, _ in
             XCTAssertEqual(method, "thread/turns/list")
             return RPCMessage(
@@ -267,6 +313,7 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         XCTAssertFalse(service.hydratedThreadIDs.contains(threadID))
         XCTAssertFalse(service.hasAuthoritativeLocalHistoryStart(threadId: threadID))
         XCTAssertTrue(service.threadsNeedingCanonicalHistoryReconcile.contains(threadID))
+        XCTAssertTrue(service.restoredThreadSnapshotIDs.contains(threadID))
         XCTAssertEqual(service.threadDisplayPhase(threadId: threadID), .loading)
         service.isConnected = false
         service.canonicalHistoryReconcileTaskByThreadID[threadID]?.cancel()

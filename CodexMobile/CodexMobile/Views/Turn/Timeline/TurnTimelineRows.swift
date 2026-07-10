@@ -396,6 +396,8 @@ struct TurnTimelineRowsSection: View {
     let onLoadEarlierMessages: () -> Void
     let pendingStreamingAssistantPlaceholderID: String?
 
+    private static let runningIndicatorRowID = "turn-timeline-running-indicator-row"
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if shouldWarmRecentTailProgressively {
@@ -487,9 +489,13 @@ struct TurnTimelineRowsSection: View {
                 }
             }
 
-            if let pendingStreamingAssistantPlaceholderID {
-                StreamingAssistantPlaceholderSlot()
-                    .id(pendingStreamingAssistantPlaceholderID)
+            if showsGlobalRunningIndicator {
+                // The running indicator is a real timeline row, not a floating overlay,
+                // so it can never draw over scrolled prose. It adopts the hidden empty
+                // streaming assistant row's ID so assistant-response scroll anchoring
+                // still resolves during the pre-first-delta gap.
+                TerminalRunningIndicator()
+                    .id(pendingStreamingAssistantPlaceholderID ?? Self.runningIndicatorRowID)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -357,6 +357,7 @@ final class CodexService {
         didSet {
             rebuildThreadLookupCaches()
             refreshPinnedThreadSnapshots()
+            scheduleCurrentMacThreadListSnapshotPersistence()
         }
     }
     var isConnected = false
@@ -717,6 +718,8 @@ final class CodexService {
     @ObservationIgnored var threadByID: [String: CodexThread] = [:]
     @ObservationIgnored var threadIndexByID: [String: Int] = [:]
     @ObservationIgnored var firstLiveThreadIDCache: String?
+    @ObservationIgnored var restoredThreadSnapshotIDs: Set<String> = []
+    @ObservationIgnored var threadListSnapshotPersistenceTask: Task<Void, Never>?
     @ObservationIgnored var subagentIdentityByThreadID: [String: CodexSubagentIdentityEntry] = [:]
     @ObservationIgnored var subagentIdentityByAgentID: [String: CodexSubagentIdentityEntry] = [:]
     // Canonical repo roots keyed by observed working directories from bridge git/status responses.
@@ -751,6 +754,7 @@ final class CodexService {
     let decoder: JSONDecoder
     let messagePersistence = CodexMessagePersistence()
     let composerDraftPersistence = CodexComposerDraftPersistence()
+    let threadListPersistence = CodexThreadListPersistence()
     let aiChangeSetPersistence = AIChangeSetPersistence()
     let defaults: UserDefaults
     let userNotificationCenter: CodexUserNotificationCentering

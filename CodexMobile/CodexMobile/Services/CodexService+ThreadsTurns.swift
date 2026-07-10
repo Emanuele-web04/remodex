@@ -6,7 +6,7 @@
 
 import Foundation
 
-private enum ThreadTurnStateSnapshotPolicy {
+enum ThreadTurnStateSnapshotPolicy {
     static let recentTurnLimit = 8
     static let requestTimeoutNanoseconds: UInt64 = 30_000_000_000
 }

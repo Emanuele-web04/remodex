@@ -100,48 +100,31 @@ struct TurnScrollStateTracker {
         currentMode == .followBottom ? .manual : currentMode
     }
 
-    // Opening a recovered live turn is different from starting one while this
-    // timeline is already visible. The former gets one response-start anchor;
-    // optimistic sends keep the established assistant-anchor/live-follow path.
-    static func shouldAnchorRecoveredTurnAtStart(
+    // Opening any live turn should show the newest streamed content immediately.
+    // A non-empty active-turn id counts as live evidence while the explicit
+    // running flag is still hydrating after a thread switch.
+    static func shouldOpenAtLiveTail(
         isThreadRunning: Bool,
         activeTurnID: String?,
         isSendInFlight: Bool,
-        shouldAnchorToAssistantResponse: Bool
+        hasStreamingTail: Bool
     ) -> Bool {
         let normalizedActiveTurnID = activeTurnID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let hasActiveTurn = normalizedActiveTurnID?.isEmpty == false
-        return (isThreadRunning || hasActiveTurn)
-            && !isSendInFlight
+        return isThreadRunning || hasActiveTurn || isSendInFlight || hasStreamingTail
+    }
+
+    static func shouldReleaseInitialHistoryAnchorForLiveTail(
+        shouldOpenAtLiveTail: Bool,
+        hasInitialResponseStartAnchor: Bool,
+        shouldAnchorToAssistantResponse: Bool,
+        isAutomaticScrollingPaused: Bool
+    ) -> Bool {
+        shouldOpenAtLiveTail
+            && hasInitialResponseStartAnchor
             && !shouldAnchorToAssistantResponse
-    }
-
-    static func shouldRetireRecoveredTurnAnchor(
-        ownsRecoveredTurnPosition: Bool,
-        recoveredRunGeneration: Int?,
-        currentRunGeneration: Int,
-        hasTerminalEvidence: Bool
-    ) -> Bool {
-        guard ownsRecoveredTurnPosition else { return false }
-        let didStartNewRun = recoveredRunGeneration.map {
-            currentRunGeneration > $0
-        } ?? false
-        // ID changes are not lifecycle boundaries: Desktop source repair can
-        // rename the same synthetic turn. A monotonic start generation or real
-        // terminal state is required to release recovered-turn ownership.
-        return didStartNewRun || hasTerminalEvidence
-    }
-
-    static func shouldResumeLiveFollowForNextTurn(
-        isWaitingForNextTurn: Bool,
-        recoveredRunGeneration: Int?,
-        currentRunGeneration: Int,
-        isThreadRunning: Bool
-    ) -> Bool {
-        guard isWaitingForNextTurn, isThreadRunning else { return false }
-        guard let recoveredRunGeneration else { return false }
-        return currentRunGeneration > recoveredRunGeneration
+            && !isAutomaticScrollingPaused
     }
 
     static func isAutomaticScrollingPaused(

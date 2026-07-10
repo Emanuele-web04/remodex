@@ -48,6 +48,9 @@ extension CodexService {
     }
 
     func upsertThread(_ incomingThread: CodexThread, treatAsServerState: Bool = false) {
+        if treatAsServerState {
+            restoredThreadSnapshotIDs.remove(incomingThread.id)
+        }
         let existingThread = self.thread(for: incomingThread.id)
         var resolvedThread = mergedThread(
             incomingThread,

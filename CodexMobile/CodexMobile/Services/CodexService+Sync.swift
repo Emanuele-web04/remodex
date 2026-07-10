@@ -221,6 +221,7 @@ extension CodexService {
         var merged: [String: CodexThread] = [:]
         merged.reserveCapacity(max(threads.count, serverThreads.count))
         var snapshotOnlyPinnedIDs: Set<String> = []
+        var stillUnconfirmedSnapshotIDs: Set<String> = []
 
         // Merge active server threads.
         for serverThread in serverThreads {
@@ -248,6 +249,20 @@ extension CodexService {
         for localThread in threads where merged[localThread.id] == nil {
             if persistedDeletedIDs.contains(localThread.id) {
                 continue
+            }
+            if restoredThreadSnapshotIDs.contains(localThread.id),
+               !isThreadPinned(localThread.id),
+               !persistedArchivedIDs.contains(localThread.id) {
+                guard activeThreadId == localThread.id else {
+                    // The cache is only a first-paint placeholder. Once the
+                    // same capped server window arrives, absent cached rows
+                    // are stale rather than durable local-only threads.
+                    continue
+                }
+                // Keep a row the user opened, but leave it unconfirmed. A
+                // successful history read confirms it; otherwise the next
+                // list refresh prunes it after the user leaves the thread.
+                stillUnconfirmedSnapshotIDs.insert(localThread.id)
             }
             merged[localThread.id] = localThread
             if isThreadPinned(localThread.id), !serverThreadIDs.contains(localThread.id) {
@@ -284,6 +299,7 @@ extension CodexService {
             // Full reconciliation — always refresh all threads even if busy-roots already hit some.
             refreshAllThreadTimelineStates()
         }
+        restoredThreadSnapshotIDs = stillUnconfirmedSnapshotIDs
 
         if activeThreadId == nil {
             activeThreadId = firstLiveThreadID()

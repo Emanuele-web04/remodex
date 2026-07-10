@@ -841,7 +841,7 @@ extension ContentViewModel {
             )
             codex.setCurrentTrustedMacDeviceId(effectiveTargetMacDeviceId)
             macSwitchNotice = nil
-            endMacSwitchContext(codex: codex)
+            endMacSwitchContext(codex: codex, persistThreadSnapshot: true)
             logMacSwitchState("success", targetMacDeviceId: effectiveTargetMacDeviceId, codex: codex)
         } catch is CancellationError {
             logMacSwitchState("cancelled", targetMacDeviceId: effectiveTargetMacDeviceId, codex: codex)
@@ -862,6 +862,7 @@ extension ContentViewModel {
             if codex.isConnected || codex.isInitialized {
                 codex.setCurrentTrustedMacDeviceId(previousCurrentTrustedMacDeviceId)
                 codex.clearPreviousTrustedMacDeviceId()
+                endMacSwitchContext(codex: codex)
                 macSwitchNotice = macSwitchNotice
                     ?? codex.lastErrorMessage
                     ?? previousErrorMessage
@@ -920,7 +921,7 @@ extension ContentViewModel {
                 continueWhile: { !self.isCancellingMacSwitch },
                 serverURLProvider: { "\(pairingPayload.relay)/\(pairingPayload.sessionId)" }
             )
-            endMacSwitchContext(codex: codex)
+            endMacSwitchContext(codex: codex, persistThreadSnapshot: true)
         } catch is CancellationError {
             await finalizeCancelledMacSwitch(
                 previousCurrentTrustedMacDeviceId: previousCurrentTrustedMacDeviceId,
@@ -1031,16 +1032,29 @@ extension ContentViewModel {
         loadCachedMessages: Bool
     ) {
         codex.clearInMemoryMacScopedState()
+        // Thread snapshot presentation depends on per-Mac rename/pin/archive
+        // defaults, so load those before restoring cached sidebar metadata.
+        codex.loadMacScopedDefaultsState(for: macDeviceId)
         if loadCachedMessages {
             codex.loadLocalState(for: macDeviceId)
+        } else {
+            codex.loadThreadListSnapshot(for: macDeviceId)
         }
         // Manual switches wait for live sync before showing messages so stale per-Mac caches do not flash.
-        codex.loadMacScopedDefaultsState(for: macDeviceId)
     }
 
-    private func endMacSwitchContext(codex: CodexService) {
-        codex.macScopedContextOverrideDeviceId = nil
+    private func endMacSwitchContext(
+        codex: CodexService,
+        persistThreadSnapshot: Bool = false
+    ) {
         codex.suspendAutomaticMacScopedPersistence = false
+        if persistThreadSnapshot {
+            // Connection setup mutates the server-backed thread list while
+            // automatic writes are suspended. Flush that verified state before
+            // releasing the target-Mac override so the next launch is warm.
+            codex.persistCurrentMacThreadListSnapshot()
+        }
+        codex.macScopedContextOverrideDeviceId = nil
     }
 
     // Keeps an explicit manual Mac selection durable even when the socket cannot reconnect yet.

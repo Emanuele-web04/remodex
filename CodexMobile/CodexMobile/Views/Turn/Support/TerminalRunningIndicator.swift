@@ -1,13 +1,13 @@
 // FILE: TerminalRunningIndicator.swift
 // Purpose: Pending assistant status label with a lightweight shimmer while a block is running.
 // Layer: View Component
-// Exports: TerminalRunningIndicator, TerminalRunningIndicatorLayout, StreamingAssistantPlaceholderSlot
+// Exports: TerminalRunningIndicator, TerminalRunningIndicatorLayout
 
 import SwiftUI
 
 enum TerminalRunningIndicatorLayout {
-    // Shared with timeline bottom padding and the hidden streaming-assistant slot so
-    // the first assistant delta does not jump past the thinking placeholder height.
+    // Fixed row height so the indicator never reflows while assistant deltas
+    // stream into the rows above it.
     static func reservedRowHeight(isAccessibilitySize: Bool) -> CGFloat {
         isAccessibilitySize ? 56 : 24
     }
@@ -29,21 +29,6 @@ struct TerminalRunningIndicator: View {
             alignment: .leading
         )
         .accessibilityLabel("Remodex is thinking")
-    }
-}
-
-// Reserves scroll space for a hidden empty streaming assistant row.
-struct StreamingAssistantPlaceholderSlot: View {
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    var body: some View {
-        Color.clear
-            .frame(
-                height: TerminalRunningIndicatorLayout.reservedRowHeight(
-                    isAccessibilitySize: dynamicTypeSize.isAccessibilitySize
-                )
-            )
-            .accessibilityHidden(true)
     }
 }
 
