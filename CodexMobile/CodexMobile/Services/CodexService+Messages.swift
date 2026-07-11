@@ -6247,6 +6247,33 @@ extension CodexService {
             return messageID
         }
 
+        // Transport recovery clears the volatile lookup maps after closing live rows. Buffered
+        // replay can then resume with the same provider item id; reconnect that identity to the
+        // persisted row instead of creating a second assistant bubble for the replayed delta.
+        if let normalizedItemId,
+           let itemStreamingKey,
+           let persistedMessage = messagesByThread[threadId]?
+               .filter({ candidate in
+                   guard candidate.role == .assistant,
+                         normalizedStreamingItemID(candidate.itemId) == normalizedItemId else {
+                       return false
+                   }
+                   return candidate.turnId == turnId || candidate.turnId == nil
+               })
+               .min(by: { $0.orderIndex < $1.orderIndex }),
+           let messageIndex = findMessageIndex(threadId: threadId, messageId: persistedMessage.id) {
+            if messagesByThread[threadId]?[messageIndex].turnId == nil {
+                messagesByThread[threadId]?[messageIndex].turnId = turnId
+            }
+            applyAssistantPhaseIfNeeded(
+                threadId: threadId,
+                messageIndex: messageIndex,
+                assistantPhase: normalizedPhase
+            )
+            streamingAssistantMessageByItemKey[itemStreamingKey] = persistedMessage.id
+            return persistedMessage.id
+        }
+
         if let turnMessageID = streamingAssistantFallbackMessageByTurnID[turnStreamingKey],
            let messageIndex = findMessageIndex(threadId: threadId, messageId: turnMessageID) {
             if let normalizedItemId {

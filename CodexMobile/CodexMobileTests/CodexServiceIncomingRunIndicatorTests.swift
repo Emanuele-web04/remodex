@@ -495,6 +495,37 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertNil(service.threadRunBadgeState(for: threadID))
     }
 
+    func testBufferedAssistantReplayReusesPersistedProviderItemAfterTransportReset() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let itemID = "item-\(UUID().uuidString)"
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            delta: "Recovered assistant"
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+        service.finalizeAllStreamingState()
+
+        service.appendAssistantDelta(
+            threadId: threadID,
+            turnId: turnID,
+            itemId: itemID,
+            delta: " block",
+            isReplay: true
+        )
+        service.flushPendingAssistantDeltas(for: threadID, turnId: turnID)
+
+        let assistantMessages = service.messages(for: threadID).filter { $0.role == .assistant }
+        XCTAssertEqual(assistantMessages.count, 1)
+        XCTAssertEqual(assistantMessages.first?.itemId, itemID)
+        XCTAssertEqual(assistantMessages.first?.text, "Recovered assistant block")
+        XCTAssertFalse(assistantMessages.first?.isStreaming ?? true)
+    }
+
     func testAssistantDeltaCoalescingMergesCumulativeSnapshotsBeforeFlush() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
