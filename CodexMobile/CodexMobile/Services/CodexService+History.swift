@@ -17,6 +17,24 @@ fileprivate struct UserMessageSemanticKey: Equatable {
     }
 }
 
+fileprivate struct CanonicalAssistantTurnKey: Hashable {
+    let threadId: String
+    let turnId: String
+}
+
+fileprivate struct CanonicalAssistantSourceKey: Hashable {
+    let threadId: String
+    let turnId: String
+    let sourceItemKey: String
+    let text: String
+}
+
+fileprivate struct CanonicalAssistantTurnTextKey: Hashable {
+    let threadId: String
+    let turnId: String
+    let text: String
+}
+
 extension CodexService {
     nonisolated static func shouldPreferRecentHistoryWindow(
         existingCount: Int,
@@ -1314,6 +1332,15 @@ extension CodexService {
             recordCanonicalOrder(at: merged.index(before: merged.endIndex))
         }
 
+        repairCanonicalAssistantSourceIdentityRotations(
+            in: &merged,
+            history: history,
+            canonicalOrderByMessageID: &canonicalOrderByMessageID,
+            activeThreadIDs: activeThreadIDs,
+            activeTurnIDs: activeTurnIDs,
+            runningThreadIDs: runningThreadIDs
+        )
+
         if shouldApplyCanonicalHistoryOrder {
             applyCanonicalHistoryOrder(
                 to: &merged,
@@ -1595,6 +1622,180 @@ extension CodexService {
 
         for index in duplicateIndices.sorted(by: >) {
             messages.remove(at: index)
+        }
+    }
+
+    // Desktop live state and canonical JSONL history can assign different stable provider ids to
+    // the same assistant item. The history alias is scoped by turn + text, so it is safe to repair
+    // one closed local row when its id is absent from the canonical turn. Active turns additionally
+    // require the orphan to precede the canonical copy (or already share the exact source alias),
+    // so a newer intentional same-text item is never folded into older history.
+    nonisolated static func repairCanonicalAssistantSourceIdentityRotations(
+        in messages: inout [CodexMessage],
+        history: [CodexMessage],
+        canonicalOrderByMessageID: inout [String: Int],
+        activeThreadIDs: Set<String>,
+        activeTurnIDs: Set<String>? = nil,
+        runningThreadIDs: Set<String>
+    ) {
+        let canonicalAssistantRows = history.filter { message in
+            message.role == .assistant
+                && normalizedHistoryIdentifier(message.turnId) != nil
+                && normalizedHistoryIdentifier(message.itemId) != nil
+                && normalizedHistoryIdentifier(message.sourceItemKey) != nil
+                && hasMeaningfulHistoryText(message.text)
+        }
+        guard !canonicalAssistantRows.isEmpty else {
+            return
+        }
+
+        var canonicalItemIDsByTurn: [CanonicalAssistantTurnKey: Set<String>] = [:]
+        for message in history where message.role == .assistant {
+            guard let turnId = normalizedHistoryIdentifier(message.turnId),
+                  let itemId = normalizedHistoryIdentifier(message.itemId) else {
+                continue
+            }
+            canonicalItemIDsByTurn[
+                CanonicalAssistantTurnKey(threadId: message.threadId, turnId: turnId),
+                default: []
+            ].insert(itemId)
+        }
+
+        let canonicalRowsBySource = Dictionary(grouping: canonicalAssistantRows) { message in
+            CanonicalAssistantSourceKey(
+                threadId: message.threadId,
+                turnId: normalizedHistoryIdentifier(message.turnId) ?? "",
+                sourceItemKey: normalizedHistoryIdentifier(message.sourceItemKey) ?? "",
+                text: normalizedMessageText(message.text)
+            )
+        }
+        let localIndicesByTurnText = Dictionary(
+            grouping: messages.indices.filter { index in
+                let message = messages[index]
+                return message.role == .assistant
+                    && !message.isStreaming
+                    && normalizedHistoryIdentifier(message.turnId) != nil
+                    && hasMeaningfulHistoryText(message.text)
+            },
+            by: { index in
+                let message = messages[index]
+                return CanonicalAssistantTurnTextKey(
+                    threadId: message.threadId,
+                    turnId: normalizedHistoryIdentifier(message.turnId) ?? "",
+                    text: normalizedMessageText(message.text)
+                )
+            }
+        )
+
+        var repairs: [(orphanMessageId: String, duplicateMessageIds: [String], canonical: CodexMessage)] = []
+        var claimedMessageIDs: Set<String> = []
+
+        for (sourceKey, canonicalRows) in canonicalRowsBySource where canonicalRows.count == 1 {
+            guard !isProvisionalHistoryTurnIdentifier(sourceKey.turnId),
+                  let canonical = canonicalRows.first,
+                  let canonicalItemID = normalizedHistoryIdentifier(canonical.itemId) else {
+                continue
+            }
+
+            let turnKey = CanonicalAssistantTurnKey(
+                threadId: sourceKey.threadId,
+                turnId: sourceKey.turnId
+            )
+            let canonicalTurnItemIDs = canonicalItemIDsByTurn[turnKey] ?? []
+            let turnTextKey = CanonicalAssistantTurnTextKey(
+                threadId: sourceKey.threadId,
+                turnId: sourceKey.turnId,
+                text: sourceKey.text
+            )
+            let matchingLocalIndices = localIndicesByTurnText[turnTextKey] ?? []
+            let orphanIndices = matchingLocalIndices.filter { index in
+                let candidate = messages[index]
+                let candidateItemID = normalizedHistoryIdentifier(candidate.itemId)
+                let candidateSourceKey = normalizedHistoryIdentifier(candidate.sourceItemKey)
+                return candidateItemID != canonicalItemID
+                    && (candidateItemID.map { !canonicalTurnItemIDs.contains($0) } ?? true)
+                    && (candidateSourceKey == nil || candidateSourceKey == sourceKey.sourceItemKey)
+            }
+            guard orphanIndices.count == 1,
+                  let orphanIndex = orphanIndices.first,
+                  !claimedMessageIDs.contains(messages[orphanIndex].id) else {
+                continue
+            }
+
+            let canonicalDuplicateIndices = matchingLocalIndices.filter { index in
+                index != orphanIndex
+                    && normalizedHistoryIdentifier(messages[index].itemId) == canonicalItemID
+            }
+            let orphanSourceKey = normalizedHistoryIdentifier(messages[orphanIndex].sourceItemKey)
+            let turnIsActive = activeThreadIDs.contains(sourceKey.threadId)
+                ? (activeTurnIDs?.contains(sourceKey.turnId) ?? true)
+                : runningThreadIDs.contains(sourceKey.threadId)
+            if turnIsActive, orphanSourceKey != sourceKey.sourceItemKey {
+                guard let earliestCanonicalOrderIndex = canonicalDuplicateIndices
+                    .map({ messages[$0].orderIndex })
+                    .min(),
+                      messages[orphanIndex].orderIndex < earliestCanonicalOrderIndex else {
+                    continue
+                }
+            }
+            let duplicateMessageIDs = canonicalDuplicateIndices.map { messages[$0].id }
+            guard duplicateMessageIDs.allSatisfy({ !claimedMessageIDs.contains($0) }) else {
+                continue
+            }
+
+            claimedMessageIDs.insert(messages[orphanIndex].id)
+            claimedMessageIDs.formUnion(duplicateMessageIDs)
+            repairs.append((
+                orphanMessageId: messages[orphanIndex].id,
+                duplicateMessageIds: duplicateMessageIDs,
+                canonical: canonical
+            ))
+        }
+
+        for repair in repairs {
+            guard let orphanIndex = messages.firstIndex(where: { $0.id == repair.orphanMessageId }),
+                  let canonicalItemID = normalizedHistoryIdentifier(repair.canonical.itemId),
+                  let canonicalSourceKey = normalizedHistoryIdentifier(repair.canonical.sourceItemKey) else {
+                continue
+            }
+
+            let preservedOrderIndex = messages[orphanIndex].orderIndex
+            var repaired = reconcileExistingMessage(
+                messages[orphanIndex],
+                with: repair.canonical,
+                activeThreadIDs: activeThreadIDs,
+                activeTurnIDs: activeTurnIDs,
+                runningThreadIDs: runningThreadIDs
+            )
+            for duplicateMessageID in repair.duplicateMessageIds {
+                guard let duplicate = messages.first(where: { $0.id == duplicateMessageID }) else {
+                    continue
+                }
+                if repaired.attachments.isEmpty, !duplicate.attachments.isEmpty {
+                    repaired.attachments = duplicate.attachments
+                }
+            }
+            repaired.itemId = canonicalItemID
+            repaired.sourceItemKey = canonicalSourceKey
+            repaired.orderIndex = preservedOrderIndex
+            messages[orphanIndex] = repaired
+
+            let canonicalOrder = repair.duplicateMessageIds.compactMap {
+                canonicalOrderByMessageID[$0]
+            }.min()
+            if let canonicalOrder {
+                canonicalOrderByMessageID[repair.orphanMessageId] = canonicalOrder
+            }
+            for duplicateMessageID in repair.duplicateMessageIds {
+                canonicalOrderByMessageID.removeValue(forKey: duplicateMessageID)
+            }
+
+            let duplicateIndices = repair.duplicateMessageIds.compactMap { duplicateMessageID in
+                messages.firstIndex(where: { $0.id == duplicateMessageID })
+            }
+            for duplicateIndex in duplicateIndices.sorted(by: >) {
+                messages.remove(at: duplicateIndex)
+            }
         }
     }
 
