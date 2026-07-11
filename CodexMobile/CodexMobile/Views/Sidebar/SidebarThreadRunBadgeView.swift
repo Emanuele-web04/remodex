@@ -12,7 +12,7 @@ struct SidebarThreadRunBadgeView: View {
     var body: some View {
         switch state {
         case .running:
-            SidebarThreadRunSpinner()
+            RunningThreadSpinner()
         case .failed:
             statusDot(color: .red)
         case .ready:
@@ -40,32 +40,5 @@ extension CodexThreadRunBadgeState {
         case .ready:
             return false
         }
-    }
-}
-
-private struct SidebarThreadRunSpinner: View {
-    @State private var isSpinning = false
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.gray.opacity(0.22), lineWidth: 1.5)
-            Circle()
-                .trim(from: 0.16, to: 0.72)
-                .stroke(
-                    Color.gray,
-                    style: StrokeStyle(lineWidth: 1.5, lineCap: .round)
-                )
-                .rotationEffect(.degrees(isSpinning ? 360 : 0))
-                .animation(
-                    .linear(duration: 0.85).repeatForever(autoreverses: false),
-                    value: isSpinning
-                )
-        }
-        .frame(width: 15, height: 15)
-        .onAppear {
-            isSpinning = true
-        }
-        .accessibilityHidden(true)
     }
 }

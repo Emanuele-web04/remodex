@@ -50,13 +50,14 @@ struct ComposerBottomBar: View {
 
     private let metaLabelColor = Color(.secondaryLabel)
     private var metaTextFont: Font { AppFont.subheadline() }
-    private let composerCircleDiameter: CGFloat = 30
+    private let composerCircleDiameter: CGFloat = 32
     private let composerActionIconSize: CGFloat = 14
     private let inlineAccessControlSize: CGFloat = 32
     private let inlineAccessControlIconSize: CGFloat = 20
     // Send stays the primary CTA, so give it a slightly larger tap target than
     // the neutral composer chrome.
-    private let sendButtonDiameter: CGFloat = 32
+    // Keep the send circle two points larger than its previous 32pt size.
+    private let sendButtonDiameter: CGFloat = 34
 
     private var selectedUserBubbleColor: UserBubbleColor {
         UserBubbleColor(rawValue: userBubbleColorRawValue) ?? .default

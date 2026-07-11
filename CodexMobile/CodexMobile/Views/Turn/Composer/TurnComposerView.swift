@@ -103,9 +103,9 @@ struct TurnComposerView: View {
     // with Dynamic Type so large accessibility sizes don't clip the placeholder.
     @ScaledMetric(relativeTo: .body) private var collapsedInputHeight: CGFloat = 22
 
-    // Square hit target for the resting capsule's "+" and mic controls, matched
-    // to the send button so they're just as easy to tap despite smaller glyphs.
-    private let collapsedControlTapTarget: CGFloat = 32
+    // Square hit target for the resting capsule's "+", mic, and send/stop
+    // controls. The extra 2pt keeps the closed capsule comfortable to tap.
+    private let collapsedControlTapTarget: CGFloat = 34
     private let expandedPlainTextMaxVisibleLines: CGFloat = 6
     private let expandedAccessoryTextMaxVisibleLines: CGFloat = 4
 
@@ -310,7 +310,7 @@ struct TurnComposerView: View {
                         }
                     }
                 }
-                // Collapsed capsule: 6pt on every side so the 32pt inline controls
+                // Collapsed capsule: 6pt on every side so the 34pt inline controls
                 // sit at the same distance from the edges as the 6pt vertical rhythm.
                 .padding(.leading, showsCollapsedComposer ? 6 : 14)
                 .padding(.trailing, showsCollapsedComposer ? 6 : 16)

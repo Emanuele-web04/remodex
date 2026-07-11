@@ -65,11 +65,13 @@ test("rollout suppression follows the follower's current ownership signal", () =
 });
 
 test("rollout suppression releases a stale Desktop owner so a growing rollout can mirror", () => {
+  let receivedFallbackActivityAt = 0;
   const desktopIpcActionFollower = {
     hasLiveThreadState() {
       return true;
     },
-    hasFreshLiveThreadState() {
+    hasFreshLiveThreadState(_threadId, { fallbackActivityAt = 0 } = {}) {
+      receivedFallbackActivityAt = fallbackActivityAt;
       return false;
     },
   };
@@ -84,8 +86,10 @@ test("rollout suppression releases a stale Desktop owner so a growing rollout ca
 
   assert.equal(shouldSuppressRolloutMirrorForThread(
     "thread-stale-desktop",
-    { desktopIpcActionFollower, desktopIpcLiveOwner }
+    { desktopIpcActionFollower, desktopIpcLiveOwner },
+    { fallbackActivityAt: 1234 }
   ), false);
+  assert.equal(receivedFallbackActivityAt, 1234);
 
   desktopIpcLiveOwner.isFreshThreadOwned = () => true;
   assert.equal(shouldSuppressRolloutMirrorForThread(

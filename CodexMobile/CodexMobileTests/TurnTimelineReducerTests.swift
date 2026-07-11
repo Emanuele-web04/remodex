@@ -5885,6 +5885,55 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         )
     }
 
+    func testUserDragEndUsesLatestObservedGeometryInsteadOfStaleCommittedBottom() {
+        let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
+            committedIsAtBottom: true,
+            latestObservedIsAtBottom: false
+        )
+
+        XCTAssertFalse(effectiveBottom)
+        XCTAssertEqual(
+            TurnScrollStateTracker.modeAfterUserDragEnded(
+                currentMode: .manual,
+                isScrolledToBottom: effectiveBottom
+            ),
+            .manual
+        )
+    }
+
+    func testBottomStateFallsBackToCommittedValueBeforeGeometryArrives() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.effectiveBottomState(
+                committedIsAtBottom: true,
+                latestObservedIsAtBottom: nil
+            )
+        )
+    }
+
+    func testGeometryReconcilesOptimisticBottomStateWhenScrollLandsShort() {
+        XCTAssertTrue(
+            TurnScrollStateTracker.shouldReconcileBottomState(
+                observedIsAtBottom: false,
+                committedIsAtBottom: true,
+                isSuppressingNotBottom: false
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldReconcileBottomState(
+                observedIsAtBottom: false,
+                committedIsAtBottom: false,
+                isSuppressingNotBottom: false
+            )
+        )
+        XCTAssertFalse(
+            TurnScrollStateTracker.shouldReconcileBottomState(
+                observedIsAtBottom: false,
+                committedIsAtBottom: true,
+                isSuppressingNotBottom: true
+            )
+        )
+    }
+
     func testCorrectsBottomForMeaningfulContentGrowthWhenPinned() {
         XCTAssertTrue(
             TurnScrollStateTracker.shouldCorrectBottomAfterContentHeightChange(

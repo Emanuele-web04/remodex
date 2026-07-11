@@ -21,7 +21,7 @@ struct ComposerAttachmentMenu: View {
     let onSetPlanModeArmed: (Bool) -> Void
     let onTapAddImage: () -> Void
     let onTapTakePhoto: () -> Void
-    var iconSide: CGFloat = 22
+    var iconSide: CGFloat = 24
     // When set, the "+" gets a larger square hit area (matching the send
     // button) so it's as easy to tap as the primary CTA in the collapsed row.
     var tapTargetSide: CGFloat?
@@ -100,8 +100,8 @@ struct ComposerAttachmentMenu: View {
 struct ComposerVoiceButton: View {
     let presentation: TurnComposerVoiceButtonPresentation
     let onTap: () -> Void
-    var circleDiameter: CGFloat = 30
-    var iconSide: CGFloat = 19
+    var circleDiameter: CGFloat = 32
+    var iconSide: CGFloat = 21
     // When set, the whole button gets a larger square hit area (matching the
     // send button) so the mic is as easy to tap as the primary CTA.
     var tapTargetSide: CGFloat?
@@ -131,7 +131,10 @@ struct ComposerVoiceButton: View {
                 background: presentation.backgroundColor,
                 diameter: circleDiameter
             ) {
-                ProgressView()
+                RunningThreadSpinner(
+                    size: 16,
+                    color: presentation.foregroundColor
+                )
             }
         } else if presentation.hasCircleBackground {
             // Keep circular voice states on the same icon pipeline as the
@@ -169,7 +172,7 @@ struct ComposerStopControl: View {
     let activeTurnID: String?
     let isSending: Bool
     let onStopTurn: (String?) -> Void
-    var diameter: CGFloat = 30
+    var diameter: CGFloat = 32
     var iconSize: CGFloat = 14
 
     private var palette: UserBubbleColor {

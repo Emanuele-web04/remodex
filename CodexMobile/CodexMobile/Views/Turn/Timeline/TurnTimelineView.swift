@@ -84,6 +84,8 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     @State private var initialLiveTurnStartAnchorDwellTask: Task<Void, Never>?
     @State private var initialLiveTurnStartAnchorDwellGeneration = 0
     @State private var followBottomScrollTask: Task<Void, Never>?
+    @State private var scrollToLatestSettlingTask: Task<Void, Never>?
+    @State private var scrollToLatestSettlingGeneration = 0
     @State private var pendingAssistantBottomSnapTask: Task<Void, Never>?
     @State private var progressiveTailRevealTask: Task<Void, Never>?
     @State private var isProgressivelyRevealingRecentTail = false
@@ -712,7 +714,38 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         userScrollCooldownUntil = nil
         pendingAssistantBottomSnapTask?.cancel()
         pendingAssistantBottomSnapTask = nil
+        // Drop a queued pre-tap `not bottom` commit, hide the affordance immediately, and keep
+        // transient geometry from re-showing it while the programmatic animation is settling.
+        scrollGeometryCoalescer.cancel()
+        // The button is visible only while the last committed position is away from the bottom.
+        // Keep that real observation until geometry proves the animation actually arrived.
+        scrollGeometryCoalescer.markLatestObservedNotAtBottom()
+        isScrolledToBottom = true
+        beginScrollToLatestSettlingWindow()
         scrollToBottom(using: proxy, animated: true)
+    }
+
+    private func beginScrollToLatestSettlingWindow() {
+        scrollToLatestSettlingTask?.cancel()
+        scrollToLatestSettlingGeneration &+= 1
+        let expectedGeneration = scrollToLatestSettlingGeneration
+        let expectedThreadID = threadID
+        scrollToLatestSettlingTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled,
+                  scrollToLatestSettlingGeneration == expectedGeneration,
+                  scrollSessionThreadID == expectedThreadID else {
+                return
+            }
+            let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
+                committedIsAtBottom: isScrolledToBottom,
+                latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
+            )
+            scrollToLatestSettlingTask = nil
+            if !effectiveBottom {
+                handleScrolledToBottomChanged(false)
+            }
+        }
     }
 
     // Resets per-thread scroll intent so each opened conversation gets one fresh
@@ -759,6 +792,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         cancelInitialLiveTurnStartAnchorDwell()
         followBottomScrollTask?.cancel()
         followBottomScrollTask = nil
+        scrollToLatestSettlingTask?.cancel()
+        scrollToLatestSettlingTask = nil
+        scrollToLatestSettlingGeneration &+= 1
+        scrollGeometryCoalescer.cancel()
         pendingAssistantBottomSnapTask?.cancel()
         pendingAssistantBottomSnapTask = nil
         progressiveTailRevealTask?.cancel()
@@ -1137,6 +1174,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         new: ScrollBottomGeometry,
         using proxy: ScrollViewProxy
     ) {
+        // Even while history loading suppresses offset commits, retain the physical bottom state
+        // so a manual scroll-to-latest timeout can verify whether its animation really landed.
+        scrollGeometryCoalescer.observe(new)
         guard !isEarlierHistoryInteractionActive || shouldProcessInitialRecoveryGeometry else { return }
 
         // Coalesce into a single commit per display-frame window so SwiftUI
@@ -1162,6 +1202,10 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     // Stops follow-bottom as soon as the user drags away so queued snaps cannot fight the gesture.
     private func handleScrolledToBottomChanged(_ nextValue: Bool) {
         guard nextValue != isScrolledToBottom else { return }
+
+        if !nextValue, scrollToLatestSettlingTask != nil {
+            return
+        }
 
         // Ignore transient "not at bottom" geometry while a newly selected chat is still
         // performing its initial recovery snap, otherwise fast chat switches can downgrade
@@ -1227,6 +1271,9 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
         cancelInitialLiveTurnStartAnchorDwell()
         followBottomScrollTask?.cancel()
         followBottomScrollTask = nil
+        scrollToLatestSettlingTask?.cancel()
+        scrollToLatestSettlingTask = nil
+        scrollToLatestSettlingGeneration &+= 1
         pendingAssistantBottomSnapTask?.cancel()
         pendingAssistantBottomSnapTask = nil
         progressiveTailRevealTask?.cancel()
@@ -1239,9 +1286,14 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
     private func handleUserScrollDragEnded() {
         isUserDraggingScroll = false
         userScrollCooldownUntil = TurnScrollStateTracker.cooldownDeadline()
+        let effectiveBottom = TurnScrollStateTracker.effectiveBottomState(
+            committedIsAtBottom: isScrolledToBottom,
+            latestObservedIsAtBottom: scrollGeometryCoalescer.latestObservedIsAtBottom
+        )
+        isScrolledToBottom = effectiveBottom
         autoScrollMode = TurnScrollStateTracker.modeAfterUserDragEnded(
             currentMode: autoScrollMode,
-            isScrolledToBottom: isScrolledToBottom
+            isScrolledToBottom: effectiveBottom
         )
     }
 
@@ -1543,8 +1595,11 @@ struct TurnTimelineView<EmptyState: View, Composer: View>: View {
                 newHeight: new.contentHeight,
                 isPinnedToBottom: shouldPinToBottom
             )
-        let bottomChanged = new.isAtBottom != old.isAtBottom
-            && !(isSuppressingBottomCorrectionsForWarmup && !new.isAtBottom)
+        let bottomChanged = TurnScrollStateTracker.shouldReconcileBottomState(
+            observedIsAtBottom: new.isAtBottom,
+            committedIsAtBottom: isScrolledToBottom,
+            isSuppressingNotBottom: isSuppressingBottomCorrectionsForWarmup
+        )
         let nextViewportHeight = new.viewportHeight
 
         Task { @MainActor in

@@ -88,17 +88,22 @@ function createRolloutLiveMirrorController({
     }
 
     let mirror;
+    let suppressionContext = {};
+    const isThreadSuppressed = () => Boolean(shouldSuppressThread?.(threadId, suppressionContext));
     mirror = createThreadRolloutLiveMirror({
       threadId,
       sendApplicationResponse: typeof shouldSuppressThread === "function"
         ? (rawNotification) => {
-          if (!shouldSuppressThread(threadId)) {
+          if (!isThreadSuppressed()) {
             sendApplicationResponse(rawNotification);
           }
         }
         : sendApplicationResponse,
       isSuppressed: typeof shouldSuppressThread === "function"
-        ? () => Boolean(shouldSuppressThread(threadId))
+        ? (context) => {
+          suppressionContext = context || {};
+          return isThreadSuppressed();
+        }
         : () => false,
       logPrefix,
       fsModule,
@@ -179,20 +184,6 @@ function createThreadRolloutLiveMirror({
     try {
       const currentTime = now();
 
-      // While another live source streams this thread the tail keeps consuming
-      // rollout lines with its emissions muted. When that source goes quiet and
-      // the mute lifts, everything consumed meanwhile was never mirrored: re-run
-      // the bootstrap catch-up so the phone backfills the gap instead of
-      // resuming from a cursor past content it never saw.
-      const suppressed = isSuppressed();
-      if (wasSuppressed && !suppressed && didBootstrap) {
-        lastSize = 0;
-        partialLine = "";
-        didBootstrap = false;
-        resetRunState(state);
-      }
-      wasSuppressed = suppressed;
-
       if (!rolloutPath) {
         if (currentTime - startedAt >= lookupTimeoutMs) {
           stop();
@@ -208,7 +199,22 @@ function createThreadRolloutLiveMirror({
         }
       }
 
-      const fileSize = readFileSize(rolloutPath, fsModule);
+      const rolloutStat = fsModule.statSync(rolloutPath);
+      const fileSize = rolloutStat.size;
+      // While another live source streams this thread the tail keeps consuming
+      // rollout lines with its emissions muted. Compare per-thread activity so
+      // a quiet Desktop turn stays owned, while newer rollout growth can recover
+      // from a stale connected snapshot.
+      const suppressed = isSuppressed({
+        fallbackActivityAt: Number(rolloutStat.mtimeMs) || 0,
+      });
+      if (wasSuppressed && !suppressed && didBootstrap) {
+        lastSize = 0;
+        partialLine = "";
+        didBootstrap = false;
+        resetRunState(state);
+      }
+      wasSuppressed = suppressed;
       if (!didBootstrap) {
         didBootstrap = true;
         bootstrapFromExistingRollout({
@@ -1031,6 +1037,7 @@ function responseItemMessageNotifications(state, entry, payload) {
   if (role === "user") {
     return userMessageNotifications(state, entry, payload, {
       rawMessage: extractResponseItemMessageText(payload),
+      isResponseItem: true,
     });
   }
   if (role && role !== "assistant") {
@@ -1051,7 +1058,10 @@ function responseItemMessageNotifications(state, entry, payload) {
   });
 }
 
-function userMessageNotifications(state, entry, payload, { rawMessage = "" } = {}) {
+function userMessageNotifications(state, entry, payload, {
+  rawMessage = "",
+  isResponseItem = false,
+} = {}) {
   const imagePlaceholder = responseItemHasUserImage(payload) ? "Image attachment" : "";
   const message = visibleUserPromptFromInputEntries(
     rawMessage || readString(payload?.message) || readString(payload?.text) || imagePlaceholder
@@ -1067,12 +1077,12 @@ function userMessageNotifications(state, entry, payload, { rawMessage = "" } = {
     // event_msg form so task_started flushes the opener before thinking/output.
     const pendingKey = `${itemId || ""}:${message}`;
     if (!state.pendingUserMessages.some((pending) => `${pending.id || ""}:${pending.message}` === pendingKey)) {
-      state.pendingUserMessages.push({ id: itemId, message, timestamp });
+      state.pendingUserMessages.push({ id: itemId, message, timestamp, isResponseItem });
     }
     return [];
   }
 
-  const dedupeKey = `user:${buildRemodexSourceItemKey(turnId, message)}`;
+  const dedupeKey = userMessageOccurrenceKey(state, turnId, message, { isResponseItem });
   if (state.emittedUserMessageKeys.has(dedupeKey)) {
     return [];
   }
@@ -1084,6 +1094,31 @@ function userMessageNotifications(state, entry, payload, { rawMessage = "" } = {
     ...(itemId ? { id: itemId } : {}),
     ...timestampParams(timestamp),
   })];
+}
+
+// Rollouts commonly persist one user message twice: first as event_msg and then
+// as response_item. Pair those two shapes by occurrence instead of collapsing
+// every identical text in the turn, because repeated steers are legitimate.
+function userMessageOccurrenceKey(state, turnId, message, { isResponseItem = false } = {}) {
+  const baseKey = buildRemodexSourceItemKey(turnId, message);
+  const pendingOccurrences = state.pendingEventUserMessageOccurrencesByBaseKey.get(baseKey) || [];
+  let occurrence;
+  if (isResponseItem && pendingOccurrences.length > 0) {
+    occurrence = pendingOccurrences.shift();
+    if (pendingOccurrences.length === 0) {
+      state.pendingEventUserMessageOccurrencesByBaseKey.delete(baseKey);
+    } else {
+      state.pendingEventUserMessageOccurrencesByBaseKey.set(baseKey, pendingOccurrences);
+    }
+  } else {
+    occurrence = (state.userMessageOccurrencesByBaseKey.get(baseKey) || 0) + 1;
+    state.userMessageOccurrencesByBaseKey.set(baseKey, occurrence);
+    if (!isResponseItem) {
+      pendingOccurrences.push(occurrence);
+      state.pendingEventUserMessageOccurrencesByBaseKey.set(baseKey, pendingOccurrences);
+    }
+  }
+  return `user:${baseKey}:${occurrence}`;
 }
 
 function responseItemHasUserImage(payload) {
@@ -1572,6 +1607,8 @@ function createMirrorState(threadId) {
     agentMessageOccurrencesByBaseKey: new Map(),
     pendingEventAgentMessageOccurrencesByBaseKey: new Map(),
     emittedUserMessageKeys: new Set(),
+    userMessageOccurrencesByBaseKey: new Map(),
+    pendingEventUserMessageOccurrencesByBaseKey: new Map(),
     pendingUserMessages: [],
     pendingSyntheticTerminalTurnId: null,
     pendingSyntheticTerminalStartedAt: 0,
@@ -1760,7 +1797,9 @@ function flushPendingUserMessageNotifications(state, turnId) {
     .map((pending) => ({ ...pending, message: visibleUserPromptFromInputEntries(pending.message) }))
     .filter((pending) => pending.message)
     .filter((pending) => {
-      const dedupeKey = `user:${buildRemodexSourceItemKey(resolvedTurnId, pending.message)}`;
+      const dedupeKey = userMessageOccurrenceKey(state, resolvedTurnId, pending.message, {
+        isResponseItem: pending.isResponseItem === true,
+      });
       if (state.emittedUserMessageKeys.has(dedupeKey)) {
         return false;
       }
@@ -1888,6 +1927,8 @@ function resetRunState(state) {
   state.agentMessageOccurrencesByBaseKey.clear();
   state.pendingEventAgentMessageOccurrencesByBaseKey.clear();
   state.emittedUserMessageKeys.clear();
+  state.userMessageOccurrencesByBaseKey.clear();
+  state.pendingEventUserMessageOccurrencesByBaseKey.clear();
   state.pendingUserMessages.length = 0;
   state.pendingSyntheticTerminalTurnId = null;
   state.pendingSyntheticTerminalStartedAt = 0;
@@ -1904,10 +1945,6 @@ function readThreadId(params) {
     readString(params?.threadId),
     readString(params?.thread_id),
   ]) || "";
-}
-
-function readFileSize(filePath, fsModule) {
-  return fsModule.statSync(filePath).size;
 }
 
 function readFileSlice(filePath, start, endExclusive, fsModule) {

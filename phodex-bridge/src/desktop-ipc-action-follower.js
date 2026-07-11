@@ -1716,7 +1716,7 @@ function createDesktopIpcActionFollower({
     // has actually moved recently. Keep hasLiveThreadState's broader meaning
     // for callers that need cached/idle Desktop state, but expose this explicit
     // lease check for source arbitration.
-    hasFreshLiveThreadState(threadId) {
+    hasFreshLiveThreadState(threadId, { fallbackActivityAt = 0 } = {}) {
       const normalizedThreadId = readString(threadId);
       if (pendingSnapshotsByThreadId.has(normalizedThreadId)) {
         return Boolean(normalizedThreadId);
@@ -1731,11 +1731,14 @@ function createDesktopIpcActionFollower({
       }
       const thread = projectDesktopConversationStateToThread(normalizedThreadId, liveState, { now });
       // A connected Desktop stream with an explicitly active projected turn is
-      // authoritative even during a quiet tool/reasoning interval. Applying
-      // the 20s cache age to that case woke rollout too, producing duplicate
-      // live sources. Idle snapshots still expire normally below.
+      // authoritative during a genuinely quiet tool/reasoning interval. Once
+      // its cached state is stale, yield only when the rollout file proves that
+      // newer per-thread activity exists; connection state alone is not enough.
       if (hasActiveProjectedTurn(thread)) {
-        return ipc.isConnected();
+        const updatedAt = rawStateUpdatedAtByThreadId.get(normalizedThreadId) || 0;
+        const hasNewerFallbackActivity = Number(fallbackActivityAt) > updatedAt;
+        return ipc.isConnected()
+          && (!isRawStateStaleForActiveRead(normalizedThreadId) || !hasNewerFallbackActivity);
       }
       return !isRawStateStaleForActiveRead(normalizedThreadId);
     },

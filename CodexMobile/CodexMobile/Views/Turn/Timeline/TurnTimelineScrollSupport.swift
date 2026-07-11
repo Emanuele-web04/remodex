@@ -168,8 +168,10 @@ final class VerticalScrollAxisGuardView: UIView {
 final class ScrollGeometryCoalescer {
     var pending: (old: ScrollBottomGeometry, new: ScrollBottomGeometry)?
     var applyTask: Task<Void, Never>?
+    private(set) var latestObservedIsAtBottom: Bool?
 
     func record(old: ScrollBottomGeometry, new: ScrollBottomGeometry) {
+        observe(new)
         if let pending {
             self.pending = (old: pending.old, new: new)
         } else {
@@ -177,10 +179,19 @@ final class ScrollGeometryCoalescer {
         }
     }
 
+    func observe(_ geometry: ScrollBottomGeometry) {
+        latestObservedIsAtBottom = geometry.isAtBottom
+    }
+
+    func markLatestObservedNotAtBottom() {
+        latestObservedIsAtBottom = false
+    }
+
     func cancel() {
         applyTask?.cancel()
         applyTask = nil
         pending = nil
+        latestObservedIsAtBottom = nil
     }
 }
 

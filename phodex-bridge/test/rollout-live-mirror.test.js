@@ -251,13 +251,17 @@ test("rollout mirror suppression silences threads owned by another live source",
 
   const outbound = [];
   let suppressed = true;
+  let fallbackActivityAt = 0;
   const controller = createRolloutLiveMirrorController({
     sendApplicationResponse(message) {
       outbound.push(JSON.parse(message));
     },
     pollIntervalMs: 5,
     idleTimeoutMs: 50,
-    shouldSuppressThread: () => suppressed,
+    shouldSuppressThread: (_threadId, context = {}) => {
+      fallbackActivityAt = context.fallbackActivityAt || fallbackActivityAt;
+      return suppressed;
+    },
   });
   t.after(() => controller.stopAll());
 
@@ -270,6 +274,7 @@ test("rollout mirror suppression silences threads owned by another live source",
 
   await wait(30);
   assert.deepEqual(outbound, []);
+  assert.ok(fallbackActivityAt > 0, "source arbitration should receive rollout activity time");
 });
 
 test("suppression lift re-bootstraps the muted tail so a running thread recovers", async (t) => {
@@ -722,6 +727,52 @@ test("desktop-origin mirror dedupes the same assistant text across event and res
     /^turn-dedupe-shapes:[a-f0-9]{16}$/,
     "the source alias must survive a later response_item with a different provider id"
   );
+});
+
+test("desktop-origin mirror keeps repeated identical user steers while deduping their response copies", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-repeated-user-steers",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [taskStarted("turn-repeated-user-steers")],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 200,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-repeated-user-steers" },
+  }));
+  await wait(20);
+  outbound.length = 0;
+
+  appendRolloutLines(rolloutPath, [
+    userMessage("keep going"),
+    responseUserMessage("keep going", "user-steer-one"),
+    userMessage("keep going"),
+    responseUserMessage("keep going", "user-steer-two"),
+  ]);
+  await wait(30);
+
+  const userMessages = outbound.filter((message) => (
+    message.method === "codex/event/user_message"
+    && message.params.message === "keep going"
+  ));
+  assert.equal(userMessages.length, 2);
 });
 
 test("desktop-origin mirror dedupes cumulative reasoning summaries across rollout shapes", async (t) => {

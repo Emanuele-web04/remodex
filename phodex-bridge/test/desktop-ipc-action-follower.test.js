@@ -4303,6 +4303,7 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
     },
   });
   await waitFor(() => follower.hasLiveThreadState("thread-stale-active"));
+  const desktopSnapshotAt = fakeNow;
 
   // While Desktop keeps the stream fresh, cached reads answer immediately.
   const freshServed = follower.observeInbound(JSON.stringify({
@@ -4313,11 +4314,17 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
   assert.equal(freshServed, true);
   assert.equal(outbound.some((message) => message.id === "read-fresh"), true);
 
-  // Desktop went silent while the cache still claims an active turn: both read
-  // serving and mirror ownership must yield so rollout/local recovery can take
-  // over instead of pinning a phantom running indicator on the phone.
+  // Desktop went silent while the cache still claims an active turn. Cached
+  // reads yield quickly, while source ownership gets a longer quiet-turn lease.
   fakeNow += 21_000;
   assert.equal(follower.hasLiveThreadState("thread-stale-active"), false);
+  assert.equal(
+    follower.hasFreshLiveThreadState("thread-stale-active", {
+      fallbackActivityAt: desktopSnapshotAt - 1,
+    }),
+    true,
+    "an older fallback must not displace a genuinely quiet Desktop turn"
+  );
   const staleServed = follower.observeInbound(JSON.stringify({
     id: "read-stale",
     method: "thread/read",
@@ -4325,6 +4332,12 @@ test("desktop IPC follower yields stale active ownership and cleanly replaces it
   }));
   assert.equal(staleServed, false);
   assert.equal(outbound.some((message) => message.id === "read-stale"), false);
+
+  // A connected IPC client is not permanent proof that this one thread is
+  // still live. Newer rollout activity lets the fallback recover it.
+  assert.equal(follower.hasFreshLiveThreadState("thread-stale-active", {
+    fallbackActivityAt: fakeNow + 1,
+  }), false);
 
   // The next fresh Desktop snapshot starts a new source epoch. It must arrive as
   // one replacement bootstrap, not as an incremental completion of stale state.

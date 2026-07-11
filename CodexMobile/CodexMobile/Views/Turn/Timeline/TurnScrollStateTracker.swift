@@ -52,6 +52,26 @@ struct TurnScrollStateTracker {
         return isScrolledToBottom ? .followBottom : .manual
     }
 
+    // Geometry commits are intentionally delayed by one frame. Gesture-end must use the newest
+    // observed value so a stale committed `true` cannot re-enable follow-bottom during release.
+    static func effectiveBottomState(
+        committedIsAtBottom: Bool,
+        latestObservedIsAtBottom: Bool?
+    ) -> Bool {
+        latestObservedIsAtBottom ?? committedIsAtBottom
+    }
+
+    // Reconcile geometry against the view's committed state, not only against the previous
+    // geometry sample. This repairs optimistic programmatic-scroll state if the scroll lands short.
+    static func shouldReconcileBottomState(
+        observedIsAtBottom: Bool,
+        committedIsAtBottom: Bool,
+        isSuppressingNotBottom: Bool
+    ) -> Bool {
+        observedIsAtBottom != committedIsAtBottom
+            && !(isSuppressingNotBottom && !observedIsAtBottom)
+    }
+
     // Re-anchor whenever pinned content meaningfully grows or shrinks so
     // completion-time row removal cannot leave blank space below the timeline.
     static func shouldCorrectBottomAfterContentHeightChange(

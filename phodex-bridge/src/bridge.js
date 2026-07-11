@@ -4921,12 +4921,13 @@ function persistBridgePreferences(
 
 function shouldSuppressRolloutMirrorForThread(
   threadId,
-  { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {}
+  { desktopIpcActionFollower = null, desktopIpcLiveOwner = null } = {},
+  { fallbackActivityAt = 0 } = {}
 ) {
   // Desktop ownership is an expiring live lease, not a permanent boolean. A
   // stale IPC snapshot used to mute an actively growing rollout forever.
   const followerIsFresh = typeof desktopIpcActionFollower?.hasFreshLiveThreadState === "function"
-    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId)
+    ? desktopIpcActionFollower.hasFreshLiveThreadState(threadId, { fallbackActivityAt })
     : desktopIpcActionFollower?.hasLiveThreadState(threadId);
   const ownerIsFresh = typeof desktopIpcLiveOwner?.isFreshThreadOwned === "function"
     ? desktopIpcLiveOwner.isFreshThreadOwned(threadId)
