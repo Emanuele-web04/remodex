@@ -3671,6 +3671,21 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
   let matchedAnchorCount = 0;
   let didReplaceMatchedItem = false;
 
+  // The rollout's turn+text alias is the only identity shared across the
+  // live-owner (item_N) and rollout (msg_...) views of one assistant reply.
+  // Carrying it onto the matched server row lets the phone join this item
+  // with its other-source representations instead of duplicating it.
+  const adoptJsonlSourceAlias = (index, jsonlItem) => {
+    const sourceKey = normalizeNonEmptyString(jsonlItem?.remodexSourceItemKey);
+    const existing = resolvedExistingItems[index];
+    if (!sourceKey || !existing || typeof existing !== "object"
+      || normalizeNonEmptyString(existing.remodexSourceItemKey)) {
+      return;
+    }
+    resolvedExistingItems[index] = { ...existing, remodexSourceItemKey: sourceKey };
+    didReplaceMatchedItem = true;
+  };
+
   const placePendingItems = () => {
     if (pendingItems.length === 0) {
       return;
@@ -3709,6 +3724,7 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
           );
           didReplaceMatchedItem = true;
         }
+        adoptJsonlSourceAlias(representedExactIndex, jsonlItem);
         continue;
       }
       existingIndex = findRelayHistorySemanticMatchIndex(existingItems, jsonlItem, eligibleMatch);
@@ -3732,6 +3748,7 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
           );
           didReplaceMatchedItem = true;
         }
+        adoptJsonlSourceAlias(representedIndex, jsonlItem);
         continue;
       }
       if (includeJsonlItem(jsonlItem)) {
@@ -3749,6 +3766,7 @@ function mergeRelayHistoryItemsWithJsonlItems(existingItems, jsonlItems, threadI
       );
       didReplaceMatchedItem = true;
     }
+    adoptJsonlSourceAlias(existingIndex, jsonlItem);
     previousMatchedIndex = existingIndex;
     matchedAnchorCount += 1;
   }
@@ -3888,6 +3906,7 @@ function isRelayAssistantHistoryItem(item) {
   const itemType = normalizeHistoryItemToken(item?.type);
   return role === "assistant"
     || itemType === "assistantmessage"
+    || itemType === "agentmessage"
     || (itemType === "message" && role !== "user");
 }
 
@@ -3915,9 +3934,13 @@ function areEquivalentRelayHistoryItems(first, second) {
 
   // JSONL line ids are source-local fallbacks, not provider identities. They
   // may reconcile semantically with a real app-server id; occurrence tracking
-  // in the merge keeps intentional repeated rows distinct.
+  // in the merge keeps intentional repeated rows distinct. Assistant messages
+  // are exempt from the two-stable-ids refusal: the live-owner state keys them
+  // by app-server event id (item_N) while the rollout records the provider id
+  // (msg_...), so the same reply legitimately carries two stable identities.
   if (relayHistoryIdentityIsStable(firstIdentity)
-    && relayHistoryIdentityIsStable(secondIdentity)) {
+    && relayHistoryIdentityIsStable(secondIdentity)
+    && !(isRelayAssistantHistoryItem(first) && isRelayAssistantHistoryItem(second))) {
     return false;
   }
   if (relayHistoryIdentityIsStable(firstCallId)
@@ -3972,6 +3995,7 @@ function relayHistoryItemKindsCompatible(first, second) {
 function isRelayMessageLikeHistoryType(itemType) {
   return itemType === "message"
     || itemType === "assistantmessage"
+    || itemType === "agentmessage"
     || itemType === "usermessage";
 }
 

@@ -10,9 +10,6 @@ import Foundation
 enum TurnAutoScrollMode {
     case followBottom
     case anchorAssistantResponse
-    // A reopened live turn first shows its coherent response boundary, then
-    // returns to normal live-follow once that one-shot placement has settled.
-    case anchorTurnStartThenFollow
     case manual
 }
 
@@ -20,9 +17,6 @@ struct TurnScrollStateTracker {
     static let bottomThreshold: CGFloat = 12
     static let userScrollCooldown: TimeInterval = 0.25
     static let contentHeightCorrectionThreshold: CGFloat = 1
-    // Give a reopened live turn enough time to be read from its response
-    // boundary before its next delta is allowed to reclaim the live tail.
-    static let initialLiveTurnStartAnchorDwellNanoseconds: UInt64 = 1_200_000_000
 
     static func shouldShowScrollToLatestButton(messageCount: Int, isScrolledToBottom: Bool) -> Bool {
         messageCount > 0 && !isScrolledToBottom
@@ -103,9 +97,7 @@ struct TurnScrollStateTracker {
         switch currentMode {
         case .followBottom:
             return true
-        case .anchorAssistantResponse, .anchorTurnStartThenFollow:
-            return false
-        case .manual:
+        case .anchorAssistantResponse, .manual:
             return false
         }
     }
@@ -146,23 +138,6 @@ struct TurnScrollStateTracker {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let hasActiveTurn = normalizedActiveTurnID?.isEmpty == false
         return isThreadRunning || hasActiveTurn || hasStreamingTail
-    }
-
-    static func modeForInitialResponseStartAnchor(
-        hasLiveTurnEvidence: Bool
-    ) -> TurnAutoScrollMode {
-        hasLiveTurnEvidence ? .anchorTurnStartThenFollow : .manual
-    }
-
-    static func modeAfterInitialResponseStartAnchorDwell(
-        currentMode: TurnAutoScrollMode,
-        isAutomaticScrollingPaused: Bool
-    ) -> TurnAutoScrollMode {
-        guard currentMode == .anchorTurnStartThenFollow,
-              !isAutomaticScrollingPaused else {
-            return currentMode
-        }
-        return .followBottom
     }
 
     static func isAutomaticScrollingPaused(

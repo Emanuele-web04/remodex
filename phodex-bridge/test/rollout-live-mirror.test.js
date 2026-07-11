@@ -775,6 +775,53 @@ test("desktop-origin mirror keeps repeated identical user steers while deduping 
   assert.equal(userMessages.length, 2);
 });
 
+// Phone/app-server-started turns persist the prompt pair in reverse order
+// (response_item before event_msg); the occurrence pairing must fold that
+// order too, or every prompt sent from the phone mirrors twice.
+test("desktop-origin mirror dedupes the user prompt pair when response_item precedes event_msg", async (t) => {
+  const { homeDir, rolloutPath } = createTemporaryRolloutHome({
+    threadId: "thread-reversed-user-pair",
+    originator: "Codex Desktop",
+    source: "desktop",
+    lines: [taskStarted("turn-reversed-user-pair")],
+  });
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = homeDir;
+  t.after(() => {
+    restoreCodexHome(previousCodexHome);
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  const outbound = [];
+  const controller = createRolloutLiveMirrorController({
+    sendApplicationResponse(message) {
+      outbound.push(JSON.parse(message));
+    },
+    pollIntervalMs: 5,
+    idleTimeoutMs: 200,
+  });
+  t.after(() => controller.stopAll());
+
+  controller.observeInbound(JSON.stringify({
+    method: "thread/resume",
+    params: { threadId: "thread-reversed-user-pair" },
+  }));
+  await wait(20);
+  outbound.length = 0;
+
+  appendRolloutLines(rolloutPath, [
+    responseUserMessage("can you push to main", "user-reversed-pair"),
+    userMessage("can you push to main"),
+  ]);
+  await wait(30);
+
+  const userMessages = outbound.filter((message) => (
+    message.method === "codex/event/user_message"
+    && message.params.message === "can you push to main"
+  ));
+  assert.equal(userMessages.length, 1);
+});
+
 test("desktop-origin mirror dedupes cumulative reasoning summaries across rollout shapes", async (t) => {
   const { homeDir, rolloutPath } = createTemporaryRolloutHome({
     threadId: "thread-reasoning-dedupe-shapes",

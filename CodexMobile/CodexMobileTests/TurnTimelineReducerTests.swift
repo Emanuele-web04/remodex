@@ -3416,67 +3416,6 @@ final class TurnTimelineReducerTests: XCTestCase {
         XCTAssertEqual(fallbackAnchor, "assistant-2")
     }
 
-    func testLargeHistoryResponseAnchorUsesFirstRenderedRowAfterLatestPrompt() {
-        let now = Date()
-        let user = makeMessage(
-            id: "latest-user",
-            threadID: "thread",
-            role: .user,
-            kind: .chat,
-            text: "Please continue",
-            createdAt: now,
-            turnID: "turn-latest"
-        )
-        let commentary = makeMessage(
-            id: "commentary",
-            threadID: "thread",
-            role: .assistant,
-            kind: .chat,
-            text: "Working on it",
-            createdAt: now.addingTimeInterval(1),
-            turnID: "turn-latest"
-        )
-        let final = makeMessage(
-            id: "final",
-            threadID: "thread",
-            role: .assistant,
-            kind: .chat,
-            text: "Done",
-            createdAt: now.addingTimeInterval(2),
-            turnID: "turn-latest"
-        )
-        let collapsed = TurnTimelinePreviousMessagesGroup(
-            finalMessage: final,
-            messages: [commentary]
-        )
-        let items: [TurnTimelineRenderItem] = [
-            .message(user),
-            .previousMessages(collapsed),
-            .message(final),
-        ]
-
-        XCTAssertEqual(
-            TurnTimelineRenderProjection.latestResponseStartAnchorID(in: items),
-            collapsed.id
-        )
-    }
-
-    func testLargeHistoryResponseAnchorFallsBackToEarliestLoadedRow() {
-        let message = makeMessage(
-            id: "first-loaded-response-row",
-            threadID: "thread",
-            role: .assistant,
-            kind: .chat,
-            text: "Continuation of a response whose prompt is on an older page",
-            turnID: "turn-latest"
-        )
-
-        XCTAssertEqual(
-            TurnTimelineRenderProjection.latestResponseStartAnchorID(in: [.message(message)]),
-            "first-loaded-response-row"
-        )
-    }
-
     func testRenderItemsCacheReusesProjectionForSameSignature() {
         let messages = [
             makeMessage(
@@ -5778,7 +5717,7 @@ final class TurnScrollStateTrackerTests: XCTestCase {
         )
     }
 
-    func testReopenedLiveEvidenceUsesStartAnchorInsteadOfTail() {
+    func testLiveTurnEvidenceDetection() {
         XCTAssertTrue(
             TurnScrollStateTracker.hasLiveTurnEvidence(
                 isThreadRunning: true,
@@ -5787,52 +5726,11 @@ final class TurnScrollStateTrackerTests: XCTestCase {
             )
         )
         XCTAssertFalse(
-            TurnScrollStateTracker.shouldOpenAtLiveTail(
-                isSendInFlight: false
-            )
-        )
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeForInitialResponseStartAnchor(
-                hasLiveTurnEvidence: true
-            ),
-            .anchorTurnStartThenFollow
-        )
-    }
-
-    func testInactiveHistoryUsesManualStartAnchor() {
-        XCTAssertFalse(
             TurnScrollStateTracker.hasLiveTurnEvidence(
                 isThreadRunning: false,
                 activeTurnID: "   ",
                 hasStreamingTail: false
             )
-        )
-    }
-
-    func testLiveStartAnchorResumesFollowOnlyAfterDwell() {
-        XCTAssertGreaterThanOrEqual(
-            TurnScrollStateTracker.initialLiveTurnStartAnchorDwellNanoseconds,
-            1_000_000_000
-        )
-        XCTAssertFalse(
-            TurnScrollStateTracker.shouldPinDuringGeometryChange(
-                currentMode: .anchorTurnStartThenFollow,
-                isAutomaticScrollingPaused: false
-            )
-        )
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterInitialResponseStartAnchorDwell(
-                currentMode: .anchorTurnStartThenFollow,
-                isAutomaticScrollingPaused: false
-            ),
-            .followBottom
-        )
-        XCTAssertEqual(
-            TurnScrollStateTracker.modeAfterInitialResponseStartAnchorDwell(
-                currentMode: .anchorTurnStartThenFollow,
-                isAutomaticScrollingPaused: true
-            ),
-            .anchorTurnStartThenFollow
         )
     }
 

@@ -1096,28 +1096,36 @@ function userMessageNotifications(state, entry, payload, {
   })];
 }
 
-// Rollouts commonly persist one user message twice: first as event_msg and then
-// as response_item. Pair those two shapes by occurrence instead of collapsing
-// every identical text in the turn, because repeated steers are legitimate.
+// Rollouts commonly persist one user message twice as an event_msg and a
+// response_item pair, in either order: desktop-started turns log event_msg
+// first, phone/app-server-started turns log response_item first. Pair the two
+// shapes by occurrence in both directions instead of collapsing every
+// identical text in the turn, because repeated steers are legitimate.
 function userMessageOccurrenceKey(state, turnId, message, { isResponseItem = false } = {}) {
   const baseKey = buildRemodexSourceItemKey(turnId, message);
-  const pendingOccurrences = state.pendingEventUserMessageOccurrencesByBaseKey.get(baseKey) || [];
-  let occurrence;
-  if (isResponseItem && pendingOccurrences.length > 0) {
-    occurrence = pendingOccurrences.shift();
-    if (pendingOccurrences.length === 0) {
-      state.pendingEventUserMessageOccurrencesByBaseKey.delete(baseKey);
+  const unpairedMap = isResponseItem
+    ? state.pendingEventUserMessageOccurrencesByBaseKey
+    : state.pendingResponseItemUserMessageOccurrencesByBaseKey;
+  const ownPendingMap = isResponseItem
+    ? state.pendingResponseItemUserMessageOccurrencesByBaseKey
+    : state.pendingEventUserMessageOccurrencesByBaseKey;
+
+  const unpaired = unpairedMap.get(baseKey) || [];
+  if (unpaired.length > 0) {
+    const occurrence = unpaired.shift();
+    if (unpaired.length === 0) {
+      unpairedMap.delete(baseKey);
     } else {
-      state.pendingEventUserMessageOccurrencesByBaseKey.set(baseKey, pendingOccurrences);
+      unpairedMap.set(baseKey, unpaired);
     }
-  } else {
-    occurrence = (state.userMessageOccurrencesByBaseKey.get(baseKey) || 0) + 1;
-    state.userMessageOccurrencesByBaseKey.set(baseKey, occurrence);
-    if (!isResponseItem) {
-      pendingOccurrences.push(occurrence);
-      state.pendingEventUserMessageOccurrencesByBaseKey.set(baseKey, pendingOccurrences);
-    }
+    return `user:${baseKey}:${occurrence}`;
   }
+
+  const occurrence = (state.userMessageOccurrencesByBaseKey.get(baseKey) || 0) + 1;
+  state.userMessageOccurrencesByBaseKey.set(baseKey, occurrence);
+  const ownPending = ownPendingMap.get(baseKey) || [];
+  ownPending.push(occurrence);
+  ownPendingMap.set(baseKey, ownPending);
   return `user:${baseKey}:${occurrence}`;
 }
 
@@ -1609,6 +1617,7 @@ function createMirrorState(threadId) {
     emittedUserMessageKeys: new Set(),
     userMessageOccurrencesByBaseKey: new Map(),
     pendingEventUserMessageOccurrencesByBaseKey: new Map(),
+    pendingResponseItemUserMessageOccurrencesByBaseKey: new Map(),
     pendingUserMessages: [],
     pendingSyntheticTerminalTurnId: null,
     pendingSyntheticTerminalStartedAt: 0,
@@ -1929,6 +1938,7 @@ function resetRunState(state) {
   state.emittedUserMessageKeys.clear();
   state.userMessageOccurrencesByBaseKey.clear();
   state.pendingEventUserMessageOccurrencesByBaseKey.clear();
+  state.pendingResponseItemUserMessageOccurrencesByBaseKey.clear();
   state.pendingUserMessages.length = 0;
   state.pendingSyntheticTerminalTurnId = null;
   state.pendingSyntheticTerminalStartedAt = 0;

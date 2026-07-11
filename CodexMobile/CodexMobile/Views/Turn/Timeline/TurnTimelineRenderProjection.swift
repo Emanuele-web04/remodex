@@ -154,30 +154,6 @@ enum TurnTimelineRenderProjection {
         return mergeAdjacentFileChangeItems(items)
     }
 
-    // Finds the first rendered row in the newest user-delimited response. The
-    // returned ID always belongs to a real render item, including collapsed
-    // previous-message and tool-burst rows, so ScrollViewReader can reach it.
-    static func latestResponseStartAnchorID(
-        in items: [TurnTimelineRenderItem]
-    ) -> String? {
-        guard !items.isEmpty else { return nil }
-
-        guard let latestUserIndex = items.lastIndex(where: { item in
-            guard case .message(let message) = item else { return false }
-            return message.role == .user
-        }) else {
-            // A bounded window can begin midway through one very large response.
-            // In that case the earliest loaded row is the closest available start.
-            return items.first?.id
-        }
-
-        let responseStartIndex = items.index(after: latestUserIndex)
-        guard responseStartIndex < items.endIndex else {
-            return items[latestUserIndex].id
-        }
-        return items[responseStartIndex].id
-    }
-
     static func collapsedFinalMessageIDs(
         in messages: [CodexMessage],
         completedTurnIDs: Set<String>,

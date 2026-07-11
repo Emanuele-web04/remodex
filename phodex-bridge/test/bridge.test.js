@@ -2206,6 +2206,93 @@ test("sanitizeThreadHistoryImagesForRelay reconciles fallback ids without collap
   assert.equal(items.some((item) => item.id?.startsWith("apply-patch-line-")), false);
 });
 
+// A live-owned turn keys assistant replies by app-server event id (item_N)
+// while the rollout records the provider id (msg_...). The augment pass must
+// fold the two stable identities into one row and carry the JSONL source
+// alias onto it so the phone can join later cross-source representations.
+test("sanitizeThreadHistoryImagesForRelay folds live-owner assistant ids into JSONL provider rows", (t) => {
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-live-owner-ids-"));
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previousCodexHome == null) {
+      delete process.env.CODEX_HOME;
+    } else {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  });
+
+  const threadId = "thread-live-owner-identities";
+  const turnId = "turn-live-owner-identities";
+  const assistantText = "The change set is substantial: tracing the new contracts.";
+  const sessionsDir = path.join(codexHome, "sessions", "2026", "07", "11");
+  fs.mkdirSync(sessionsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionsDir, `rollout-2026-07-11T15-55-04-${threadId}.jsonl`),
+    [
+      JSON.stringify({ type: "session_meta", payload: { id: threadId } }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "user_message", turn_id: turnId, message: "review my changes" },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        payload: {
+          id: "msg_rollout_provider_identity",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: assistantText }],
+        },
+      }),
+      JSON.stringify({
+        type: "event_msg",
+        payload: { type: "task_complete", turn_id: turnId },
+      }),
+    ].join("\n"),
+    "utf8"
+  );
+
+  const sanitized = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "req-thread-live-owner-identities",
+    result: {
+      thread: {
+        id: threadId,
+        turns: [{
+          id: turnId,
+          status: "inProgress",
+          items: [
+            {
+              id: `${turnId}:input`,
+              type: "userMessage",
+              content: [{ type: "text", text: "review my changes" }],
+            },
+            { id: "item_0", type: "agentMessage", text: assistantText },
+          ],
+        }],
+      },
+    },
+  }), "thread/read"));
+
+  const items = sanitized.result.thread.turns[0].items;
+  const assistantItems = items.filter((item) => (
+    (item.role || "").toLowerCase() === "assistant"
+      || (item.type || "").toLowerCase().replace(/[_-]/g, "") === "agentmessage"
+  ));
+  assert.equal(assistantItems.length, 1);
+  assert.equal(assistantItems[0].id, "item_0");
+  assert.equal(
+    typeof assistantItems[0].remodexSourceItemKey,
+    "string",
+    "the folded row must adopt the JSONL turn+text source alias"
+  );
+  assert.equal(assistantItems[0].remodexSourceItemKey.startsWith(`${turnId}:`), true);
+});
+
 test("sanitizeThreadHistoryImagesForRelay augments app-server history with JSONL fileChange blocks", (t) => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-history-jsonl-"));
   const previousCodexHome = process.env.CODEX_HOME;
