@@ -3522,8 +3522,10 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
-        let sourceKey = "\(turnID):assistant-source"
         let text = "The provider-isolation branch is committed and all focused verification passes."
+        let sourceKey = try! XCTUnwrap(
+            CodexService.remodexAssistantSourceItemKey(turnId: turnID, text: text)
+        )
 
         var localAssistant = CodexMessage(
             id: "local-assistant",
@@ -3531,7 +3533,8 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
             role: .assistant,
             text: text,
             turnId: turnID,
-            itemId: "desktop-provider-item"
+            itemId: "desktop-provider-item",
+            sourceItemKey: sourceKey
         )
         var tool = CodexMessage(
             id: "tool",
@@ -3542,91 +3545,158 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
             turnId: turnID,
             itemId: "tool-item"
         )
-        var duplicateCanonicalAssistant = CodexMessage(
-            id: "duplicate-canonical-assistant",
-            threadId: threadID,
-            role: .assistant,
-            text: text,
-            turnId: turnID,
-            itemId: "canonical-provider-item",
-            sourceItemKey: sourceKey
-        )
         localAssistant.orderIndex = 1
         tool.orderIndex = 2
-        duplicateCanonicalAssistant.orderIndex = 3
 
-        let history = [
-            CodexMessage(
-                id: "history-assistant",
+        for canonicalSourceKey in [nil, sourceKey] as [String?] {
+            var duplicateCanonicalAssistant = CodexMessage(
+                id: "duplicate-canonical-assistant",
                 threadId: threadID,
                 role: .assistant,
                 text: text,
                 turnId: turnID,
                 itemId: "canonical-provider-item",
-                sourceItemKey: sourceKey
-            ),
-            CodexMessage(
-                id: "history-tool",
-                threadId: threadID,
-                role: .system,
-                kind: .commandExecution,
-                text: "git show --stat",
-                turnId: turnID,
-                itemId: "tool-item"
-            ),
-        ]
+                sourceItemKey: canonicalSourceKey
+            )
+            duplicateCanonicalAssistant.orderIndex = 3
+            let history = [
+                CodexMessage(
+                    id: "history-assistant",
+                    threadId: threadID,
+                    role: .assistant,
+                    text: text,
+                    turnId: turnID,
+                    itemId: "canonical-provider-item",
+                    sourceItemKey: canonicalSourceKey
+                ),
+                CodexMessage(
+                    id: "history-tool",
+                    threadId: threadID,
+                    role: .system,
+                    kind: .commandExecution,
+                    text: "git show --stat",
+                    turnId: turnID,
+                    itemId: "tool-item"
+                ),
+            ]
 
-        for includesPersistedCanonicalDuplicate in [false, true] {
-            let existing = includesPersistedCanonicalDuplicate
-                ? [localAssistant, tool, duplicateCanonicalAssistant]
-                : [localAssistant, tool]
-            let merged = service.mergeHistoryMessages(existing, history)
-            let assistantRows = merged.filter { $0.role == .assistant }
+            for includesPersistedCanonicalDuplicate in [false, true] {
+                let existing = includesPersistedCanonicalDuplicate
+                    ? [localAssistant, tool, duplicateCanonicalAssistant]
+                    : [localAssistant, tool]
+                let merged = service.mergeHistoryMessages(existing, history)
+                let assistantRows = merged.filter { $0.role == .assistant }
 
-            XCTAssertEqual(assistantRows.count, 1)
-            XCTAssertEqual(assistantRows.first?.id, "local-assistant")
-            XCTAssertEqual(assistantRows.first?.itemId, "canonical-provider-item")
-            XCTAssertEqual(assistantRows.first?.sourceItemKey, sourceKey)
-            XCTAssertEqual(merged.map(\.id), ["local-assistant", "tool"])
+                XCTAssertEqual(assistantRows.count, 1)
+                XCTAssertEqual(assistantRows.first?.id, "local-assistant")
+                XCTAssertEqual(assistantRows.first?.itemId, "canonical-provider-item")
+                XCTAssertEqual(assistantRows.first?.sourceItemKey, sourceKey)
+                XCTAssertEqual(merged.map(\.id), ["local-assistant", "tool"])
+            }
         }
+    }
+
+    func testRemodexAssistantSourceItemKeyMatchesBridgeFormat() {
+        XCTAssertEqual(
+            CodexService.remodexAssistantSourceItemKey(
+                turnId: "turn-test",
+                text: "  hello\n"
+            ),
+            "turn-test:2cf24dba5fb0a30e"
+        )
     }
 
     func testHistoryMergePreservesRepeatedAssistantTextWhenBothProviderItemsAreCanonical() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
-        let sourceKey = "\(turnID):assistant-source"
         let text = "This deliberately repeated assistant update must remain visible twice."
-        let existing = [
-            CodexMessage(
-                id: "local-first",
-                threadId: threadID,
-                role: .assistant,
-                text: text,
-                turnId: turnID,
-                itemId: "provider-a",
-                sourceItemKey: sourceKey
-            ),
-        ]
-        let history = [
-            CodexMessage(
-                id: "history-first",
-                threadId: threadID,
-                role: .assistant,
-                text: text,
-                turnId: turnID,
-                itemId: "provider-a",
-                sourceItemKey: sourceKey
-            ),
-            CodexMessage(
-                id: "history-tool",
-                threadId: threadID,
-                role: .system,
-                kind: .toolActivity,
-                text: "Reviewed provider isolation",
-                turnId: turnID,
-                itemId: "tool-between"
-            ),
+        let sourceKey = try! XCTUnwrap(
+            CodexService.remodexAssistantSourceItemKey(turnId: turnID, text: text)
+        )
+        for firstSourceKey in [nil, sourceKey] as [String?] {
+            let existing = [
+                CodexMessage(
+                    id: "local-first",
+                    threadId: threadID,
+                    role: .assistant,
+                    text: text,
+                    turnId: turnID,
+                    itemId: "provider-a",
+                    sourceItemKey: firstSourceKey
+                ),
+            ]
+            let history = [
+                CodexMessage(
+                    id: "history-first",
+                    threadId: threadID,
+                    role: .assistant,
+                    text: text,
+                    turnId: turnID,
+                    itemId: "provider-a",
+                    sourceItemKey: firstSourceKey
+                ),
+                CodexMessage(
+                    id: "history-tool",
+                    threadId: threadID,
+                    role: .system,
+                    kind: .toolActivity,
+                    text: "Reviewed provider isolation",
+                    turnId: turnID,
+                    itemId: "tool-between"
+                ),
+                CodexMessage(
+                    id: "history-second",
+                    threadId: threadID,
+                    role: .assistant,
+                    text: text,
+                    turnId: turnID,
+                    itemId: "provider-b"
+                ),
+            ]
+
+            let merged = service.mergeHistoryMessages(existing, history)
+            let assistantRows = merged.filter { $0.role == .assistant }
+
+            XCTAssertEqual(assistantRows.map(\.itemId), ["provider-a", "provider-b"])
+            XCTAssertEqual(merged.map(\.id), ["local-first", "history-tool", "history-second"])
+        }
+    }
+
+    func testHistoryMergePreservesAliaslessRepeatedAssistantOutsidePartialCanonicalPage() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "turn-\(UUID().uuidString)"
+        let text = "This intentional update has the same text as a later canonical item."
+        var first = CodexMessage(
+            id: "local-first",
+            threadId: threadID,
+            role: .assistant,
+            text: text,
+            turnId: turnID,
+            itemId: "provider-a"
+        )
+        var tool = CodexMessage(
+            id: "tool-between",
+            threadId: threadID,
+            role: .system,
+            kind: .toolActivity,
+            text: "Checked the implementation",
+            turnId: turnID,
+            itemId: "tool-between"
+        )
+        var second = CodexMessage(
+            id: "local-second",
+            threadId: threadID,
+            role: .assistant,
+            text: text,
+            turnId: turnID,
+            itemId: "provider-b"
+        )
+        first.orderIndex = 1
+        tool.orderIndex = 2
+        second.orderIndex = 3
+        let partialHistory = [
             CodexMessage(
                 id: "history-second",
                 threadId: threadID,
@@ -3637,31 +3707,25 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
             ),
         ]
 
-        let merged = service.mergeHistoryMessages(existing, history)
-        let assistantRows = merged.filter { $0.role == .assistant }
+        let merged = service.mergeHistoryMessages([first, tool, second], partialHistory)
 
-        XCTAssertEqual(assistantRows.map(\.itemId), ["provider-a", "provider-b"])
-        XCTAssertEqual(merged.map(\.id), ["local-first", "history-tool", "history-second"])
+        XCTAssertEqual(
+            merged.filter { $0.role == .assistant }.map(\.itemId),
+            ["provider-a", "provider-b"]
+        )
     }
 
     func testActiveHistoryMergePreservesNewerSameTextProviderItemNotYetCanonical() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"
         let turnID = "turn-\(UUID().uuidString)"
-        let sourceKey = "\(turnID):assistant-source"
         let text = "This intentional live update repeats an earlier canonical status exactly."
+        let sourceKey = try! XCTUnwrap(
+            CodexService.remodexAssistantSourceItemKey(turnId: turnID, text: text)
+        )
         service.setActiveTurnID(turnID, for: threadID)
         service.runningThreadIDs.insert(threadID)
 
-        var canonicalAssistant = CodexMessage(
-            id: "canonical-existing",
-            threadId: threadID,
-            role: .assistant,
-            text: text,
-            turnId: turnID,
-            itemId: "provider-a",
-            sourceItemKey: sourceKey
-        )
         var tool = CodexMessage(
             id: "tool-between",
             threadId: threadID,
@@ -3680,39 +3744,50 @@ final class CodexServiceIncomingCommandExecutionTests: XCTestCase {
             itemId: "provider-b",
             isStreaming: false
         )
-        canonicalAssistant.orderIndex = 1
         tool.orderIndex = 2
         newerLiveAssistant.orderIndex = 3
-        let history = [
-            CodexMessage(
-                id: "history-canonical",
+        for canonicalSourceKey in [nil, sourceKey] as [String?] {
+            var canonicalAssistant = CodexMessage(
+                id: "canonical-existing",
                 threadId: threadID,
                 role: .assistant,
                 text: text,
                 turnId: turnID,
                 itemId: "provider-a",
-                sourceItemKey: sourceKey
-            ),
-            CodexMessage(
-                id: "history-tool",
-                threadId: threadID,
-                role: .system,
-                kind: .toolActivity,
-                text: "Reviewed provider isolation",
-                turnId: turnID,
-                itemId: "tool-between"
-            ),
-        ]
+                sourceItemKey: canonicalSourceKey
+            )
+            canonicalAssistant.orderIndex = 1
+            let history = [
+                CodexMessage(
+                    id: "history-canonical",
+                    threadId: threadID,
+                    role: .assistant,
+                    text: text,
+                    turnId: turnID,
+                    itemId: "provider-a",
+                    sourceItemKey: canonicalSourceKey
+                ),
+                CodexMessage(
+                    id: "history-tool",
+                    threadId: threadID,
+                    role: .system,
+                    kind: .toolActivity,
+                    text: "Reviewed provider isolation",
+                    turnId: turnID,
+                    itemId: "tool-between"
+                ),
+            ]
 
-        let merged = service.mergeHistoryMessages(
-            [canonicalAssistant, tool, newerLiveAssistant],
-            history
-        )
+            let merged = service.mergeHistoryMessages(
+                [canonicalAssistant, tool, newerLiveAssistant],
+                history
+            )
 
-        XCTAssertEqual(
-            merged.filter { $0.role == .assistant }.map(\.itemId),
-            ["provider-a", "provider-b"]
-        )
+            XCTAssertEqual(
+                merged.filter { $0.role == .assistant }.map(\.itemId),
+                ["provider-a", "provider-b"]
+            )
+        }
     }
 
     func testOlderCanonicalPageRepairsAssistantIdentityPastNewerUserFence() {

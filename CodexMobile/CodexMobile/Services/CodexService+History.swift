@@ -2,8 +2,9 @@
 // Purpose: Parses thread/read history payloads into normalized timeline messages.
 // Layer: Service
 // Exports: CodexService history parsing helpers
-// Depends on: CodexMessage, JSONValue
+// Depends on: CodexMessage, CryptoKit, JSONValue
 
+import CryptoKit
 import Foundation
 import UIKit
 
@@ -1625,11 +1626,11 @@ extension CodexService {
         }
     }
 
-    // Desktop live state and canonical JSONL history can assign different stable provider ids to
-    // the same assistant item. The history alias is scoped by turn + text, so it is safe to repair
-    // one closed local row when its id is absent from the canonical turn. Active turns additionally
-    // require the orphan to precede the canonical copy (or already share the exact source alias),
-    // so a newer intentional same-text item is never folded into older history.
+    // Desktop live state and canonical history can assign different stable provider ids to the
+    // same assistant item. Match them through the bridge's deterministic turn + text source alias;
+    // normal app-server history can derive that alias even though it does not carry the field.
+    // Active turns additionally require the orphan to precede the canonical copy unless the alias
+    // is exact, so a newer intentional same-text item is never folded into history.
     nonisolated static func repairCanonicalAssistantSourceIdentityRotations(
         in messages: inout [CodexMessage],
         history: [CodexMessage],
@@ -1642,7 +1643,6 @@ extension CodexService {
             message.role == .assistant
                 && normalizedHistoryIdentifier(message.turnId) != nil
                 && normalizedHistoryIdentifier(message.itemId) != nil
-                && normalizedHistoryIdentifier(message.sourceItemKey) != nil
                 && hasMeaningfulHistoryText(message.text)
         }
         guard !canonicalAssistantRows.isEmpty else {
@@ -1662,10 +1662,13 @@ extension CodexService {
         }
 
         let canonicalRowsBySource = Dictionary(grouping: canonicalAssistantRows) { message in
-            CanonicalAssistantSourceKey(
+            let turnId = normalizedHistoryIdentifier(message.turnId) ?? ""
+            return CanonicalAssistantSourceKey(
                 threadId: message.threadId,
-                turnId: normalizedHistoryIdentifier(message.turnId) ?? "",
-                sourceItemKey: normalizedHistoryIdentifier(message.sourceItemKey) ?? "",
+                turnId: turnId,
+                sourceItemKey: normalizedHistoryIdentifier(message.sourceItemKey)
+                    ?? remodexAssistantSourceItemKey(turnId: turnId, text: message.text)
+                    ?? "",
                 text: normalizedMessageText(message.text)
             )
         }
@@ -1708,13 +1711,18 @@ extension CodexService {
                 text: sourceKey.text
             )
             let matchingLocalIndices = localIndicesByTurnText[turnTextKey] ?? []
+            let canonicalHasExplicitSourceAlias = normalizedHistoryIdentifier(
+                canonical.sourceItemKey
+            ) != nil
             let orphanIndices = matchingLocalIndices.filter { index in
                 let candidate = messages[index]
                 let candidateItemID = normalizedHistoryIdentifier(candidate.itemId)
                 let candidateSourceKey = normalizedHistoryIdentifier(candidate.sourceItemKey)
                 return candidateItemID != canonicalItemID
                     && (candidateItemID.map { !canonicalTurnItemIDs.contains($0) } ?? true)
-                    && (candidateSourceKey == nil || candidateSourceKey == sourceKey.sourceItemKey)
+                    && (canonicalHasExplicitSourceAlias
+                        ? (candidateSourceKey == nil || candidateSourceKey == sourceKey.sourceItemKey)
+                        : candidateSourceKey == sourceKey.sourceItemKey)
             }
             guard orphanIndices.count == 1,
                   let orphanIndex = orphanIndices.first,
@@ -1730,7 +1738,9 @@ extension CodexService {
             let turnIsActive = activeThreadIDs.contains(sourceKey.threadId)
                 ? (activeTurnIDs?.contains(sourceKey.turnId) ?? true)
                 : runningThreadIDs.contains(sourceKey.threadId)
-            if turnIsActive, orphanSourceKey != sourceKey.sourceItemKey {
+            let hasExactSourceProof = !sourceKey.sourceItemKey.isEmpty
+                && orphanSourceKey == sourceKey.sourceItemKey
+            if turnIsActive, !hasExactSourceProof {
                 guard let earliestCanonicalOrderIndex = canonicalDuplicateIndices
                     .map({ messages[$0].orderIndex })
                     .min(),
@@ -1754,8 +1764,7 @@ extension CodexService {
 
         for repair in repairs {
             guard let orphanIndex = messages.firstIndex(where: { $0.id == repair.orphanMessageId }),
-                  let canonicalItemID = normalizedHistoryIdentifier(repair.canonical.itemId),
-                  let canonicalSourceKey = normalizedHistoryIdentifier(repair.canonical.sourceItemKey) else {
+                  let canonicalItemID = normalizedHistoryIdentifier(repair.canonical.itemId) else {
                 continue
             }
 
@@ -1776,7 +1785,9 @@ extension CodexService {
                 }
             }
             repaired.itemId = canonicalItemID
-            repaired.sourceItemKey = canonicalSourceKey
+            if let canonicalSourceKey = normalizedHistoryIdentifier(repair.canonical.sourceItemKey) {
+                repaired.sourceItemKey = canonicalSourceKey
+            }
             repaired.orderIndex = preservedOrderIndex
             messages[orphanIndex] = repaired
 
@@ -2337,6 +2348,22 @@ extension CodexService {
 
     nonisolated static func stableHistoryTextFingerprint(for text: String) -> String {
         return CodexTextContentFingerprint.cacheKey(for: text)
+    }
+
+    // Mirrors the bridge's source-neutral alias for an event_msg/response_item pair. Normal
+    // app-server history omits remodexSourceItemKey, so deriving it here preserves exact replay
+    // identity without falling back to unsafe turn + text matching on partial history windows.
+    nonisolated static func remodexAssistantSourceItemKey(turnId: String, text: String) -> String? {
+        guard let normalizedTurnId = normalizedHistoryIdentifier(turnId) else {
+            return nil
+        }
+        let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedText.isEmpty else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data(normalizedText.utf8))
+        let textHash = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "\(normalizedTurnId):\(textHash)"
     }
 
     nonisolated static func normalizedHistoryIdentifier(_ value: String?) -> String? {
